@@ -23,8 +23,8 @@ namespace PointCloud
         public uint depthWidth = 640;
         public uint depthHeight = 576;
         public uint depthFps = 30;
-        public uint colorWidth = 640;
-        public uint colorHeight = 480;
+        public uint colorWidth = 1280;
+        public uint colorHeight = 720;
         public uint colorFps = 30;
 
         [Header("Pipeline")]
@@ -32,8 +32,9 @@ namespace PointCloud
         public bool enableFrameSync = true;
 
         [Header("Point cloud")]
-        [Tooltip("Upper bound used to size the GPU vertex buffer. Frames with more points are clipped.")]
-        public int maxPoints = 640 * 576;
+        [Tooltip("Upper bound used to size the GPU vertex buffer. Frames with more points are clipped. " +
+                 "After D2C alignment, point count == color resolution (width*height).")]
+        public int maxPoints = 1280 * 720;
         [Tooltip("Material used for the points. Use Orbbec/PointCloudUnlit or compatible.")]
         public Material pointMaterial;
 

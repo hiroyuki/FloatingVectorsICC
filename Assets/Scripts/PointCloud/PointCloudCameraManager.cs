@@ -22,11 +22,11 @@ namespace PointCloud
         public uint depthWidth = 640;
         public uint depthHeight = 576;
         public uint depthFps = 30;
-        public uint colorWidth = 640;
-        public uint colorHeight = 480;
+        public uint colorWidth = 1280;
+        public uint colorHeight = 720;
         public uint colorFps = 30;
         public ObAlignMode alignMode = ObAlignMode.D2CSwMode;
-        public int maxPointsPerDevice = 640 * 576;
+        public int maxPointsPerDevice = 1280 * 720;
 
         [Header("Diagnostics")]
         public bool verboseLogging = true;
