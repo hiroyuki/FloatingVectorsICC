@@ -45,6 +45,11 @@ namespace PointCloud
                  "(Y points down); flipping Y maps them to Unity's Y-up convention.")]
         public bool flipY = true;
 
+        [Header("Bounding box filter")]
+        [Tooltip("Optional oriented bounding box. When assigned and its filterMode is not Disabled, " +
+                 "points falling outside/inside the box (per mode) are culled before upload.")]
+        public PointCloudBoundingBox boundingBox;
+
         // --- Native ---
         private OrbbecDevice _device;
         private OrbbecPipeline _pipeline;
@@ -114,6 +119,7 @@ namespace PointCloud
             try
             {
                 int n = Math.Min(slot.PointCount, maxPoints);
+                n = ApplyBoundingBoxFilter(slot.Buffer, n);
                 _mesh.SetVertexBufferData(slot.Buffer, 0, 0, n,
                     flags: MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
                 _mesh.SetSubMesh(0, new SubMeshDescriptor(0, n, MeshTopology.Points),
@@ -228,6 +234,46 @@ namespace PointCloud
             var s = transform.localScale;
             s.y = -Mathf.Abs(s.y);
             transform.localScale = s;
+        }
+
+        // --- Bounding box filter ---
+
+        // Compacts slot.Buffer in place, keeping only points that pass the bounding box test.
+        // Points are transformed to box-local space (unit cube [-0.5, +0.5]^3) via the composed
+        // matrix worldToBox * localToWorld, then tested per axis.
+        private int ApplyBoundingBoxFilter(NativeArray<ObColorPoint> buffer, int count)
+        {
+            if (boundingBox == null || count <= 0) return count;
+            var mode = boundingBox.Mode;
+            if (mode == PointCloudBoundingBox.FilterMode.Disabled) return count;
+
+            var m = boundingBox.transform.worldToLocalMatrix * transform.localToWorldMatrix;
+            float m00 = m.m00, m01 = m.m01, m02 = m.m02, m03 = m.m03;
+            float m10 = m.m10, m11 = m.m11, m12 = m.m12, m13 = m.m13;
+            float m20 = m.m20, m21 = m.m21, m22 = m.m22, m23 = m.m23;
+            bool keepInside = mode == PointCloudBoundingBox.FilterMode.KeepInside;
+
+            unsafe
+            {
+                var ptr = (ObColorPoint*)NativeArrayUnsafeUtility.GetUnsafePtr(buffer);
+                int w = 0;
+                for (int r = 0; r < count; r++)
+                {
+                    var p = ptr[r];
+                    float bx = m00 * p.X + m01 * p.Y + m02 * p.Z + m03;
+                    float by = m10 * p.X + m11 * p.Y + m12 * p.Z + m13;
+                    float bz = m20 * p.X + m21 * p.Y + m22 * p.Z + m23;
+                    bool inside = bx >= -0.5f && bx <= 0.5f
+                               && by >= -0.5f && by <= 0.5f
+                               && bz >= -0.5f && bz <= 0.5f;
+                    if (inside == keepInside)
+                    {
+                        if (w != r) ptr[w] = p;
+                        w++;
+                    }
+                }
+                return w;
+            }
         }
 
         // --- Capture thread ---

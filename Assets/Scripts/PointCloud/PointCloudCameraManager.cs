@@ -29,6 +29,10 @@ namespace PointCloud
         public ObStreamType alignTargetStream = ObStreamType.Color;
         public int maxPointsPerDevice = 1280 * 720;
 
+        [Tooltip("Optional shared bounding box applied to every spawned renderer. " +
+                 "Only used when rendererPrefab is null (bare GameObject path).")]
+        public PointCloudBoundingBox defaultBoundingBox;
+
         [Header("Diagnostics")]
         public bool verboseLogging = true;
 
@@ -102,6 +106,7 @@ namespace PointCloud
                 pcr.alignTargetStream = alignTargetStream;
                 pcr.maxPoints = maxPointsPerDevice;
                 pcr.pointMaterial = defaultPointMaterial;
+                pcr.boundingBox = defaultBoundingBox;
             }
 
             return pcr;
