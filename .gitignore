@@ -12,6 +12,13 @@
 /[Uu]ser[Ss]ettings/
 *.log
 
+# OrbbecSDK runtime log directory
+/Log/
+
+# Unity crash recovery artifacts
+/Assets/_Recovery/
+/Assets/_Recovery.meta
+
 # By default unity supports Blender asset imports, *.blend1 blender files do not need to be commited to version control.
 *.blend1
 *.blend1.meta
