@@ -170,12 +170,19 @@ namespace PointCloud
             _mesh.SetVertexBufferParams(maxPoints, attrs);
 
             // Identity index buffer for MeshTopology.Points.
+            // (try/finally instead of `using` because `using` makes the variable
+            //  readonly, which blocks NativeArray's indexer set on a struct.)
             _mesh.SetIndexBufferParams(maxPoints, IndexFormat.UInt32);
-            using (var indices = new NativeArray<uint>(maxPoints, Allocator.Temp, NativeArrayOptions.UninitializedMemory))
+            var indices = new NativeArray<uint>(maxPoints, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
+            try
             {
                 for (int i = 0; i < maxPoints; i++) indices[i] = (uint)i;
                 _mesh.SetIndexBufferData(indices, 0, 0, maxPoints,
                     MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
+            }
+            finally
+            {
+                indices.Dispose();
             }
             _mesh.SetSubMesh(0, new SubMeshDescriptor(0, 0, MeshTopology.Points),
                 MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
