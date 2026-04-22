@@ -58,6 +58,9 @@ AIはユーザーからの質問には端的に答える。長文・整理表・
   - showVisualization で Scene/Game 両方にワイヤーキューブを表示（Gizmo + runtime mesh）
 - PointCloudDecimater.cs: MonoBehaviour
   - reductionPercent (0-100%) で毎フレーム各点を独立にランダムドロップ（Bernoulliサンプリング）
+- PointCloudCumulative.cs: MonoBehaviour
+  - noErase が ON の間、interval フレームごとに現在の点群をスナップショット Mesh として子 GO に保存・蓄積
+  - Editor/PointCloudCumulativeEditor.cs が Inspector に Clear ボタンを追加（全スナップショットを破棄）
 
 ## コーディング規約
 - ネイティブリソースは必ずIDisposableパターン + ファイナライザで管理
