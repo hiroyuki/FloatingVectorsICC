@@ -55,6 +55,11 @@ namespace PointCloud
                  "each surviving point is randomly dropped with the configured probability.")]
         public PointCloudDecimater decimater;
 
+        [Header("Cumulative")]
+        [Tooltip("Optional cumulative snapshotter. When assigned and its No Erase toggle is on, " +
+                 "snapshots are captured every 'interval' frames and kept visible until cleared.")]
+        public PointCloudCumulative cumulative;
+
         // --- Native ---
         private OrbbecDevice _device;
         private OrbbecPipeline _pipeline;
@@ -126,6 +131,7 @@ namespace PointCloud
                 int n = Math.Min(slot.PointCount, maxPoints);
                 n = ApplyBoundingBoxFilter(slot.Buffer, n);
                 n = ApplyDecimationFilter(slot.Buffer, n);
+                cumulative?.OnFrame(slot.Buffer, n, transform, pointMaterial);
                 _mesh.SetVertexBufferData(slot.Buffer, 0, 0, n,
                     flags: MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
                 _mesh.SetSubMesh(0, new SubMeshDescriptor(0, n, MeshTopology.Points),
