@@ -1,0 +1,353 @@
+// P/Invoke surface for OrbbecSDK v2 (libobsensor).
+// All declarations transcribed directly from headers under
+// C:\dev\OrbbecSDK_v2\include\libobsensor\h\ — do NOT add or change
+// signatures based on guesses. Re-check the corresponding header before
+// editing any function in this file.
+
+using System;
+using System.Runtime.InteropServices;
+
+namespace Orbbec
+{
+    // --- Enums (ObTypes.h) ---
+
+    public enum ObSensorType
+    {
+        Unknown = 0,
+        IR = 1,
+        Color = 2,
+        Depth = 3,
+        Accel = 4,
+        Gyro = 5,
+        IRLeft = 6,
+        IRRight = 7,
+    }
+
+    public enum ObStreamType
+    {
+        Unknown = -1,
+        Video = 0,
+        IR = 1,
+        Color = 2,
+        Depth = 3,
+        Accel = 4,
+        Gyro = 5,
+        IRLeft = 6,
+        IRRight = 7,
+    }
+
+    public enum ObFrameType
+    {
+        Unknown = -1,
+        Video = 0,
+        IR = 1,
+        Color = 2,
+        Depth = 3,
+        Accel = 4,
+        Set = 5,
+        Points = 6,
+        Gyro = 7,
+        IRLeft = 8,
+        IRRight = 9,
+    }
+
+    public enum ObFormat
+    {
+        Unknown = -1,
+        YUYV = 0,
+        UYVY = 2,
+        NV12 = 3,
+        NV21 = 4,
+        MJPG = 5,
+        H264 = 6,
+        H265 = 7,
+        Y16 = 8,
+        Y8 = 9,
+        Gray = 13,
+        I420 = 15,
+        Point = 19,         // OBPoint (xyz)
+        RGBPoint = 20,      // OBColorPoint (xyz + rgb)
+        RGB = 22,
+        BGR = 23,
+        BGRA = 25,
+        Z16 = 28,
+        RGBA = 31,
+    }
+
+    public enum ObAlignMode
+    {
+        Disable = 0,
+        D2CHwMode = 1,
+        D2CSwMode = 2,
+    }
+
+    public enum ObFrameAggregateOutputMode
+    {
+        AllTypeFrameRequire = 0,
+        ColorFrameRequire = 1,
+        AnySituation = 2,
+        Disable = 3,
+    }
+
+    public enum ObLogSeverity
+    {
+        Debug = 0,
+        Info = 1,
+        Warn = 2,
+        Error = 3,
+        Fatal = 4,
+        Off = 5,
+    }
+
+    // --- Structs (ObTypes.h) ---
+
+    /// <summary>OBColorPoint: matches OB_FORMAT_RGB_POINT layout (6 floats, 24 bytes).</summary>
+    [StructLayout(LayoutKind.Sequential, Pack = 1)]
+    public struct ObColorPoint
+    {
+        public float X, Y, Z;
+        public float R, G, B;
+    }
+
+    /// <summary>OBPoint: matches OB_FORMAT_POINT layout (3 floats, 12 bytes).</summary>
+    [StructLayout(LayoutKind.Sequential, Pack = 1)]
+    public struct ObPoint
+    {
+        public float X, Y, Z;
+    }
+
+    // --- Convenience constants (ObTypes.h) ---
+
+    public static class ObConst
+    {
+        public const int WidthAny = 0;
+        public const int HeightAny = 0;
+        public const int FpsAny = 0;
+        public const int FormatAny = -1; // OB_FORMAT_UNKNOWN
+    }
+
+    /// <summary>
+    /// Native function declarations for OrbbecSDK.dll. Add new entries by
+    /// transcribing from C:\dev\OrbbecSDK_v2\include\libobsensor\h\*.h, never
+    /// from memory.
+    /// </summary>
+    internal static class OrbbecNative
+    {
+        private const string DLL = "OrbbecSDK";
+
+        // === Error.h ===
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void ob_delete_error(IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern ObStatus ob_error_get_status(IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ob_error_get_message(IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ob_error_get_function(IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ob_error_get_args(IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern ObExceptionType ob_error_get_exception_type(IntPtr error);
+
+        // === Context.h ===
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ob_create_context(out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void ob_delete_context(IntPtr context, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ob_query_device_list(IntPtr context, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void ob_set_extensions_directory(
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string directory,
+            out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void ob_set_logger_severity(ObLogSeverity severity, out IntPtr error);
+
+        // === Device.h (device list) ===
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void ob_delete_device_list(IntPtr list, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern uint ob_device_list_get_count(IntPtr list, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ob_device_list_get_device(IntPtr list, uint index, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ob_device_list_get_device_by_serial_number(
+            IntPtr list,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string serialNumber,
+            out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ob_device_list_get_device_serial_number(
+            IntPtr list, uint index, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ob_device_list_get_device_name(
+            IntPtr list, uint index, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ob_device_list_get_device_uid(
+            IntPtr list, uint index, out IntPtr error);
+
+        // === Device.h (device + info) ===
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void ob_delete_device(IntPtr device, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ob_device_get_device_info(IntPtr device, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void ob_delete_device_info(IntPtr info, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ob_device_info_get_serial_number(IntPtr info, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ob_device_info_get_name(IntPtr info, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ob_device_info_get_uid(IntPtr info, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ob_device_info_get_firmware_version(IntPtr info, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ob_device_info_get_connection_type(IntPtr info, out IntPtr error);
+
+        // === Pipeline.h ===
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ob_create_pipeline_with_device(IntPtr device, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void ob_delete_pipeline(IntPtr pipeline, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void ob_pipeline_start_with_config(
+            IntPtr pipeline, IntPtr config, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void ob_pipeline_stop(IntPtr pipeline, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ob_pipeline_wait_for_frameset(
+            IntPtr pipeline, uint timeoutMs, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void ob_pipeline_enable_frame_sync(IntPtr pipeline, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void ob_pipeline_disable_frame_sync(IntPtr pipeline, out IntPtr error);
+
+        // === Pipeline.h (config) ===
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ob_create_config(out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void ob_delete_config(IntPtr config, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void ob_config_enable_video_stream(
+            IntPtr config, ObStreamType streamType,
+            uint width, uint height, uint fps, ObFormat format,
+            out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void ob_config_set_align_mode(
+            IntPtr config, ObAlignMode mode, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void ob_config_set_frame_aggregate_output_mode(
+            IntPtr config, ObFrameAggregateOutputMode mode, out IntPtr error);
+
+        // === Filter.h ===
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ob_create_filter(
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string name, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void ob_delete_filter(IntPtr filter, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void ob_filter_set_config_value(
+            IntPtr filter,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string configName,
+            double value,
+            out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern double ob_filter_get_config_value(
+            IntPtr filter,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string configName,
+            out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ob_filter_process(
+            IntPtr filter, IntPtr frame, out IntPtr error);
+
+        // === Frame.h ===
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void ob_delete_frame(IntPtr frame, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ob_frame_get_data(IntPtr frame, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern uint ob_frame_get_data_size(IntPtr frame, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern ObFormat ob_frame_get_format(IntPtr frame, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern ObFrameType ob_frame_get_type(IntPtr frame, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern ulong ob_frame_get_index(IntPtr frame, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern ulong ob_frame_get_timestamp_us(IntPtr frame, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern float ob_points_frame_get_coordinate_value_scale(IntPtr frame, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern uint ob_video_frame_get_width(IntPtr frame, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern uint ob_video_frame_get_height(IntPtr frame, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ob_frameset_get_depth_frame(IntPtr frameset, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ob_frameset_get_color_frame(IntPtr frameset, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ob_frameset_get_points_frame(IntPtr frameset, out IntPtr error);
+
+        // === Helpers (not P/Invoke) ===
+
+        internal static string ReadUtf8(IntPtr p)
+        {
+            return p == IntPtr.Zero ? string.Empty : (Marshal.PtrToStringUTF8(p) ?? string.Empty);
+        }
+    }
+}
