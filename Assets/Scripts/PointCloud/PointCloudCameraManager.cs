@@ -25,7 +25,8 @@ namespace PointCloud
         public uint colorWidth = 1280;
         public uint colorHeight = 720;
         public uint colorFps = 30;
-        public ObAlignMode alignMode = ObAlignMode.D2CSwMode;
+        [Tooltip("Stream that depth gets aligned TO via the Align filter (D2C target).")]
+        public ObStreamType alignTargetStream = ObStreamType.Color;
         public int maxPointsPerDevice = 1280 * 720;
 
         [Header("Diagnostics")]
@@ -98,7 +99,7 @@ namespace PointCloud
                 pcr.colorWidth = colorWidth;
                 pcr.colorHeight = colorHeight;
                 pcr.colorFps = colorFps;
-                pcr.alignMode = alignMode;
+                pcr.alignTargetStream = alignTargetStream;
                 pcr.maxPoints = maxPointsPerDevice;
                 pcr.pointMaterial = defaultPointMaterial;
             }

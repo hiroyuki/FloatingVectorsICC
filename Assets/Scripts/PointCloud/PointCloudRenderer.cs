@@ -28,7 +28,11 @@ namespace PointCloud
         public uint colorFps = 30;
 
         [Header("Pipeline")]
-        public ObAlignMode alignMode = ObAlignMode.D2CSwMode;
+        [Tooltip("Stream that depth gets aligned TO via the Align filter. " +
+                 "OB_STREAM_COLOR = depth-to-color (D2C) per CLAUDE.md. " +
+                 "Note: ALIGN_D2C_SW_MODE on the pipeline config is NOT supported by the SDK; " +
+                 "we always use the Align filter instead.")]
+        public ObStreamType alignTargetStream = ObStreamType.Color;
         public bool enableFrameSync = true;
 
         [Header("Point cloud")]
@@ -42,6 +46,7 @@ namespace PointCloud
         private OrbbecDevice _device;
         private OrbbecPipeline _pipeline;
         private OrbbecConfig _config;
+        private OrbbecFilter _alignFilter;
         private OrbbecFilter _pointCloudFilter;
 
         // --- Threading ---
@@ -140,12 +145,17 @@ namespace PointCloud
             _config = new OrbbecConfig();
             _config.EnableVideoStream(ObStreamType.Depth, depthWidth, depthHeight, depthFps, ObFormat.Y16);
             _config.EnableVideoStream(ObStreamType.Color, colorWidth, colorHeight, colorFps, ObFormat.RGB);
-            _config.SetAlignMode(alignMode);
+            // Pipeline-level align supports only ALIGN_D2C_HW_MODE; we use the Align filter for SW D2C.
+            _config.SetAlignMode(ObAlignMode.Disable);
             _config.SetFrameAggregateOutputMode(ObFrameAggregateOutputMode.AllTypeFrameRequire);
 
             _pipeline = _device.CreatePipeline();
             if (enableFrameSync) _pipeline.EnableFrameSync();
             _pipeline.Start(_config);
+
+            // Align: depth gets aligned to the target stream (default = Color, i.e. D2C).
+            _alignFilter = new OrbbecFilter("Align");
+            _alignFilter.SetConfigValue("AlignType", (double)alignTargetStream);
 
             _pointCloudFilter = new OrbbecFilter("PointCloudFilter");
             _pointCloudFilter.SetConfigValue("pointFormat", (double)ObFormat.RGBPoint);
@@ -231,7 +241,10 @@ namespace PointCloud
                     using var frameset = _pipeline.WaitForFrameset(100);
                     if (frameset == null) continue;
 
-                    using var points = _pointCloudFilter.Process(frameset);
+                    using var aligned = _alignFilter.Process(frameset);
+                    if (aligned == null) continue;
+
+                    using var points = _pointCloudFilter.Process(aligned);
                     if (points == null) continue;
 
                     if (points.Format != ObFormat.RGBPoint) continue;
@@ -275,6 +288,7 @@ namespace PointCloud
             _cts = null;
 
             _pointCloudFilter?.Dispose(); _pointCloudFilter = null;
+            _alignFilter?.Dispose(); _alignFilter = null;
             _pipeline?.Dispose(); _pipeline = null;
             _config?.Dispose(); _config = null;
             _device?.Dispose(); _device = null;
