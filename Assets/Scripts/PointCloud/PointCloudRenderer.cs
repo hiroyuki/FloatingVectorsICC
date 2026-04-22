@@ -41,6 +41,9 @@ namespace PointCloud
         public int maxPoints = 1280 * 720;
         [Tooltip("Material used for the points. Use Orbbec/PointCloudUnlit or compatible.")]
         public Material pointMaterial;
+        [Tooltip("Negate Y on the GameObject's transform. The SDK emits points in image coordinates " +
+                 "(Y points down); flipping Y maps them to Unity's Y-up convention.")]
+        public bool flipY = true;
 
         // --- Native ---
         private OrbbecDevice _device;
@@ -86,6 +89,7 @@ namespace PointCloud
             {
                 OpenDevice();
                 BuildMesh();
+                ApplyAxisConvention();
                 StartCaptureThread();
             }
             catch (Exception e)
@@ -216,6 +220,14 @@ namespace PointCloud
             if (pointMaterial != null) _meshRenderer.sharedMaterial = pointMaterial;
 
             _slots = new SlotPool(slotCount: 3, capacity: maxPoints);
+        }
+
+        private void ApplyAxisConvention()
+        {
+            if (!flipY) return;
+            var s = transform.localScale;
+            s.y = -Mathf.Abs(s.y);
+            transform.localScale = s;
         }
 
         // --- Capture thread ---
