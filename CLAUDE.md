@@ -56,6 +56,8 @@ AIはユーザーからの質問には端的に答える。長文・整理表・
 - PointCloudBoundingBox.cs: MonoBehaviour
   - Transform（位置・回転・localScale）で OBB を定義し、KeepInside/KeepOutside で点群をフィルタ
   - showVisualization で Scene/Game 両方にワイヤーキューブを表示（Gizmo + runtime mesh）
+- PointCloudDecimater.cs: MonoBehaviour
+  - reductionPercent (0-100%) で毎フレーム各点を独立にランダムドロップ（Bernoulliサンプリング）
 
 ## コーディング規約
 - ネイティブリソースは必ずIDisposableパターン + ファイナライザで管理

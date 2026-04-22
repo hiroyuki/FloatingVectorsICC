@@ -33,6 +33,10 @@ namespace PointCloud
                  "Only used when rendererPrefab is null (bare GameObject path).")]
         public PointCloudBoundingBox defaultBoundingBox;
 
+        [Tooltip("Optional shared decimater applied to every spawned renderer. " +
+                 "Only used when rendererPrefab is null (bare GameObject path).")]
+        public PointCloudDecimater defaultDecimater;
+
         [Header("Diagnostics")]
         public bool verboseLogging = true;
 
@@ -107,6 +111,7 @@ namespace PointCloud
                 pcr.maxPoints = maxPointsPerDevice;
                 pcr.pointMaterial = defaultPointMaterial;
                 pcr.boundingBox = defaultBoundingBox;
+                pcr.decimater = defaultDecimater;
             }
 
             return pcr;

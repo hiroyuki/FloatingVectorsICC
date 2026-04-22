@@ -50,6 +50,11 @@ namespace PointCloud
                  "points falling outside/inside the box (per mode) are culled before upload.")]
         public PointCloudBoundingBox boundingBox;
 
+        [Header("Decimater")]
+        [Tooltip("Optional random decimater. When assigned and its reductionPercent is > 0, " +
+                 "each surviving point is randomly dropped with the configured probability.")]
+        public PointCloudDecimater decimater;
+
         // --- Native ---
         private OrbbecDevice _device;
         private OrbbecPipeline _pipeline;
@@ -120,6 +125,7 @@ namespace PointCloud
             {
                 int n = Math.Min(slot.PointCount, maxPoints);
                 n = ApplyBoundingBoxFilter(slot.Buffer, n);
+                n = ApplyDecimationFilter(slot.Buffer, n);
                 _mesh.SetVertexBufferData(slot.Buffer, 0, 0, n,
                     flags: MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
                 _mesh.SetSubMesh(0, new SubMeshDescriptor(0, n, MeshTopology.Points),
@@ -272,6 +278,46 @@ namespace PointCloud
                         w++;
                     }
                 }
+                return w;
+            }
+        }
+
+        // --- Decimation filter ---
+
+        // xorshift32 state for decimation. Seeded lazily on first use; rolls forward
+        // across frames so successive frames don't reuse the same random sequence.
+        private uint _decimateRngState;
+
+        // Compacts slot.Buffer in place, keeping each point independently with
+        // probability decimater.KeepRatio (Bernoulli sampling).
+        private int ApplyDecimationFilter(NativeArray<ObColorPoint> buffer, int count)
+        {
+            if (decimater == null || count <= 0 || !decimater.Enabled) return count;
+            float keep = decimater.KeepRatio;
+            if (keep >= 1f) return count;
+            if (keep <= 0f) return 0;
+
+            uint state = _decimateRngState;
+            if (state == 0u) state = (uint)System.Environment.TickCount | 1u;
+
+            const float Inv = 1f / 16777216f; // 1 / 2^24
+            unsafe
+            {
+                var ptr = (ObColorPoint*)NativeArrayUnsafeUtility.GetUnsafePtr(buffer);
+                int w = 0;
+                for (int r = 0; r < count; r++)
+                {
+                    state ^= state << 13;
+                    state ^= state >> 17;
+                    state ^= state << 5;
+                    float u = (state & 0x00FFFFFFu) * Inv;
+                    if (u < keep)
+                    {
+                        if (w != r) ptr[w] = ptr[r];
+                        w++;
+                    }
+                }
+                _decimateRngState = state;
                 return w;
             }
         }
