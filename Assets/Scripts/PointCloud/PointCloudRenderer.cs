@@ -60,6 +60,14 @@ namespace PointCloud
                  "snapshots are captured every 'interval' frames and kept visible until cleared.")]
         public PointCloudCumulative cumulative;
 
+        /// <summary>
+        /// Fires each frame after the point cloud mesh has been updated. Subscribers receive the
+        /// post-filter point buffer (renderer-local space), the valid point count, and the SDK
+        /// frame timestamp (microseconds). The buffer is reused next frame, so consumers must
+        /// copy any data they need to retain before returning from the handler.
+        /// </summary>
+        public event Action<PointCloudRenderer, NativeArray<ObColorPoint>, int, ulong> OnFrameUploaded;
+
         // --- Native ---
         private OrbbecDevice _device;
         private OrbbecPipeline _pipeline;
@@ -138,6 +146,7 @@ namespace PointCloud
                     MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
                 LastPointCount = n;
                 LastTimestampUs = slot.TimestampUs;
+                OnFrameUploaded?.Invoke(this, slot.Buffer, n, slot.TimestampUs);
             }
             finally
             {

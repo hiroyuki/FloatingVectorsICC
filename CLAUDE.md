@@ -61,6 +61,14 @@ AIはユーザーからの質問には端的に答える。長文・整理表・
 - PointCloudCumulative.cs: MonoBehaviour
   - noErase が ON の間、interval フレームごとに現在の点群をスナップショット Mesh として子 GO に保存・蓄積
   - Editor/PointCloudCumulativeEditor.cs が Inspector に Clear ボタンを追加（全スナップショットを破棄）
+- PointCloudRecorder.cs: MonoBehaviour
+  - Rec / Play / Save / Read の 4 操作で点群データの収録・再生・保存・読み込みを行う
+  - 収録は PointCloudRenderer.OnFrameUploaded イベント経由で各デバイスのフレームをメモリに蓄積
+  - 保存形式は scanned-reality.com の RCSV 互換（`<root>/dataset/<host>/FemtoBolt_<serial>/pointcloud_main`、multi device 前提）
+  - 再生はデバイスごとに子 GO を生成し、タイムスタンプに合わせて Mesh を更新
+  - Editor/PointCloudRecorderEditor.cs が Inspector に Rec / Play / Save / Read ボタンと状態表示を追加
+- PointCloudRecording.cs: static ユーティリティ
+  - RCSV (variable-size records) 形式の書き込み / 読み込みと、デバイス毎ディレクトリ構成の組み立て
 
 ## コーディング規約
 - ネイティブリソースは必ずIDisposableパターン + ファイナライザで管理
