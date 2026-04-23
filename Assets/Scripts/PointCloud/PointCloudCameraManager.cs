@@ -10,15 +10,10 @@ namespace PointCloud
 {
     public class PointCloudCameraManager : MonoBehaviour
     {
-        [Header("Spawn")]
-        [Tooltip("Prefab containing PointCloudRenderer + MeshFilter + MeshRenderer. " +
-                 "If null, a bare GameObject with those components is created instead.")]
-        public GameObject rendererPrefab;
-
-        [Tooltip("Material assigned to spawned renderers when no prefab is set.")]
+        [Tooltip("Material assigned to spawned renderers.")]
         public Material defaultPointMaterial;
 
-        [Header("Per-device defaults (used when rendererPrefab is null)")]
+        [Header("Per-device defaults")]
         public uint depthWidth = 640;
         public uint depthHeight = 576;
         public uint depthFps = 30;
@@ -29,16 +24,13 @@ namespace PointCloud
         public ObStreamType alignTargetStream = ObStreamType.Color;
         public int maxPointsPerDevice = 1280 * 720;
 
-        [Tooltip("Optional shared bounding box applied to every spawned renderer. " +
-                 "Only used when rendererPrefab is null (bare GameObject path).")]
+        [Tooltip("Optional shared bounding box applied to every spawned renderer.")]
         public PointCloudBoundingBox defaultBoundingBox;
 
-        [Tooltip("Optional shared decimater applied to every spawned renderer. " +
-                 "Only used when rendererPrefab is null (bare GameObject path).")]
+        [Tooltip("Optional shared decimater applied to every spawned renderer.")]
         public PointCloudDecimater defaultDecimater;
 
-        [Tooltip("Optional shared cumulative snapshotter applied to every spawned renderer. " +
-                 "Only used when rendererPrefab is null (bare GameObject path).")]
+        [Tooltip("Optional shared cumulative snapshotter applied to every spawned renderer.")]
         public PointCloudCumulative defaultCumulative;
 
         [Header("Diagnostics")]
@@ -75,49 +67,25 @@ namespace PointCloud
 
         private PointCloudRenderer SpawnRenderer(OrbbecDeviceDescriptor desc, int index)
         {
-            GameObject go;
-            if (rendererPrefab != null)
-            {
-                go = Instantiate(rendererPrefab, transform);
-            }
-            else
-            {
-                go = new GameObject("PointCloudRenderer");
-                go.transform.SetParent(transform, worldPositionStays: false);
-                go.AddComponent<MeshFilter>();
-                go.AddComponent<MeshRenderer>();
-                go.AddComponent<PointCloudRenderer>();
-            }
-
-            go.name = $"PointCloud[{index}] {desc.Name} ({desc.Serial})";
-
-            var pcr = go.GetComponent<PointCloudRenderer>();
-            if (pcr == null)
-            {
-                Debug.LogError($"[{nameof(PointCloudCameraManager)}] " +
-                               $"Spawned object has no PointCloudRenderer component.", go);
-                return null;
-            }
+            var go = new GameObject($"PointCloud[{index}] {desc.Name} ({desc.Serial})");
+            go.transform.SetParent(transform, worldPositionStays: false);
+            go.AddComponent<MeshFilter>();
+            go.AddComponent<MeshRenderer>();
+            var pcr = go.AddComponent<PointCloudRenderer>();
 
             pcr.deviceSerial = desc.Serial;
-
-            // Apply manager defaults only when a bare GameObject was created
-            // (so an authored prefab keeps its own values).
-            if (rendererPrefab == null)
-            {
-                pcr.depthWidth = depthWidth;
-                pcr.depthHeight = depthHeight;
-                pcr.depthFps = depthFps;
-                pcr.colorWidth = colorWidth;
-                pcr.colorHeight = colorHeight;
-                pcr.colorFps = colorFps;
-                pcr.alignTargetStream = alignTargetStream;
-                pcr.maxPoints = maxPointsPerDevice;
-                pcr.pointMaterial = defaultPointMaterial;
-                pcr.boundingBox = defaultBoundingBox;
-                pcr.decimater = defaultDecimater;
-                pcr.cumulative = defaultCumulative;
-            }
+            pcr.depthWidth = depthWidth;
+            pcr.depthHeight = depthHeight;
+            pcr.depthFps = depthFps;
+            pcr.colorWidth = colorWidth;
+            pcr.colorHeight = colorHeight;
+            pcr.colorFps = colorFps;
+            pcr.alignTargetStream = alignTargetStream;
+            pcr.maxPoints = maxPointsPerDevice;
+            pcr.pointMaterial = defaultPointMaterial;
+            pcr.boundingBox = defaultBoundingBox;
+            pcr.decimater = defaultDecimater;
+            pcr.cumulative = defaultCumulative;
 
             return pcr;
         }
