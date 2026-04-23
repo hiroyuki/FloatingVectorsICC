@@ -37,6 +37,10 @@ namespace PointCloud
                  "Only used when rendererPrefab is null (bare GameObject path).")]
         public PointCloudDecimater defaultDecimater;
 
+        [Tooltip("Optional shared cumulative snapshotter applied to every spawned renderer. " +
+                 "Only used when rendererPrefab is null (bare GameObject path).")]
+        public PointCloudCumulative defaultCumulative;
+
         [Header("Diagnostics")]
         public bool verboseLogging = true;
 
@@ -112,6 +116,7 @@ namespace PointCloud
                 pcr.pointMaterial = defaultPointMaterial;
                 pcr.boundingBox = defaultBoundingBox;
                 pcr.decimater = defaultDecimater;
+                pcr.cumulative = defaultCumulative;
             }
 
             return pcr;
