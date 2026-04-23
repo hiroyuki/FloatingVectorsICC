@@ -5,6 +5,7 @@
 //
 // Uses the legacy Input Manager (ProjectSettings/activeInputHandler: 0).
 
+using PointCloud;
 using UnityEngine;
 
 namespace CameraControl
@@ -12,8 +13,14 @@ namespace CameraControl
     public class CameraOrbitController : MonoBehaviour
     {
         [Header("Pivot")]
-        [Tooltip("Point the camera orbits around. If null, the pivot is initialized " +
-                 "to the point \"distance\" in front of this transform on first Update.")]
+        [Tooltip("Bounding box whose world-space center is used as the orbit pivot. " +
+                 "When assigned, it takes priority over 'pivot' each frame. The box " +
+                 "itself is never moved; panning accumulates into an internal offset.")]
+        public PointCloudBoundingBox boundingBox;
+
+        [Tooltip("Fallback pivot transform. Used only when boundingBox is null. " +
+                 "If both are null, the pivot is initialized to the point \"distance\" " +
+                 "in front of this transform on first Update.")]
         public Transform pivot;
 
         [Tooltip("Initial distance from pivot to camera (world units = meters). " +
@@ -41,6 +48,7 @@ namespace CameraControl
         public float maxDistance = 100f;
 
         private Vector3 _pivotPoint;
+        private Vector3 _panOffset;
         private float _yaw;
         private float _pitch;
         private bool _initialized;
@@ -58,7 +66,9 @@ namespace CameraControl
                 _initialized = true;
             }
 
-            if (pivot != null)
+            if (boundingBox != null)
+                _pivotPoint = boundingBox.transform.position + _panOffset;
+            else if (pivot != null)
                 _pivotPoint = pivot.position;
 
             float dx = Input.GetAxis("Mouse X");
@@ -84,7 +94,9 @@ namespace CameraControl
                 Vector3 up = transform.up;
                 Vector3 delta = (-dx * right - dy * up) * panSpeed * distance;
                 _pivotPoint += delta;
-                if (pivot != null)
+                if (boundingBox != null)
+                    _panOffset += delta;
+                else if (pivot != null)
                     pivot.position = _pivotPoint;
             }
 
@@ -103,18 +115,25 @@ namespace CameraControl
 
         private void InitializeFromCurrentTransform()
         {
-            if (pivot != null)
+            _panOffset = Vector3.zero;
+
+            if (boundingBox != null)
+            {
+                _pivotPoint = boundingBox.transform.position;
+            }
+            else if (pivot != null)
             {
                 _pivotPoint = pivot.position;
-                Vector3 toCam = transform.position - _pivotPoint;
-                float d = toCam.magnitude;
-                if (d > 1e-4f)
-                    distance = d;
             }
             else
             {
                 _pivotPoint = transform.position + transform.forward * distance;
             }
+
+            Vector3 toPivot = _pivotPoint - transform.position;
+            float camDist = toPivot.magnitude;
+            if (camDist > 1e-4f)
+                distance = camDist;
 
             Vector3 euler = transform.rotation.eulerAngles;
             _pitch = NormalizeAngle(euler.x);
