@@ -1,0 +1,3 @@
+[submodule "claude-basics"]
+	path = claude-basics
+	url = https://github.com/P-A-N/CLAUDE_BASICS.git
