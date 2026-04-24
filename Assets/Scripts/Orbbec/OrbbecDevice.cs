@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace Orbbec
 {
@@ -109,6 +110,63 @@ namespace Orbbec
             ThrowIfDisposed();
             OrbbecNative.ob_device_timer_sync_with_host(Handle, out var err);
             OrbbecException.ThrowIfNotEmpty(err);
+        }
+
+        // --- Depth work mode (Advanced.h) ---
+
+        /// <summary>Name of the currently active depth work mode.</summary>
+        public string GetCurrentDepthWorkModeName()
+        {
+            ThrowIfDisposed();
+            IntPtr p = OrbbecNative.ob_device_get_current_depth_work_mode_name(Handle, out var err);
+            OrbbecException.ThrowIfNotEmpty(err);
+            return OrbbecNative.ReadUtf8(p);
+        }
+
+        /// <summary>
+        /// Switch to a depth work mode by name. The name must match one reported by
+        /// <see cref="GetDepthWorkModeNames"/> for the current device / firmware.
+        /// Must be called before the pipeline starts.
+        /// </summary>
+        public void SwitchDepthWorkModeByName(string modeName)
+        {
+            ThrowIfDisposed();
+            if (string.IsNullOrEmpty(modeName))
+                throw new ArgumentException("modeName must be non-empty.", nameof(modeName));
+            var status = OrbbecNative.ob_device_switch_depth_work_mode_by_name(Handle, modeName, out var err);
+            OrbbecException.ThrowIfNotEmpty(err);
+            if (status != ObStatus.Ok)
+                throw new InvalidOperationException(
+                    $"ob_device_switch_depth_work_mode_by_name(\"{modeName}\") returned {status}.");
+        }
+
+        /// <summary>
+        /// Enumerate available depth work mode names. Allocates and frees the SDK list internally.
+        /// </summary>
+        public IReadOnlyList<string> GetDepthWorkModeNames()
+        {
+            ThrowIfDisposed();
+            IntPtr list = OrbbecNative.ob_device_get_depth_work_mode_list(Handle, out var err);
+            OrbbecException.ThrowIfNotEmpty(err);
+            if (list == IntPtr.Zero) return Array.Empty<string>();
+
+            var names = new List<string>();
+            try
+            {
+                uint count = OrbbecNative.ob_depth_work_mode_list_get_count(list, out err);
+                OrbbecException.ThrowIfNotEmpty(err);
+                for (uint i = 0; i < count; i++)
+                {
+                    var item = OrbbecNative.ob_depth_work_mode_list_get_item(list, i, out err);
+                    OrbbecException.ThrowIfNotEmpty(err);
+                    if (!string.IsNullOrEmpty(item.Name)) names.Add(item.Name);
+                }
+            }
+            finally
+            {
+                OrbbecNative.ob_delete_depth_work_mode_list(list, out _);
+            }
+            return names;
         }
 
         public void Dispose()

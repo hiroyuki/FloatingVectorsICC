@@ -41,6 +41,12 @@ namespace PointCloud
                  "timestamps share a host-time reference.")]
         public bool enableTimerSyncWithHost = true;
 
+        [Header("Depth work mode")]
+        [Tooltip("Depth work mode name applied to every spawned renderer before its pipeline starts. " +
+                 "Leave empty to keep each device's current mode. Run the renderer's 'Log Depth Work " +
+                 "Modes' context menu to list the available names for your firmware.")]
+        public string depthWorkMode = string.Empty;
+
         [Header("Diagnostics")]
         public bool verboseLogging = true;
 
@@ -96,6 +102,7 @@ namespace PointCloud
             pcr.cumulative = defaultCumulative;
             pcr.syncMode = ResolveSyncMode(index);
             pcr.timerSyncWithHost = enableTimerSyncWithHost;
+            pcr.depthWorkMode = depthWorkMode;
 
             return pcr;
         }

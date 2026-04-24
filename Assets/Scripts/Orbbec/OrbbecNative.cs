@@ -154,6 +154,28 @@ namespace Orbbec
         public int FramesPerTrigger;
     }
 
+    public enum ObDepthWorkModeTag
+    {
+        DeviceDefault = 0,  // OB_DEVICE_DEPTH_WORK_MODE
+        Custom        = 1,  // OB_CUSTOM_DEPTH_WORK_MODE
+    }
+
+    /// <summary>
+    /// ob_depth_work_mode (ObTypes.h): uint8_t checksum[16] + char name[32] + enum tag.
+    /// Natural alignment gives 16 + 32 + 4 = 52 bytes.
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct ObDepthWorkMode
+    {
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 16)]
+        public byte[] Checksum;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+        public string Name;
+
+        public ObDepthWorkModeTag Tag;
+    }
+
     // --- Convenience constants (ObTypes.h) ---
 
     public static class ObConst
@@ -286,6 +308,30 @@ namespace Orbbec
 
         [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void ob_device_timer_sync_with_host(IntPtr device, out IntPtr error);
+
+        // === Advanced.h (depth work mode) ===
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ob_device_get_current_depth_work_mode_name(IntPtr device, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern ObStatus ob_device_switch_depth_work_mode_by_name(
+            IntPtr device,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string modeName,
+            out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ob_device_get_depth_work_mode_list(IntPtr device, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern uint ob_depth_work_mode_list_get_count(IntPtr list, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern ObDepthWorkMode ob_depth_work_mode_list_get_item(
+            IntPtr list, uint index, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void ob_delete_depth_work_mode_list(IntPtr list, out IntPtr error);
 
         // === Pipeline.h ===
 

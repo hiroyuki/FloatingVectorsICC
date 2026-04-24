@@ -43,6 +43,13 @@ namespace PointCloud
                  "this device's frame timestamps become comparable across devices on the same host.")]
         public bool timerSyncWithHost = true;
 
+        [Header("Depth work mode")]
+        [Tooltip("Name of the depth work mode to switch to before starting the pipeline. " +
+                 "Leave empty to keep the device's current mode. Must match a name reported by " +
+                 "ob_device_get_depth_work_mode_list for this device/firmware. Use the " +
+                 "'Log Depth Work Modes' context menu at runtime to list the available names.")]
+        public string depthWorkMode = string.Empty;
+
         [Header("Point cloud")]
         [Tooltip("Upper bound used to size the GPU vertex buffer. Frames with more points are clipped. " +
                  "After D2C alignment, point count == color resolution (width*height).")]
@@ -181,6 +188,11 @@ namespace PointCloud
             var ctx = OrbbecRuntime.Context;
             _device = ctx.OpenDeviceBySerial(deviceSerial);
 
+            // Depth work mode must be switched while streams are stopped — always safe here
+            // because the pipeline isn't started yet. Doing it before ApplySyncConfig so the
+            // sync settings apply to the mode we'll actually stream in.
+            ApplyDepthWorkMode();
+
             // Multi-device sync and timer sync must happen after the device is open but
             // before the pipeline starts, otherwise the sync-mode switch can race the stream.
             ApplySyncConfig();
@@ -277,6 +289,60 @@ namespace PointCloud
             var s = transform.localScale;
             s.y = -Mathf.Abs(s.y);
             transform.localScale = s;
+        }
+
+        private void ApplyDepthWorkMode()
+        {
+            if (string.IsNullOrWhiteSpace(depthWorkMode)) return;
+
+            string current;
+            try { current = _device.GetCurrentDepthWorkModeName(); }
+            catch (Exception e)
+            {
+                Debug.LogWarning(
+                    $"[{nameof(PointCloudRenderer)}] GetCurrentDepthWorkModeName failed on {deviceSerial}: {e.Message}. " +
+                    $"Skipping depth mode switch.", this);
+                return;
+            }
+
+            if (string.Equals(current, depthWorkMode, StringComparison.Ordinal)) return;
+
+            try
+            {
+                _device.SwitchDepthWorkModeByName(depthWorkMode);
+                Debug.Log(
+                    $"[{nameof(PointCloudRenderer)}] {deviceSerial}: depth work mode \"{current}\" -> \"{depthWorkMode}\".",
+                    this);
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning(
+                    $"[{nameof(PointCloudRenderer)}] SwitchDepthWorkModeByName(\"{depthWorkMode}\") failed on " +
+                    $"{deviceSerial}: {e.Message}. Keeping current mode \"{current}\".", this);
+            }
+        }
+
+        [ContextMenu("Log Depth Work Modes")]
+        private void LogDepthWorkModes()
+        {
+            if (_device == null)
+            {
+                Debug.LogWarning($"[{nameof(PointCloudRenderer)}] device not open yet.", this);
+                return;
+            }
+            try
+            {
+                var names = _device.GetDepthWorkModeNames();
+                string current = _device.GetCurrentDepthWorkModeName();
+                Debug.Log(
+                    $"[{nameof(PointCloudRenderer)}] {deviceSerial} depth modes (current=\"{current}\"): " +
+                    string.Join(", ", names),
+                    this);
+            }
+            catch (Exception e)
+            {
+                Debug.LogException(e, this);
+            }
         }
 
         private void ApplySyncConfig()
