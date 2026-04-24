@@ -236,7 +236,9 @@ namespace PointCloud
             }
             track.Frames.Add(new PointCloudRecording.Frame
             {
-                TimestampNs = UtcNowUnixNs(),
+                // Device-supplied timestamp in microseconds; the renderer calls
+                // TimerSyncWithHost at startup, so these become comparable across devices.
+                TimestampNs = timestampUs * 1000UL,
                 Bytes = buf,
             });
         }
@@ -498,13 +500,6 @@ namespace PointCloud
         {
             try { return Environment.MachineName; }
             catch { return "unknown"; }
-        }
-
-        private static ulong UtcNowUnixNs()
-        {
-            // DateTime ticks are 100ns units; subtract Unix epoch then multiply by 100.
-            long unixTicks = DateTime.UtcNow.Ticks - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).Ticks;
-            return (ulong)unixTicks * 100UL;
         }
 
         private void SetStatus(string msg, bool warn = false)

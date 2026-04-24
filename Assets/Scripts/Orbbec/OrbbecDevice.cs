@@ -62,6 +62,55 @@ namespace Orbbec
             return new OrbbecPipeline(this);
         }
 
+        // --- Multi-device sync (MultipleDevices.h) ---
+
+        /// <summary>
+        /// Bitmap of supported <see cref="ObMultiDeviceSyncMode"/> values. Callers typically
+        /// check `(bitmap &amp; (ushort)mode) != 0` before selecting a mode.
+        /// </summary>
+        public ushort GetSupportedSyncModeBitmap()
+        {
+            ThrowIfDisposed();
+            ushort bitmap = OrbbecNative.ob_device_get_supported_multi_device_sync_mode_bitmap(Handle, out var err);
+            OrbbecException.ThrowIfNotEmpty(err);
+            return bitmap;
+        }
+
+        public void SetSyncConfig(ObMultiDeviceSyncConfig config)
+        {
+            ThrowIfDisposed();
+            OrbbecNative.ob_device_set_multi_device_sync_config(Handle, ref config, out var err);
+            OrbbecException.ThrowIfNotEmpty(err);
+        }
+
+        public ObMultiDeviceSyncConfig GetSyncConfig()
+        {
+            ThrowIfDisposed();
+            var config = OrbbecNative.ob_device_get_multi_device_sync_config(Handle, out var err);
+            OrbbecException.ThrowIfNotEmpty(err);
+            return config;
+        }
+
+        /// <summary>Send a one-shot capture command (only effective in SOFTWARE_TRIGGERING mode).</summary>
+        public void TriggerCapture()
+        {
+            ThrowIfDisposed();
+            OrbbecNative.ob_device_trigger_capture(Handle, out var err);
+            OrbbecException.ThrowIfNotEmpty(err);
+        }
+
+        /// <summary>
+        /// Align the device's internal timer with the host. Recommended at startup and
+        /// periodically (~every 60 min) to limit drift. After this call, frame timestamps
+        /// across devices become comparable.
+        /// </summary>
+        public void TimerSyncWithHost()
+        {
+            ThrowIfDisposed();
+            OrbbecNative.ob_device_timer_sync_with_host(Handle, out var err);
+            OrbbecException.ThrowIfNotEmpty(err);
+        }
+
         public void Dispose()
         {
             if (_disposed) return;

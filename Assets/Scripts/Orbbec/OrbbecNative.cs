@@ -99,6 +99,26 @@ namespace Orbbec
         Off = 5,
     }
 
+    /// <summary>
+    /// Multi-device sync modes. Values are bit-flags as declared in ObTypes.h
+    /// (ob_multi_device_sync_mode): ob_device_get_supported_multi_device_sync_mode_bitmap
+    /// returns OR of these. A single ob_multi_device_sync_config.syncMode field takes
+    /// exactly one of these values.
+    /// </summary>
+    [Flags]
+    public enum ObMultiDeviceSyncMode
+    {
+        FreeRun             = 1 << 0,
+        Standalone          = 1 << 1,
+        Primary             = 1 << 2,
+        Secondary           = 1 << 3,
+        SecondarySynced     = 1 << 4,
+        SoftwareTriggering  = 1 << 5,
+        HardwareTriggering  = 1 << 6,
+        IrImuSync           = 1 << 7,
+        SoftwareSynced      = 1 << 8,
+    }
+
     // --- Structs (ObTypes.h) ---
 
     /// <summary>OBColorPoint: matches OB_FORMAT_RGB_POINT layout (6 floats, 24 bytes).</summary>
@@ -114,6 +134,24 @@ namespace Orbbec
     public struct ObPoint
     {
         public float X, Y, Z;
+    }
+
+    /// <summary>
+    /// ob_multi_device_sync_config (ObTypes.h). Default natural alignment (Sequential, no Pack)
+    /// gives: enum(4) + int*3(12) + bool(1)+pad(3) + int*2(8) = 28 bytes, matching the C layout
+    /// on MSVC/GCC-Windows where both enums and _Bool take 1 and 4 bytes respectively with
+    /// 4-byte alignment between ints.
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct ObMultiDeviceSyncConfig
+    {
+        public ObMultiDeviceSyncMode SyncMode;
+        public int DepthDelayUs;
+        public int ColorDelayUs;
+        public int Trigger2ImageDelayUs;
+        [MarshalAs(UnmanagedType.I1)] public bool TriggerOutEnable;
+        public int TriggerOutDelayUs;
+        public int FramesPerTrigger;
     }
 
     // --- Convenience constants (ObTypes.h) ---
@@ -228,6 +266,26 @@ namespace Orbbec
 
         [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
         internal static extern IntPtr ob_device_info_get_connection_type(IntPtr info, out IntPtr error);
+
+        // === MultipleDevices.h ===
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern ushort ob_device_get_supported_multi_device_sync_mode_bitmap(
+            IntPtr device, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void ob_device_set_multi_device_sync_config(
+            IntPtr device, ref ObMultiDeviceSyncConfig config, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern ObMultiDeviceSyncConfig ob_device_get_multi_device_sync_config(
+            IntPtr device, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void ob_device_trigger_capture(IntPtr device, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void ob_device_timer_sync_with_host(IntPtr device, out IntPtr error);
 
         // === Pipeline.h ===
 

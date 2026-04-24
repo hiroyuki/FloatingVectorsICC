@@ -35,6 +35,14 @@ namespace PointCloud
         public ObStreamType alignTargetStream = ObStreamType.Color;
         public bool enableFrameSync = true;
 
+        [Header("Multi-device sync")]
+        [Tooltip("Hardware-level sync role for this device. Normally set by PointCloudCameraManager " +
+                 "(index 0 = Primary, rest = SecondarySynced). Standalone disables hardware sync on this device.")]
+        public ObMultiDeviceSyncMode syncMode = ObMultiDeviceSyncMode.Standalone;
+        [Tooltip("When enabled, calls ob_device_timer_sync_with_host before starting the pipeline so " +
+                 "this device's frame timestamps become comparable across devices on the same host.")]
+        public bool timerSyncWithHost = true;
+
         [Header("Point cloud")]
         [Tooltip("Upper bound used to size the GPU vertex buffer. Frames with more points are clipped. " +
                  "After D2C alignment, point count == color resolution (width*height).")]
@@ -173,6 +181,20 @@ namespace PointCloud
             var ctx = OrbbecRuntime.Context;
             _device = ctx.OpenDeviceBySerial(deviceSerial);
 
+            // Multi-device sync and timer sync must happen after the device is open but
+            // before the pipeline starts, otherwise the sync-mode switch can race the stream.
+            ApplySyncConfig();
+            if (timerSyncWithHost)
+            {
+                try { _device.TimerSyncWithHost(); }
+                catch (Exception e)
+                {
+                    Debug.LogWarning(
+                        $"[{nameof(PointCloudRenderer)}] TimerSyncWithHost failed on {deviceSerial}: {e.Message}",
+                        this);
+                }
+            }
+
             _config = new OrbbecConfig();
             _config.EnableVideoStream(ObStreamType.Depth, depthWidth, depthHeight, depthFps, ObFormat.Y16);
             _config.EnableVideoStream(ObStreamType.Color, colorWidth, colorHeight, colorFps, ObFormat.RGB);
@@ -255,6 +277,49 @@ namespace PointCloud
             var s = transform.localScale;
             s.y = -Mathf.Abs(s.y);
             transform.localScale = s;
+        }
+
+        private void ApplySyncConfig()
+        {
+            ushort supported;
+            try { supported = _device.GetSupportedSyncModeBitmap(); }
+            catch (Exception e)
+            {
+                Debug.LogWarning(
+                    $"[{nameof(PointCloudRenderer)}] GetSupportedSyncModeBitmap failed on {deviceSerial}: {e.Message}. " +
+                    "Skipping sync config.", this);
+                return;
+            }
+
+            var desired = syncMode;
+            if ((supported & (ushort)desired) == 0)
+            {
+                var fallback = ObMultiDeviceSyncMode.Standalone;
+                if ((supported & (ushort)fallback) == 0) fallback = ObMultiDeviceSyncMode.FreeRun;
+                Debug.LogWarning(
+                    $"[{nameof(PointCloudRenderer)}] device {deviceSerial} does not support sync mode {desired} " +
+                    $"(bitmap=0x{supported:X4}); falling back to {fallback}.",
+                    this);
+                desired = fallback;
+            }
+
+            var config = new ObMultiDeviceSyncConfig
+            {
+                SyncMode             = desired,
+                DepthDelayUs         = 0,
+                ColorDelayUs         = 0,
+                Trigger2ImageDelayUs = 0,
+                TriggerOutEnable     = true,
+                TriggerOutDelayUs    = 0,
+                FramesPerTrigger     = 1,
+            };
+            try { _device.SetSyncConfig(config); }
+            catch (Exception e)
+            {
+                Debug.LogWarning(
+                    $"[{nameof(PointCloudRenderer)}] SetSyncConfig({desired}) failed on {deviceSerial}: {e.Message}",
+                    this);
+            }
         }
 
         // --- Bounding box filter ---

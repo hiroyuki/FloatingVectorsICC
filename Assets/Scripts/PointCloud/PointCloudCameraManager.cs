@@ -33,6 +33,14 @@ namespace PointCloud
         [Tooltip("Optional shared cumulative snapshotter applied to every spawned renderer.")]
         public PointCloudCumulative defaultCumulative;
 
+        [Header("Multi-device sync")]
+        [Tooltip("Enable hardware multi-device sync via Sync Hub Pro. Index 0 is configured as " +
+                 "PRIMARY, the rest as SECONDARY_SYNCED. When off, every device runs standalone.")]
+        public bool enableHardwareSync = true;
+        [Tooltip("Call ob_device_timer_sync_with_host on each device at startup so their frame " +
+                 "timestamps share a host-time reference.")]
+        public bool enableTimerSyncWithHost = true;
+
         [Header("Diagnostics")]
         public bool verboseLogging = true;
 
@@ -86,8 +94,17 @@ namespace PointCloud
             pcr.boundingBox = defaultBoundingBox;
             pcr.decimater = defaultDecimater;
             pcr.cumulative = defaultCumulative;
+            pcr.syncMode = ResolveSyncMode(index);
+            pcr.timerSyncWithHost = enableTimerSyncWithHost;
 
             return pcr;
+        }
+
+        private ObMultiDeviceSyncMode ResolveSyncMode(int index)
+        {
+            if (!enableHardwareSync) return ObMultiDeviceSyncMode.Standalone;
+            // Sync Hub Pro topology: first device is the clock source, rest follow.
+            return index == 0 ? ObMultiDeviceSyncMode.Primary : ObMultiDeviceSyncMode.SecondarySynced;
         }
     }
 }
