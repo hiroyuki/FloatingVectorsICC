@@ -1,7 +1,11 @@
 // Cumulative point cloud snapshotter. When "No Erase" is on, every `interval`
-// frames the current (post-filter) point cloud is copied into its own Mesh
-// and parented to this GameObject, so snapshots accumulate over time. The
-// Clear button (Inspector) destroys all accumulated snapshots.
+// frames the current point cloud is copied into its own Mesh and kept visible,
+// so snapshots accumulate over time. Vertices are stored untransformed
+// (renderer-local); the snapshot GameObject's world transform is frozen to the
+// renderer's world transform at capture time, then reparented to this
+// GameObject so future renderer motion is ignored but cumulative motion moves
+// the whole accumulation together. The Clear button (Inspector) destroys all
+// accumulated snapshots.
 
 using System.Collections.Generic;
 using Orbbec;
@@ -40,10 +44,15 @@ namespace PointCloud
         // "every N frames per renderer", not "every N total OnFrame calls".
         private readonly Dictionary<int, int> _frameCounters = new Dictionary<int, int>();
 
-        // Called by PointCloudRenderer each frame after filtering. Passes the filtered
-        // buffer in renderer-local space plus the renderer's transform. Points are
-        // baked into this component's local space so snapshots stay put if the
-        // renderer later moves.
+        // Shared identity index buffer. Lazily grown so every snapshot mesh can
+        // memcpy the first `count` entries instead of re-filling `0..N-1` each time.
+        private NativeArray<uint> _sharedIndices;
+
+        // Called by PointCloudRenderer each frame. `buffer` is the raw SDK point cloud
+        // in renderer-local space; OBB / decimation filters are applied in the vertex
+        // shader, not here, so snapshots include points that the live view culls.
+        // The snapshot GO's world transform is frozen to rendererTransform's current
+        // world transform so snapshots stay put if the renderer later moves.
         public void OnFrame(NativeArray<ObColorPoint> buffer, int count, Transform rendererTransform, Material fallbackMaterial)
         {
             if (!noErase || count <= 0 || rendererTransform == null) return;
@@ -74,91 +83,75 @@ namespace PointCloud
         private void OnDestroy()
         {
             Clear();
+            if (_sharedIndices.IsCreated) _sharedIndices.Dispose();
         }
 
         private void CaptureSnapshot(NativeArray<ObColorPoint> buffer, int count, Transform rendererTransform, Material fallbackMaterial)
         {
-            // renderer-local -> cumulative-local. Expanded inline for the tight copy loop.
-            Matrix4x4 m = transform.worldToLocalMatrix * rendererTransform.localToWorldMatrix;
-            float m00 = m.m00, m01 = m.m01, m02 = m.m02, m03 = m.m03;
-            float m10 = m.m10, m11 = m.m11, m12 = m.m12, m13 = m.m13;
-            float m20 = m.m20, m21 = m.m21, m22 = m.m22, m23 = m.m23;
+            // Points stay in renderer-local space; the snapshot GO's world transform is
+            // frozen to match the renderer's current world transform, so no per-point
+            // CPU matrix multiply is needed. This is the hot path for interval=1.
 
-            var data = new NativeArray<ObColorPoint>(count, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
-            try
+            var mesh = new Mesh
             {
-                for (int i = 0; i < count; i++)
+                name = $"PointCloudSnapshot_{Time.frameCount}",
+                indexFormat = IndexFormat.UInt32,
+                bounds = new Bounds(Vector3.zero, Vector3.one * 100f),
+            };
+
+            var attrs = new[]
+            {
+                new VertexAttributeDescriptor(VertexAttribute.Position, VertexAttributeFormat.Float32, 3, stream: 0),
+                new VertexAttributeDescriptor(VertexAttribute.Color,    VertexAttributeFormat.Float32, 3, stream: 0),
+            };
+            mesh.SetVertexBufferParams(count, attrs);
+            // SetVertexBufferData copies into the mesh's own storage, so reusing `buffer`
+            // next frame is safe.
+            mesh.SetVertexBufferData(buffer, 0, 0, count,
+                flags: MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
+
+            mesh.SetIndexBufferParams(count, IndexFormat.UInt32);
+            EnsureSharedIndices(count);
+            mesh.SetIndexBufferData(_sharedIndices, 0, 0, count,
+                MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
+            mesh.SetSubMesh(0, new SubMeshDescriptor(0, count, MeshTopology.Points),
+                MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
+
+            var go = new GameObject($"_Snapshot_{_snapshots.Count}");
+            var mf = go.AddComponent<MeshFilter>();
+            var mr = go.AddComponent<MeshRenderer>();
+            mr.shadowCastingMode = ShadowCastingMode.Off;
+            mr.receiveShadows = false;
+            mr.lightProbeUsage = LightProbeUsage.Off;
+            mr.reflectionProbeUsage = ReflectionProbeUsage.Off;
+            mf.sharedMesh = mesh;
+
+            var mat = snapshotMaterial != null ? snapshotMaterial : fallbackMaterial;
+            if (mat != null) mr.sharedMaterial = mat;
+
+            // Freeze the snapshot's world transform to the renderer's current world transform,
+            // then reparent to this cumulative GO preserving that world transform. Future
+            // renderer motion no longer affects this snapshot; cumulative motion does.
+            go.transform.SetParent(rendererTransform, worldPositionStays: false);
+            go.transform.SetParent(transform, worldPositionStays: true);
+
+            _snapshots.Add(go);
+
+            if (maxSnapshots > 0)
+            {
+                while (_snapshots.Count > maxSnapshots)
                 {
-                    var p = buffer[i];
-                    data[i] = new ObColorPoint
-                    {
-                        X = m00 * p.X + m01 * p.Y + m02 * p.Z + m03,
-                        Y = m10 * p.X + m11 * p.Y + m12 * p.Z + m13,
-                        Z = m20 * p.X + m21 * p.Y + m22 * p.Z + m23,
-                        R = p.R,
-                        G = p.G,
-                        B = p.B,
-                    };
-                }
-
-                var mesh = new Mesh
-                {
-                    name = $"PointCloudSnapshot_{Time.frameCount}",
-                    indexFormat = IndexFormat.UInt32,
-                    bounds = new Bounds(Vector3.zero, Vector3.one * 100f),
-                };
-
-                var attrs = new[]
-                {
-                    new VertexAttributeDescriptor(VertexAttribute.Position, VertexAttributeFormat.Float32, 3, stream: 0),
-                    new VertexAttributeDescriptor(VertexAttribute.Color,    VertexAttributeFormat.Float32, 3, stream: 0),
-                };
-                mesh.SetVertexBufferParams(count, attrs);
-                mesh.SetVertexBufferData(data, 0, 0, count,
-                    flags: MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
-
-                mesh.SetIndexBufferParams(count, IndexFormat.UInt32);
-                var indices = new NativeArray<uint>(count, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
-                try
-                {
-                    for (int i = 0; i < count; i++) indices[i] = (uint)i;
-                    mesh.SetIndexBufferData(indices, 0, 0, count,
-                        MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
-                }
-                finally
-                {
-                    indices.Dispose();
-                }
-                mesh.SetSubMesh(0, new SubMeshDescriptor(0, count, MeshTopology.Points),
-                    MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
-
-                var go = new GameObject($"_Snapshot_{_snapshots.Count}");
-                go.transform.SetParent(transform, worldPositionStays: false);
-                var mf = go.AddComponent<MeshFilter>();
-                var mr = go.AddComponent<MeshRenderer>();
-                mr.shadowCastingMode = ShadowCastingMode.Off;
-                mr.receiveShadows = false;
-                mr.lightProbeUsage = LightProbeUsage.Off;
-                mr.reflectionProbeUsage = ReflectionProbeUsage.Off;
-                mf.sharedMesh = mesh;
-
-                var mat = snapshotMaterial != null ? snapshotMaterial : fallbackMaterial;
-                if (mat != null) mr.sharedMaterial = mat;
-
-                _snapshots.Add(go);
-
-                if (maxSnapshots > 0)
-                {
-                    while (_snapshots.Count > maxSnapshots)
-                    {
-                        DestroySnapshotAt(0);
-                    }
+                    DestroySnapshotAt(0);
                 }
             }
-            finally
-            {
-                data.Dispose();
-            }
+        }
+
+        private void EnsureSharedIndices(int count)
+        {
+            if (_sharedIndices.IsCreated && _sharedIndices.Length >= count) return;
+            if (_sharedIndices.IsCreated) _sharedIndices.Dispose();
+            _sharedIndices = new NativeArray<uint>(count, Allocator.Persistent, NativeArrayOptions.UninitializedMemory);
+            for (int i = 0; i < count; i++) _sharedIndices[i] = (uint)i;
         }
 
         private void DestroySnapshotAt(int index)

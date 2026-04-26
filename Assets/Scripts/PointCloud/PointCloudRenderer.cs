@@ -2,15 +2,49 @@
 // One GameObject per device. PointCloudCameraManager spawns these on enumeration.
 
 using System;
+using System.Runtime.InteropServices;
 using System.Threading;
 using Orbbec;
 using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
 using UnityEngine;
 using UnityEngine.Rendering;
+using Stopwatch = System.Diagnostics.Stopwatch;
 
 namespace PointCloud
 {
+    /// <summary>
+    /// One frame of raw pre-D2C sensor data. Byte arrays are pooled — they live only for the
+    /// duration of the OnRawFramesReady callback, so consumers must copy before returning.
+    /// </summary>
+    public readonly struct RawFrameData
+    {
+        public readonly byte[] DepthBytes;   // Y16 (2 bytes per pixel), row-major
+        public readonly int DepthByteCount;  // actual bytes of interest (DepthBytes.Length may be larger due to pooling)
+        public readonly int DepthWidth;
+        public readonly int DepthHeight;
+        public readonly byte[] ColorBytes;   // RGB8 (3 bytes per pixel), row-major
+        public readonly int ColorByteCount;
+        public readonly int ColorWidth;
+        public readonly int ColorHeight;
+        public readonly ulong TimestampUs;
+
+        public RawFrameData(byte[] depthBytes, int depthByteCount, int depthWidth, int depthHeight,
+                            byte[] colorBytes, int colorByteCount, int colorWidth, int colorHeight,
+                            ulong timestampUs)
+        {
+            DepthBytes = depthBytes;
+            DepthByteCount = depthByteCount;
+            DepthWidth = depthWidth;
+            DepthHeight = depthHeight;
+            ColorBytes = colorBytes;
+            ColorByteCount = colorByteCount;
+            ColorWidth = colorWidth;
+            ColorHeight = colorHeight;
+            TimestampUs = timestampUs;
+        }
+    }
+
     [RequireComponent(typeof(MeshFilter))]
     [RequireComponent(typeof(MeshRenderer))]
     public class PointCloudRenderer : MonoBehaviour
@@ -77,12 +111,12 @@ namespace PointCloud
 
         [Header("Bounding box filter")]
         [Tooltip("Optional oriented bounding box. When assigned and its filterMode is not Disabled, " +
-                 "points falling outside/inside the box (per mode) are culled before upload.")]
+                 "points falling outside/inside the box (per mode) are culled in the vertex shader.")]
         public PointCloudBoundingBox boundingBox;
 
         [Header("Decimater")]
         [Tooltip("Optional random decimater. When assigned and its reductionPercent is > 0, " +
-                 "each surviving point is randomly dropped with the configured probability.")]
+                 "each point is independently dropped in the vertex shader via a per-vertex hash.")]
         public PointCloudDecimater decimater;
 
         [Header("Cumulative")]
@@ -90,13 +124,37 @@ namespace PointCloud
                  "snapshots are captured every 'interval' frames and kept visible until cleared.")]
         public PointCloudCumulative cumulative;
 
+        [Header("Diagnostics")]
+        [Tooltip("When on, logs captured / consumed / dropped fps once per second to the Unity console. " +
+                 "captured = SDK frames published by the capture thread, consumed = frames uploaded to the " +
+                 "Mesh on the main thread, dropped = publish-but-unread frames (capture outpacing Update).")]
+        public bool logFps = false;
+
         /// <summary>
         /// Fires each frame after the point cloud mesh has been updated. Subscribers receive the
-        /// post-filter point buffer (renderer-local space), the valid point count, and the SDK
-        /// frame timestamp (microseconds). The buffer is reused next frame, so consumers must
-        /// copy any data they need to retain before returning from the handler.
+        /// raw SDK point buffer in renderer-local space (OBB / decimation filters run in the
+        /// vertex shader, not on this buffer), the valid point count, and the SDK frame timestamp
+        /// (microseconds). The buffer is reused next frame, so consumers must copy any data they
+        /// need to retain before returning from the handler.
         /// </summary>
         public event Action<PointCloudRenderer, NativeArray<ObColorPoint>, int, ulong> OnFrameUploaded;
+
+        /// <summary>
+        /// Fires each frame alongside <see cref="OnFrameUploaded"/> with the raw pre-D2C sensor
+        /// data: Y16 depth + RGB color bytes. The byte arrays live inside the slot pool and are
+        /// reused next frame — consumers must copy any bytes they want to keep before returning.
+        /// Depth and Color refer to the same capture moment on Femto Bolt when frame sync is
+        /// enabled.
+        /// </summary>
+        public event Action<PointCloudRenderer, RawFrameData> OnRawFramesReady;
+
+        /// <summary>
+        /// Camera parameters fetched from the pipeline after it starts: depth/color intrinsics +
+        /// distortion + depth-to-color extrinsic (millimeters). Null until pipeline has started.
+        /// Values reflect the state at the moment the pipeline was started; changing depth work
+        /// mode or stream profiles during capture will not update this snapshot.
+        /// </summary>
+        public ObCameraParam? CameraParam { get; private set; }
 
         // --- Native ---
         private OrbbecDevice _device;
@@ -131,6 +189,19 @@ namespace PointCloud
 
         // Periodic timer sync.
         private Coroutine _timerSyncCoro;
+
+        // --- FPS counters ---
+        private long _capturedCount;          // capture thread: Interlocked.Increment on Publish
+        private long _lastCapturedSnapshot;   // main thread only
+        private ulong _lastDroppedSnapshot;   // main thread only
+        private int _consumedCount;           // main thread only
+        private float _fpsWindowStart;        // Time.realtimeSinceStartup, 0 = not started
+
+        // --- Per-stage timers (main thread only, accumulated over fps window) ---
+        private readonly Stopwatch _stageSw = new Stopwatch();
+        private long _shaderTicks;
+        private long _cumulTicks;
+        private long _meshTicks;
 
         private void Awake()
         {
@@ -171,27 +242,151 @@ namespace PointCloud
                 Debug.LogException(err, this);
             }
 
-            var slot = _slots?.TryAcquireRead();
-            if (slot == null) return;
+            // Filter parameters can change every frame (user dragging the bbox, tweaking decim).
+            // Push them via MaterialPropertyBlock so the shared material stays untouched —
+            // Cumulative snapshot GOs therefore render with the shader defaults (filters off).
+            _stageSw.Restart();
+            UpdateShaderFilterProperties();
+            _stageSw.Stop();
+            if (logFps) _shaderTicks += _stageSw.ElapsedTicks;
 
-            try
+            var slot = _slots?.TryAcquireRead();
+            if (slot != null)
             {
-                int n = Math.Min(slot.PointCount, maxPoints);
-                n = ApplyBoundingBoxFilter(slot.Buffer, n);
-                n = ApplyDecimationFilter(slot.Buffer, n);
-                cumulative?.OnFrame(slot.Buffer, n, transform, pointMaterial);
-                _mesh.SetVertexBufferData(slot.Buffer, 0, 0, n,
-                    flags: MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
-                _mesh.SetSubMesh(0, new SubMeshDescriptor(0, n, MeshTopology.Points),
-                    MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
-                LastPointCount = n;
-                LastTimestampUs = slot.TimestampUs;
-                OnFrameUploaded?.Invoke(this, slot.Buffer, n, slot.TimestampUs);
+                try
+                {
+                    int n = Math.Min(slot.PointCount, maxPoints);
+
+                    _stageSw.Restart();
+                    cumulative?.OnFrame(slot.Buffer, n, transform, pointMaterial);
+                    _stageSw.Stop();
+                    if (logFps) _cumulTicks += _stageSw.ElapsedTicks;
+
+                    _stageSw.Restart();
+                    _mesh.SetVertexBufferData(slot.Buffer, 0, 0, n,
+                        flags: MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
+                    _mesh.SetSubMesh(0, new SubMeshDescriptor(0, n, MeshTopology.Points),
+                        MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
+                    _stageSw.Stop();
+                    if (logFps) _meshTicks += _stageSw.ElapsedTicks;
+
+                    LastPointCount = n;
+                    LastTimestampUs = slot.TimestampUs;
+                    _consumedCount++;
+                    OnFrameUploaded?.Invoke(this, slot.Buffer, n, slot.TimestampUs);
+
+                    if (OnRawFramesReady != null && slot.DepthByteCount > 0 && slot.ColorByteCount > 0)
+                    {
+                        OnRawFramesReady.Invoke(this, new RawFrameData(
+                            depthBytes: slot.DepthBytes,
+                            depthByteCount: slot.DepthByteCount,
+                            depthWidth: slot.DepthWidth,
+                            depthHeight: slot.DepthHeight,
+                            colorBytes: slot.ColorBytes,
+                            colorByteCount: slot.ColorByteCount,
+                            colorWidth: slot.ColorWidth,
+                            colorHeight: slot.ColorHeight,
+                            timestampUs: slot.TimestampUs));
+                    }
+                }
+                finally
+                {
+                    _slots.ReturnRead(slot);
+                }
             }
-            finally
+
+            UpdateFpsDiagnostics();
+        }
+
+        private static readonly int _ObbObjToBoxId = Shader.PropertyToID("_ObbObjToBox");
+        private static readonly int _ObbModeId     = Shader.PropertyToID("_ObbMode");
+        private static readonly int _DecimKeepId   = Shader.PropertyToID("_DecimKeep");
+        private static readonly int _DecimFrameId  = Shader.PropertyToID("_DecimFrame");
+        private MaterialPropertyBlock _mpb;
+
+        private void UpdateShaderFilterProperties()
+        {
+            if (_mpb == null) _mpb = new MaterialPropertyBlock();
+            _meshRenderer.GetPropertyBlock(_mpb);
+
+            // OBB: shader expects renderer-object-space -> box-local matrix.
+            float obbMode = 0f;
+            if (boundingBox != null)
             {
-                _slots.ReturnRead(slot);
+                var mode = boundingBox.Mode;
+                if (mode != PointCloudBoundingBox.FilterMode.Disabled)
+                {
+                    obbMode = mode == PointCloudBoundingBox.FilterMode.KeepInside ? 1f : 2f;
+                    var m = boundingBox.transform.worldToLocalMatrix * transform.localToWorldMatrix;
+                    _mpb.SetMatrix(_ObbObjToBoxId, m);
+                }
             }
+            _mpb.SetFloat(_ObbModeId, obbMode);
+
+            // Decimation: reuse the same KeepRatio the CPU path used; Enabled=false -> keep all.
+            float decimKeep = 1f;
+            if (decimater != null && decimater.Enabled) decimKeep = Mathf.Clamp01(decimater.KeepRatio);
+            _mpb.SetFloat(_DecimKeepId, decimKeep);
+            _mpb.SetFloat(_DecimFrameId, Time.frameCount);
+
+            _meshRenderer.SetPropertyBlock(_mpb);
+        }
+
+        private void UpdateFpsDiagnostics()
+        {
+            if (!logFps)
+            {
+                // Reset window so the first sample after re-enabling isn't inflated by accumulated counts.
+                if (_fpsWindowStart != 0f)
+                {
+                    _fpsWindowStart = 0f;
+                    _consumedCount = 0;
+                    _shaderTicks = _cumulTicks = _meshTicks = 0;
+                    _lastCapturedSnapshot = Interlocked.Read(ref _capturedCount);
+                    _lastDroppedSnapshot = FramesDropped;
+                }
+                return;
+            }
+
+            float now = Time.realtimeSinceStartup;
+            if (_fpsWindowStart == 0f)
+            {
+                _fpsWindowStart = now;
+                _lastCapturedSnapshot = Interlocked.Read(ref _capturedCount);
+                _lastDroppedSnapshot = FramesDropped;
+                _consumedCount = 0;
+                _shaderTicks = _cumulTicks = _meshTicks = 0;
+                return;
+            }
+
+            float elapsed = now - _fpsWindowStart;
+            if (elapsed < 1f) return;
+
+            long captured = Interlocked.Read(ref _capturedCount);
+            ulong dropped = FramesDropped;
+            float capturedFps = (captured - _lastCapturedSnapshot) / elapsed;
+            float consumedFps = _consumedCount / elapsed;
+            float droppedFps = (dropped - _lastDroppedSnapshot) / elapsed;
+
+            // Average per-consumed-frame stage time in ms. Ticks -> ms: 1000 * ticks / Stopwatch.Frequency.
+            int framesForAvg = _consumedCount > 0 ? _consumedCount : 1;
+            double tickToMs = 1000.0 / Stopwatch.Frequency;
+            double shaderMs = _shaderTicks * tickToMs / framesForAvg;
+            double cumulMs  = _cumulTicks  * tickToMs / framesForAvg;
+            double meshMs   = _meshTicks   * tickToMs / framesForAvg;
+
+            Debug.Log(
+                $"[PCR {Truncate(deviceSerial, 6)}] captured={capturedFps:F1} " +
+                $"consumed={consumedFps:F1} dropped={droppedFps:F1} (/s) | " +
+                $"per-frame avg ms: shader={shaderMs:F2} cumul={cumulMs:F2} " +
+                $"mesh={meshMs:F2} pts={LastPointCount}",
+                this);
+
+            _lastCapturedSnapshot = captured;
+            _lastDroppedSnapshot = dropped;
+            _consumedCount = 0;
+            _shaderTicks = _cumulTicks = _meshTicks = 0;
+            _fpsWindowStart = now;
         }
 
         private void OnDestroy()
@@ -271,6 +466,16 @@ namespace PointCloud
             if (enableFrameSync) _pipeline.EnableFrameSync();
             _pipeline.Start(_config);
 
+            // Snapshot camera parameters now that the streams are configured. Recorder writes
+            // these into extrinsics.yaml / sensor intrinsics so playback can reconstruct points.
+            try { CameraParam = _pipeline.GetCameraParam(); }
+            catch (Exception e)
+            {
+                Debug.LogWarning(
+                    $"[{nameof(PointCloudRenderer)}] GetCameraParam failed on {deviceSerial}: {e.Message}. " +
+                    "Raw-data recordings from this device will be missing intrinsics.", this);
+            }
+
             // Align: depth gets aligned to the target stream (default = Color, i.e. D2C).
             _alignFilter = new OrbbecFilter("Align");
             _alignFilter.SetConfigValue("AlignType", (double)alignTargetStream);
@@ -333,7 +538,14 @@ namespace PointCloud
             }
             if (pointMaterial != null) _meshRenderer.sharedMaterial = pointMaterial;
 
-            _slots = new SlotPool(slotCount: 3, capacity: maxPoints);
+            // Oversize raw buffers to the configured stream resolution. Y16 = 2 B/pixel,
+            // RGB = 3 B/pixel. If the SDK actually delivers smaller frames we record only
+            // the filled portion; if it delivers larger we log and skip the raw path.
+            int depthRaw = (int)(depthWidth * depthHeight) * 2;
+            int colorRaw = (int)(colorWidth * colorHeight) * 3;
+            _slots = new SlotPool(slotCount: 3, capacity: maxPoints,
+                                  depthRawByteCapacity: depthRaw,
+                                  colorRawByteCapacity: colorRaw);
         }
 
         private void ApplyAxisConvention()
@@ -464,86 +676,6 @@ namespace PointCloud
             _device.SetSyncConfig(config);
         }
 
-        // --- Bounding box filter ---
-
-        // Compacts slot.Buffer in place, keeping only points that pass the bounding box test.
-        // Points are transformed to box-local space (unit cube [-0.5, +0.5]^3) via the composed
-        // matrix worldToBox * localToWorld, then tested per axis.
-        private int ApplyBoundingBoxFilter(NativeArray<ObColorPoint> buffer, int count)
-        {
-            if (boundingBox == null || count <= 0) return count;
-            var mode = boundingBox.Mode;
-            if (mode == PointCloudBoundingBox.FilterMode.Disabled) return count;
-
-            var m = boundingBox.transform.worldToLocalMatrix * transform.localToWorldMatrix;
-            float m00 = m.m00, m01 = m.m01, m02 = m.m02, m03 = m.m03;
-            float m10 = m.m10, m11 = m.m11, m12 = m.m12, m13 = m.m13;
-            float m20 = m.m20, m21 = m.m21, m22 = m.m22, m23 = m.m23;
-            bool keepInside = mode == PointCloudBoundingBox.FilterMode.KeepInside;
-
-            unsafe
-            {
-                var ptr = (ObColorPoint*)NativeArrayUnsafeUtility.GetUnsafePtr(buffer);
-                int w = 0;
-                for (int r = 0; r < count; r++)
-                {
-                    var p = ptr[r];
-                    float bx = m00 * p.X + m01 * p.Y + m02 * p.Z + m03;
-                    float by = m10 * p.X + m11 * p.Y + m12 * p.Z + m13;
-                    float bz = m20 * p.X + m21 * p.Y + m22 * p.Z + m23;
-                    bool inside = bx >= -0.5f && bx <= 0.5f
-                               && by >= -0.5f && by <= 0.5f
-                               && bz >= -0.5f && bz <= 0.5f;
-                    if (inside == keepInside)
-                    {
-                        if (w != r) ptr[w] = p;
-                        w++;
-                    }
-                }
-                return w;
-            }
-        }
-
-        // --- Decimation filter ---
-
-        // xorshift32 state for decimation. Seeded lazily on first use; rolls forward
-        // across frames so successive frames don't reuse the same random sequence.
-        private uint _decimateRngState;
-
-        // Compacts slot.Buffer in place, keeping each point independently with
-        // probability decimater.KeepRatio (Bernoulli sampling).
-        private int ApplyDecimationFilter(NativeArray<ObColorPoint> buffer, int count)
-        {
-            if (decimater == null || count <= 0 || !decimater.Enabled) return count;
-            float keep = decimater.KeepRatio;
-            if (keep >= 1f) return count;
-            if (keep <= 0f) return 0;
-
-            uint state = _decimateRngState;
-            if (state == 0u) state = (uint)System.Environment.TickCount | 1u;
-
-            const float Inv = 1f / 16777216f; // 1 / 2^24
-            unsafe
-            {
-                var ptr = (ObColorPoint*)NativeArrayUnsafeUtility.GetUnsafePtr(buffer);
-                int w = 0;
-                for (int r = 0; r < count; r++)
-                {
-                    state ^= state << 13;
-                    state ^= state >> 17;
-                    state ^= state << 5;
-                    float u = (state & 0x00FFFFFFu) * Inv;
-                    if (u < keep)
-                    {
-                        if (w != r) ptr[w] = ptr[r];
-                        w++;
-                    }
-                }
-                _decimateRngState = state;
-                return w;
-            }
-        }
-
         // --- Capture thread ---
 
         private void StartCaptureThread()
@@ -606,12 +738,58 @@ namespace PointCloud
                     slot.PointCount = pointCount;
                     slot.TimestampUs = frameTimestampUs;
 
+                    // Raw pre-D2C depth + color — pulled off the original frameset (the align
+                    // filter produces a new frameset, it doesn't mutate this one).
+                    CopyRawStream(frameset.GetDepthFrame, slot.DepthBytes,
+                                  out slot.DepthByteCount, out slot.DepthWidth, out slot.DepthHeight);
+                    CopyRawStream(frameset.GetColorFrame, slot.ColorBytes,
+                                  out slot.ColorByteCount, out slot.ColorWidth, out slot.ColorHeight);
+
                     if (_slots.Publish(slot)) FramesDropped++;
+                    Interlocked.Increment(ref _capturedCount);
                 }
             }
             catch (Exception e)
             {
                 Interlocked.Exchange(ref _captureError, e);
+            }
+        }
+
+        private void CopyRawStream(
+            Func<OrbbecFrame> getFrame,
+            byte[] dest,
+            out int byteCount,
+            out int width,
+            out int height)
+        {
+            byteCount = 0;
+            width = 0;
+            height = 0;
+            if (dest == null || dest.Length == 0) return;
+
+            OrbbecFrame frame = null;
+            try
+            {
+                frame = getFrame();
+                if (frame == null) return;
+
+                int size = (int)frame.DataSize;
+                if (size <= 0 || size > dest.Length) return;
+
+                Marshal.Copy(frame.DataPointer, dest, 0, size);
+                byteCount = size;
+                width = (int)frame.VideoWidth;
+                height = (int)frame.VideoHeight;
+            }
+            catch (Exception)
+            {
+                byteCount = 0;
+                width = 0;
+                height = 0;
+            }
+            finally
+            {
+                frame?.Dispose();
             }
         }
 
@@ -673,6 +851,17 @@ namespace PointCloud
             public NativeArray<ObColorPoint> Buffer;
             public int PointCount;
             public ulong TimestampUs;
+
+            // Raw pre-D2C frames captured alongside the point cloud. Byte arrays are
+            // oversized (allocated once for the configured resolution) and reused.
+            public byte[] DepthBytes;
+            public int DepthByteCount;
+            public int DepthWidth;
+            public int DepthHeight;
+            public byte[] ColorBytes;
+            public int ColorByteCount;
+            public int ColorWidth;
+            public int ColorHeight;
         }
 
         private readonly object _lock = new object();
@@ -680,7 +869,7 @@ namespace PointCloud
         private int _freeCount;
         private Slot _ready;
 
-        public SlotPool(int slotCount, int capacity)
+        public SlotPool(int slotCount, int capacity, int depthRawByteCapacity, int colorRawByteCapacity)
         {
             if (slotCount < 2) throw new ArgumentOutOfRangeException(nameof(slotCount));
             _free = new Slot[slotCount];
@@ -690,6 +879,8 @@ namespace PointCloud
                 {
                     Buffer = new NativeArray<ObColorPoint>(capacity, Allocator.Persistent,
                         NativeArrayOptions.UninitializedMemory),
+                    DepthBytes = depthRawByteCapacity > 0 ? new byte[depthRawByteCapacity] : Array.Empty<byte>(),
+                    ColorBytes = colorRawByteCapacity > 0 ? new byte[colorRawByteCapacity] : Array.Empty<byte>(),
                 };
             }
             _freeCount = slotCount;
