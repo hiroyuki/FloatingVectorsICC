@@ -36,12 +36,26 @@ namespace PointCloud
         public bool enableFrameSync = true;
 
         [Header("Multi-device sync")]
-        [Tooltip("Hardware-level sync role for this device. Normally set by PointCloudCameraManager " +
-                 "(index 0 = Primary, rest = SecondarySynced). Standalone disables hardware sync on this device.")]
-        public ObMultiDeviceSyncMode syncMode = ObMultiDeviceSyncMode.Standalone;
-        [Tooltip("When enabled, calls ob_device_timer_sync_with_host before starting the pipeline so " +
-                 "this device's frame timestamps become comparable across devices on the same host.")]
+        [Tooltip("Hardware-level sync role for this device. Default HardwareTriggering matches the " +
+                 "Sync Hub Pro topology where the hub fans out trigger pulses to every camera's " +
+                 "VSYNC_IN. Use Primary/SecondarySynced only for camera-to-camera daisy chain " +
+                 "(no hub). Standalone disables hardware sync on this device.")]
+        public ObMultiDeviceSyncMode syncMode = ObMultiDeviceSyncMode.HardwareTriggering;
+        [Tooltip("Per-trigger image-capture delay in microseconds. Stagger across devices to reduce " +
+                 "iToF NIR pulse interference. The camera manager fills this with 160µs * deviceIndex.")]
+        public int trigger2ImageDelayUs = 0;
+        [Tooltip("Calls ob_device_enable_global_timestamp(true) and uses depth.GlobalTimestampUs " +
+                 "as the recording timestamp (host-clock domain in microseconds). Falls back to " +
+                 "SystemTimestampUs (host wall clock) when the device doesn't support it.")]
+        public bool enableGlobalTimestamp = true;
+        [Tooltip("Calls ob_device_timer_sync_with_host before starting the pipeline so this device's " +
+                 "frame timestamps share a host-time reference.")]
         public bool timerSyncWithHost = true;
+        [Tooltip("If > 0, re-runs ob_device_timer_sync_with_host every N seconds during capture " +
+                 "to limit drift. The Orbbec docs recommend 60 minutes; we default to 60 seconds " +
+                 "matching the official multi-device sample's enableDeviceClockSync(60000).")]
+        [Min(0)]
+        public float timerSyncIntervalSec = 60f;
 
         [Header("Depth work mode")]
         [Tooltip("Name of the depth work mode to switch to before starting the pipeline. " +
@@ -108,6 +122,14 @@ namespace PointCloud
         public int LastPointCount { get; private set; }
         public ulong LastTimestampUs { get; private set; }
         public ulong FramesDropped { get; private set; }
+        /// <summary>
+        /// True when the device confirmed global-timestamp support and EnableGlobalTimestamp(true)
+        /// succeeded; capture loop reads frame.GlobalTimestampUs in that case.
+        /// </summary>
+        public bool GlobalTimestampActive { get; private set; }
+
+        // Periodic timer sync.
+        private Coroutine _timerSyncCoro;
 
         private void Awake()
         {
@@ -129,6 +151,8 @@ namespace PointCloud
                 BuildMesh();
                 ApplyAxisConvention();
                 StartCaptureThread();
+                if (timerSyncWithHost && timerSyncIntervalSec > 0f)
+                    _timerSyncCoro = StartCoroutine(PeriodicTimerSync());
             }
             catch (Exception e)
             {
@@ -204,6 +228,34 @@ namespace PointCloud
                     Debug.LogWarning(
                         $"[{nameof(PointCloudRenderer)}] TimerSyncWithHost failed on {deviceSerial}: {e.Message}",
                         this);
+                }
+            }
+
+            // Global timestamp must be enabled before stream start so the first frame already
+            // carries a host-domain GlobalTimestampUs value.
+            GlobalTimestampActive = false;
+            if (enableGlobalTimestamp)
+            {
+                try
+                {
+                    if (_device.IsGlobalTimestampSupported())
+                    {
+                        _device.EnableGlobalTimestamp(true);
+                        GlobalTimestampActive = true;
+                    }
+                    else
+                    {
+                        Debug.LogWarning(
+                            $"[{nameof(PointCloudRenderer)}] {deviceSerial}: device reports global " +
+                            "timestamp NOT supported; falling back to frame.SystemTimestampUs " +
+                            "(host wall clock at frame arrival).", this);
+                    }
+                }
+                catch (Exception e)
+                {
+                    Debug.LogWarning(
+                        $"[{nameof(PointCloudRenderer)}] EnableGlobalTimestamp failed on {deviceSerial}: " +
+                        $"{e.Message}. Falling back to SystemTimestampUs.", this);
                 }
             }
 
@@ -347,45 +399,35 @@ namespace PointCloud
 
         private void ApplySyncConfig()
         {
-            ushort supported;
-            try { supported = _device.GetSupportedSyncModeBitmap(); }
-            catch (Exception e)
+            ushort supported = _device.GetSupportedSyncModeBitmap();
+            if ((supported & (ushort)syncMode) == 0)
             {
-                Debug.LogWarning(
-                    $"[{nameof(PointCloudRenderer)}] GetSupportedSyncModeBitmap failed on {deviceSerial}: {e.Message}. " +
-                    "Skipping sync config.", this);
-                return;
+                // Silent fallback hides synchronisation failures (you'll think the cameras are
+                // synced but every device is actually free-running). Throw so the caller has to
+                // pick a supported mode explicitly via the Inspector.
+                throw new InvalidOperationException(
+                    $"Device {deviceSerial} does not support sync mode {syncMode} " +
+                    $"(supported bitmap = 0x{supported:X4}). " +
+                    "Choose a supported mode in the PointCloudCameraManager / PointCloudRenderer Inspector.");
             }
 
-            var desired = syncMode;
-            if ((supported & (ushort)desired) == 0)
-            {
-                var fallback = ObMultiDeviceSyncMode.Standalone;
-                if ((supported & (ushort)fallback) == 0) fallback = ObMultiDeviceSyncMode.FreeRun;
-                Debug.LogWarning(
-                    $"[{nameof(PointCloudRenderer)}] device {deviceSerial} does not support sync mode {desired} " +
-                    $"(bitmap=0x{supported:X4}); falling back to {fallback}.",
-                    this);
-                desired = fallback;
-            }
+            // HARDWARE_TRIGGERING: Sync Hub Pro fans trigger pulses out to every camera's VSYNC_IN
+            // and there's no daisy-chained trigger to forward — leave triggerOutEnable=false.
+            // PRIMARY/SECONDARY_SYNCED need triggerOutEnable=true to forward the pulse to the next
+            // camera in a chain.
+            bool triggerOut = syncMode != ObMultiDeviceSyncMode.HardwareTriggering;
 
             var config = new ObMultiDeviceSyncConfig
             {
-                SyncMode             = desired,
+                SyncMode             = syncMode,
                 DepthDelayUs         = 0,
                 ColorDelayUs         = 0,
-                Trigger2ImageDelayUs = 0,
-                TriggerOutEnable     = true,
+                Trigger2ImageDelayUs = trigger2ImageDelayUs,
+                TriggerOutEnable     = triggerOut,
                 TriggerOutDelayUs    = 0,
                 FramesPerTrigger     = 1,
             };
-            try { _device.SetSyncConfig(config); }
-            catch (Exception e)
-            {
-                Debug.LogWarning(
-                    $"[{nameof(PointCloudRenderer)}] SetSyncConfig({desired}) failed on {deviceSerial}: {e.Message}",
-                    this);
-            }
+            _device.SetSyncConfig(config);
         }
 
         // --- Bounding box filter ---
@@ -491,6 +533,20 @@ namespace PointCloud
                     using var frameset = _pipeline.WaitForFrameset(100);
                     if (frameset == null) continue;
 
+                    // Pull the recording timestamp from the raw depth frame, not from the
+                    // PointCloudFilter output. PointCloudFilter is a synthetic frame whose
+                    // timestamp semantics aren't documented; depth is the real sensor frame.
+                    // Prefer the global (host-domain) timestamp; fall back to the system
+                    // timestamp (host wall clock at frame arrival) if global isn't active.
+                    ulong frameTimestampUs;
+                    using (var depthFrame = frameset.GetDepthFrame())
+                    {
+                        if (depthFrame == null) continue;
+                        frameTimestampUs = GlobalTimestampActive
+                            ? depthFrame.GlobalTimestampUs
+                            : depthFrame.SystemTimestampUs;
+                    }
+
                     using var aligned = _alignFilter.Process(frameset);
                     if (aligned == null) continue;
 
@@ -514,7 +570,7 @@ namespace PointCloud
                             (long)pointCount * UnsafeUtility.SizeOf<ObColorPoint>());
                     }
                     slot.PointCount = pointCount;
-                    slot.TimestampUs = points.TimestampUs;
+                    slot.TimestampUs = frameTimestampUs;
 
                     if (_slots.Publish(slot)) FramesDropped++;
                 }
@@ -527,6 +583,11 @@ namespace PointCloud
 
         private void ShutdownCapture()
         {
+            if (_timerSyncCoro != null)
+            {
+                StopCoroutine(_timerSyncCoro);
+                _timerSyncCoro = null;
+            }
             _cts?.Cancel();
             if (_captureThread != null)
             {
@@ -542,6 +603,25 @@ namespace PointCloud
             _pipeline?.Dispose(); _pipeline = null;
             _config?.Dispose(); _config = null;
             _device?.Dispose(); _device = null;
+        }
+
+        private System.Collections.IEnumerator PeriodicTimerSync()
+        {
+            // Note: TimerSyncWithHost can cause a one-frame timestamp jump per the SDK doc, but
+            // long-running captures drift several ms across devices without periodic re-sync.
+            var wait = new WaitForSecondsRealtime(timerSyncIntervalSec);
+            while (true)
+            {
+                yield return wait;
+                if (_device == null) yield break;
+                try { _device.TimerSyncWithHost(); }
+                catch (Exception e)
+                {
+                    Debug.LogWarning(
+                        $"[{nameof(PointCloudRenderer)}] periodic TimerSyncWithHost failed on " +
+                        $"{deviceSerial}: {e.Message}", this);
+                }
+            }
         }
 
         private static string Truncate(string s, int n) =>

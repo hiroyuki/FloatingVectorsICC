@@ -63,6 +63,37 @@ namespace Orbbec
             }
         }
 
+        /// <summary>
+        /// Host wall-clock time at which the SDK received the frame (microseconds, Unix-style).
+        /// Always available regardless of <c>EnableGlobalTimestamp</c>.
+        /// </summary>
+        public ulong SystemTimestampUs
+        {
+            get
+            {
+                ThrowIfDisposed();
+                var v = OrbbecNative.ob_frame_get_system_timestamp_us(Handle, out var err);
+                OrbbecException.ThrowIfNotEmpty(err);
+                return v;
+            }
+        }
+
+        /// <summary>
+        /// Drift-corrected device timestamp converted into the host clock domain. Returns 0 when
+        /// global timestamp is disabled or unsupported — call <c>OrbbecDevice.IsGlobalTimestampSupported</c>
+        /// and <c>EnableGlobalTimestamp(true)</c> at startup before relying on this.
+        /// </summary>
+        public ulong GlobalTimestampUs
+        {
+            get
+            {
+                ThrowIfDisposed();
+                var v = OrbbecNative.ob_frame_get_global_timestamp_us(Handle, out var err);
+                OrbbecException.ThrowIfNotEmpty(err);
+                return v;
+            }
+        }
+
         /// <summary>Raw native data pointer. Valid until this frame is disposed.</summary>
         public IntPtr DataPointer
         {

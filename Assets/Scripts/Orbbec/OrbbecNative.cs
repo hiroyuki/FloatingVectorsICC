@@ -309,6 +309,18 @@ namespace Orbbec
         [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void ob_device_timer_sync_with_host(IntPtr device, out IntPtr error);
 
+        // === Device.h (global timestamp) ===
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        [return: MarshalAs(UnmanagedType.I1)]
+        internal static extern bool ob_device_is_global_timestamp_supported(IntPtr device, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void ob_device_enable_global_timestamp(
+            IntPtr device,
+            [MarshalAs(UnmanagedType.I1)] bool enable,
+            out IntPtr error);
+
         // === Advanced.h (depth work mode) ===
 
         [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
@@ -428,6 +440,12 @@ namespace Orbbec
 
         [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
         internal static extern ulong ob_frame_get_timestamp_us(IntPtr frame, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern ulong ob_frame_get_system_timestamp_us(IntPtr frame, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern ulong ob_frame_get_global_timestamp_us(IntPtr frame, out IntPtr error);
 
         [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
         internal static extern float ob_points_frame_get_coordinate_value_scale(IntPtr frame, out IntPtr error);

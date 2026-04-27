@@ -34,12 +34,31 @@ namespace PointCloud
         public PointCloudCumulative defaultCumulative;
 
         [Header("Multi-device sync")]
-        [Tooltip("Enable hardware multi-device sync via Sync Hub Pro. Index 0 is configured as " +
-                 "PRIMARY, the rest as SECONDARY_SYNCED. When off, every device runs standalone.")]
-        public bool enableHardwareSync = true;
+        [Tooltip("Sync mode applied to every spawned renderer. Default HardwareTriggering matches " +
+                 "the Sync Hub Pro topology where the hub fans trigger pulses to every camera's " +
+                 "VSYNC_IN. Use Primary/SecondarySynced only for a hub-less daisy chain (index 0 " +
+                 "becomes PRIMARY, rest SECONDARY_SYNCED).")]
+        public SyncTopology syncTopology = SyncTopology.SyncHubPro;
+        [Tooltip("Stagger trigger2ImageDelayUs across devices to reduce iToF NIR pulse interference. " +
+                 "Each device gets index * step microseconds. 0 disables the stagger.")]
+        [Min(0)]
+        public int trigger2ImageDelayStepUs = 160;
         [Tooltip("Call ob_device_timer_sync_with_host on each device at startup so their frame " +
                  "timestamps share a host-time reference.")]
         public bool enableTimerSyncWithHost = true;
+        [Tooltip("Call ob_device_enable_global_timestamp(true) so frame.GlobalTimestampUs becomes " +
+                 "host-clock-aligned. The recorder uses this as the recording timestamp.")]
+        public bool enableGlobalTimestamp = true;
+
+        public enum SyncTopology
+        {
+            /// <summary>Sync Hub Pro: hub fans trigger pulses out → every device set to HardwareTriggering.</summary>
+            SyncHubPro = 0,
+            /// <summary>Camera-to-camera daisy chain: index 0 = PRIMARY, rest = SECONDARY_SYNCED.</summary>
+            DaisyChain = 1,
+            /// <summary>No hardware sync; each device runs Standalone (use only for single-camera or testing).</summary>
+            Standalone = 2,
+        }
 
         [Header("Depth work mode")]
         [Tooltip("Depth work mode name applied to every spawned renderer before its pipeline starts. " +
@@ -101,7 +120,9 @@ namespace PointCloud
             pcr.decimater = defaultDecimater;
             pcr.cumulative = defaultCumulative;
             pcr.syncMode = ResolveSyncMode(index);
+            pcr.trigger2ImageDelayUs = trigger2ImageDelayStepUs * index;
             pcr.timerSyncWithHost = enableTimerSyncWithHost;
+            pcr.enableGlobalTimestamp = enableGlobalTimestamp;
             pcr.depthWorkMode = depthWorkMode;
 
             return pcr;
@@ -109,9 +130,15 @@ namespace PointCloud
 
         private ObMultiDeviceSyncMode ResolveSyncMode(int index)
         {
-            if (!enableHardwareSync) return ObMultiDeviceSyncMode.Standalone;
-            // Sync Hub Pro topology: first device is the clock source, rest follow.
-            return index == 0 ? ObMultiDeviceSyncMode.Primary : ObMultiDeviceSyncMode.SecondarySynced;
+            switch (syncTopology)
+            {
+                case SyncTopology.SyncHubPro:
+                    return ObMultiDeviceSyncMode.HardwareTriggering;
+                case SyncTopology.DaisyChain:
+                    return index == 0 ? ObMultiDeviceSyncMode.Primary : ObMultiDeviceSyncMode.SecondarySynced;
+                default:
+                    return ObMultiDeviceSyncMode.Standalone;
+            }
         }
     }
 }

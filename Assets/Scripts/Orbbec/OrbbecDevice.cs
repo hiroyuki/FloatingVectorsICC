@@ -112,6 +112,31 @@ namespace Orbbec
             OrbbecException.ThrowIfNotEmpty(err);
         }
 
+        /// <summary>
+        /// True when the device exposes <see cref="OrbbecFrame.GlobalTimestampUs"/> values
+        /// (drift-corrected device→host time). Femto Bolt firmware versions vary; check before
+        /// relying on the global timestamp instead of the system timestamp.
+        /// </summary>
+        public bool IsGlobalTimestampSupported()
+        {
+            ThrowIfDisposed();
+            bool supported = OrbbecNative.ob_device_is_global_timestamp_supported(Handle, out var err);
+            OrbbecException.ThrowIfNotEmpty(err);
+            return supported;
+        }
+
+        /// <summary>
+        /// Enable or disable the global-timestamp service. Disabled by default in the SDK; call
+        /// once after opening the device and before starting the pipeline. With it enabled,
+        /// frame.GlobalTimestampUs returns a host-clock-aligned value comparable across devices.
+        /// </summary>
+        public void EnableGlobalTimestamp(bool enable)
+        {
+            ThrowIfDisposed();
+            OrbbecNative.ob_device_enable_global_timestamp(Handle, enable, out var err);
+            OrbbecException.ThrowIfNotEmpty(err);
+        }
+
         // --- Depth work mode (Advanced.h) ---
 
         /// <summary>Name of the currently active depth work mode.</summary>
