@@ -1,10 +1,17 @@
-// Rec / Play / Save / Read component. Records point clouds emitted by one or more
-// PointCloudRenderer(s), stores them in memory, saves/loads them as ScannedReality-
-// Studio-compatible RCSV files (one per device under <root>/dataset/<host>/.../pointcloud_main),
-// and plays them back onto child meshes.
+// Rec / Play / Save / Read for raw Femto Bolt data. Records the raw Y16 depth + RGB8
+// color frames emitted by one or more PointCloudRenderers and stores them in memory.
+// On Save, each device's streams are written to the Scanned-Reality-style layout
+//   <root>/dataset/<host>/FemtoBolt_<serial>/{depth_main,color_main}
+// along with configuration.yaml / dataset.yaml / sensor_node_config.yaml,
+// <host>/hostinfo.yaml and calibration/extrinsics.yaml (intrinsics + D2C extrinsic
+// per device; global_tr_colorCamera defaults to identity until Phase E adds ChArUco
+// calibration).
 //
-// The four button actions are exposed as public methods so they can be triggered from
-// PointCloudRecorderEditor (Inspector) or from runtime UI.
+// On Play, points are reconstructed per-frame from raw depth + color using the stored
+// intrinsics and depth-to-color extrinsic: each depth pixel is unprojected into the
+// depth camera's frame, transformed into the color camera's frame, and the color
+// sampled by reprojecting onto the color image. Output is emitted in color-camera
+// space (meters), which aligns with how global_tr_colorCamera is defined.
 
 using System;
 using System.Collections.Generic;
@@ -35,6 +42,9 @@ namespace PointCloud
                  "Leave empty to use '<persistentDataPath>/Recordings/recording'.")]
         public string folderPath = "";
 
+        [Tooltip("Dataset name written into dataset.yaml. Defaults to the recording folder name.")]
+        public string datasetName = "";
+
         [Header("Playback")]
         public bool loop = true;
 
@@ -49,7 +59,7 @@ namespace PointCloud
             get
             {
                 int n = 0;
-                foreach (var kv in _tracks) n += kv.Value.Frames.Count;
+                foreach (var kv in _tracks) n += kv.Value.DepthFrames.Count;
                 return n;
             }
         }
@@ -63,8 +73,10 @@ namespace PointCloud
                 foreach (var kv in _tracks)
                 {
                     var track = kv.Value;
-                    if (track.Frames.Count < 2) continue;
-                    ulong span = track.Frames[track.Frames.Count - 1].TimestampNs - track.Frames[0].TimestampNs;
+                    if (track.DepthFrames.Count < 2) continue;
+                    ulong first = track.DepthFrames[0].TimestampNs;
+                    ulong last = track.DepthFrames[track.DepthFrames.Count - 1].TimestampNs;
+                    ulong span = last - first;
                     if (span > maxSpan) maxSpan = span;
                 }
                 return maxSpan / 1_000_000_000f;
@@ -79,19 +91,30 @@ namespace PointCloud
         private sealed class DeviceTrack
         {
             public string Serial;
-            public readonly List<PointCloudRecording.Frame> Frames = new List<PointCloudRecording.Frame>();
+
+            // Raw sensor data.
+            public readonly List<PointCloudRecording.Frame> DepthFrames = new List<PointCloudRecording.Frame>();
+            public readonly List<PointCloudRecording.Frame> ColorFrames = new List<PointCloudRecording.Frame>();
+            public int DepthWidth, DepthHeight;
+            public int ColorWidth, ColorHeight;
+
+            // Calibration captured at record time (or loaded from YAML on Read).
+            public ObCameraParam? CameraParam;
+
+            // Playback plumbing.
             public GameObject PlaybackObject;
             public MeshFilter PlaybackFilter;
             public MeshRenderer PlaybackRenderer;
             public Mesh PlaybackMesh;
             public int PlaybackMeshCapacity;
             public int PlaybackCursor;
+            public NativeArray<ObColorPoint> ReconstructBuffer; // scratch for Reconstruct (sized once)
         }
 
         private readonly Dictionary<string, DeviceTrack> _tracks = new Dictionary<string, DeviceTrack>();
         private readonly List<PointCloudRenderer> _subscribed = new List<PointCloudRenderer>();
-        private readonly Dictionary<PointCloudRenderer, Action<PointCloudRenderer, NativeArray<ObColorPoint>, int, ulong>>
-            _subscribedHandlers = new Dictionary<PointCloudRenderer, Action<PointCloudRenderer, NativeArray<ObColorPoint>, int, ulong>>();
+        private readonly Dictionary<PointCloudRenderer, Action<PointCloudRenderer, RawFrameData>>
+            _subscribedHandlers = new Dictionary<PointCloudRenderer, Action<PointCloudRenderer, RawFrameData>>();
         private double _playbackWallStart;
         private ulong _playbackTrackStartNs;
 
@@ -123,16 +146,76 @@ namespace PointCloud
             {
                 string root = ResolveRoot();
                 string host = SafeMachineName();
-                int totalFrames = 0;
+                var serials = new List<string>();
+                var calibrations = new List<PointCloudRecording.DeviceCalibration>();
+                int totalDepthFrames = 0;
+                int totalColorFrames = 0;
+
+                // Compute centroid of camera positions so extrinsics.yaml puts world origin at
+                // the centroid for multi-device setups (identity for a single device).
+                var centroid = Vector3.zero;
+                int withParam = 0;
+                foreach (var kv in _tracks)
+                {
+                    if (kv.Value.CameraParam.HasValue)
+                    {
+                        // For single-host single-rig setups we don't have a marker yet, so each
+                        // camera's own color-camera frame is its own origin; centroid across
+                        // cameras stays at zero. Kept as a scaffold for Phase E.
+                        withParam++;
+                    }
+                }
+                _ = centroid; _ = withParam;
+
                 foreach (var kv in _tracks)
                 {
                     var track = kv.Value;
-                    if (track.Frames.Count == 0) continue;
-                    string filePath = PointCloudRecording.DeviceFilePath(root, host, track.Serial);
-                    PointCloudRecording.WriteDeviceFile(filePath, track.Serial, track.Frames);
-                    totalFrames += track.Frames.Count;
+                    serials.Add(track.Serial);
+
+                    if (track.DepthFrames.Count > 0)
+                    {
+                        string depthPath = PointCloudRecording.SensorFilePath(
+                            root, host, track.Serial, PointCloudRecording.DepthSensorName);
+                        PointCloudRecording.WriteRcsv(
+                            depthPath,
+                            PointCloudRecording.BuildDepthHeaderYaml(track.Serial, track.DepthWidth, track.DepthHeight),
+                            track.DepthFrames);
+                        totalDepthFrames += track.DepthFrames.Count;
+                    }
+                    if (track.ColorFrames.Count > 0)
+                    {
+                        string colorPath = PointCloudRecording.SensorFilePath(
+                            root, host, track.Serial, PointCloudRecording.ColorSensorName);
+                        PointCloudRecording.WriteRcsv(
+                            colorPath,
+                            PointCloudRecording.BuildColorHeaderYaml(track.Serial, track.ColorWidth, track.ColorHeight),
+                            track.ColorFrames);
+                        totalColorFrames += track.ColorFrames.Count;
+                    }
+
+                    if (track.CameraParam.HasValue)
+                    {
+                        var p = track.CameraParam.Value;
+                        calibrations.Add(new PointCloudRecording.DeviceCalibration
+                        {
+                            Serial           = track.Serial,
+                            ColorIntrinsic   = p.RgbIntrinsic,
+                            DepthIntrinsic   = p.DepthIntrinsic,
+                            ColorDistortion  = p.RgbDistortion,
+                            DepthDistortion  = p.DepthDistortion,
+                            DepthToColor     = p.Transform,
+                            GlobalTrColorCamera = null, // identity; Phase E fills this in
+                        });
+                    }
                 }
-                SetStatus($"Saved {totalFrames} frame(s) across {_tracks.Count} device(s) to {root}");
+
+                string ds = string.IsNullOrWhiteSpace(datasetName) ? Path.GetFileName(root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)) : datasetName;
+                PointCloudRecording.WriteDatasetMetadata(root, host, ds, serials);
+                if (calibrations.Count > 0)
+                    PointCloudRecording.WriteExtrinsicsYaml(root, calibrations);
+
+                SetStatus(
+                    $"Saved {totalDepthFrames} depth / {totalColorFrames} color frame(s) across {_tracks.Count} device(s) to {root}");
             }
             catch (Exception e)
             {
@@ -152,28 +235,46 @@ namespace PointCloud
             try
             {
                 string root = ResolveRoot();
-                if (!Directory.Exists(Path.Combine(root, "dataset")))
+                if (!Directory.Exists(PointCloudRecording.DatasetRoot(root)))
                 {
                     SetStatus($"Read: no dataset under {root}", warn: true);
                     return;
                 }
 
                 ClearTracks();
-                int totalFrames = 0;
-                foreach (var (serial, filePath) in PointCloudRecording.EnumerateDevices(root))
+                int totalDepth = 0, totalColor = 0;
+                foreach (var (serial, deviceDir) in PointCloudRecording.EnumerateDevices(root))
                 {
-                    var frames = PointCloudRecording.ReadDeviceFile(filePath);
-                    if (frames.Count == 0) continue;
+                    string depthPath = Path.Combine(deviceDir, PointCloudRecording.DepthSensorName);
+                    string colorPath = Path.Combine(deviceDir, PointCloudRecording.ColorSensorName);
+                    bool hasDepth = File.Exists(depthPath);
+                    bool hasColor = File.Exists(colorPath);
+                    if (!hasDepth && !hasColor) continue;
+
                     var track = GetOrCreateTrack(serial);
-                    track.Frames.AddRange(frames);
-                    totalFrames += frames.Count;
+                    if (hasDepth)
+                    {
+                        track.DepthFrames.AddRange(PointCloudRecording.ReadRcsv(depthPath));
+                        totalDepth += track.DepthFrames.Count;
+                    }
+                    if (hasColor)
+                    {
+                        track.ColorFrames.AddRange(PointCloudRecording.ReadRcsv(colorPath));
+                        totalColor += track.ColorFrames.Count;
+                    }
+
+                    // Dimensions are saved in the RCSV YAML header but we don't parse that back —
+                    // pull them from the first frame size + the configured renderer, if available.
+                    // As a fallback, infer from the live renderer's current settings.
+                    FillDimensionsFromRenderer(track);
                 }
-                if (totalFrames == 0)
+
+                if (totalDepth == 0 && totalColor == 0)
                 {
-                    SetStatus($"Read: no frames found under {root}", warn: true);
+                    SetStatus($"Read: no raw sensor frames found under {root}", warn: true);
                     return;
                 }
-                SetStatus($"Loaded {totalFrames} frame(s) across {_tracks.Count} device(s) from {root}");
+                SetStatus($"Loaded {totalDepth} depth / {totalColor} color frame(s) across {_tracks.Count} device(s) from {root}");
             }
             catch (Exception e)
             {
@@ -199,10 +300,14 @@ namespace PointCloud
             foreach (var r in renderers)
             {
                 if (r == null) continue;
-                Action<PointCloudRenderer, NativeArray<ObColorPoint>, int, ulong> h = HandleFrame;
-                r.OnFrameUploaded += h;
+                Action<PointCloudRenderer, RawFrameData> h = HandleRawFrame;
+                r.OnRawFramesReady += h;
                 _subscribed.Add(r);
                 _subscribedHandlers[r] = h;
+
+                // Snapshot calibration at start — CameraParam is populated once pipeline starts.
+                var track = GetOrCreateTrack(string.IsNullOrEmpty(r.deviceSerial) ? r.name : r.deviceSerial);
+                track.CameraParam = r.CameraParam;
             }
             CurrentState = State.Recording;
             SetStatus($"Recording ({_subscribed.Count} device(s))…");
@@ -215,32 +320,33 @@ namespace PointCloud
             SetStatus($"Recorded {RecordedFrameCount} frame(s) across {_tracks.Count} device(s).");
         }
 
-        private void HandleFrame(PointCloudRenderer src, NativeArray<ObColorPoint> buffer, int count, ulong timestampUs)
+        private void HandleRawFrame(PointCloudRenderer src, RawFrameData raw)
         {
             if (CurrentState != State.Recording) return;
-            if (count <= 0 || src == null) return;
+            if (src == null) return;
 
             string serial = string.IsNullOrEmpty(src.deviceSerial) ? src.name : src.deviceSerial;
             var track = GetOrCreateTrack(serial);
+            if (!track.CameraParam.HasValue) track.CameraParam = src.CameraParam;
 
-            int bytes = count * PointCloudRecording.VertexStride;
-            var buf = new byte[bytes];
-            unsafe
+            ulong timestampNs = raw.TimestampUs * 1000UL;
+
+            if (raw.DepthByteCount > 0)
             {
-                fixed (byte* dst = buf)
-                {
-                    UnsafeUtility.MemCpy(dst,
-                        NativeArrayUnsafeUtility.GetUnsafeReadOnlyPtr(buffer),
-                        bytes);
-                }
+                var depthBuf = new byte[raw.DepthByteCount];
+                Buffer.BlockCopy(raw.DepthBytes, 0, depthBuf, 0, raw.DepthByteCount);
+                track.DepthFrames.Add(new PointCloudRecording.Frame { TimestampNs = timestampNs, Bytes = depthBuf });
+                track.DepthWidth = raw.DepthWidth;
+                track.DepthHeight = raw.DepthHeight;
             }
-            track.Frames.Add(new PointCloudRecording.Frame
+            if (raw.ColorByteCount > 0)
             {
-                // Device-supplied timestamp in microseconds; the renderer calls
-                // TimerSyncWithHost at startup, so these become comparable across devices.
-                TimestampNs = timestampUs * 1000UL,
-                Bytes = buf,
-            });
+                var colorBuf = new byte[raw.ColorByteCount];
+                Buffer.BlockCopy(raw.ColorBytes, 0, colorBuf, 0, raw.ColorByteCount);
+                track.ColorFrames.Add(new PointCloudRecording.Frame { TimestampNs = timestampNs, Bytes = colorBuf });
+                track.ColorWidth = raw.ColorWidth;
+                track.ColorHeight = raw.ColorHeight;
+            }
         }
 
         // --- Playback ---
@@ -248,20 +354,27 @@ namespace PointCloud
         private void StartPlayback()
         {
             if (CurrentState == State.Recording) StopRecording();
-            if (_tracks.Count == 0 || RecordedFrameCount == 0)
+            if (_tracks.Count == 0)
             {
                 SetStatus("Play: nothing to play. Record or Read first.", warn: true);
                 return;
             }
 
             ulong firstTs = ulong.MaxValue;
+            bool anyFrames = false;
             foreach (var kv in _tracks)
             {
                 var track = kv.Value;
-                if (track.Frames.Count == 0) continue;
-                if (track.Frames[0].TimestampNs < firstTs) firstTs = track.Frames[0].TimestampNs;
-                track.PlaybackCursor = 0;
+                if (track.DepthFrames.Count == 0) continue;
+                anyFrames = true;
+                if (track.DepthFrames[0].TimestampNs < firstTs) firstTs = track.DepthFrames[0].TimestampNs;
+                track.PlaybackCursor = -1;
                 EnsurePlaybackObject(track);
+            }
+            if (!anyFrames)
+            {
+                SetStatus("Play: nothing to play (no depth frames).", warn: true);
+                return;
             }
             _playbackTrackStartNs = firstTs == ulong.MaxValue ? 0 : firstTs;
             _playbackWallStart = Time.timeAsDouble;
@@ -286,17 +399,26 @@ namespace PointCloud
             foreach (var kv in _tracks)
             {
                 var track = kv.Value;
-                if (track.Frames.Count == 0) continue;
+                if (track.DepthFrames.Count == 0) continue;
 
-                int cursor = track.PlaybackCursor;
-                while (cursor + 1 < track.Frames.Count && track.Frames[cursor + 1].TimestampNs <= playheadNs)
+                int cursor = Mathf.Max(track.PlaybackCursor, 0);
+                while (cursor + 1 < track.DepthFrames.Count && track.DepthFrames[cursor + 1].TimestampNs <= playheadNs)
                     cursor++;
 
-                if (cursor < track.Frames.Count - 1) anyRemaining = true;
-                if (cursor != track.PlaybackCursor || track.PlaybackMesh == null)
+                if (cursor < track.DepthFrames.Count - 1) anyRemaining = true;
+                if (cursor != track.PlaybackCursor)
                 {
                     track.PlaybackCursor = cursor;
-                    UploadFrameToMesh(track, track.Frames[cursor]);
+                    var depthFrame = track.DepthFrames[cursor];
+                    PointCloudRecording.Frame colorFrame = null;
+                    if (track.ColorFrames.Count > 0)
+                    {
+                        // Match the color frame with the closest timestamp (frames should be 1:1 with depth
+                        // when frame-sync is enabled, but tolerate slight drift).
+                        int colorIdx = Mathf.Min(cursor, track.ColorFrames.Count - 1);
+                        colorFrame = track.ColorFrames[colorIdx];
+                    }
+                    ReconstructAndUpload(track, depthFrame, colorFrame);
                 }
             }
 
@@ -305,7 +427,7 @@ namespace PointCloud
                 if (loop)
                 {
                     _playbackWallStart = Time.timeAsDouble;
-                    foreach (var kv in _tracks) kv.Value.PlaybackCursor = 0;
+                    foreach (var kv in _tracks) kv.Value.PlaybackCursor = -1;
                 }
                 else
                 {
@@ -316,15 +438,11 @@ namespace PointCloud
 
         private void EnsurePlaybackObject(DeviceTrack track)
         {
-            // Only gate on the GameObject existing: the mesh is lazily (re)created in
-            // UploadFrameToMesh based on point count, so a null mesh with an existing
-            // GO is a valid intermediate state.
             if (track.PlaybackObject != null) return;
 
             var go = new GameObject($"_Playback_{track.Serial}");
             go.transform.SetParent(transform, worldPositionStays: false);
-            // Source PointCloudRenderers flip localScale.y to map image Y-down to Unity Y-up;
-            // mirror that here so playback geometry lines up with live points.
+            // Mirror the live renderer's image-Y-down -> Unity-Y-up flip.
             go.transform.localScale = new Vector3(1f, -1f, 1f);
             var mf = go.AddComponent<MeshFilter>();
             var mr = go.AddComponent<MeshRenderer>();
@@ -356,17 +474,43 @@ namespace PointCloud
             track.PlaybackMeshCapacity = 0;
         }
 
-        private void UploadFrameToMesh(DeviceTrack track, PointCloudRecording.Frame frame)
+        private void ReconstructAndUpload(
+            DeviceTrack track,
+            PointCloudRecording.Frame depthFrame,
+            PointCloudRecording.Frame colorFrame)
         {
-            if (frame == null || frame.Bytes == null) return;
-            int count = frame.PointCount;
-            if (count <= 0) return;
-            EnsurePlaybackObject(track);
+            if (!track.CameraParam.HasValue)
+            {
+                // No intrinsics — nothing to reconstruct. Blank the mesh.
+                if (track.PlaybackMesh != null)
+                {
+                    track.PlaybackMesh.SetSubMesh(0, new SubMeshDescriptor(0, 0, MeshTopology.Points),
+                        MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
+                }
+                return;
+            }
+            int dw = track.DepthWidth, dh = track.DepthHeight;
+            if (dw <= 0 || dh <= 0) return;
 
-            if (track.PlaybackMesh == null || track.PlaybackMeshCapacity < count)
+            int capacity = dw * dh;
+            if (!track.ReconstructBuffer.IsCreated || track.ReconstructBuffer.Length < capacity)
+            {
+                if (track.ReconstructBuffer.IsCreated) track.ReconstructBuffer.Dispose();
+                track.ReconstructBuffer = new NativeArray<ObColorPoint>(
+                    capacity, Allocator.Persistent, NativeArrayOptions.UninitializedMemory);
+            }
+
+            int pointCount = PointReconstruction.Reconstruct(
+                depthFrame.Bytes, dw, dh,
+                colorFrame != null ? colorFrame.Bytes : null,
+                track.ColorWidth, track.ColorHeight,
+                track.CameraParam.Value,
+                track.ReconstructBuffer);
+
+            EnsurePlaybackObject(track);
+            if (track.PlaybackMesh == null || track.PlaybackMeshCapacity < capacity)
             {
                 if (track.PlaybackMesh != null) Destroy(track.PlaybackMesh);
-                int capacity = Mathf.Max(count, 1);
                 var mesh = new Mesh
                 {
                     name = $"PlaybackMesh_{track.Serial}",
@@ -393,25 +537,9 @@ namespace PointCloud
                 track.PlaybackFilter.sharedMesh = mesh;
             }
 
-            var tmp = new NativeArray<ObColorPoint>(count, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
-            try
-            {
-                unsafe
-                {
-                    fixed (byte* src = frame.Bytes)
-                    {
-                        UnsafeUtility.MemCpy(
-                            NativeArrayUnsafeUtility.GetUnsafePtr(tmp),
-                            src,
-                            (long)count * PointCloudRecording.VertexStride);
-                    }
-                }
-                track.PlaybackMesh.SetVertexBufferData(tmp, 0, 0, count,
-                    flags: MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
-            }
-            finally { tmp.Dispose(); }
-
-            track.PlaybackMesh.SetSubMesh(0, new SubMeshDescriptor(0, count, MeshTopology.Points),
+            track.PlaybackMesh.SetVertexBufferData(track.ReconstructBuffer, 0, 0, pointCount,
+                flags: MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
+            track.PlaybackMesh.SetSubMesh(0, new SubMeshDescriptor(0, pointCount, MeshTopology.Points),
                 MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
         }
 
@@ -435,7 +563,7 @@ namespace PointCloud
             {
                 var r = _subscribed[i];
                 if (r != null && _subscribedHandlers.TryGetValue(r, out var h))
-                    r.OnFrameUploaded -= h;
+                    r.OnRawFramesReady -= h;
             }
             _subscribed.Clear();
             _subscribedHandlers.Clear();
@@ -446,6 +574,7 @@ namespace PointCloud
             foreach (var kv in _tracks)
             {
                 var track = kv.Value;
+                if (track.ReconstructBuffer.IsCreated) track.ReconstructBuffer.Dispose();
                 if (track.PlaybackMesh != null)
                 {
                     if (Application.isPlaying) Destroy(track.PlaybackMesh);
@@ -468,6 +597,21 @@ namespace PointCloud
                 _tracks[serial] = track;
             }
             return track;
+        }
+
+        private void FillDimensionsFromRenderer(DeviceTrack track)
+        {
+            if (track.DepthWidth > 0 && track.ColorWidth > 0) return;
+            foreach (var r in CollectSourceRenderers())
+            {
+                if (r == null) continue;
+                string serial = string.IsNullOrEmpty(r.deviceSerial) ? r.name : r.deviceSerial;
+                if (serial != track.Serial) continue;
+                if (track.DepthWidth == 0)  { track.DepthWidth  = (int)r.depthWidth;  track.DepthHeight  = (int)r.depthHeight; }
+                if (track.ColorWidth == 0)  { track.ColorWidth  = (int)r.colorWidth;  track.ColorHeight  = (int)r.colorHeight; }
+                if (!track.CameraParam.HasValue && r.CameraParam.HasValue) track.CameraParam = r.CameraParam;
+                break;
+            }
         }
 
         private List<PointCloudRenderer> CollectSourceRenderers()
@@ -507,6 +651,96 @@ namespace PointCloud
             StatusMessage = msg;
             if (warn) Debug.LogWarning($"[{nameof(PointCloudRecorder)}] {msg}", this);
             else Debug.Log($"[{nameof(PointCloudRecorder)}] {msg}", this);
+        }
+    }
+
+    /// <summary>
+    /// CPU-side Phase D reconstruction: raw depth Y16 + raw color RGB + intrinsics/distortion
+    /// + depth-to-color extrinsic (all in millimeters for translation) -> ObColorPoint array in
+    /// color-camera space (meters), packed densely (invalid-depth pixels skipped).
+    /// </summary>
+    internal static class PointReconstruction
+    {
+        public static unsafe int Reconstruct(
+            byte[] depthY16, int depthW, int depthH,
+            byte[] colorRgb8, int colorW, int colorH,
+            ObCameraParam cam,
+            NativeArray<ObColorPoint> output)
+        {
+            if (depthY16 == null || depthW <= 0 || depthH <= 0) return 0;
+            int expected = depthW * depthH * 2;
+            if (depthY16.Length < expected) return 0;
+
+            float fxD = cam.DepthIntrinsic.Fx, fyD = cam.DepthIntrinsic.Fy;
+            float cxD = cam.DepthIntrinsic.Cx, cyD = cam.DepthIntrinsic.Cy;
+            float fxC = cam.RgbIntrinsic.Fx,   fyC = cam.RgbIntrinsic.Fy;
+            float cxC = cam.RgbIntrinsic.Cx,   cyC = cam.RgbIntrinsic.Cy;
+
+            // SDK transform: rotation (depth->color) + translation in millimeters.
+            float r0 = cam.Transform.Rot[0], r1 = cam.Transform.Rot[1], r2 = cam.Transform.Rot[2];
+            float r3 = cam.Transform.Rot[3], r4 = cam.Transform.Rot[4], r5 = cam.Transform.Rot[5];
+            float r6 = cam.Transform.Rot[6], r7 = cam.Transform.Rot[7], r8 = cam.Transform.Rot[8];
+            float tx = cam.Transform.Trans[0], ty = cam.Transform.Trans[1], tz = cam.Transform.Trans[2];
+
+            bool hasColor = colorRgb8 != null && colorW > 0 && colorH > 0
+                            && colorRgb8.Length >= colorW * colorH * 3;
+            int outCount = 0;
+            int max = output.Length;
+
+            // Use a stub non-null empty array in the else-branch so `fixed` doesn't receive
+            // a null candidate (some C# versions reject the mixed ternary).
+            byte[] colorSrc = hasColor ? colorRgb8 : Array.Empty<byte>();
+
+            fixed (byte* depthP = depthY16)
+            fixed (byte* colorP = colorSrc)
+            {
+                ushort* depthPtr = (ushort*)depthP;
+                for (int v = 0; v < depthH; v++)
+                {
+                    for (int u = 0; u < depthW; u++)
+                    {
+                        if (outCount >= max) return outCount;
+                        ushort zRaw = depthPtr[v * depthW + u];
+                        if (zRaw == 0) continue;
+
+                        float z = zRaw; // mm
+                        float xD = (u - cxD) * z / fxD;
+                        float yD = (v - cyD) * z / fyD;
+
+                        // Transform to color camera space.
+                        float xC = r0 * xD + r1 * yD + r2 * z + tx;
+                        float yC = r3 * xD + r4 * yD + r5 * z + ty;
+                        float zC = r6 * xD + r7 * yD + r8 * z + tz;
+
+                        // Default color (grey) when sampling fails.
+                        float cr = 0.5f, cg = 0.5f, cb = 0.5f;
+                        if (hasColor && zC > 0f)
+                        {
+                            float uC = fxC * xC / zC + cxC;
+                            float vC = fyC * yC / zC + cyC;
+                            int iu = (int)uC;
+                            int iv = (int)vC;
+                            if (iu >= 0 && iu < colorW && iv >= 0 && iv < colorH)
+                            {
+                                byte* px = colorP + (iv * colorW + iu) * 3;
+                                cr = px[0] * (1.0f / 255f);
+                                cg = px[1] * (1.0f / 255f);
+                                cb = px[2] * (1.0f / 255f);
+                            }
+                        }
+
+                        output[outCount] = new ObColorPoint
+                        {
+                            X = xC * 0.001f, // mm -> m, in color camera space
+                            Y = yC * 0.001f,
+                            Z = zC * 0.001f,
+                            R = cr, G = cg, B = cb,
+                        };
+                        outCount++;
+                    }
+                }
+            }
+            return outCount;
         }
     }
 }

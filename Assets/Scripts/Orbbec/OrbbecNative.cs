@@ -160,6 +160,57 @@ namespace Orbbec
         Custom        = 1,  // OB_CUSTOM_DEPTH_WORK_MODE
     }
 
+    /// <summary>ob_camera_distortion_model (ObTypes.h).</summary>
+    public enum ObCameraDistortionModel
+    {
+        None         = 0,
+        ModifiedBrownConrady = 1,
+        InverseBrownConrady  = 2,
+        BrownConrady         = 3,
+        KannalaBrandt4       = 4,
+    }
+
+    /// <summary>ob_camera_intrinsic (ObTypes.h): 4 floats + 2 int16 = 20 bytes.</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct ObCameraIntrinsic
+    {
+        public float Fx, Fy, Cx, Cy;
+        public short Width, Height;
+    }
+
+    /// <summary>ob_camera_distortion (ObTypes.h): 8 floats + enum model = 36 bytes.</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct ObCameraDistortion
+    {
+        public float K1, K2, K3, K4, K5, K6;
+        public float P1, P2;
+        public ObCameraDistortionModel Model;
+    }
+
+    /// <summary>ob_extrinsic / ob_d2c_transform (ObTypes.h): rot[9] + trans[3] = 48 bytes. trans is in millimeters.</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct ObExtrinsic
+    {
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 9)] public float[] Rot;    // row-major 3x3
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 3)] public float[] Trans;  // mm
+    }
+
+    /// <summary>
+    /// ob_camera_param (ObTypes.h): intrinsic pair + distortion pair + depth-to-color transform + mirrored flag.
+    /// Total = 20+20+36+36+48+1+pad(3) = 164 bytes.
+    /// The <c>Transform</c> field is the depth-to-color extrinsic in millimeters.
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct ObCameraParam
+    {
+        public ObCameraIntrinsic DepthIntrinsic;
+        public ObCameraIntrinsic RgbIntrinsic;
+        public ObCameraDistortion DepthDistortion;
+        public ObCameraDistortion RgbDistortion;
+        public ObExtrinsic Transform;
+        [MarshalAs(UnmanagedType.I1)] public bool IsMirrored;
+    }
+
     /// <summary>
     /// ob_depth_work_mode (ObTypes.h): uint8_t checksum[16] + char name[32] + enum tag.
     /// Natural alignment gives 16 + 32 + 4 = 52 bytes.
@@ -369,6 +420,14 @@ namespace Orbbec
 
         [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
         internal static extern void ob_pipeline_disable_frame_sync(IntPtr pipeline, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern ObCameraParam ob_pipeline_get_camera_param(IntPtr pipeline, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern ObCameraParam ob_pipeline_get_camera_param_with_profile(
+            IntPtr pipeline, uint colorWidth, uint colorHeight, uint depthWidth, uint depthHeight,
+            out IntPtr error);
 
         // === Pipeline.h (config) ===
 

@@ -47,11 +47,22 @@ namespace CameraControl
         public float minDistance = 0.1f;
         public float maxDistance = 100f;
 
+        [Header("Reset")]
+        [Tooltip("Max seconds between two left-clicks to count as a double-click and reset to the default pose.")]
+        public float doubleClickInterval = 0.3f;
+
         private Vector3 _pivotPoint;
         private Vector3 _panOffset;
         private float _yaw;
         private float _pitch;
         private bool _initialized;
+
+        // Default pose captured on first initialization; restored on double-click.
+        private float _defaultYaw;
+        private float _defaultPitch;
+        private float _defaultDistance;
+        private Vector3 _defaultPivotPoint;
+        private float _lastLeftClickTime = -1f;
 
         private void OnEnable()
         {
@@ -64,6 +75,20 @@ namespace CameraControl
             {
                 InitializeFromCurrentTransform();
                 _initialized = true;
+            }
+
+            if (Input.GetMouseButtonDown(0))
+            {
+                float now = Time.unscaledTime;
+                if (_lastLeftClickTime > 0f && now - _lastLeftClickTime <= doubleClickInterval)
+                {
+                    ResetToDefault();
+                    _lastLeftClickTime = -1f;
+                }
+                else
+                {
+                    _lastLeftClickTime = now;
+                }
             }
 
             if (boundingBox != null)
@@ -139,6 +164,22 @@ namespace CameraControl
             _pitch = NormalizeAngle(euler.x);
             _yaw = euler.y;
             _pitch = Mathf.Clamp(_pitch, minPitch, maxPitch);
+
+            _defaultYaw = _yaw;
+            _defaultPitch = _pitch;
+            _defaultDistance = distance;
+            _defaultPivotPoint = _pivotPoint;
+        }
+
+        private void ResetToDefault()
+        {
+            _yaw = _defaultYaw;
+            _pitch = _defaultPitch;
+            distance = _defaultDistance;
+            _panOffset = Vector3.zero;
+            _pivotPoint = _defaultPivotPoint;
+            if (boundingBox == null && pivot != null)
+                pivot.position = _defaultPivotPoint;
         }
 
         private static float NormalizeAngle(float a)

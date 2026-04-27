@@ -25,6 +25,18 @@ namespace Orbbec
             OrbbecException.ThrowIfNotEmpty(err);
         }
 
+        /// <summary>
+        /// Fetch current camera parameters: depth/color intrinsics + distortion + depth-to-color
+        /// extrinsic (in millimeters). If D2C is enabled the values are post-D2C.
+        /// </summary>
+        public ObCameraParam GetCameraParam()
+        {
+            ThrowIfDisposed();
+            var param = OrbbecNative.ob_pipeline_get_camera_param(Handle, out var err);
+            OrbbecException.ThrowIfNotEmpty(err);
+            return param;
+        }
+
         public void Start(OrbbecConfig config)
         {
             ThrowIfDisposed();
