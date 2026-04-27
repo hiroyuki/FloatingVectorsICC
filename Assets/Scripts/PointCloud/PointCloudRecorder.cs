@@ -86,6 +86,46 @@ namespace PointCloud
         public int DeviceCount => _tracks.Count;
         public string StatusMessage { get; private set; } = "";
 
+        /// <summary>Raised after Read() finishes loading raw recordings into memory. Subscribers
+        /// (e.g. BodyTrackingPlayback) can use it to kick off post-Read processing of the
+        /// freshly populated tracks. Not raised for Rec/Save.</summary>
+        public event Action OnTracksLoaded;
+
+        /// <summary>Read-only view of one recorded device's raw depth track + the calibration
+        /// captured at record (or load) time. Returned by <see cref="GetRecordedDepthTracks"/>.</summary>
+        public sealed class RecordedDepthTrack
+        {
+            public string Serial;
+            public int DepthWidth;
+            public int DepthHeight;
+            public int ColorWidth;
+            public int ColorHeight;
+            public ObCameraParam? CameraParam;
+            public IReadOnlyList<PointCloudRecording.Frame> DepthFrames;
+        }
+
+        /// <summary>Snapshot of all loaded depth tracks (post-Read or post-Rec). Frames list is
+        /// the recorder's live list; do not mutate from outside.</summary>
+        public IReadOnlyList<RecordedDepthTrack> GetRecordedDepthTracks()
+        {
+            var list = new List<RecordedDepthTrack>(_tracks.Count);
+            foreach (var kv in _tracks)
+            {
+                var t = kv.Value;
+                list.Add(new RecordedDepthTrack
+                {
+                    Serial = t.Serial,
+                    DepthWidth = t.DepthWidth,
+                    DepthHeight = t.DepthHeight,
+                    ColorWidth = t.ColorWidth,
+                    ColorHeight = t.ColorHeight,
+                    CameraParam = t.CameraParam,
+                    DepthFrames = t.DepthFrames,
+                });
+            }
+            return list;
+        }
+
         // --- Internals ---
 
         private sealed class DeviceTrack
@@ -275,6 +315,9 @@ namespace PointCloud
                     return;
                 }
                 SetStatus($"Loaded {totalDepth} depth / {totalColor} color frame(s) across {_tracks.Count} device(s) from {root}");
+
+                try { OnTracksLoaded?.Invoke(); }
+                catch (Exception subscriberEx) { Debug.LogException(subscriberEx, this); }
             }
             catch (Exception e)
             {
