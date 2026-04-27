@@ -36,11 +36,12 @@ namespace PointCloud
         public bool enableFrameSync = true;
 
         [Header("Multi-device sync")]
-        [Tooltip("Hardware-level sync role for this device. Default HardwareTriggering matches the " +
-                 "Sync Hub Pro topology where the hub fans out trigger pulses to every camera's " +
-                 "VSYNC_IN. Use Primary/SecondarySynced only for camera-to-camera daisy chain " +
-                 "(no hub). Standalone disables hardware sync on this device.")]
-        public ObMultiDeviceSyncMode syncMode = ObMultiDeviceSyncMode.HardwareTriggering;
+        [Tooltip("Hardware-level sync role for this device. Set by PointCloudCameraManager based " +
+                 "on its SyncTopology field (SyncHubPro -> Secondary, DaisyChain -> Primary or " +
+                 "Secondary by index). Femto Bolt firmware exposes Secondary, not SecondarySynced. " +
+                 "Run the 'Log Supported Sync Modes' context menu after the device is open to see " +
+                 "the actual bitmap reported by your unit.")]
+        public ObMultiDeviceSyncMode syncMode = ObMultiDeviceSyncMode.Secondary;
         [Tooltip("Per-trigger image-capture delay in microseconds. Stagger across devices to reduce " +
                  "iToF NIR pulse interference. The camera manager fills this with 160µs * deviceIndex.")]
         public int trigger2ImageDelayUs = 0;
@@ -374,6 +375,37 @@ namespace PointCloud
             }
         }
 
+        [ContextMenu("Log Supported Sync Modes")]
+        private void LogSupportedSyncModes()
+        {
+            if (_device == null)
+            {
+                Debug.LogWarning($"[{nameof(PointCloudRenderer)}] device not open yet.", this);
+                return;
+            }
+            try
+            {
+                ushort bitmap = _device.GetSupportedSyncModeBitmap();
+                var sb = new System.Text.StringBuilder();
+                foreach (ObMultiDeviceSyncMode mode in Enum.GetValues(typeof(ObMultiDeviceSyncMode)))
+                {
+                    if ((bitmap & (ushort)mode) != 0)
+                    {
+                        if (sb.Length > 0) sb.Append(", ");
+                        sb.Append(mode);
+                    }
+                }
+                Debug.Log(
+                    $"[{nameof(PointCloudRenderer)}] {deviceSerial} supported sync modes " +
+                    $"(bitmap=0x{bitmap:X4}): {sb}",
+                    this);
+            }
+            catch (Exception e)
+            {
+                Debug.LogException(e, this);
+            }
+        }
+
         [ContextMenu("Log Depth Work Modes")]
         private void LogDepthWorkModes()
         {
@@ -411,11 +443,13 @@ namespace PointCloud
                     "Choose a supported mode in the PointCloudCameraManager / PointCloudRenderer Inspector.");
             }
 
-            // HARDWARE_TRIGGERING: Sync Hub Pro fans trigger pulses out to every camera's VSYNC_IN
-            // and there's no daisy-chained trigger to forward — leave triggerOutEnable=false.
-            // PRIMARY/SECONDARY_SYNCED need triggerOutEnable=true to forward the pulse to the next
-            // camera in a chain.
-            bool triggerOut = syncMode != ObMultiDeviceSyncMode.HardwareTriggering;
+            // PRIMARY emits the pulse, SECONDARY forwards it down a daisy chain. For Sync Hub Pro
+            // fan-out the secondary's VSYNC_OUT is unused, but enabling it is harmless. Only
+            // disable when the device has nothing to broadcast (HardwareTriggering / Standalone /
+            // FreeRun / SoftwareTriggering modes that don't normally drive a downstream camera).
+            bool triggerOut = syncMode == ObMultiDeviceSyncMode.Primary
+                           || syncMode == ObMultiDeviceSyncMode.Secondary
+                           || syncMode == ObMultiDeviceSyncMode.SecondarySynced;
 
             var config = new ObMultiDeviceSyncConfig
             {

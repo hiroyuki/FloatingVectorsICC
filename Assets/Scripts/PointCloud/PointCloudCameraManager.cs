@@ -34,10 +34,12 @@ namespace PointCloud
         public PointCloudCumulative defaultCumulative;
 
         [Header("Multi-device sync")]
-        [Tooltip("Sync mode applied to every spawned renderer. Default HardwareTriggering matches " +
-                 "the Sync Hub Pro topology where the hub fans trigger pulses to every camera's " +
-                 "VSYNC_IN. Use Primary/SecondarySynced only for a hub-less daisy chain (index 0 " +
-                 "becomes PRIMARY, rest SECONDARY_SYNCED).")]
+        [Tooltip("Sync mode applied to every spawned renderer. SyncHubPro: all devices set to " +
+                 "Secondary (the hub generates trigger pulses on VSYNC, every camera receives " +
+                 "via VSYNC_IN). DaisyChain: index 0 = Primary (generates the pulse), rest = " +
+                 "Secondary (forwards to the next camera). Note: Femto Bolt firmware exposes " +
+                 "Secondary, not SecondarySynced — observed bitmap 0x000F = FreeRun|Standalone|" +
+                 "Primary|Secondary.")]
         public SyncTopology syncTopology = SyncTopology.SyncHubPro;
         [Tooltip("Stagger trigger2ImageDelayUs across devices to reduce iToF NIR pulse interference. " +
                  "Each device gets index * step microseconds. 0 disables the stagger.")]
@@ -52,9 +54,9 @@ namespace PointCloud
 
         public enum SyncTopology
         {
-            /// <summary>Sync Hub Pro: hub fans trigger pulses out → every device set to HardwareTriggering.</summary>
+            /// <summary>Sync Hub Pro: hub fans trigger pulses out → every device set to Secondary.</summary>
             SyncHubPro = 0,
-            /// <summary>Camera-to-camera daisy chain: index 0 = PRIMARY, rest = SECONDARY_SYNCED.</summary>
+            /// <summary>Camera-to-camera daisy chain: index 0 = Primary, rest = Secondary.</summary>
             DaisyChain = 1,
             /// <summary>No hardware sync; each device runs Standalone (use only for single-camera or testing).</summary>
             Standalone = 2,
@@ -133,9 +135,11 @@ namespace PointCloud
             switch (syncTopology)
             {
                 case SyncTopology.SyncHubPro:
-                    return ObMultiDeviceSyncMode.HardwareTriggering;
+                    // Hub generates the trigger; every camera is a passive receiver.
+                    return ObMultiDeviceSyncMode.Secondary;
                 case SyncTopology.DaisyChain:
-                    return index == 0 ? ObMultiDeviceSyncMode.Primary : ObMultiDeviceSyncMode.SecondarySynced;
+                    // First camera generates the pulse; the rest receive (and forward via VSYNC_OUT).
+                    return index == 0 ? ObMultiDeviceSyncMode.Primary : ObMultiDeviceSyncMode.Secondary;
                 default:
                     return ObMultiDeviceSyncMode.Standalone;
             }
