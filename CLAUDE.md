@@ -13,7 +13,9 @@ Unity上でリアルタイムにポイントクラウドとして描画する。
 ## 技術スタック
 - Unity 6 LTS (URP - Universal 3D)
 - OrbbecSDK v2（C/C++ネイティブSDK、直接P/Invoke経由で利用）
-- K4A Wrapperは使わない。v2 APIを直接叩く
+- 点群・カメラ I/O は K4A Wrapper を使わず v2 API を直接叩く
+- ボディトラッキングのみ例外: Microsoft Azure Kinect Body Tracking SDK 1.1.2
+  + Orbbec K4A Wrapper を併用（Femto Bolt で BT を動かす公式経路はこれしか無いため）
 - 言語: C#
 - 対象プラットフォーム: Windows x64
 
@@ -23,6 +25,19 @@ Unity上でリアルタイムにポイントクラウドとして描画する。
 - DLL配置済み: Assets\Plugins\OrbbecSDK\
 - ラッパーC#: Assets\Scripts\Orbbec\
 - 描画スクリプト: Assets\Scripts\PointCloud\
+
+### 外部 SDK（リポジトリには含めない）
+- Orbbec K4A Wrapper:
+  D:\OrbbecSDK_K4A_Wrapper_v2.0.11_windows_202510221441\
+  - bin\: k4a.dll, k4arecord.dll, OrbbecSDK.dll, depthengine_2_0.dll
+  - include\: k4a/, k4arecord/ ヘッダ
+- Microsoft Azure Kinect Body Tracking SDK 1.1.2:
+  C:\Program Files\Azure Kinect Body Tracking SDK\
+  - sdk\windows-desktop\amd64\release\bin\: k4abt.dll, onnxruntime.dll, DirectML.dll,
+    onnxruntime_providers_*.dll, dnn_model_2_0_*.onnx
+  - sdk\include\: k4abt.h, k4abttypes.h
+- UVCメタデータ登録スクリプト（Femto Bolt 接続初回に管理者で実行済み）:
+  D:\OrbbecSDK_K4A_Wrapper_v2.0.11_windows_202510221441\scripts\obsensor_metadata_win10.ps1
 
 ## プロジェクト固有ルール
 
@@ -83,5 +98,7 @@ Unity上でリアルタイムにポイントクラウドとして描画する。
 
 ## 禁止事項
 - OrbbecSDK v1のAPIを使わない（v2専用）
-- Azure Kinect SDK / K4A APIに依存しない（v2直接経路）
+- 点群・カメラ I/O では Azure Kinect SDK / K4A API に依存しない（v2直接経路）
+  - 例外: ボディトラッキング機能（k4abt）は K4A 経路を許可
 - ヘッダを読まずにAPIシグネチャを推測しない
+  - BT 用 P/Invoke も同様に `k4a.h` / `k4abt.h` のヘッダ参照を必須とする
