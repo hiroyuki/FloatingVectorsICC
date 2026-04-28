@@ -522,6 +522,9 @@ namespace Orbbec
         internal static extern IntPtr ob_frameset_get_color_frame(IntPtr frameset, out IntPtr error);
 
         [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern IntPtr ob_frameset_get_ir_frame(IntPtr frameset, out IntPtr error);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
         internal static extern IntPtr ob_frameset_get_points_frame(IntPtr frameset, out IntPtr error);
 
         // === Helpers (not P/Invoke) ===
