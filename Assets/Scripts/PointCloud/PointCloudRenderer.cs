@@ -74,11 +74,12 @@ namespace PointCloud
         public uint colorHeight = 720;
         public uint colorFps = 30;
 
-        [Tooltip("Enable the Femto Bolt's passive IR stream. k4abt body tracking can use it as " +
-                 "a real IR cue instead of the depth-as-IR fallback. Default OFF because the " +
-                 "IR profile is fragile on this firmware and can stall the pipeline; flip ON " +
-                 "to opt into the better BT path and verify point cloud still streams.")]
-        public bool enableIRStream = false;
+        [Tooltip("Enable the Femto Bolt's passive IR stream. k4abt body tracking uses it as the " +
+                 "real IR cue instead of the depth-as-IR fallback (which makes detections stop " +
+                 "after the first frame). Requires PointCloudCameraManager.syncTopology = " +
+                 "Standalone — multi-device sync modes drop framesets when IR is added to the " +
+                 "aggregate. Turn OFF if you only need depth + color.")]
+        public bool enableIRStream = true;
 
         [Header("Pipeline")]
         [Tooltip("Stream that depth gets aligned TO via the Align filter. " +
