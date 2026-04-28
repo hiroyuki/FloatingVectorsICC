@@ -43,6 +43,21 @@ Unity上でリアルタイムにポイントクラウドとして描画する。
 
 - AIは対応完了後 main にマージする前に、Unity Editor のコンソールでコンパイルエラーがないことを必ず確認する（Unity MCP の Unity_GetConsoleLogs などで取得）。コンパイルエラーが残っている場合はマージせず、原因を特定して修正する。
 
+### 動作検証はAI自身がMCP経由で進める
+
+ユーザーに「Playしてログを貼ってください」と都度依頼しない。Unity の動作検証・ログ確認は AI 側で完結させる：
+
+- **Play / Stop**: `mcp__unity-mcp__Unity_RunCommand` で `EditorApplication.EnterPlaymode()` / `ExitPlaymode()` を呼ぶ
+- **コンパイル**: `UnityEditor.Compilation.CompilationPipeline.RequestScriptCompilation()` を呼んで `AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate)` で待つ。Play 中は再コンパイルしないので、スクリプト変更後は必ず一旦 Stop する
+- **エラー / 警告**: `mcp__unity-mcp__Unity_GetConsoleLogs` で取得
+- **ランタイムログ全体**: `C:\Users\hori\AppData\Local\Unity\Editor\Editor.log` を Bash で `tail` / `grep` する。MCP の Console は前のセッション分が混じることがあるので、行番号や時刻と照らし合わせて新しいエントリを判別する
+- **シーン状態**: `mcp__unity-mcp__Unity_RunCommand` で `Object.FindObjectsByType<>` 経由で実行時状態を読む（Inspector の値、`MeshFilter.sharedMesh.vertexCount`、`MeshRenderer.sharedMaterial.shader.name` など）
+- **シーン編集**: 同 RunCommand で `EditorUtility.SetDirty()` + `EditorSceneManager.SaveOpenScenes()` で永続化する。エディタ操作の代行は Inspector 値変更などに限り、ヒエラルキー大改修は事前にユーザー確認
+
+ユーザーへの報告は「自分で確認した結果」を提示する形にする。コピペでログを貼ってもらうのは最終手段。
+
+カメラデバイスが応答しなくなった等の物理層の問題（USB再接続など）はユーザーにしか対処できないので、その場合のみ依頼する。
+
 ### P/Invokeラッパー（Assets\Scripts\Orbbec\）
 - OrbbecNative.cs: 全P/Invoke宣言をまとめる
   - DllImportの対象は "OrbbecSDK"（拡張子なし）
