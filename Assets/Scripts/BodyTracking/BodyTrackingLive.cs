@@ -41,6 +41,28 @@ namespace BodyTracking
         [Tooltip("Skeleton color. Bones inherit this; joints are shown slightly brighter.")]
         public Color skeletonColor = new Color(0.2f, 0.9f, 1f, 1f);
 
+        [Header("Trails")]
+        [Tooltip("Attach a TrailRenderer to each joint so its motion leaves a line in real time. " +
+                 "Equivalent to the Motion Line view but live, frame by frame.")]
+        public bool showTrails = true;
+
+        public enum TrailColorMode { PerJointHue, FlatColor }
+
+        [Tooltip("PerJointHue gives each K4ABT joint a distinct color so individual limbs are " +
+                 "traceable. FlatColor uses trailFlatColor for every joint.")]
+        public TrailColorMode trailColorMode = TrailColorMode.PerJointHue;
+
+        [Tooltip("Trail color used in FlatColor mode (also tints PerJointHue).")]
+        public Color trailFlatColor = Color.white;
+
+        [Min(0.05f)]
+        [Tooltip("How long (seconds) each segment of the trail stays visible before fading out.")]
+        public float trailDuration = 2.0f;
+
+        [Range(0.001f, 0.05f)]
+        [Tooltip("Trail width in meters at the head (= the joint). Tail tapers to ~0.")]
+        public float trailWidth = 0.005f;
+
         [Header("Tracker")]
         [Tooltip("BT processing mode. DirectML works on most Windows GPUs without CUDA.")]
         public k4abt_tracker_processing_mode_t processingMode =
@@ -311,10 +333,13 @@ namespace BodyTracking
                             // every time k4abt assigns a new id (which can happen per frame
                             // when tracking is unstable, freezing Unity within seconds).
                             EvictIfFull();
-                            visual = new BodyVisual(transform, id, jointRadius, skeletonColor);
+                            visual = new BodyVisual(transform, id, jointRadius, skeletonColor,
+                                showTrails, trailDuration, trailWidth,
+                                trailColorMode, trailFlatColor);
                             _bodies[id] = visual;
                         }
                         visual.UpdateFromSkeleton(skel, jointRadius, showAnatomicalBones, skeletonColor);
+                        visual.ApplyTrailParams(showTrails, trailDuration, trailWidth, trailColorMode, trailFlatColor);
                         _seenThisFrame.Add(id);
                         _lastSeenFrame[id] = Time.frameCount;
                     }
@@ -425,7 +450,11 @@ namespace BodyTracking
             private readonly Vector3[] _boneVerts;
             private readonly int[] _boneIndices;
 
-            public BodyVisual(Transform parent, uint id, float jointRadius, Color color)
+            private TrailRenderer[] _trails;
+
+            public BodyVisual(Transform parent, uint id, float jointRadius, Color color,
+                              bool showTrails, float trailDuration, float trailWidth,
+                              TrailColorMode trailColorMode, Color trailFlatColor)
             {
                 _root = new GameObject($"Body_{id}");
                 _root.transform.SetParent(parent, false);
@@ -439,6 +468,8 @@ namespace BodyTracking
                 var jointMat = new Material(unlitShader);
                 SetMaterialColor(jointMat, new Color(color.r * 1.2f, color.g * 1.2f, color.b * 1.2f, 1f));
 
+                _trails = new TrailRenderer[_joints.Length];
+
                 for (int i = 0; i < _joints.Length; i++)
                 {
                     var sphere = GameObject.CreatePrimitive(PrimitiveType.Sphere);
@@ -448,6 +479,30 @@ namespace BodyTracking
                     sphere.GetComponent<MeshRenderer>().sharedMaterial = jointMat;
                     sphere.name = ((k4abt_joint_id_t)i).ToString();
                     _joints[i] = sphere.transform;
+
+                    // TrailRenderer per joint. Built-in component, renders in world space and
+                    // lays down a width-tapered strip behind the moving sphere. Joint-specific
+                    // hue makes individual limbs traceable in PerJointHue mode.
+                    var tr = sphere.AddComponent<TrailRenderer>();
+                    tr.time = trailDuration;
+                    tr.startWidth = trailWidth;
+                    tr.endWidth = 0f;
+                    tr.minVertexDistance = 0.005f;
+                    tr.numCornerVertices = 0;
+                    tr.numCapVertices = 0;
+                    tr.alignment = LineAlignment.View;
+                    tr.textureMode = LineTextureMode.Stretch;
+                    tr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                    tr.receiveShadows = false;
+                    tr.sharedMaterial = ResolveTrailMaterial();
+                    var c = TrailColorFor(i, trailColorMode, trailFlatColor);
+                    var grad = new Gradient();
+                    grad.SetKeys(
+                        new[] { new GradientColorKey(c, 0f), new GradientColorKey(c, 1f) },
+                        new[] { new GradientAlphaKey(c.a, 0f), new GradientAlphaKey(0f, 1f) });
+                    tr.colorGradient = grad;
+                    tr.enabled = showTrails;
+                    _trails[i] = tr;
                 }
 
                 _bonesGO = new GameObject("Bones");
@@ -621,6 +676,48 @@ namespace BodyTracking
                 if (m.HasProperty("_BaseColor")) m.SetColor("_BaseColor", c);
                 if (m.HasProperty("_Color")) m.SetColor("_Color", c);
                 m.color = c;
+            }
+
+            // Single shared material for every TrailRenderer — uses the same overlay shader so
+            // trails draw on top of the point cloud. Vertex-color via the gradient handles the
+            // per-trail color; we don't need per-instance materials.
+            private static Material s_trailMat;
+            private static Material ResolveTrailMaterial()
+            {
+                if (s_trailMat != null) return s_trailMat;
+                s_trailMat = new Material(ResolveUnlitShader()) { name = "BT_Trail" };
+                SetMaterialColor(s_trailMat, Color.white);
+                return s_trailMat;
+            }
+
+            private static Color TrailColorFor(int jointIndex, TrailColorMode mode, Color flat)
+            {
+                if (mode == TrailColorMode.FlatColor) return flat;
+                float h = (jointIndex % K4ABTConsts.K4ABT_JOINT_COUNT) / (float)K4ABTConsts.K4ABT_JOINT_COUNT;
+                Color hue = Color.HSVToRGB(h, 0.85f, 1f);
+                return new Color(hue.r * flat.r, hue.g * flat.g, hue.b * flat.b, flat.a);
+            }
+
+            // Live-tweakable trail params from the Inspector (no need to re-spawn visuals).
+            public void ApplyTrailParams(bool show, float duration, float width,
+                                          TrailColorMode mode, Color flat)
+            {
+                if (_trails == null) return;
+                for (int i = 0; i < _trails.Length; i++)
+                {
+                    var tr = _trails[i];
+                    if (tr == null) continue;
+                    tr.enabled = show;
+                    tr.time = duration;
+                    tr.startWidth = width;
+                    tr.endWidth = 0f;
+                    var c = TrailColorFor(i, mode, flat);
+                    var grad = new Gradient();
+                    grad.SetKeys(
+                        new[] { new GradientColorKey(c, 0f), new GradientColorKey(c, 1f) },
+                        new[] { new GradientAlphaKey(c.a, 0f), new GradientAlphaKey(0f, 1f) });
+                    tr.colorGradient = grad;
+                }
             }
         }
     }
