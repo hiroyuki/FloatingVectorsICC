@@ -488,14 +488,7 @@ namespace PointCloud
             }
             // Pipeline-level align supports only ALIGN_D2C_HW_MODE; we use the Align filter for SW D2C.
             _config.SetAlignMode(ObAlignMode.Disable);
-            // When IR is enabled the aggregate mode has to drop to ColorFrameRequire,
-            // otherwise the pipeline stalls waiting for IR + depth + color to all
-            // arrive in the same frameset and never publishes anything (point cloud
-            // disappears). With ColorFrameRequire the frameset still fires per color
-            // frame and depth/IR are delivered when available.
-            _config.SetFrameAggregateOutputMode(enableIRStream
-                ? ObFrameAggregateOutputMode.ColorFrameRequire
-                : ObFrameAggregateOutputMode.AllTypeFrameRequire);
+            _config.SetFrameAggregateOutputMode(ObFrameAggregateOutputMode.AllTypeFrameRequire);
 
             _pipeline = _device.CreatePipeline();
             if (enableFrameSync) _pipeline.EnableFrameSync();
