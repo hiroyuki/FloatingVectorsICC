@@ -463,22 +463,24 @@ namespace BodyTracking
             public void UpdateFromSkeleton(in k4abt_skeleton_t skel, float jointRadius,
                                             bool showBones, Color color)
             {
+                // Each pop refreshes the last-known position for every joint with at least
+                // LOW confidence. Joints whose confidence flaps below LOW keep their previous
+                // position (don't toggle SetActive — that's what produced per-joint flicker
+                // when a body was being tracked at the edge of the depth model's range).
                 for (int i = 0; i < _joints.Length; i++)
                 {
                     var j = skel.Joints[i];
-                    bool valid = j.ConfidenceLevel >= k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW;
-                    _jointValid[i] = valid;
-                    if (valid)
+                    if (j.ConfidenceLevel >= k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW)
                     {
-                        var p = K4AmmToUnity(j.Position);
-                        _jointPositions[i] = p;
-                        _joints[i].localPosition = p;
-                        _joints[i].localScale = Vector3.one * (jointRadius * 2f);
-                        _joints[i].gameObject.SetActive(true);
+                        _jointPositions[i] = K4AmmToUnity(j.Position);
+                        _jointValid[i] = true;
                     }
-                    else
+                    // else: leave _jointPositions[i] / _jointValid[i] from previous pop.
+                    _joints[i].localPosition = _jointPositions[i];
+                    _joints[i].localScale = Vector3.one * (jointRadius * 2f);
+                    if (!_joints[i].gameObject.activeSelf && _jointValid[i])
                     {
-                        _joints[i].gameObject.SetActive(false);
+                        _joints[i].gameObject.SetActive(true);
                     }
                 }
 
@@ -509,16 +511,19 @@ namespace BodyTracking
                         _bonesMesh.vertices = verts;
                         _bonesMesh.SetIndices(idx, MeshTopology.Lines, 0, true);
                     }
-                    _bonesMat.color = color;
-                    _bonesGO.SetActive(true);
+                    SetMaterialColor(_bonesMat, color);
+                    if (!_bonesGO.activeSelf) _bonesGO.SetActive(true);
                 }
                 else
                 {
-                    _bonesGO.SetActive(false);
+                    if (_bonesGO.activeSelf) _bonesGO.SetActive(false);
                 }
             }
 
-            public void SetVisible(bool visible) => _root.SetActive(visible);
+            public void SetVisible(bool visible)
+            {
+                if (_root != null && _root.activeSelf != visible) _root.SetActive(visible);
+            }
 
             public bool IsActive => _root != null && _root.activeInHierarchy;
 
