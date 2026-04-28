@@ -86,6 +86,7 @@ namespace BodyTracking
 
         private void HandleTracksLoaded()
         {
+            Debug.Log($"[BodyTrackingPlayback] OnTracksLoaded fired, autoProcessOnRead={autoProcessOnRead}", this);
             if (autoProcessOnRead) Process();
         }
 
@@ -121,15 +122,18 @@ namespace BodyTracking
             if (pick == null)
             {
                 ProcessingStatus = "no recorded depth track to process";
+                Debug.LogWarning("[BodyTrackingPlayback] " + ProcessingStatus, this);
                 _processing = null;
                 yield break;
             }
             if (!pick.CameraParam.HasValue)
             {
                 ProcessingStatus = $"track {pick.Serial} has no calibration; cannot build k4a_calibration_t";
+                Debug.LogWarning("[BodyTrackingPlayback] " + ProcessingStatus, this);
                 _processing = null;
                 yield break;
             }
+            Debug.Log($"[BodyTrackingPlayback] processing serial={pick.Serial} depthFrames={pick.DepthFrames.Count} dW={pick.DepthWidth} dH={pick.DepthHeight}", this);
 
             int dW = pick.DepthWidth > 0 ? pick.DepthWidth : 640;
             int dH = pick.DepthHeight > 0 ? pick.DepthHeight : 576;
@@ -151,6 +155,7 @@ namespace BodyTracking
                     != k4a_result_t.K4A_RESULT_SUCCEEDED)
                 {
                     ProcessingStatus = "k4abt_tracker_create failed";
+                    Debug.LogError("[BodyTrackingPlayback] " + ProcessingStatus, this);
                     _processing = null;
                     yield break;
                 }
@@ -217,6 +222,7 @@ namespace BodyTracking
                 }
 
                 ProcessingStatus = $"done: {_trajectories.Count} trajectories from {processed} frames";
+                Debug.Log("[BodyTrackingPlayback] " + ProcessingStatus, this);
             }
             finally
             {
