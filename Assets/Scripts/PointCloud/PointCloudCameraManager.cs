@@ -68,12 +68,19 @@ namespace PointCloud
                  "Modes' context menu to list the available names for your firmware.")]
         public string depthWorkMode = string.Empty;
 
+        [Header("Display")]
+        [Tooltip("Hide / show all point cloud renderers. Toggling at runtime disables the " +
+                 "MeshRenderer on each spawned PointCloudRenderer GO without stopping capture, " +
+                 "so re-enabling resumes immediately with no pipeline restart.")]
+        public bool showPointClouds = true;
+
         [Header("Diagnostics")]
         public bool verboseLogging = true;
 
         public IReadOnlyList<PointCloudRenderer> Renderers => _renderers;
 
         private readonly List<PointCloudRenderer> _renderers = new List<PointCloudRenderer>();
+        private bool _lastAppliedShowPointClouds = true;
 
         private void Start()
         {
@@ -89,6 +96,21 @@ namespace PointCloud
                     Debug.Log($"  [{i}] {d}");
                 _renderers.Add(SpawnRenderer(d, i));
             }
+        }
+
+        private void Update()
+        {
+            // Live-toggle the MeshRenderer on each spawned point cloud GO without stopping
+            // capture. Capture thread keeps producing frames so re-enabling is instant.
+            if (showPointClouds == _lastAppliedShowPointClouds) return;
+            for (int i = 0; i < _renderers.Count; i++)
+            {
+                var r = _renderers[i];
+                if (r == null) continue;
+                var mr = r.GetComponent<MeshRenderer>();
+                if (mr != null && mr.enabled != showPointClouds) mr.enabled = showPointClouds;
+            }
+            _lastAppliedShowPointClouds = showPointClouds;
         }
 
         private void OnDestroy()
