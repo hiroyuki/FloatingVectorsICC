@@ -176,6 +176,14 @@ namespace Orbbec
             return h == IntPtr.Zero ? null : new OrbbecFrame(h);
         }
 
+        public OrbbecFrame GetIRFrame()
+        {
+            ThrowIfDisposed();
+            var h = OrbbecNative.ob_frameset_get_ir_frame(Handle, out var err);
+            OrbbecException.ThrowIfNotEmpty(err);
+            return h == IntPtr.Zero ? null : new OrbbecFrame(h);
+        }
+
         public OrbbecFrame GetPointsFrame()
         {
             ThrowIfDisposed();

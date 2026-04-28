@@ -87,24 +87,35 @@ namespace BodyTracking
         }
 
         /// <summary>
-        /// One-shot helper: copy depth Y16 into a native-backed k4a_image_t, attach to a
-        /// fresh k4a_capture_t, return the capture (image is released, capture owns the
-        /// internal reference). Returns IntPtr.Zero on failure.
-        ///
-        /// k4abt's TrackerHost reads the IR image off the capture too (despite the header
-        /// only documenting "depth data"), so we attach a second IR16 image. v2 doesn't
-        /// expose passive IR yet, so we feed the depth bytes again as a stand-in. The
-        /// inference quality drops (the BT model treats IR brightness as a real cue), but
-        /// it lets the tracker run end-to-end while a proper IR stream is added in (B).
+        /// Build a k4a_capture_t with a depth image and (if supplied) a proper IR image.
+        /// Pass <paramref name="ir16"/> = null and <paramref name="irByteCount"/> = 0 to
+        /// fall back to using the depth bytes as a stand-in IR image — the tracker runs
+        /// end-to-end but accuracy drops because the BT model uses IR brightness as a real
+        /// cue. The full path with a real IR stream is the supported one.
+        /// Returns IntPtr.Zero on failure.
         /// </summary>
-        public static IntPtr CreateCaptureFromDepthY16(byte[] y16, int byteCount, int width, int height,
-                                                        ulong deviceTimestampUsec)
+        public static IntPtr CreateCaptureFromDepthAndIR(
+            byte[] depth16, int depthByteCount, int depthWidth, int depthHeight,
+            byte[] ir16, int irByteCount, int irWidth, int irHeight,
+            ulong deviceTimestampUsec)
         {
-            IntPtr depth = CreateDepthImageFromY16(y16, byteCount, width, height, deviceTimestampUsec);
+            IntPtr depth = CreateDepthImageFromY16(depth16, depthByteCount, depthWidth, depthHeight, deviceTimestampUsec);
             if (depth == IntPtr.Zero) return IntPtr.Zero;
 
-            // Independent copy for the IR slot; the SDK calls our release callback per-image.
-            IntPtr ir = CreateIrImageFromY16(y16, byteCount, width, height, deviceTimestampUsec);
+            byte[] irSrc = ir16;
+            int irCount = irByteCount;
+            int irW = irWidth;
+            int irH = irHeight;
+            // Fallback path: reuse depth as IR if no real IR stream is plumbed through.
+            if (irSrc == null || irCount <= 0 || irW <= 0 || irH <= 0)
+            {
+                irSrc = depth16;
+                irCount = depthByteCount;
+                irW = depthWidth;
+                irH = depthHeight;
+            }
+
+            IntPtr ir = CreateIrImageFromY16(irSrc, irCount, irW, irH, deviceTimestampUsec);
             if (ir == IntPtr.Zero)
             {
                 K4ANative.k4a_image_release(depth);
@@ -125,6 +136,16 @@ namespace BodyTracking
             K4ANative.k4a_image_release(depth);
             K4ANative.k4a_image_release(ir);
             return capture;
+        }
+
+        /// <summary>Backward-compat wrapper that uses depth as the IR stand-in.</summary>
+        public static IntPtr CreateCaptureFromDepthY16(byte[] y16, int byteCount, int width, int height,
+                                                        ulong deviceTimestampUsec)
+        {
+            return CreateCaptureFromDepthAndIR(
+                y16, byteCount, width, height,
+                null, 0, 0, 0,
+                deviceTimestampUsec);
         }
 
         /// <summary>
