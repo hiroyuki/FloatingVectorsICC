@@ -100,8 +100,14 @@ namespace PointCloud
             public int DepthHeight;
             public int ColorWidth;
             public int ColorHeight;
+            public int IRWidth;
+            public int IRHeight;
             public ObCameraParam? CameraParam;
             public IReadOnlyList<PointCloudRecording.Frame> DepthFrames;
+            // IR frames recorded alongside depth (Y16, depth-aligned dimensions). May be empty
+            // when IR streaming was off at record time, in which case Playback BT falls back
+            // to using depth bytes as a stand-in IR (and the BT model rejects all detections).
+            public IReadOnlyList<PointCloudRecording.Frame> IRFrames;
         }
 
         /// <summary>Snapshot of all loaded depth tracks (post-Read or post-Rec). Frames list is
@@ -119,8 +125,11 @@ namespace PointCloud
                     DepthHeight = t.DepthHeight,
                     ColorWidth = t.ColorWidth,
                     ColorHeight = t.ColorHeight,
+                    IRWidth = t.IRWidth,
+                    IRHeight = t.IRHeight,
                     CameraParam = t.CameraParam,
                     DepthFrames = t.DepthFrames,
+                    IRFrames = t.IRFrames,
                 });
             }
             return list;
@@ -135,8 +144,10 @@ namespace PointCloud
             // Raw sensor data.
             public readonly List<PointCloudRecording.Frame> DepthFrames = new List<PointCloudRecording.Frame>();
             public readonly List<PointCloudRecording.Frame> ColorFrames = new List<PointCloudRecording.Frame>();
+            public readonly List<PointCloudRecording.Frame> IRFrames = new List<PointCloudRecording.Frame>();
             public int DepthWidth, DepthHeight;
             public int ColorWidth, ColorHeight;
+            public int IRWidth, IRHeight;
 
             // Calibration captured at record time (or loaded from YAML on Read).
             public ObCameraParam? CameraParam;
@@ -232,6 +243,15 @@ namespace PointCloud
                             track.ColorFrames);
                         totalColorFrames += track.ColorFrames.Count;
                     }
+                    if (track.IRFrames.Count > 0)
+                    {
+                        string irPath = PointCloudRecording.SensorFilePath(
+                            root, host, track.Serial, PointCloudRecording.IRSensorName);
+                        PointCloudRecording.WriteRcsv(
+                            irPath,
+                            PointCloudRecording.BuildIRHeaderYaml(track.Serial, track.IRWidth, track.IRHeight),
+                            track.IRFrames);
+                    }
 
                     if (track.CameraParam.HasValue)
                     {
@@ -282,14 +302,16 @@ namespace PointCloud
                 }
 
                 ClearTracks();
-                int totalDepth = 0, totalColor = 0;
+                int totalDepth = 0, totalColor = 0, totalIR = 0;
                 foreach (var (serial, deviceDir) in PointCloudRecording.EnumerateDevices(root))
                 {
                     string depthPath = Path.Combine(deviceDir, PointCloudRecording.DepthSensorName);
                     string colorPath = Path.Combine(deviceDir, PointCloudRecording.ColorSensorName);
+                    string irPath = Path.Combine(deviceDir, PointCloudRecording.IRSensorName);
                     bool hasDepth = File.Exists(depthPath);
                     bool hasColor = File.Exists(colorPath);
-                    if (!hasDepth && !hasColor) continue;
+                    bool hasIR = File.Exists(irPath);
+                    if (!hasDepth && !hasColor && !hasIR) continue;
 
                     var track = GetOrCreateTrack(serial);
                     if (hasDepth)
@@ -301,6 +323,11 @@ namespace PointCloud
                     {
                         track.ColorFrames.AddRange(PointCloudRecording.ReadRcsv(colorPath));
                         totalColor += track.ColorFrames.Count;
+                    }
+                    if (hasIR)
+                    {
+                        track.IRFrames.AddRange(PointCloudRecording.ReadRcsv(irPath));
+                        totalIR += track.IRFrames.Count;
                     }
 
                     // Dimensions are saved in the RCSV YAML header but we don't parse that back —
@@ -314,7 +341,7 @@ namespace PointCloud
                     SetStatus($"Read: no raw sensor frames found under {root}", warn: true);
                     return;
                 }
-                SetStatus($"Loaded {totalDepth} depth / {totalColor} color frame(s) across {_tracks.Count} device(s) from {root}");
+                SetStatus($"Loaded {totalDepth} depth / {totalColor} color / {totalIR} IR frame(s) across {_tracks.Count} device(s) from {root}");
 
                 try { OnTracksLoaded?.Invoke(); }
                 catch (Exception subscriberEx) { Debug.LogException(subscriberEx, this); }
@@ -389,6 +416,14 @@ namespace PointCloud
                 track.ColorFrames.Add(new PointCloudRecording.Frame { TimestampNs = timestampNs, Bytes = colorBuf });
                 track.ColorWidth = raw.ColorWidth;
                 track.ColorHeight = raw.ColorHeight;
+            }
+            if (raw.IRByteCount > 0 && raw.IRBytes != null)
+            {
+                var irBuf = new byte[raw.IRByteCount];
+                Buffer.BlockCopy(raw.IRBytes, 0, irBuf, 0, raw.IRByteCount);
+                track.IRFrames.Add(new PointCloudRecording.Frame { TimestampNs = timestampNs, Bytes = irBuf });
+                track.IRWidth = raw.IRWidth;
+                track.IRHeight = raw.IRHeight;
             }
         }
 
@@ -652,6 +687,7 @@ namespace PointCloud
                 if (serial != track.Serial) continue;
                 if (track.DepthWidth == 0)  { track.DepthWidth  = (int)r.depthWidth;  track.DepthHeight  = (int)r.depthHeight; }
                 if (track.ColorWidth == 0)  { track.ColorWidth  = (int)r.colorWidth;  track.ColorHeight  = (int)r.colorHeight; }
+                if (track.IRWidth == 0)     { track.IRWidth     = (int)r.depthWidth;  track.IRHeight     = (int)r.depthHeight; }
                 if (!track.CameraParam.HasValue && r.CameraParam.HasValue) track.CameraParam = r.CameraParam;
                 break;
             }

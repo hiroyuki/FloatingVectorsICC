@@ -34,6 +34,7 @@ namespace PointCloud
 
         public const string DepthSensorName      = "depth_main";
         public const string ColorSensorName      = "color_main";
+        public const string IRSensorName         = "ir_main";
         public const string PointcloudSensorName = "pointcloud_main"; // legacy
 
         public const int PointCloudVertexStride = 24; // sizeof(ObColorPoint)
@@ -213,6 +214,28 @@ namespace PointCloud
             sb.Append("  sensor:\n");
             sb.Append("    sensor_type: color\n");
             sb.Append("    format: rgb8\n");
+            sb.Append($"    width: {width}\n");
+            sb.Append($"    height: {height}\n");
+            sb.Append($"  device_serial: \"{EscapeYaml(serial)}\"\n");
+            sb.Append("  timestamp_basis: device_synced_unix_like_ns\n");
+            sb.Append("  producer: FloatingVectorsICC\n");
+            return sb.ToString();
+        }
+
+        public static string BuildIRHeaderYaml(string serial, int width, int height)
+        {
+            var sb = new StringBuilder();
+            sb.Append("record_format:\n");
+            sb.Append("  - name: timestamp_ns\n");
+            sb.Append("    type: u64\n");
+            sb.Append("  - name: image\n");
+            sb.Append("    type: u16\n");
+            sb.Append($"    count: {width * height}\n");
+            sb.Append("    comment: Y16 passive IR (2 bytes per pixel, row-major). Required by k4abt for offline body recompute.\n");
+            sb.Append("custom:\n");
+            sb.Append("  sensor:\n");
+            sb.Append("    sensor_type: ir\n");
+            sb.Append("    format: y16\n");
             sb.Append($"    width: {width}\n");
             sb.Append($"    height: {height}\n");
             sb.Append($"  device_serial: \"{EscapeYaml(serial)}\"\n");

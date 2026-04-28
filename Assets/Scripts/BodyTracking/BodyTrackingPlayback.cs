@@ -194,14 +194,33 @@ namespace BodyTracking
                 const int kPopTimeoutMs = 500;
                 int enqueueTimeouts = 0, popTimeouts = 0, popFailures = 0;
 
+                bool hasRealIR = pick.IRFrames != null && pick.IRFrames.Count == total;
+                int irW = hasRealIR && pick.IRWidth > 0 ? pick.IRWidth : dW;
+                int irH = hasRealIR && pick.IRHeight > 0 ? pick.IRHeight : dH;
+                Debug.Log($"[BodyTrackingPlayback] IR source = {(hasRealIR ? "recorded passive IR" : "depth-as-IR fallback (no IR in recording, k4abt may detect 0 bodies)")}", this);
+
                 for (int i = 0; i < total; i++)
                 {
                     var f = pick.DepthFrames[i];
                     if (f == null || f.Bytes == null || f.Bytes.Length == 0) continue;
 
                     ulong tsUsec = f.TimestampNs / 1000UL;
-                    IntPtr capture = K4ACaptureBridge.CreateCaptureFromDepthY16(
-                        f.Bytes, f.Bytes.Length, dW, dH, tsUsec);
+                    IntPtr capture;
+                    if (hasRealIR)
+                    {
+                        var irF = pick.IRFrames[i];
+                        capture = K4ACaptureBridge.CreateCaptureFromDepthAndIR(
+                            f.Bytes, f.Bytes.Length, dW, dH,
+                            irF != null ? irF.Bytes : null,
+                            irF != null && irF.Bytes != null ? irF.Bytes.Length : 0,
+                            irW, irH,
+                            tsUsec);
+                    }
+                    else
+                    {
+                        capture = K4ACaptureBridge.CreateCaptureFromDepthY16(
+                            f.Bytes, f.Bytes.Length, dW, dH, tsUsec);
+                    }
                     if (capture == IntPtr.Zero) continue;
 
                     var enqRc = K4ABTNative.k4abt_tracker_enqueue_capture(tracker, capture, kEnqueueTimeoutMs);
