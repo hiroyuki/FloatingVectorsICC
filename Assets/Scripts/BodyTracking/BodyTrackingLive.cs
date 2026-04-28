@@ -352,12 +352,22 @@ namespace BodyTracking
                 float elapsed = now - _diagWindowStart;
                 if (elapsed >= 1f)
                 {
+                    // Probe a representative joint (PELVIS) so we know whether the visual
+                    // is actually being placed somewhere visible or off in nowhere-land.
+                    string sample = "<no body>";
+                    foreach (var kv in _bodies)
+                    {
+                        var v = kv.Value;
+                        var p = v.GetSamplePosition();
+                        sample = $"id={kv.Key} pelvis_local={p} pelvis_world={v.WorldOf(p)} active={v.IsActive}";
+                        break;
+                    }
                     Debug.Log(
                         $"[BodyTrackingLive] enq_ok={_diagEnqueueOk}/s " +
                         $"enq_dropped={_diagEnqueueDropped}/s " +
                         $"popped={_diagPoppedFrames}/s " +
                         $"bodies_seen={_diagBodiesSeen}/s " +
-                        $"alive_visuals={_bodies.Count}",
+                        $"alive_visuals={_bodies.Count} | {sample}",
                         this);
                     _diagEnqueueOk = 0;
                     _diagEnqueueDropped = 0;
@@ -507,6 +517,20 @@ namespace BodyTracking
             }
 
             public void SetVisible(bool visible) => _root.SetActive(visible);
+
+            public bool IsActive => _root != null && _root.activeInHierarchy;
+
+            // Diagnostic accessors (used by the parent's per-second log).
+            public Vector3 GetSamplePosition()
+            {
+                int idx = (int)k4abt_joint_id_t.K4ABT_JOINT_PELVIS;
+                return idx < _jointPositions.Length ? _jointPositions[idx] : Vector3.zero;
+            }
+
+            public Vector3 WorldOf(Vector3 local)
+            {
+                return _root != null ? _root.transform.TransformPoint(local) : local;
+            }
 
             public void Destroy()
             {
