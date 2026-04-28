@@ -16,6 +16,9 @@
 # OrbbecSDK runtime log directory
 /Log/
 
+# External SDK extracts (kept outside the repo, see CLAUDE.md for canonical paths)
+/OrbbecSDK_K4A_Wrapper*/
+
 # Unity crash recovery artifacts
 /Assets/_Recovery/
 /Assets/_Recovery.meta

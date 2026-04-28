@@ -1,0 +1,112 @@
+// Wraps a v2 Y16 depth buffer in a k4a_capture_t so we can hand it to the
+// k4abt tracker without ever owning the device through the K4A API. Lifetime:
+// the byte buffer is copied into native memory at create time and freed when
+// the underlying k4a_image_t's refcount drops to 0 (the tracker keeps a ref
+// for the duration of inference and drops it when the body frame is popped).
+
+using System;
+using System.Runtime.InteropServices;
+
+namespace BodyTracking
+{
+    public static class K4ACaptureBridge
+    {
+        // The k4a release callback is a function pointer the SDK calls back into
+        // managed code from a worker thread. We keep one static delegate alive
+        // (so the GC doesn't collect it) and pass it to every image create call.
+        private static readonly k4a_memory_destroy_cb_t s_releaseCb = ReleaseUnmanagedBuffer;
+
+        [AOT.MonoPInvokeCallback(typeof(k4a_memory_destroy_cb_t))]
+        private static void ReleaseUnmanagedBuffer(IntPtr buffer, IntPtr context)
+        {
+            // We allocated the buffer via Marshal.AllocHGlobal in CreateDepthImageFromY16,
+            // so the matching release is FreeHGlobal. context is unused.
+            if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);
+        }
+
+        /// <summary>
+        /// Allocate a k4a_image_t (DEPTH16) backed by a copy of the supplied Y16 row-major
+        /// buffer. The image takes ownership of the copied bytes and frees them when
+        /// released. Returns IntPtr.Zero on failure.
+        /// </summary>
+        public static IntPtr CreateDepthImageFromY16(byte[] y16, int byteCount, int width, int height,
+                                                      ulong deviceTimestampUsec)
+        {
+            if (y16 == null || byteCount <= 0 || width <= 0 || height <= 0)
+                return IntPtr.Zero;
+
+            int strideBytes = width * 2; // DEPTH16 = 2 bytes per pixel
+            int expected = strideBytes * height;
+            if (byteCount < expected)
+            {
+                UnityEngine.Debug.LogError(
+                    $"[K4ACaptureBridge] depth buffer too small: got {byteCount} bytes, " +
+                    $"expected {expected} for {width}x{height} Y16");
+                return IntPtr.Zero;
+            }
+
+            IntPtr nativeBuf = Marshal.AllocHGlobal(expected);
+            Marshal.Copy(y16, 0, nativeBuf, expected);
+
+            var rc = K4ANative.k4a_image_create_from_buffer(
+                k4a_image_format_t.K4A_IMAGE_FORMAT_DEPTH16,
+                width, height, strideBytes,
+                nativeBuf, (UIntPtr)expected,
+                s_releaseCb, IntPtr.Zero,
+                out IntPtr image);
+
+            if (rc != k4a_result_t.K4A_RESULT_SUCCEEDED)
+            {
+                Marshal.FreeHGlobal(nativeBuf);
+                UnityEngine.Debug.LogError("[K4ACaptureBridge] k4a_image_create_from_buffer failed");
+                return IntPtr.Zero;
+            }
+
+            K4ANative.k4a_image_set_device_timestamp_usec(image, deviceTimestampUsec);
+            return image;
+        }
+
+        /// <summary>
+        /// Create a k4a_capture_t containing the supplied depth image. Adds a ref to the
+        /// image internally (so it is safe to release the caller's handle afterwards).
+        /// Caller releases the returned capture via <see cref="K4ANative.k4a_capture_release"/>.
+        /// Returns IntPtr.Zero on failure.
+        /// </summary>
+        public static IntPtr CreateCaptureWithDepth(IntPtr depthImage)
+        {
+            if (depthImage == IntPtr.Zero) return IntPtr.Zero;
+
+            var rc = K4ANative.k4a_capture_create(out IntPtr capture);
+            if (rc != k4a_result_t.K4A_RESULT_SUCCEEDED)
+            {
+                UnityEngine.Debug.LogError("[K4ACaptureBridge] k4a_capture_create failed");
+                return IntPtr.Zero;
+            }
+            K4ANative.k4a_capture_set_depth_image(capture, depthImage);
+            return capture;
+        }
+
+        /// <summary>
+        /// One-shot helper: copy depth Y16 into a native-backed k4a_image_t, attach to a
+        /// fresh k4a_capture_t, return the capture (image is released, capture owns the
+        /// internal reference). Returns IntPtr.Zero on failure.
+        /// </summary>
+        public static IntPtr CreateCaptureFromDepthY16(byte[] y16, int byteCount, int width, int height,
+                                                        ulong deviceTimestampUsec)
+        {
+            IntPtr image = CreateDepthImageFromY16(y16, byteCount, width, height, deviceTimestampUsec);
+            if (image == IntPtr.Zero) return IntPtr.Zero;
+
+            IntPtr capture = CreateCaptureWithDepth(image);
+            // capture_set_depth_image bumps the image refcount; release our caller-side ref.
+            K4ANative.k4a_image_release(image);
+
+            if (capture == IntPtr.Zero)
+            {
+                // image was already released; capture creation owns nothing now.
+                return IntPtr.Zero;
+            }
+            return capture;
+        }
+    }
+}

@@ -28,7 +28,7 @@ using Orbbec;
 
 namespace PointCloud
 {
-    internal static class PointCloudRecording
+    public static class PointCloudRecording
     {
         public const string Magic = "RCSV";
 
