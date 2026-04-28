@@ -38,10 +38,24 @@ namespace BodyTracking
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
         private static void RuntimeInit() => Initialize();
 
+        // Diagnostic kill switch — leave false in normal operation. Setting to true skips
+        // the PATH prepend, which makes k4abt P/Invoke fail with DllNotFoundException but
+        // can be useful when ruling out PATH-related interference.
+        public static bool DisableForDiagnostics = false;
+
         public static void Initialize()
         {
             if (_initialized) return;
             _initialized = true;
+
+            if (DisableForDiagnostics)
+            {
+                Debug.LogWarning(
+                    "[BodyTrackingBootstrap] DisableForDiagnostics=true — skipping PATH " +
+                    "prepend. Body tracking will fail with DllNotFoundException; flip the " +
+                    "flag back to false once point cloud rendering is verified.");
+                return;
+            }
 
             string current = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
             string prepend = string.Empty;

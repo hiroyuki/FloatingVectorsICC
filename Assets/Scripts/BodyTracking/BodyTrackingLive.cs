@@ -325,16 +325,16 @@ namespace BodyTracking
                 }
             }
 
-            // Tracker runs at ~30 Hz, Update at ~60 Hz, so most ticks have an empty
-            // _seenThisFrame even when the body is being tracked perfectly. Keep the
-            // visual visible for unseenFramesBeforeHide ticks of grace, and only destroy
-            // the GO once unseenFramesBeforeDestroy ticks have passed without a pop.
+            // While a body is alive in the dict its visual stays visible — never call
+            // SetActive in the per-tick loop. The only path that removes the visual is
+            // Destroy() below, after unseenFramesBeforeDestroy ticks without a pop.
+            // This eliminates the SetActive(true)/SetActive(false) toggle storm that
+            // happened when the per-tick visibility check fluctuated between true/false.
             _toDestroy.Clear();
             foreach (var kv in _bodies)
             {
                 int lastSeen = _lastSeenFrame.TryGetValue(kv.Key, out var f) ? f : -1;
                 int sinceLastSeen = Time.frameCount - lastSeen;
-                kv.Value.SetVisible(sinceLastSeen <= unseenFramesBeforeHide);
                 kv.Value.TickDiagAfterUpdate();
                 if (sinceLastSeen > unseenFramesBeforeDestroy)
                 {
@@ -364,6 +364,7 @@ namespace BodyTracking
                         float meanJump = v.JumpSamples > 0 ? v.SumJumpThisWindow / v.JumpSamples : 0f;
                         sample = $"id={kv.Key} active={v.IsActive} " +
                                  $"toggles/s={v.VisibilityToggles} " +
+                                 $"setActive(true/false)={v.SetActiveCallsTrue}/{v.SetActiveCallsFalse} " +
                                  $"pelvis_jump_max={v.MaxJumpThisWindow:F3}m " +
                                  $"pelvis_jump_avg={meanJump:F3}m";
                         v.ResetDiagWindow();
@@ -525,9 +526,16 @@ namespace BodyTracking
                 }
             }
 
+            public int SetActiveCallsTrue { get; private set; }
+            public int SetActiveCallsFalse { get; private set; }
+
             public void SetVisible(bool visible)
             {
-                if (_root != null && _root.activeSelf != visible) _root.SetActive(visible);
+                if (_root == null) return;
+                if (_root.activeSelf == visible) return;
+                _root.SetActive(visible);
+                if (visible) SetActiveCallsTrue++;
+                else SetActiveCallsFalse++;
             }
 
             public bool IsActive => _root != null && _root.activeInHierarchy;
@@ -580,6 +588,8 @@ namespace BodyTracking
                 MaxJumpThisWindow = 0f;
                 SumJumpThisWindow = 0f;
                 JumpSamples = 0;
+                SetActiveCallsTrue = 0;
+                SetActiveCallsFalse = 0;
             }
 
             public void Destroy()
