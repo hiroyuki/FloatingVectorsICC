@@ -121,8 +121,11 @@ namespace PointCloud
 
         [Header("Point cloud")]
         [Tooltip("Upper bound used to size the GPU vertex buffer. Frames with more points are clipped. " +
-                 "After D2C alignment, point count == color resolution (width*height).")]
-        public int maxPoints = 1280 * 720;
+                 "Default = depth resolution (640x576 = 368640 pts) to keep the per-frame upload " +
+                 "under D3D12's 16 MiB staging buffer (24 B/vertex × 920K verts at color resolution " +
+                 "exceeds it and stalls the upload, especially when DirectML BT is also active). " +
+                 "Set to color resolution (1280×720) only if you have headroom and need denser points.")]
+        public int maxPoints = 640 * 576;
         [Tooltip("Material used for the points. Use Orbbec/PointCloudUnlit or compatible.")]
         public Material pointMaterial;
         [Tooltip("Negate Y on the GameObject's transform. The SDK emits points in image coordinates " +
