@@ -74,6 +74,11 @@ namespace BodyTracking
                  "At 30 fps, 60 frames = ~2s of grace before re-creating on a new ID.")]
         [Min(1)] public int unseenFramesBeforeDestroy = 60;
 
+        [Tooltip("Keep a BodyVisual visible for this many Update ticks after it was last " +
+                 "popped. Tracker runs at ~30 Hz but Update runs at ~60 Hz, so without grace " +
+                 "every other frame would hide the skeleton (= the 'flicker' the user sees).")]
+        [Min(0)] public int unseenFramesBeforeHide = 6;
+
         [Tooltip("Log diagnostic counters once per second (captures enqueued/dropped, body " +
                  "frames popped, bodies detected). Useful while tuning IR/processing mode.")]
         public bool diagnosticLogging = true;
@@ -320,22 +325,19 @@ namespace BodyTracking
                 }
             }
 
-            // Bodies that disappeared this tick are hidden but kept around for a few
-            // frames in case they re-appear with the same id (cheap to keep, expensive
-            // to destroy and re-create the GameObjects). Past unseenFramesBeforeDestroy
-            // they get destroyed to reclaim GameObjects.
+            // Tracker runs at ~30 Hz, Update at ~60 Hz, so most ticks have an empty
+            // _seenThisFrame even when the body is being tracked perfectly. Keep the
+            // visual visible for unseenFramesBeforeHide ticks of grace, and only destroy
+            // the GO once unseenFramesBeforeDestroy ticks have passed without a pop.
             _toDestroy.Clear();
             foreach (var kv in _bodies)
             {
-                bool seen = _seenThisFrame.Contains(kv.Key);
-                kv.Value.SetVisible(seen);
-                if (!seen)
+                int lastSeen = _lastSeenFrame.TryGetValue(kv.Key, out var f) ? f : -1;
+                int sinceLastSeen = Time.frameCount - lastSeen;
+                kv.Value.SetVisible(sinceLastSeen <= unseenFramesBeforeHide);
+                if (sinceLastSeen > unseenFramesBeforeDestroy)
                 {
-                    int lastSeen = _lastSeenFrame.TryGetValue(kv.Key, out var f) ? f : -1;
-                    if (Time.frameCount - lastSeen > unseenFramesBeforeDestroy)
-                    {
-                        _toDestroy.Add(kv.Key);
-                    }
+                    _toDestroy.Add(kv.Key);
                 }
             }
             foreach (var id in _toDestroy)
