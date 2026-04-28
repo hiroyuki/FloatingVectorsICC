@@ -201,6 +201,7 @@ namespace PointCloud
                 var calibrations = new List<PointCloudRecording.DeviceCalibration>();
                 int totalDepthFrames = 0;
                 int totalColorFrames = 0;
+                int totalIRFrames = 0;
 
                 // Compute centroid of camera positions so extrinsics.yaml puts world origin at
                 // the centroid for multi-device setups (identity for a single device).
@@ -251,6 +252,7 @@ namespace PointCloud
                             irPath,
                             PointCloudRecording.BuildIRHeaderYaml(track.Serial, track.IRWidth, track.IRHeight),
                             track.IRFrames);
+                        totalIRFrames += track.IRFrames.Count;
                     }
 
                     if (track.CameraParam.HasValue)
@@ -275,7 +277,7 @@ namespace PointCloud
                     PointCloudRecording.WriteExtrinsicsYaml(root, calibrations);
 
                 SetStatus(
-                    $"Saved {totalDepthFrames} depth / {totalColorFrames} color frame(s) across {_tracks.Count} device(s) to {root}");
+                    $"Saved {totalDepthFrames} depth / {totalColorFrames} color / {totalIRFrames} IR frame(s) across {_tracks.Count} device(s) to {root}");
             }
             catch (Exception e)
             {
