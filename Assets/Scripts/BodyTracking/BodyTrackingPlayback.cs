@@ -186,25 +186,37 @@ namespace BodyTracking
                 ulong t0 = total > 0 ? pick.DepthFrames[0].TimestampNs : 0UL;
                 int processed = 0;
 
+                // Bounded waits so the coroutine can never block Unity's main thread
+                // forever if the tracker stalls. 200 ms is generous (DirectML pop is
+                // typically <40 ms) and a single dropped frame is not visually critical
+                // for the offline trajectory pass.
+                const int kEnqueueTimeoutMs = 200;
+                const int kPopTimeoutMs = 500;
+                int enqueueTimeouts = 0, popTimeouts = 0, popFailures = 0;
+
                 for (int i = 0; i < total; i++)
                 {
                     var f = pick.DepthFrames[i];
                     if (f == null || f.Bytes == null || f.Bytes.Length == 0) continue;
 
-                    // Convert ns → us for k4a's device timestamp.
                     ulong tsUsec = f.TimestampNs / 1000UL;
-
                     IntPtr capture = K4ACaptureBridge.CreateCaptureFromDepthY16(
                         f.Bytes, f.Bytes.Length, dW, dH, tsUsec);
                     if (capture == IntPtr.Zero) continue;
 
-                    // Offline path: block until enqueued, then block until popped. There's no
-                    // live producer competing for the queue so this is just synchronous I/O.
-                    K4ABTNative.k4abt_tracker_enqueue_capture(tracker, capture, K4ABTConsts.K4A_WAIT_INFINITE);
+                    var enqRc = K4ABTNative.k4abt_tracker_enqueue_capture(tracker, capture, kEnqueueTimeoutMs);
                     K4ANative.k4a_capture_release(capture);
+                    if (enqRc != k4a_wait_result_t.K4A_WAIT_RESULT_SUCCEEDED)
+                    {
+                        enqueueTimeouts++;
+                        continue;
+                    }
 
-                    if (K4ABTNative.k4abt_tracker_pop_result(tracker, out IntPtr bodyFrame,
-                            K4ABTConsts.K4A_WAIT_INFINITE) == k4a_wait_result_t.K4A_WAIT_RESULT_SUCCEEDED)
+                    var popRc = K4ABTNative.k4abt_tracker_pop_result(tracker, out IntPtr bodyFrame, kPopTimeoutMs);
+                    if (popRc == k4a_wait_result_t.K4A_WAIT_RESULT_TIMEOUT) popTimeouts++;
+                    else if (popRc == k4a_wait_result_t.K4A_WAIT_RESULT_FAILED) popFailures++;
+
+                    if (popRc == k4a_wait_result_t.K4A_WAIT_RESULT_SUCCEEDED)
                     {
                         try
                         {
@@ -238,11 +250,17 @@ namespace BodyTracking
                     if ((processed & 7) == 0)
                     {
                         ProcessingStatus = $"BT recompute: {processed} / {total}";
+                        if ((processed & 31) == 0) // log every 32 frames (~1 sec at 30 Hz)
+                        {
+                            Debug.Log($"[BodyTrackingPlayback] {ProcessingStatus} " +
+                                      $"(enqueueTimeouts={enqueueTimeouts} popTimeouts={popTimeouts} popFails={popFailures})", this);
+                        }
                         yield return null;
                     }
                 }
 
-                ProcessingStatus = $"done: {_trajectories.Count} trajectories from {processed} frames";
+                ProcessingStatus = $"done: {_trajectories.Count} trajectories from {processed} frames " +
+                                   $"(enqueueTimeouts={enqueueTimeouts} popTimeouts={popTimeouts} popFails={popFailures})";
                 Debug.Log("[BodyTrackingPlayback] " + ProcessingStatus, this);
             }
             finally
