@@ -522,11 +522,14 @@ namespace BodyTracking
                 if (_root != null) Object.Destroy(_root);
             }
 
-            // URP shader name on a fresh URP project, with a built-in fallback for
-            // non-URP assemblies and a guaranteed-present last resort.
+            // BodyTracking/SkeletonOverlay hardcodes ZTest Always + ZWrite Off + Overlay queue
+            // so the skeleton always draws on top of the point cloud. Falls back to URP/Unlit
+            // (with the depth test issue) only if the custom shader is missing — that surfaces
+            // a magenta material so the problem is obvious.
             private static Shader ResolveUnlitShader()
             {
-                Shader s = Shader.Find("Universal Render Pipeline/Unlit");
+                Shader s = Shader.Find("BodyTracking/SkeletonOverlay");
+                if (s == null) s = Shader.Find("Universal Render Pipeline/Unlit");
                 if (s == null) s = Shader.Find("Unlit/Color");
                 if (s == null) s = Shader.Find("Sprites/Default");
                 if (s == null) s = Shader.Find("Hidden/InternalErrorShader");
