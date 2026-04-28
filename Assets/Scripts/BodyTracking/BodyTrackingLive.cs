@@ -600,7 +600,13 @@ namespace BodyTracking
 
             private static Shader ResolveUnlitShader()
             {
-                Shader s = Shader.Find("Universal Render Pipeline/Unlit");
+                // SkeletonOverlay forces ZTest Always + ZWrite Off + Overlay queue so the
+                // joints/bones aren't occluded by the point cloud surface. URP-compatible
+                // (HLSLPROGRAM, UniversalForward LightMode). Fallback to URP/Unlit if it
+                // ever fails to compile (skeleton would lose the always-on-top behaviour
+                // but at least render).
+                Shader s = Shader.Find("BodyTracking/SkeletonOverlay");
+                if (s == null) s = Shader.Find("Universal Render Pipeline/Unlit");
                 if (s == null) s = Shader.Find("Unlit/Color");
                 if (s == null) s = Shader.Find("Sprites/Default");
                 return s;
