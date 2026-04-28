@@ -296,9 +296,16 @@ namespace BodyTracking
                 _root = new GameObject($"Body_{id}");
                 _root.transform.SetParent(parent, false);
 
-                var jointMat = new Material(Shader.Find("Universal Render Pipeline/Unlit"));
-                if (jointMat.shader == null) jointMat = new Material(Shader.Find("Unlit/Color"));
-                jointMat.color = new Color(color.r * 1.2f, color.g * 1.2f, color.b * 1.2f, 1f);
+                // Pre-resolve a shader. `new Material(null)` throws ArgumentNullException
+                // immediately, so the old shader-then-fallback pattern (`new Material(Find(a));
+                // if (mat.shader == null) mat = new Material(Find(b))`) crashes before the
+                // fallback runs. Resolve the chain first, then construct the Material once.
+                var unlitShader = ResolveUnlitShader();
+
+                var jointMat = new Material(unlitShader)
+                {
+                    color = new Color(color.r * 1.2f, color.g * 1.2f, color.b * 1.2f, 1f),
+                };
 
                 for (int i = 0; i < _joints.Length; i++)
                 {
@@ -318,9 +325,7 @@ namespace BodyTracking
                 _bonesMesh = new Mesh { name = "Bones", indexFormat = UnityEngine.Rendering.IndexFormat.UInt16 };
                 mf.sharedMesh = _bonesMesh;
 
-                _bonesMat = new Material(Shader.Find("Universal Render Pipeline/Unlit"));
-                if (_bonesMat.shader == null) _bonesMat = new Material(Shader.Find("Unlit/Color"));
-                _bonesMat.color = color;
+                _bonesMat = new Material(unlitShader) { color = color };
                 _bonesRenderer.sharedMaterial = _bonesMat;
 
                 _boneVerts = new Vector3[s_bones.Length * 2];
@@ -392,6 +397,17 @@ namespace BodyTracking
             {
                 if (_bonesMesh != null) Object.Destroy(_bonesMesh);
                 if (_root != null) Object.Destroy(_root);
+            }
+
+            // URP shader name on a fresh URP project, with a built-in fallback for
+            // non-URP assemblies and a guaranteed-present last resort.
+            private static Shader ResolveUnlitShader()
+            {
+                Shader s = Shader.Find("Universal Render Pipeline/Unlit");
+                if (s == null) s = Shader.Find("Unlit/Color");
+                if (s == null) s = Shader.Find("Sprites/Default");
+                if (s == null) s = Shader.Find("Hidden/InternalErrorShader");
+                return s;
             }
         }
     }
