@@ -74,6 +74,17 @@ namespace BodyTracking
                  "At 30 fps, 60 frames = ~2s of grace before re-creating on a new ID.")]
         [Min(1)] public int unseenFramesBeforeDestroy = 60;
 
+        [Tooltip("Log diagnostic counters once per second (captures enqueued/dropped, body " +
+                 "frames popped, bodies detected). Useful while tuning IR/processing mode.")]
+        public bool diagnosticLogging = true;
+
+        // Diagnostic counters, reset every ~1s of Update ticks.
+        private int _diagEnqueueOk;
+        private int _diagEnqueueDropped;
+        private int _diagPoppedFrames;
+        private int _diagBodiesSeen;
+        private float _diagWindowStart;
+
         private byte[] _depthCopy;   // reused scratch so we don't realloc each callback
         private byte[] _irCopy;      // ditto, only used when IR is delivered alongside depth
 
@@ -257,7 +268,12 @@ namespace BodyTracking
             // Non-blocking enqueue (returns TIMEOUT if the input queue is full — drop the frame).
             var enq = K4ABTNative.k4abt_tracker_enqueue_capture(_tracker, capture, 0);
             K4ANative.k4a_capture_release(capture);
-            if (enq != k4a_wait_result_t.K4A_WAIT_RESULT_SUCCEEDED) return;
+            if (enq != k4a_wait_result_t.K4A_WAIT_RESULT_SUCCEEDED)
+            {
+                _diagEnqueueDropped++;
+                return;
+            }
+            _diagEnqueueOk++;
         }
 
         private void Update()
@@ -271,9 +287,11 @@ namespace BodyTracking
             {
                 var rc = K4ABTNative.k4abt_tracker_pop_result(_tracker, out System.IntPtr bodyFrame, 0);
                 if (rc != k4a_wait_result_t.K4A_WAIT_RESULT_SUCCEEDED) break;
+                _diagPoppedFrames++;
                 try
                 {
                     uint nBodies = K4ABTNative.k4abt_frame_get_num_bodies(bodyFrame);
+                    _diagBodiesSeen += (int)nBodies;
                     for (uint i = 0; i < nBodies; i++)
                     {
                         uint id = K4ABTNative.k4abt_frame_get_body_id(bodyFrame, i);
@@ -325,6 +343,28 @@ namespace BodyTracking
                 _bodies[id].Destroy();
                 _bodies.Remove(id);
                 _lastSeenFrame.Remove(id);
+            }
+
+            if (diagnosticLogging)
+            {
+                float now = Time.realtimeSinceStartup;
+                if (_diagWindowStart == 0f) _diagWindowStart = now;
+                float elapsed = now - _diagWindowStart;
+                if (elapsed >= 1f)
+                {
+                    Debug.Log(
+                        $"[BodyTrackingLive] enq_ok={_diagEnqueueOk}/s " +
+                        $"enq_dropped={_diagEnqueueDropped}/s " +
+                        $"popped={_diagPoppedFrames}/s " +
+                        $"bodies_seen={_diagBodiesSeen}/s " +
+                        $"alive_visuals={_bodies.Count}",
+                        this);
+                    _diagEnqueueOk = 0;
+                    _diagEnqueueDropped = 0;
+                    _diagPoppedFrames = 0;
+                    _diagBodiesSeen = 0;
+                    _diagWindowStart = now;
+                }
             }
         }
 
@@ -381,7 +421,9 @@ namespace BodyTracking
                 var jointMat = new Material(unlitShader)
                 {
                     color = new Color(color.r * 1.2f, color.g * 1.2f, color.b * 1.2f, 1f),
+                    renderQueue = (int)UnityEngine.Rendering.RenderQueue.Overlay,
                 };
+                ConfigureOverlayMaterial(jointMat);
 
                 for (int i = 0; i < _joints.Length; i++)
                 {
@@ -401,7 +443,12 @@ namespace BodyTracking
                 _bonesMesh = new Mesh { name = "Bones", indexFormat = UnityEngine.Rendering.IndexFormat.UInt16 };
                 mf.sharedMesh = _bonesMesh;
 
-                _bonesMat = new Material(unlitShader) { color = color };
+                _bonesMat = new Material(unlitShader)
+                {
+                    color = color,
+                    renderQueue = (int)UnityEngine.Rendering.RenderQueue.Overlay,
+                };
+                ConfigureOverlayMaterial(_bonesMat);
                 _bonesRenderer.sharedMaterial = _bonesMat;
 
                 _boneVerts = new Vector3[s_bones.Length * 2];
@@ -484,6 +531,18 @@ namespace BodyTracking
                 if (s == null) s = Shader.Find("Sprites/Default");
                 if (s == null) s = Shader.Find("Hidden/InternalErrorShader");
                 return s;
+            }
+
+            // Force the skeleton material to draw on top of the point cloud. Without this
+            // the joint spheres / bone lines sit at almost the same depth as the point
+            // cloud surface and lose the depth test, so the skeleton seems to disappear.
+            // ZTest Always + ZWrite Off + Overlay queue = always visible on top.
+            private static void ConfigureOverlayMaterial(Material m)
+            {
+                if (m == null) return;
+                if (m.HasProperty("_ZTest")) m.SetInt("_ZTest", (int)UnityEngine.Rendering.CompareFunction.Always);
+                if (m.HasProperty("_ZWrite")) m.SetInt("_ZWrite", 0);
+                if (m.HasProperty("_Cull")) m.SetInt("_Cull", (int)UnityEngine.Rendering.CullMode.Off);
             }
         }
     }
