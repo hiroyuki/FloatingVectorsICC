@@ -15,8 +15,15 @@ namespace BodyTracking
     public class BodyTrackingLive : MonoBehaviour
     {
         [Header("Source")]
-        [Tooltip("PointCloudRenderer whose depth stream feeds the body tracker. " +
-                 "Leave empty to auto-pick the first PointCloudRenderer found in the scene.")]
+        [Tooltip("PointCloudCameraManager that spawns per-device PointCloudRenderers at runtime. " +
+                 "Drag your existing 'PointClouds' GameObject here so this component can pick up " +
+                 "the renderer once it's spawned (Edit-time D&D into the source field below isn't " +
+                 "possible because renderers don't exist until Play).")]
+        public PointCloudCameraManager cameraManager;
+
+        [Tooltip("Specific PointCloudRenderer to drive body tracking from. If empty, the first " +
+                 "renderer the cameraManager spawns is used. Set this only if you have multiple " +
+                 "devices and want to pin BT to one of them.")]
         public PointCloudRenderer source;
 
         [Header("Display")]
@@ -114,24 +121,46 @@ namespace BodyTracking
             BodyTrackingBootstrap.Initialize();
         }
 
+        private bool _bound;
+
         private void OnEnable()
         {
-            if (source == null) source = FindFirstObjectByType<PointCloudRenderer>();
-            if (source == null)
-            {
-                Debug.LogWarning("[BodyTrackingLive] no PointCloudRenderer in scene; disabled.");
-                enabled = false;
-                return;
-            }
-            source.OnRawFramesReady += HandleRawFrame;
+            if (cameraManager == null) cameraManager = FindFirstObjectByType<PointCloudCameraManager>();
+            TryBindSource();
         }
 
         private void OnDisable()
         {
-            if (source != null) source.OnRawFramesReady -= HandleRawFrame;
+            UnbindSource();
             DestroyTracker();
             foreach (var v in _bodies.Values) v.Destroy();
             _bodies.Clear();
+        }
+
+        // Renderers are spawned at runtime by PointCloudCameraManager.Start, so we may
+        // need a few frames before one is available. Re-check from Update until bound.
+        private void TryBindSource()
+        {
+            if (_bound) return;
+
+            if (source == null && cameraManager != null && cameraManager.Renderers.Count > 0)
+            {
+                source = cameraManager.Renderers[0];
+            }
+            if (source == null && cameraManager == null)
+            {
+                source = FindFirstObjectByType<PointCloudRenderer>();
+            }
+            if (source == null) return;
+
+            source.OnRawFramesReady += HandleRawFrame;
+            _bound = true;
+        }
+
+        private void UnbindSource()
+        {
+            if (_bound && source != null) source.OnRawFramesReady -= HandleRawFrame;
+            _bound = false;
         }
 
         private bool TryEnsureTracker(in RawFrameData frame)
@@ -204,6 +233,7 @@ namespace BodyTracking
 
         private void Update()
         {
+            if (!_bound) TryBindSource();
             if (!_trackerReady || !showSkeleton) return;
 
             // Drain whatever the tracker has produced this frame; non-blocking.

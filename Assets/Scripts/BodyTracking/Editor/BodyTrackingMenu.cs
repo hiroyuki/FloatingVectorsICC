@@ -31,9 +31,12 @@ namespace BodyTracking.EditorTools
             }
             var liveComp = live.GetComponent<BodyTrackingLive>();
             if (liveComp == null) liveComp = Undo.AddComponent<BodyTrackingLive>(live);
-            if (liveComp.source == null)
+            // PointCloudRenderer is runtime-spawned by PointCloudCameraManager, so we
+            // wire the manager instead and let BodyTrackingLive late-bind to the first
+            // renderer once it appears.
+            if (liveComp.cameraManager == null)
             {
-                liveComp.source = Object.FindFirstObjectByType<PointCloudRenderer>();
+                liveComp.cameraManager = Object.FindFirstObjectByType<PointCloudCameraManager>();
                 EditorUtility.SetDirty(liveComp);
             }
 
