@@ -1,10 +1,10 @@
-// URP-compatible always-on-top shader for the body tracking skeleton (joint
-// spheres + bone line meshes). Required pieces for URP forward rendering:
-//   - HLSLPROGRAM (not CGPROGRAM) and Core.hlsl include
-//   - Pass tag "LightMode" = "UniversalForward"
-//   - TransformObjectToHClip (not UnityObjectToClipPos)
-// ZTest Always + ZWrite Off + Overlay queue keep the skeleton on top of the
-// point cloud regardless of distance.
+// Always-on-top unlit shader for the body tracking skeleton (joint spheres
+// + bone line meshes). Works under Unity Built-in render pipeline (URP is
+// not installed in this project, despite the project being structured as
+// "Universal 3D" — there is no com.unity.render-pipelines.universal in
+// Packages/manifest.json or Library/PackageCache).
+// ZTest Always + ZWrite Off + Overlay queue keep the skeleton on top of
+// the point cloud regardless of distance.
 
 Shader "BodyTracking/SkeletonOverlay"
 {
@@ -15,55 +15,44 @@ Shader "BodyTracking/SkeletonOverlay"
 
     SubShader
     {
-        Tags
-        {
-            "RenderPipeline" = "UniversalPipeline"
-            "Queue" = "Overlay"
-            "RenderType" = "Overlay"
-            "IgnoreProjector" = "True"
-        }
+        Tags { "Queue" = "Overlay" "RenderType" = "Overlay" "IgnoreProjector" = "True" }
+
+        ZTest Always
+        ZWrite Off
+        Cull Off
+        Lighting Off
 
         Pass
         {
-            Name "SkeletonOverlay"
-            Tags { "LightMode" = "UniversalForward" }
-
-            ZTest Always
-            ZWrite Off
-            Cull Off
-
-            HLSLPROGRAM
+            CGPROGRAM
             #pragma vertex vert
             #pragma fragment frag
+            #include "UnityCG.cginc"
 
-            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
-
-            CBUFFER_START(UnityPerMaterial)
-                half4 _Color;
-            CBUFFER_END
-
-            struct Attributes
+            struct appdata
             {
-                float3 positionOS : POSITION;
+                float4 vertex : POSITION;
             };
 
-            struct Varyings
+            struct v2f
             {
-                float4 positionHCS : SV_POSITION;
+                float4 pos : SV_POSITION;
             };
 
-            Varyings vert(Attributes IN)
+            fixed4 _Color;
+
+            v2f vert(appdata v)
             {
-                Varyings OUT;
-                OUT.positionHCS = TransformObjectToHClip(IN.positionOS);
-                return OUT;
+                v2f o;
+                o.pos = UnityObjectToClipPos(v.vertex);
+                return o;
             }
 
-            half4 frag(Varyings IN) : SV_Target
+            fixed4 frag(v2f i) : SV_Target
             {
                 return _Color;
             }
-            ENDHLSL
+            ENDCG
         }
     }
 
