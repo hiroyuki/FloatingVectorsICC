@@ -335,6 +335,7 @@ namespace BodyTracking
                 int lastSeen = _lastSeenFrame.TryGetValue(kv.Key, out var f) ? f : -1;
                 int sinceLastSeen = Time.frameCount - lastSeen;
                 kv.Value.SetVisible(sinceLastSeen <= unseenFramesBeforeHide);
+                kv.Value.TickDiagAfterUpdate();
                 if (sinceLastSeen > unseenFramesBeforeDestroy)
                 {
                     _toDestroy.Add(kv.Key);
@@ -360,8 +361,12 @@ namespace BodyTracking
                     foreach (var kv in _bodies)
                     {
                         var v = kv.Value;
-                        var p = v.GetSamplePosition();
-                        sample = $"id={kv.Key} pelvis_local={p} pelvis_world={v.WorldOf(p)} active={v.IsActive}";
+                        float meanJump = v.JumpSamples > 0 ? v.SumJumpThisWindow / v.JumpSamples : 0f;
+                        sample = $"id={kv.Key} active={v.IsActive} " +
+                                 $"toggles/s={v.VisibilityToggles} " +
+                                 $"pelvis_jump_max={v.MaxJumpThisWindow:F3}m " +
+                                 $"pelvis_jump_avg={meanJump:F3}m";
+                        v.ResetDiagWindow();
                         break;
                     }
                     Debug.Log(
@@ -537,6 +542,44 @@ namespace BodyTracking
             public Vector3 WorldOf(Vector3 local)
             {
                 return _root != null ? _root.transform.TransformPoint(local) : local;
+            }
+
+            // Diagnostic: how often did this body's visibility toggle and how big are
+            // the per-pop position jumps? Reset by ResetDiagWindow.
+            public int VisibilityToggles { get; private set; }
+            public float MaxJumpThisWindow { get; private set; }
+            public float SumJumpThisWindow { get; private set; }
+            public int JumpSamples { get; private set; }
+            private bool _wasActive;
+            private Vector3 _prevPelvis;
+
+            public void TickDiagAfterUpdate()
+            {
+                bool nowActive = _root != null && _root.activeSelf;
+                if (nowActive != _wasActive) VisibilityToggles++;
+                _wasActive = nowActive;
+
+                int idx = (int)k4abt_joint_id_t.K4ABT_JOINT_PELVIS;
+                if (idx < _jointPositions.Length)
+                {
+                    var cur = _jointPositions[idx];
+                    if (_prevPelvis != Vector3.zero)
+                    {
+                        float d = (cur - _prevPelvis).magnitude;
+                        if (d > MaxJumpThisWindow) MaxJumpThisWindow = d;
+                        SumJumpThisWindow += d;
+                        JumpSamples++;
+                    }
+                    _prevPelvis = cur;
+                }
+            }
+
+            public void ResetDiagWindow()
+            {
+                VisibilityToggles = 0;
+                MaxJumpThisWindow = 0f;
+                SumJumpThisWindow = 0f;
+                JumpSamples = 0;
             }
 
             public void Destroy()
