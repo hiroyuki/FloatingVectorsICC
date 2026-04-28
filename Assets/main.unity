@@ -303,7 +303,7 @@ MonoBehaviour:
   defaultBoundingBox: {fileID: 1151541767}
   defaultDecimater: {fileID: 173474409}
   defaultCumulative: {fileID: 18533122}
-  syncTopology: 0
+  syncTopology: 2
   trigger2ImageDelayStepUs: 160
   enableTimerSyncWithHost: 1
   enableGlobalTimestamp: 1
@@ -666,10 +666,13 @@ MonoBehaviour:
   source: {fileID: 0}
   showSkeleton: 1
   showAnatomicalBones: 1
-  jointRadius: 0.015
+  jointRadius: 0.05
   skeletonColor: {r: 0.2, g: 0.9, b: 1, a: 1}
   processingMode: 4
-  smoothing: 0
+  smoothing: 0.4
+  maxBodies: 4
+  unseenFramesBeforeDestroy: 60
+  diagnosticLogging: 1
 --- !u!1 &2103759209
 GameObject:
   m_ObjectHideFlags: 0

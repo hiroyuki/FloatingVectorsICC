@@ -36,7 +36,7 @@ namespace BodyTracking
         public bool showAnatomicalBones = true;
 
         [Tooltip("Joint marker radius in meters.")]
-        [Range(0.005f, 0.05f)] public float jointRadius = 0.015f;
+        [Range(0.005f, 0.2f)] public float jointRadius = 0.05f;
 
         [Tooltip("Skeleton color. Bones inherit this; joints are shown slightly brighter.")]
         public Color skeletonColor = new Color(0.2f, 0.9f, 1f, 1f);
@@ -418,12 +418,8 @@ namespace BodyTracking
                 // fallback runs. Resolve the chain first, then construct the Material once.
                 var unlitShader = ResolveUnlitShader();
 
-                var jointMat = new Material(unlitShader)
-                {
-                    color = new Color(color.r * 1.2f, color.g * 1.2f, color.b * 1.2f, 1f),
-                    renderQueue = (int)UnityEngine.Rendering.RenderQueue.Overlay,
-                };
-                ConfigureOverlayMaterial(jointMat);
+                var jointMat = new Material(unlitShader);
+                SetMaterialColor(jointMat, new Color(color.r * 1.2f, color.g * 1.2f, color.b * 1.2f, 1f));
 
                 for (int i = 0; i < _joints.Length; i++)
                 {
@@ -443,12 +439,8 @@ namespace BodyTracking
                 _bonesMesh = new Mesh { name = "Bones", indexFormat = UnityEngine.Rendering.IndexFormat.UInt16 };
                 mf.sharedMesh = _bonesMesh;
 
-                _bonesMat = new Material(unlitShader)
-                {
-                    color = color,
-                    renderQueue = (int)UnityEngine.Rendering.RenderQueue.Overlay,
-                };
-                ConfigureOverlayMaterial(_bonesMat);
+                _bonesMat = new Material(unlitShader);
+                SetMaterialColor(_bonesMat, color);
                 _bonesRenderer.sharedMaterial = _bonesMat;
 
                 _boneVerts = new Vector3[s_bones.Length * 2];
@@ -522,30 +514,23 @@ namespace BodyTracking
                 if (_root != null) Object.Destroy(_root);
             }
 
-            // BodyTracking/SkeletonOverlay hardcodes ZTest Always + ZWrite Off + Overlay queue
-            // so the skeleton always draws on top of the point cloud. Falls back to URP/Unlit
-            // (with the depth test issue) only if the custom shader is missing — that surfaces
-            // a magenta material so the problem is obvious.
             private static Shader ResolveUnlitShader()
             {
-                Shader s = Shader.Find("BodyTracking/SkeletonOverlay");
-                if (s == null) s = Shader.Find("Universal Render Pipeline/Unlit");
+                Shader s = Shader.Find("Universal Render Pipeline/Unlit");
                 if (s == null) s = Shader.Find("Unlit/Color");
                 if (s == null) s = Shader.Find("Sprites/Default");
-                if (s == null) s = Shader.Find("Hidden/InternalErrorShader");
                 return s;
             }
 
-            // Force the skeleton material to draw on top of the point cloud. Without this
-            // the joint spheres / bone lines sit at almost the same depth as the point
-            // cloud surface and lose the depth test, so the skeleton seems to disappear.
-            // ZTest Always + ZWrite Off + Overlay queue = always visible on top.
-            private static void ConfigureOverlayMaterial(Material m)
+            // URP/Unlit binds the visible color to "_BaseColor"; legacy Material.color
+            // writes "_Color" instead and gets ignored on URP shaders. Set both so the
+            // material picks up the colour regardless of which pipeline is in use.
+            private static void SetMaterialColor(Material m, Color c)
             {
                 if (m == null) return;
-                if (m.HasProperty("_ZTest")) m.SetInt("_ZTest", (int)UnityEngine.Rendering.CompareFunction.Always);
-                if (m.HasProperty("_ZWrite")) m.SetInt("_ZWrite", 0);
-                if (m.HasProperty("_Cull")) m.SetInt("_Cull", (int)UnityEngine.Rendering.CullMode.Off);
+                if (m.HasProperty("_BaseColor")) m.SetColor("_BaseColor", c);
+                if (m.HasProperty("_Color")) m.SetColor("_Color", c);
+                m.color = c;
             }
         }
     }
