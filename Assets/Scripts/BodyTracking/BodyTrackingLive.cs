@@ -62,7 +62,6 @@ namespace BodyTracking
         private readonly HashSet<uint> _seenThisFrame = new HashSet<uint>();
 
         private byte[] _depthCopy;   // reused scratch so we don't realloc each callback
-        private byte[] _irCopy;      // ditto, only used when IR is delivered alongside depth
 
         private static readonly (k4abt_joint_id_t a, k4abt_joint_id_t b)[] s_bones = new[]
         {
@@ -217,28 +216,13 @@ namespace BodyTracking
             if (!showSkeleton) return;
             if (!TryEnsureTracker(frame)) return;
 
-            int dNeeded = frame.DepthByteCount;
-            if (_depthCopy == null || _depthCopy.Length < dNeeded) _depthCopy = new byte[dNeeded];
-            System.Buffer.BlockCopy(frame.DepthBytes, 0, _depthCopy, 0, dNeeded);
-
-            byte[] irBytes = null;
-            int irBytesCount = 0, irW = 0, irH = 0;
-            if (frame.IRByteCount > 0 && frame.IRBytes != null)
-            {
-                int iNeeded = frame.IRByteCount;
-                if (_irCopy == null || _irCopy.Length < iNeeded) _irCopy = new byte[iNeeded];
-                System.Buffer.BlockCopy(frame.IRBytes, 0, _irCopy, 0, iNeeded);
-                irBytes = _irCopy;
-                irBytesCount = iNeeded;
-                irW = frame.IRWidth;
-                irH = frame.IRHeight;
-            }
+            int needed = frame.DepthByteCount;
+            if (_depthCopy == null || _depthCopy.Length < needed) _depthCopy = new byte[needed];
+            System.Buffer.BlockCopy(frame.DepthBytes, 0, _depthCopy, 0, needed);
 
             ulong tsUsec = frame.TimestampUs; // already microseconds
-            var capture = K4ACaptureBridge.CreateCaptureFromDepthAndIR(
-                _depthCopy, dNeeded, frame.DepthWidth, frame.DepthHeight,
-                irBytes, irBytesCount, irW, irH,
-                tsUsec);
+            var capture = K4ACaptureBridge.CreateCaptureFromDepthY16(
+                _depthCopy, needed, frame.DepthWidth, frame.DepthHeight, tsUsec);
             if (capture == System.IntPtr.Zero) return;
 
             // Non-blocking enqueue (returns TIMEOUT if the input queue is full — drop the frame).

@@ -16,10 +16,6 @@ namespace PointCloud
     /// <summary>
     /// One frame of raw pre-D2C sensor data. Byte arrays are pooled — they live only for the
     /// duration of the OnRawFramesReady callback, so consumers must copy before returning.
-    ///
-    /// IR fields are populated when <see cref="PointCloudRenderer.enableIRStream"/> is true
-    /// (Femto Bolt delivers passive IR at the same resolution as depth, Y16). They are zero
-    /// otherwise; consumers that need IR should check <see cref="IRByteCount"/> &gt; 0.
     /// </summary>
     public readonly struct RawFrameData
     {
@@ -31,15 +27,10 @@ namespace PointCloud
         public readonly int ColorByteCount;
         public readonly int ColorWidth;
         public readonly int ColorHeight;
-        public readonly byte[] IRBytes;      // Y16 (2 bytes per pixel), row-major. May be empty.
-        public readonly int IRByteCount;
-        public readonly int IRWidth;
-        public readonly int IRHeight;
         public readonly ulong TimestampUs;
 
         public RawFrameData(byte[] depthBytes, int depthByteCount, int depthWidth, int depthHeight,
                             byte[] colorBytes, int colorByteCount, int colorWidth, int colorHeight,
-                            byte[] irBytes, int irByteCount, int irWidth, int irHeight,
                             ulong timestampUs)
         {
             DepthBytes = depthBytes;
@@ -50,10 +41,6 @@ namespace PointCloud
             ColorByteCount = colorByteCount;
             ColorWidth = colorWidth;
             ColorHeight = colorHeight;
-            IRBytes = irBytes;
-            IRByteCount = irByteCount;
-            IRWidth = irWidth;
-            IRHeight = irHeight;
             TimestampUs = timestampUs;
         }
     }
@@ -73,12 +60,6 @@ namespace PointCloud
         public uint colorWidth = 1280;
         public uint colorHeight = 720;
         public uint colorFps = 30;
-
-        [Tooltip("Enable the Femto Bolt's passive IR stream. Required for k4abt body tracking, " +
-                 "which reads IR off the synthesized k4a_capture in addition to depth. IR is " +
-                 "delivered at the same resolution and fps as depth. Leave OFF if you don't " +
-                 "use BodyTrackingLive — pulling IR each frame costs an extra ~720 KB/frame copy.")]
-        public bool enableIRStream = true;
 
         [Header("Pipeline")]
         [Tooltip("Stream that depth gets aligned TO via the Align filter. " +
@@ -305,10 +286,6 @@ namespace PointCloud
                             colorByteCount: slot.ColorByteCount,
                             colorWidth: slot.ColorWidth,
                             colorHeight: slot.ColorHeight,
-                            irBytes: slot.IRBytes ?? Array.Empty<byte>(),
-                            irByteCount: slot.IRByteCount,
-                            irWidth: slot.IRWidth,
-                            irHeight: slot.IRHeight,
                             timestampUs: slot.TimestampUs));
                     }
                 }
@@ -481,11 +458,6 @@ namespace PointCloud
             _config = new OrbbecConfig();
             _config.EnableVideoStream(ObStreamType.Depth, depthWidth, depthHeight, depthFps, ObFormat.Y16);
             _config.EnableVideoStream(ObStreamType.Color, colorWidth, colorHeight, colorFps, ObFormat.RGB);
-            if (enableIRStream)
-            {
-                // Femto Bolt's passive IR stream matches depth (same dimensions, Y16, same fps).
-                _config.EnableVideoStream(ObStreamType.IR, depthWidth, depthHeight, depthFps, ObFormat.Y16);
-            }
             // Pipeline-level align supports only ALIGN_D2C_HW_MODE; we use the Align filter for SW D2C.
             _config.SetAlignMode(ObAlignMode.Disable);
             _config.SetFrameAggregateOutputMode(ObFrameAggregateOutputMode.AllTypeFrameRequire);
@@ -571,11 +543,9 @@ namespace PointCloud
             // the filled portion; if it delivers larger we log and skip the raw path.
             int depthRaw = (int)(depthWidth * depthHeight) * 2;
             int colorRaw = (int)(colorWidth * colorHeight) * 3;
-            int irRaw = enableIRStream ? (int)(depthWidth * depthHeight) * 2 : 0; // IR matches depth dims
             _slots = new SlotPool(slotCount: 3, capacity: maxPoints,
                                   depthRawByteCapacity: depthRaw,
-                                  colorRawByteCapacity: colorRaw,
-                                  irRawByteCapacity: irRaw);
+                                  colorRawByteCapacity: colorRaw);
         }
 
         private void ApplyAxisConvention()
@@ -774,15 +744,6 @@ namespace PointCloud
                                   out slot.DepthByteCount, out slot.DepthWidth, out slot.DepthHeight);
                     CopyRawStream(frameset.GetColorFrame, slot.ColorBytes,
                                   out slot.ColorByteCount, out slot.ColorWidth, out slot.ColorHeight);
-                    if (enableIRStream)
-                    {
-                        CopyRawStream(frameset.GetIRFrame, slot.IRBytes,
-                                      out slot.IRByteCount, out slot.IRWidth, out slot.IRHeight);
-                    }
-                    else
-                    {
-                        slot.IRByteCount = 0; slot.IRWidth = 0; slot.IRHeight = 0;
-                    }
 
                     if (_slots.Publish(slot)) FramesDropped++;
                     Interlocked.Increment(ref _capturedCount);
@@ -901,10 +862,6 @@ namespace PointCloud
             public int ColorByteCount;
             public int ColorWidth;
             public int ColorHeight;
-            public byte[] IRBytes;       // empty when IR stream is disabled
-            public int IRByteCount;
-            public int IRWidth;
-            public int IRHeight;
         }
 
         private readonly object _lock = new object();
@@ -912,8 +869,7 @@ namespace PointCloud
         private int _freeCount;
         private Slot _ready;
 
-        public SlotPool(int slotCount, int capacity, int depthRawByteCapacity, int colorRawByteCapacity,
-                         int irRawByteCapacity)
+        public SlotPool(int slotCount, int capacity, int depthRawByteCapacity, int colorRawByteCapacity)
         {
             if (slotCount < 2) throw new ArgumentOutOfRangeException(nameof(slotCount));
             _free = new Slot[slotCount];
@@ -925,7 +881,6 @@ namespace PointCloud
                         NativeArrayOptions.UninitializedMemory),
                     DepthBytes = depthRawByteCapacity > 0 ? new byte[depthRawByteCapacity] : Array.Empty<byte>(),
                     ColorBytes = colorRawByteCapacity > 0 ? new byte[colorRawByteCapacity] : Array.Empty<byte>(),
-                    IRBytes = irRawByteCapacity > 0 ? new byte[irRawByteCapacity] : Array.Empty<byte>(),
                 };
             }
             _freeCount = slotCount;
