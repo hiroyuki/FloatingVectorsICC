@@ -103,7 +103,7 @@ namespace BodyTracking
 
         [Tooltip("Log diagnostic counters once per second (captures enqueued/dropped, body " +
                  "frames popped, bodies detected). Useful while tuning IR/processing mode.")]
-        public bool diagnosticLogging = true;
+        public bool diagnosticLogging = false;
 
         // Diagnostic counters, reset every ~1s of Update ticks.
         private int _diagEnqueueOk;
@@ -451,6 +451,7 @@ namespace BodyTracking
             private readonly int[] _boneIndices;
 
             private TrailRenderer[] _trails;
+            private bool[] _jointEverValid; // first-valid bookkeeping for trail Clear() seeding
 
             public BodyVisual(Transform parent, uint id, float jointRadius, Color color,
                               bool showTrails, float trailDuration, float trailWidth,
@@ -469,6 +470,7 @@ namespace BodyTracking
                 SetMaterialColor(jointMat, new Color(color.r * 1.2f, color.g * 1.2f, color.b * 1.2f, 1f));
 
                 _trails = new TrailRenderer[_joints.Length];
+                _jointEverValid = new bool[_joints.Length];
 
                 for (int i = 0; i < _joints.Length; i++)
                 {
@@ -528,13 +530,35 @@ namespace BodyTracking
                 // LOW confidence. Joints whose confidence flaps below LOW keep their previous
                 // position (don't toggle SetActive — that's what produced per-joint flicker
                 // when a body was being tracked at the edge of the depth model's range).
+                // Big single-frame jump that suggests the joint was re-detected at a new location
+                // (id swap inside k4abt, brief tracking loss, etc.). Clearing the trail when this
+                // happens prevents a long stray line from appearing through space. 0.4 m / frame
+                // at 30 Hz = 12 m/s — well above natural human joint velocity.
+                const float kTrailJumpResetMeters = 0.4f;
+
                 for (int i = 0; i < _joints.Length; i++)
                 {
                     var j = skel.Joints[i];
                     if (j.ConfidenceLevel >= k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW)
                     {
-                        _jointPositions[i] = K4AmmToUnity(j.Position);
+                        var newPos = K4AmmToUnity(j.Position);
+                        bool firstTime = _jointEverValid != null && !_jointEverValid[i];
+                        bool bigJump = !firstTime &&
+                                       (newPos - _jointPositions[i]).sqrMagnitude > kTrailJumpResetMeters * kTrailJumpResetMeters;
+                        _jointPositions[i] = newPos;
                         _jointValid[i] = true;
+
+                        if (firstTime || bigJump)
+                        {
+                            // Snap the joint to its real position WITHOUT drawing a trail back
+                            // to the previous (or origin) location.
+                            _joints[i].localPosition = newPos;
+                            if (_trails != null && _trails[i] != null) _trails[i].Clear();
+                            if (_jointEverValid != null) _jointEverValid[i] = true;
+                            _joints[i].localScale = Vector3.one * (jointRadius * 2f);
+                            if (!_joints[i].gameObject.activeSelf) _joints[i].gameObject.SetActive(true);
+                            continue;
+                        }
                     }
                     // else: leave _jointPositions[i] / _jointValid[i] from previous pop.
                     _joints[i].localPosition = _jointPositions[i];

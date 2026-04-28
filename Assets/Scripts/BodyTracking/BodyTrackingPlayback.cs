@@ -86,7 +86,6 @@ namespace BodyTracking
 
         private void HandleTracksLoaded()
         {
-            Debug.Log($"[BodyTrackingPlayback] OnTracksLoaded fired, autoProcessOnRead={autoProcessOnRead}", this);
             if (autoProcessOnRead) Process();
         }
 
@@ -122,15 +121,11 @@ namespace BodyTracking
             }
             if (live != null && liveWasEnabled)
             {
-                Debug.Log("[BodyTrackingPlayback] disabling BodyTrackingLive (synchronous OnDisable -> tracker destroy)", this);
                 live.enabled = false;
-                // OnDisable runs synchronously inside the assignment above. By the time
-                // we reach this line, Live's tracker is destroyed and the BT 'one tracker
-                // per process' slot is free. No yield needed.
+                // OnDisable runs synchronously, freeing the k4abt tracker slot.
             }
 
             var tracks = recorder.GetRecordedDepthTracks();
-            Debug.Log($"[BodyTrackingPlayback] got tracks: count={tracks.Count}", this);
             PointCloudRecorder.RecordedDepthTrack pick = null;
             foreach (var t in tracks)
             {
@@ -154,7 +149,7 @@ namespace BodyTracking
                 _processing = null;
                 yield break;
             }
-            Debug.Log($"[BodyTrackingPlayback] processing serial={pick.Serial} depthFrames={pick.DepthFrames.Count} dW={pick.DepthWidth} dH={pick.DepthHeight}", this);
+            // Inputs validated — proceed with the recompute pass silently.
 
             int dW = pick.DepthWidth > 0 ? pick.DepthWidth : 640;
             int dH = pick.DepthHeight > 0 ? pick.DepthHeight : 576;
@@ -197,7 +192,10 @@ namespace BodyTracking
                 bool hasRealIR = pick.IRFrames != null && pick.IRFrames.Count == total;
                 int irW = hasRealIR && pick.IRWidth > 0 ? pick.IRWidth : dW;
                 int irH = hasRealIR && pick.IRHeight > 0 ? pick.IRHeight : dH;
-                Debug.Log($"[BodyTrackingPlayback] IR source = {(hasRealIR ? "recorded passive IR" : "depth-as-IR fallback (no IR in recording, k4abt may detect 0 bodies)")}", this);
+                if (!hasRealIR)
+                {
+                    Debug.LogWarning("[BodyTrackingPlayback] no IR in recording — k4abt may detect 0 bodies", this);
+                }
 
                 for (int i = 0; i < total; i++)
                 {
@@ -269,18 +267,12 @@ namespace BodyTracking
                     if ((processed & 7) == 0)
                     {
                         ProcessingStatus = $"BT recompute: {processed} / {total}";
-                        if ((processed & 31) == 0) // log every 32 frames (~1 sec at 30 Hz)
-                        {
-                            Debug.Log($"[BodyTrackingPlayback] {ProcessingStatus} " +
-                                      $"(enqueueTimeouts={enqueueTimeouts} popTimeouts={popTimeouts} popFails={popFailures})", this);
-                        }
                         yield return null;
                     }
                 }
 
                 ProcessingStatus = $"done: {_trajectories.Count} trajectories from {processed} frames " +
                                    $"(enqueueTimeouts={enqueueTimeouts} popTimeouts={popTimeouts} popFails={popFailures})";
-                Debug.Log("[BodyTrackingPlayback] " + ProcessingStatus, this);
             }
             finally
             {
@@ -294,11 +286,7 @@ namespace BodyTracking
             }
 
             // Re-enable Live (re-creates its tracker on next frame) if we paused it.
-            if (live != null && liveWasEnabled && !live.enabled)
-            {
-                live.enabled = true;
-                Debug.Log("[BodyTrackingPlayback] re-enabled BodyTrackingLive", this);
-            }
+            if (live != null && liveWasEnabled && !live.enabled) live.enabled = true;
 
             try { OnTrajectoriesReady?.Invoke(); }
             catch (Exception e) { Debug.LogException(e, this); }
