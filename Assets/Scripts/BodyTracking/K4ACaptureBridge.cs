@@ -90,23 +90,75 @@ namespace BodyTracking
         /// One-shot helper: copy depth Y16 into a native-backed k4a_image_t, attach to a
         /// fresh k4a_capture_t, return the capture (image is released, capture owns the
         /// internal reference). Returns IntPtr.Zero on failure.
+        ///
+        /// k4abt's TrackerHost reads the IR image off the capture too (despite the header
+        /// only documenting "depth data"), so we attach a second IR16 image. v2 doesn't
+        /// expose passive IR yet, so we feed the depth bytes again as a stand-in. The
+        /// inference quality drops (the BT model treats IR brightness as a real cue), but
+        /// it lets the tracker run end-to-end while a proper IR stream is added in (B).
         /// </summary>
         public static IntPtr CreateCaptureFromDepthY16(byte[] y16, int byteCount, int width, int height,
                                                         ulong deviceTimestampUsec)
         {
-            IntPtr image = CreateDepthImageFromY16(y16, byteCount, width, height, deviceTimestampUsec);
-            if (image == IntPtr.Zero) return IntPtr.Zero;
+            IntPtr depth = CreateDepthImageFromY16(y16, byteCount, width, height, deviceTimestampUsec);
+            if (depth == IntPtr.Zero) return IntPtr.Zero;
 
-            IntPtr capture = CreateCaptureWithDepth(image);
-            // capture_set_depth_image bumps the image refcount; release our caller-side ref.
-            K4ANative.k4a_image_release(image);
-
-            if (capture == IntPtr.Zero)
+            // Independent copy for the IR slot; the SDK calls our release callback per-image.
+            IntPtr ir = CreateIrImageFromY16(y16, byteCount, width, height, deviceTimestampUsec);
+            if (ir == IntPtr.Zero)
             {
-                // image was already released; capture creation owns nothing now.
+                K4ANative.k4a_image_release(depth);
                 return IntPtr.Zero;
             }
+
+            var rc = K4ANative.k4a_capture_create(out IntPtr capture);
+            if (rc != k4a_result_t.K4A_RESULT_SUCCEEDED)
+            {
+                UnityEngine.Debug.LogError("[K4ACaptureBridge] k4a_capture_create failed");
+                K4ANative.k4a_image_release(depth);
+                K4ANative.k4a_image_release(ir);
+                return IntPtr.Zero;
+            }
+            K4ANative.k4a_capture_set_depth_image(capture, depth);
+            K4ANative.k4a_capture_set_ir_image(capture, ir);
+            // capture_set_*_image bumped each image's refcount; release our caller-side refs.
+            K4ANative.k4a_image_release(depth);
+            K4ANative.k4a_image_release(ir);
             return capture;
+        }
+
+        /// <summary>
+        /// Build a k4a_image_t in IR16 format backed by a copy of the supplied Y16 buffer.
+        /// Used as a stand-in until v2 gives us a real passive-IR stream.
+        /// </summary>
+        public static IntPtr CreateIrImageFromY16(byte[] y16, int byteCount, int width, int height,
+                                                    ulong deviceTimestampUsec)
+        {
+            if (y16 == null || byteCount <= 0 || width <= 0 || height <= 0)
+                return IntPtr.Zero;
+
+            int strideBytes = width * 2; // IR16 = 2 bytes per pixel
+            int expected = strideBytes * height;
+            if (byteCount < expected) return IntPtr.Zero;
+
+            IntPtr nativeBuf = Marshal.AllocHGlobal(expected);
+            Marshal.Copy(y16, 0, nativeBuf, expected);
+
+            var rc = K4ANative.k4a_image_create_from_buffer(
+                k4a_image_format_t.K4A_IMAGE_FORMAT_IR16,
+                width, height, strideBytes,
+                nativeBuf, (UIntPtr)expected,
+                s_releaseCb, IntPtr.Zero,
+                out IntPtr image);
+
+            if (rc != k4a_result_t.K4A_RESULT_SUCCEEDED)
+            {
+                Marshal.FreeHGlobal(nativeBuf);
+                UnityEngine.Debug.LogError("[K4ACaptureBridge] k4a_image_create_from_buffer (IR16) failed");
+                return IntPtr.Zero;
+            }
+            K4ANative.k4a_image_set_device_timestamp_usec(image, deviceTimestampUsec);
+            return image;
         }
     }
 }

@@ -165,6 +165,12 @@ namespace BodyTracking
         [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
         public static extern IntPtr k4a_capture_get_depth_image(IntPtr capture_handle);
 
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void k4a_capture_set_ir_image(IntPtr capture_handle, IntPtr image_handle);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr k4a_capture_get_ir_image(IntPtr capture_handle);
+
         // image lifecycle
         [DllImport(DLL, CallingConvention = CallingConvention.Cdecl)]
         public static extern k4a_result_t k4a_image_create_from_buffer(
