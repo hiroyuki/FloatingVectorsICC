@@ -59,7 +59,20 @@ namespace BodyTracking
         // spheres + a Mesh holding bone line segments. We keep them around between
         // frames so movement is smooth and we don't allocate every Update.
         private readonly Dictionary<uint, BodyVisual> _bodies = new Dictionary<uint, BodyVisual>();
+        private readonly Dictionary<uint, int> _lastSeenFrame = new Dictionary<uint, int>();
         private readonly HashSet<uint> _seenThisFrame = new HashSet<uint>();
+        private readonly List<uint> _toDestroy = new List<uint>();
+
+        [Header("Visual lifetime")]
+        [Tooltip("Hard cap on cached BodyVisuals. K4abt body IDs can flap between frames " +
+                 "when tracking is unstable; without a cap we'd allocate 32 GameObjects + " +
+                 "Mesh + Material per id forever and freeze Unity. Single-person sessions " +
+                 "rarely need more than 2.")]
+        [Min(1)] public int maxBodies = 4;
+
+        [Tooltip("Destroy a BodyVisual that hasn't been seen for this many Update ticks. " +
+                 "At 30 fps, 60 frames = ~2s of grace before re-creating on a new ID.")]
+        [Min(1)] public int unseenFramesBeforeDestroy = 60;
 
         private byte[] _depthCopy;   // reused scratch so we don't realloc each callback
         private byte[] _irCopy;      // ditto, only used when IR is delivered alongside depth
@@ -270,11 +283,17 @@ namespace BodyTracking
 
                         if (!_bodies.TryGetValue(id, out var visual))
                         {
+                            // Hard cap: if the dict is full, evict the oldest unseen body
+                            // before allocating a new visual. Without this we'd leak 32+ GOs
+                            // every time k4abt assigns a new id (which can happen per frame
+                            // when tracking is unstable, freezing Unity within seconds).
+                            EvictIfFull();
                             visual = new BodyVisual(transform, id, jointRadius, skeletonColor);
                             _bodies[id] = visual;
                         }
                         visual.UpdateFromSkeleton(skel, jointRadius, showAnatomicalBones, skeletonColor);
                         _seenThisFrame.Add(id);
+                        _lastSeenFrame[id] = Time.frameCount;
                     }
                 }
                 finally
@@ -285,10 +304,51 @@ namespace BodyTracking
 
             // Bodies that disappeared this tick are hidden but kept around for a few
             // frames in case they re-appear with the same id (cheap to keep, expensive
-            // to destroy and re-create the GameObjects).
+            // to destroy and re-create the GameObjects). Past unseenFramesBeforeDestroy
+            // they get destroyed to reclaim GameObjects.
+            _toDestroy.Clear();
             foreach (var kv in _bodies)
             {
-                kv.Value.SetVisible(_seenThisFrame.Contains(kv.Key));
+                bool seen = _seenThisFrame.Contains(kv.Key);
+                kv.Value.SetVisible(seen);
+                if (!seen)
+                {
+                    int lastSeen = _lastSeenFrame.TryGetValue(kv.Key, out var f) ? f : -1;
+                    if (Time.frameCount - lastSeen > unseenFramesBeforeDestroy)
+                    {
+                        _toDestroy.Add(kv.Key);
+                    }
+                }
+            }
+            foreach (var id in _toDestroy)
+            {
+                _bodies[id].Destroy();
+                _bodies.Remove(id);
+                _lastSeenFrame.Remove(id);
+            }
+        }
+
+        private void EvictIfFull()
+        {
+            while (_bodies.Count >= maxBodies)
+            {
+                uint oldestId = 0;
+                int oldestFrame = int.MaxValue;
+                bool any = false;
+                foreach (var kv in _bodies)
+                {
+                    int f = _lastSeenFrame.TryGetValue(kv.Key, out var v) ? v : -1;
+                    if (f < oldestFrame)
+                    {
+                        oldestFrame = f;
+                        oldestId = kv.Key;
+                        any = true;
+                    }
+                }
+                if (!any) break;
+                _bodies[oldestId].Destroy();
+                _bodies.Remove(oldestId);
+                _lastSeenFrame.Remove(oldestId);
             }
         }
 
