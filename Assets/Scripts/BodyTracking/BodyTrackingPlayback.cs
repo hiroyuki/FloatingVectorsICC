@@ -109,7 +109,28 @@ namespace BodyTracking
         private IEnumerator ProcessCoroutine()
         {
             ClearTrajectories();
+
+            // k4abt allows only one tracker per process. If Live is running it owns the
+            // tracker, so we have to disable it (its OnDisable destroys the tracker)
+            // before creating ours, or k4abt_tracker_create hangs / fails.
+            BodyTrackingLive live = null;
+            bool liveWasEnabled = false;
+            var allMb = UnityEngine.Object.FindObjectsByType<MonoBehaviour>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+            foreach (var mb in allMb)
+            {
+                if (mb is BodyTrackingLive l) { live = l; liveWasEnabled = l.enabled; break; }
+            }
+            if (live != null && liveWasEnabled)
+            {
+                Debug.Log("[BodyTrackingPlayback] disabling BodyTrackingLive (synchronous OnDisable -> tracker destroy)", this);
+                live.enabled = false;
+                // OnDisable runs synchronously inside the assignment above. By the time
+                // we reach this line, Live's tracker is destroyed and the BT 'one tracker
+                // per process' slot is free. No yield needed.
+            }
+
             var tracks = recorder.GetRecordedDepthTracks();
+            Debug.Log($"[BodyTrackingPlayback] got tracks: count={tracks.Count}", this);
             PointCloudRecorder.RecordedDepthTrack pick = null;
             foreach (var t in tracks)
             {
@@ -233,6 +254,13 @@ namespace BodyTracking
                 }
                 K4ACalibration.Free(calibration);
                 _processing = null;
+            }
+
+            // Re-enable Live (re-creates its tracker on next frame) if we paused it.
+            if (live != null && liveWasEnabled && !live.enabled)
+            {
+                live.enabled = true;
+                Debug.Log("[BodyTrackingPlayback] re-enabled BodyTrackingLive", this);
             }
 
             try { OnTrajectoriesReady?.Invoke(); }
