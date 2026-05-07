@@ -103,6 +103,10 @@ namespace PointCloud
             public int IRWidth;
             public int IRHeight;
             public ObCameraParam? CameraParam;
+            // World ← color camera transform (issue #9 / Phase E). Loaded from
+            // calibration/extrinsics.yaml on Read; null when the file is absent or
+            // the device entry has identity (single-camera shortcut).
+            public ObExtrinsic? GlobalTrColorCamera;
             public IReadOnlyList<PointCloudRecording.Frame> DepthFrames;
             // IR frames recorded alongside depth (Y16, depth-aligned dimensions). May be empty
             // when IR streaming was off at record time, in which case Playback BT falls back
@@ -128,6 +132,7 @@ namespace PointCloud
                     IRWidth = t.IRWidth,
                     IRHeight = t.IRHeight,
                     CameraParam = t.CameraParam,
+                    GlobalTrColorCamera = t.GlobalTrColorCamera,
                     DepthFrames = t.DepthFrames,
                     IRFrames = t.IRFrames,
                 });
@@ -151,6 +156,9 @@ namespace PointCloud
 
             // Calibration captured at record time (or loaded from YAML on Read).
             public ObCameraParam? CameraParam;
+            // World ← color camera transform (issue #9 / Phase E). Loaded from
+            // calibration/extrinsics.yaml on Read.
+            public ObExtrinsic? GlobalTrColorCamera;
 
             // Playback plumbing.
             public GameObject PlaybackObject;
@@ -343,7 +351,16 @@ namespace PointCloud
                     SetStatus($"Read: no raw sensor frames found under {root}", warn: true);
                     return;
                 }
-                SetStatus($"Loaded {totalDepth} depth / {totalColor} color / {totalIR} IR frame(s) across {_tracks.Count} device(s) from {root}");
+
+                // Pull intrinsics + extrinsics from calibration/extrinsics.yaml so playback
+                // can reconstruct point clouds without depending on a live renderer
+                // (per Plans/issue-9-multicam-extrinsic-calibration.md → Phase 4).
+                int extrinsicsApplied = LoadExtrinsicsFromYaml(root);
+
+                SetStatus(
+                    $"Loaded {totalDepth} depth / {totalColor} color / {totalIR} IR frame(s) across {_tracks.Count} device(s)"
+                    + (extrinsicsApplied > 0 ? $", extrinsics applied to {extrinsicsApplied} device(s)" : "")
+                    + $" from {root}");
 
                 try { OnTracksLoaded?.Invoke(); }
                 catch (Exception subscriberEx) { Debug.LogException(subscriberEx, this); }
@@ -353,6 +370,64 @@ namespace PointCloud
                 SetStatus($"Read failed: {e.Message}", warn: true);
                 Debug.LogException(e, this);
             }
+        }
+
+        /// <summary>
+        /// Read <c>calibration/extrinsics.yaml</c> if present and populate each
+        /// matching track's <see cref="DeviceTrack.CameraParam"/> and
+        /// <see cref="DeviceTrack.GlobalTrColorCamera"/>. Returns the number of
+        /// devices that received a non-identity <c>global_tr_colorCamera</c>.
+        /// </summary>
+        private int LoadExtrinsicsFromYaml(string root)
+        {
+            string path = Path.Combine(PointCloudRecording.CalibrationDir(root), "extrinsics.yaml");
+            if (!File.Exists(path)) return 0;
+
+            IReadOnlyList<PointCloudRecording.DeviceCalibration> calibrations;
+            try
+            {
+                calibrations = PointCloudRecording.ReadExtrinsicsYaml(root);
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[{nameof(PointCloudRecorder)}] extrinsics.yaml present but failed to parse: {e.Message}", this);
+                return 0;
+            }
+
+            int withGlobal = 0;
+            foreach (var c in calibrations)
+            {
+                if (!_tracks.TryGetValue(c.Serial, out var track)) continue;
+                // Calibration metadata: keep RCSV-derived dimensions as the source of truth
+                // (per plan: yaml intrinsic.width/height is calibration-time and may drift
+                // from the actual recorded stream shape if the mode changes).
+                track.CameraParam = new ObCameraParam
+                {
+                    DepthIntrinsic = c.DepthIntrinsic,
+                    RgbIntrinsic = c.ColorIntrinsic,
+                    DepthDistortion = c.DepthDistortion,
+                    RgbDistortion = c.ColorDistortion,
+                    Transform = c.DepthToColor,
+                    IsMirrored = false,
+                };
+                track.GlobalTrColorCamera = c.GlobalTrColorCamera;
+                if (c.GlobalTrColorCamera.HasValue && !IsIdentityExtrinsic(c.GlobalTrColorCamera.Value))
+                    withGlobal++;
+            }
+            return withGlobal;
+        }
+
+        private static bool IsIdentityExtrinsic(ObExtrinsic e)
+        {
+            const float eps = 1e-5f;
+            if (Math.Abs(e.Trans[0]) > eps || Math.Abs(e.Trans[1]) > eps || Math.Abs(e.Trans[2]) > eps) return false;
+            for (int r = 0; r < 3; r++)
+                for (int col = 0; col < 3; col++)
+                {
+                    float expected = (r == col) ? 1f : 0f;
+                    if (Math.Abs(e.Rot[r * 3 + col] - expected) > eps) return false;
+                }
+            return true;
         }
 
         // --- Recording ---
@@ -524,6 +599,11 @@ namespace PointCloud
             go.transform.SetParent(transform, worldPositionStays: false);
             // Mirror the live renderer's image-Y-down -> Unity-Y-up flip.
             go.transform.localScale = new Vector3(1f, -1f, 1f);
+            // Apply the per-track world ← color camera transform if extrinsics were
+            // loaded from extrinsics.yaml (issue #9 / Phase 5). Sets localPosition
+            // and localRotation; localScale is the Y-flip above.
+            if (track.GlobalTrColorCamera.HasValue)
+                Calibration.ExtrinsicsApply.ApplyToTransform(go.transform, track.GlobalTrColorCamera.Value);
             var mf = go.AddComponent<MeshFilter>();
             var mr = go.AddComponent<MeshRenderer>();
             mr.shadowCastingMode = ShadowCastingMode.Off;

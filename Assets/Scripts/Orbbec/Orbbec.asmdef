@@ -1,10 +1,7 @@
 {
-    "name": "Calibration",
-    "rootNamespace": "Calibration",
-    "references": [
-        "GUID:cef0e9dabbfe59a4790acbf31c21f33e",
-        "Orbbec"
-    ],
+    "name": "Orbbec",
+    "rootNamespace": "Orbbec",
+    "references": [],
     "includePlatforms": [],
     "excludePlatforms": [],
     "allowUnsafeCode": false,

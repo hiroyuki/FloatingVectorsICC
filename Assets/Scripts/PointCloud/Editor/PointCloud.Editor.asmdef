@@ -1,12 +1,9 @@
 {
-    "name": "Calibration.Editor",
-    "rootNamespace": "Calibration.EditorTools",
+    "name": "PointCloud.Editor",
+    "rootNamespace": "PointCloud.EditorTools",
     "references": [
-        "GUID:cef0e9dabbfe59a4790acbf31c21f33e",
-        "GUID:0acc523941302664db1f4e527237feb3",
-        "Calibration",
-        "Orbbec",
-        "PointCloud"
+        "PointCloud",
+        "Orbbec"
     ],
     "includePlatforms": [
         "Editor"

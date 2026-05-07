@@ -1,13 +1,13 @@
 {
-    "name": "Calibration",
-    "rootNamespace": "Calibration",
+    "name": "PointCloud",
+    "rootNamespace": "PointCloud",
     "references": [
-        "GUID:cef0e9dabbfe59a4790acbf31c21f33e",
-        "Orbbec"
+        "Orbbec",
+        "Calibration"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
-    "allowUnsafeCode": false,
+    "allowUnsafeCode": true,
     "overrideReferences": false,
     "precompiledReferences": [],
     "autoReferenced": true,
