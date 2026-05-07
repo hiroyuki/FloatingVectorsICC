@@ -1,0 +1,10 @@
+# Pinned managed dependency checksum (issue #9 / Phase E calibration)
+#
+# Verify: cd <repo-root> && sha256sum -c Assets/Plugins/YamlDotNet/CHECKSUMS.txt
+# Source: https://www.nuget.org/api/v2/package/YamlDotNet/16.3.0
+# Target: Unity 6 LTS, .NET Standard 2.1
+#
+# OpenCV for Unity (Enox Software) is imported separately via Asset Store
+# into Assets/OpenCVForUnity/ and is not tracked here.
+
+39c210cb0ec54d4076b13988ea21c71f008c253f3b95c5f931ccbbe8e896ff6e *Assets/Plugins/YamlDotNet/YamlDotNet.dll

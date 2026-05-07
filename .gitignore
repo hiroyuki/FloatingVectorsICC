@@ -19,6 +19,13 @@
 # External SDK extracts (kept outside the repo, see CLAUDE.md for canonical paths)
 /OrbbecSDK_K4A_Wrapper*/
 
+# OpenCV for Unity (Asset Store, Enox Software) — user-imported, license forbids redistribution
+/Assets/OpenCVForUnity/
+/Assets/OpenCVForUnity.meta
+
+# Calibration dev artifacts (probe + test result dumps written by editor scripts)
+/_*.txt
+
 # Unity crash recovery artifacts
 /Assets/_Recovery/
 /Assets/_Recovery.meta

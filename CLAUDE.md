@@ -25,6 +25,16 @@ Unity上でリアルタイムにポイントクラウドとして描画する。
 - DLL配置済み: Assets\Plugins\OrbbecSDK\
 - ラッパーC#: Assets\Scripts\Orbbec\
 - 描画スクリプト: Assets\Scripts\PointCloud\
+- キャリブスクリプト: Assets\Scripts\Calibration\
+
+### キャリブ用依存
+- **OpenCV for Unity** (Enox Software, Asset Store): `Assets\OpenCVForUnity\` に展開 (ユーザー手動インポート)
+  - 用途: マルチカメラ extrinsic calibration (issue #9)。ChArUco 検出 (`Aruco.detectMarkers` / `Aruco.interpolateCornersCharuco` / `Aruco.estimatePoseCharucoBoard`) と solvePnP
+  - リポジトリには含めない (Asset Store ライセンス) — `.gitignore` で除外
+- **YamlDotNet** 16.3.0: `Assets\Plugins\YamlDotNet\YamlDotNet.dll` (managed, netstandard2.1)
+  - 取得元 / SHA-256 は `Assets\Plugins\YamlDotNet\CHECKSUMS.txt`
+  - 用途: extrinsics.yaml の安全パース (`YamlStream` ノード走査、型自動 deserialization 禁止)
+- 動作確認: Unity Editor メニュー `Window > Calibration > Check Dependencies` で OpenCV for Unity と YamlDotNet ロードを確認
 
 ### 外部 SDK（リポジトリには含めない）
 - Orbbec K4A Wrapper:
