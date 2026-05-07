@@ -16,6 +16,12 @@
 # OrbbecSDK runtime log directory
 /Log/
 
+# Standalone .NET worker projects (issue #10): bin/ and obj/ at any depth.
+# Hand-written worker .csproj re-allow lives below, after Unity's default
+# *.csproj exclusion line, so the negation actually wins.
+Workers/**/bin/
+Workers/**/obj/
+
 # External SDK extracts (kept outside the repo, see CLAUDE.md for canonical paths)
 /OrbbecSDK_K4A_Wrapper*/
 
@@ -65,6 +71,10 @@ ExportedObj/
 *.mdb
 *.opendb
 *.VC.db
+
+# Re-allow hand-written .csproj for standalone worker projects (issue #10).
+# This must follow the Unity-default *.csproj line above to take effect.
+!Workers/**/*.csproj
 
 # Unity3D generated meta files
 *.pidb.meta

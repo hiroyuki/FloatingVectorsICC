@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RootNamespace>K4abtWorker</RootNamespace>
+    <AssemblyName>k4abt_worker</AssemblyName>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Platforms>x64</Platforms>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>false</SelfContained>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <DebugType>portable</DebugType>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <!--
+    Worker reuses the Unity-side P/Invoke wrappers and shared layout files via
+    <Compile Include> rather than copies. Paths are relative to this csproj.
+    K4ACalibration.cs is intentionally NOT included: the worker receives a
+    pre-built calibration blob through the MMF header (raw 1032 bytes), so it
+    only needs to copy those bytes to unmanaged memory and pass IntPtr to
+    k4abt_tracker_create. See Plans/issue-10-k4abt-worker-process.md.
+  -->
+  <ItemGroup>
+    <Compile Include="..\..\Assets\Scripts\BodyTracking\Shared\IWorkerLogger.cs" Link="Shared\IWorkerLogger.cs" />
+    <Compile Include="..\..\Assets\Scripts\BodyTracking\Shared\WorkerLog.cs" Link="Shared\WorkerLog.cs" />
+    <Compile Include="..\..\Assets\Scripts\BodyTracking\Shared\WorkerBootstrap.cs" Link="Shared\WorkerBootstrap.cs" />
+    <Compile Include="..\..\Assets\Scripts\BodyTracking\Shared\K4abtWorkerSharedLayout.cs" Link="Shared\K4abtWorkerSharedLayout.cs" />
+    <Compile Include="..\..\Assets\Scripts\BodyTracking\K4ANative.cs" Link="Interop\K4ANative.cs" />
+    <Compile Include="..\..\Assets\Scripts\BodyTracking\K4ABTNative.cs" Link="Interop\K4ABTNative.cs" />
+    <Compile Include="..\..\Assets\Scripts\BodyTracking\K4ACaptureBridge.cs" Link="Interop\K4ACaptureBridge.cs" />
+  </ItemGroup>
+
+</Project>
