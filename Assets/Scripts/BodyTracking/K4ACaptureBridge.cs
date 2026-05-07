@@ -3,9 +3,14 @@
 // the byte buffer is copied into native memory at create time and freed when
 // the underlying k4a_image_t's refcount drops to 0 (the tracker keeps a ref
 // for the duration of inference and drops it when the body frame is popped).
+//
+// Compiled into both Unity and the standalone k4abt_worker.exe — diagnostics
+// route through WorkerLog (Unity-bound to Debug.Log; worker-bound to Console)
+// rather than UnityEngine.Debug directly so the worker build stays Unity-free.
 
 using System;
 using System.Runtime.InteropServices;
+using BodyTracking.Shared;
 
 namespace BodyTracking
 {
@@ -16,7 +21,11 @@ namespace BodyTracking
         // (so the GC doesn't collect it) and pass it to every image create call.
         private static readonly k4a_memory_destroy_cb_t s_releaseCb = ReleaseUnmanagedBuffer;
 
+#if UNITY_2017_1_OR_NEWER
+        // IL2CPP requires this attribute for delegates handed to native code; the
+        // standalone .NET 8 worker build doesn't define UNITY_* and ignores it.
         [AOT.MonoPInvokeCallback(typeof(k4a_memory_destroy_cb_t))]
+#endif
         private static void ReleaseUnmanagedBuffer(IntPtr buffer, IntPtr context)
         {
             // We allocated the buffer via Marshal.AllocHGlobal in CreateDepthImageFromY16,
@@ -39,7 +48,7 @@ namespace BodyTracking
             int expected = strideBytes * height;
             if (byteCount < expected)
             {
-                UnityEngine.Debug.LogError(
+                WorkerLog.Error(
                     $"[K4ACaptureBridge] depth buffer too small: got {byteCount} bytes, " +
                     $"expected {expected} for {width}x{height} Y16");
                 return IntPtr.Zero;
@@ -58,7 +67,7 @@ namespace BodyTracking
             if (rc != k4a_result_t.K4A_RESULT_SUCCEEDED)
             {
                 Marshal.FreeHGlobal(nativeBuf);
-                UnityEngine.Debug.LogError("[K4ACaptureBridge] k4a_image_create_from_buffer failed");
+                WorkerLog.Error("[K4ACaptureBridge] k4a_image_create_from_buffer failed");
                 return IntPtr.Zero;
             }
 
@@ -79,7 +88,7 @@ namespace BodyTracking
             var rc = K4ANative.k4a_capture_create(out IntPtr capture);
             if (rc != k4a_result_t.K4A_RESULT_SUCCEEDED)
             {
-                UnityEngine.Debug.LogError("[K4ACaptureBridge] k4a_capture_create failed");
+                WorkerLog.Error("[K4ACaptureBridge] k4a_capture_create failed");
                 return IntPtr.Zero;
             }
             K4ANative.k4a_capture_set_depth_image(capture, depthImage);
@@ -125,7 +134,7 @@ namespace BodyTracking
             var rc = K4ANative.k4a_capture_create(out IntPtr capture);
             if (rc != k4a_result_t.K4A_RESULT_SUCCEEDED)
             {
-                UnityEngine.Debug.LogError("[K4ACaptureBridge] k4a_capture_create failed");
+                WorkerLog.Error("[K4ACaptureBridge] k4a_capture_create failed");
                 K4ANative.k4a_image_release(depth);
                 K4ANative.k4a_image_release(ir);
                 return IntPtr.Zero;
@@ -175,7 +184,7 @@ namespace BodyTracking
             if (rc != k4a_result_t.K4A_RESULT_SUCCEEDED)
             {
                 Marshal.FreeHGlobal(nativeBuf);
-                UnityEngine.Debug.LogError("[K4ACaptureBridge] k4a_image_create_from_buffer (IR16) failed");
+                WorkerLog.Error("[K4ACaptureBridge] k4a_image_create_from_buffer (IR16) failed");
                 return IntPtr.Zero;
             }
             K4ANative.k4a_image_set_device_timestamp_usec(image, deviceTimestampUsec);
