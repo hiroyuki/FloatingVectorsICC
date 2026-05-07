@@ -68,14 +68,27 @@ namespace BodyTracking
         public k4abt_tracker_processing_mode_t processingMode =
             k4abt_tracker_processing_mode_t.K4ABT_TRACKER_PROCESSING_MODE_GPU_DIRECTML;
 
-        [Tooltip("Temporal smoothing in [0,1]. 0 = none, 1 = full smoothing.")]
+        [Tooltip("Temporal smoothing in [0,1]. 0 = none, 1 = full smoothing. " +
+                 "Ignored when useWorker is true (the worker fixes smoothing to 0 in v1).")]
         [Range(0f, 1f)] public float smoothing = 0.0f;
+
+        [Tooltip("Run k4abt in a separate process via K4abtWorkerHost instead of in-process. " +
+                 "Required for future multi-camera scenarios where multiple trackers can't " +
+                 "share one process. v1 still drives a single tracker but exercises the IPC " +
+                 "path so issue #11 can extend it.")]
+        public bool useWorker = false;
+
+        [Tooltip("K4abtWorkerHost in the scene. Auto-found via FindFirstObjectByType when " +
+                 "useWorker is true and this is left null.")]
+        public K4abtWorkerHost workerHost;
 
         // --- runtime state ---
 
         private System.IntPtr _tracker;
         private System.IntPtr _calibration;
         private bool _trackerReady;
+        private bool _workerStarted;
+        private string _workerSerial;
 
         // Per-body visuals: id -> Transform of a parent GameObject that owns 32 joint
         // spheres + a Mesh holding bone line segments. We keep them around between
@@ -184,9 +197,22 @@ namespace BodyTracking
         private void OnDisable()
         {
             UnbindSource();
+            StopWorkerIfStarted();
             DestroyTracker();
             foreach (var v in _bodies.Values) v.Destroy();
             _bodies.Clear();
+        }
+
+        private void StopWorkerIfStarted()
+        {
+            if (!_workerStarted) return;
+            if (workerHost != null)
+            {
+                workerHost.OnSkeletonsReady -= OnWorkerSkeletons;
+                workerHost.StopWorker(_workerSerial);
+            }
+            _workerStarted = false;
+            _workerSerial = null;
         }
 
         // Renderers are spawned at runtime by PointCloudCameraManager.Start, so we may
@@ -213,6 +239,37 @@ namespace BodyTracking
         {
             if (_bound && source != null) source.OnRawFramesReady -= HandleRawFrame;
             _bound = false;
+        }
+
+        private bool TryEnsureWorker(in RawFrameData frame)
+        {
+            if (_workerStarted) return true;
+            if (!source.CameraParam.HasValue) return false;
+            if (workerHost == null) workerHost = FindFirstObjectByType<K4abtWorkerHost>();
+            if (workerHost == null)
+            {
+                Debug.LogError("[BodyTrackingLive] useWorker=true but no K4abtWorkerHost in scene; disabling worker path");
+                useWorker = false;
+                return false;
+            }
+
+            _workerSerial = string.IsNullOrEmpty(source.deviceSerial)
+                ? source.gameObject.name
+                : source.deviceSerial;
+
+            int irW = frame.IRWidth > 0 ? frame.IRWidth : frame.DepthWidth;
+            int irH = frame.IRHeight > 0 ? frame.IRHeight : frame.DepthHeight;
+            if (!workerHost.StartWorker(_workerSerial, source.CameraParam.Value,
+                    frame.DepthWidth, frame.DepthHeight, irW, irH,
+                    frame.ColorWidth, frame.ColorHeight))
+            {
+                Debug.LogError("[BodyTrackingLive] StartWorker failed; falling back to in-process tracker");
+                useWorker = false;
+                return false;
+            }
+            workerHost.OnSkeletonsReady += OnWorkerSkeletons;
+            _workerStarted = true;
+            return true;
         }
 
         private bool TryEnsureTracker(in RawFrameData frame)
@@ -266,7 +323,6 @@ namespace BodyTracking
         private void HandleRawFrame(PointCloudRenderer src, RawFrameData frame)
         {
             if (!showSkeleton) return;
-            if (!TryEnsureTracker(frame)) return;
 
             int dNeeded = frame.DepthByteCount;
             if (_depthCopy == null || _depthCopy.Length < dNeeded) _depthCopy = new byte[dNeeded];
@@ -284,6 +340,24 @@ namespace BodyTracking
                 irW = frame.IRWidth;
                 irH = frame.IRHeight;
             }
+
+            if (useWorker)
+            {
+                if (!TryEnsureWorker(frame)) return;
+                ulong tsNs = frame.TimestampUs * 1000UL;
+                if (workerHost.EnqueueFrame(_workerSerial, _depthCopy, dNeeded,
+                                            irBytes, irBytesCount, tsNs))
+                {
+                    _diagEnqueueOk++;
+                }
+                else
+                {
+                    _diagEnqueueDropped++;
+                }
+                return;
+            }
+
+            if (!TryEnsureTracker(frame)) return;
 
             ulong tsUsec = frame.TimestampUs; // already microseconds
             var capture = K4ACaptureBridge.CreateCaptureFromDepthAndIR(
@@ -303,50 +377,66 @@ namespace BodyTracking
             _diagEnqueueOk++;
         }
 
+        // Synchronously fired from K4abtWorkerHost.Update via OnSkeletonsReady.
+        // Because the host has DefaultExecutionOrder(-100) it runs before this
+        // script's Update each frame, so Update only needs to do GC/diag.
+        private void OnWorkerSkeletons(string serial, BodySnapshot[] bodies, int count)
+        {
+            if (!showSkeleton) return;
+            if (serial != _workerSerial) return; // someone else's worker
+            _diagPoppedFrames++;
+            _diagBodiesSeen += count;
+
+            // Reuse a scratch skel struct: BodyVisual.UpdateFromSkeleton just iterates
+            // skel.Joints[i], so we can swap the joint array reference each iteration.
+            var skel = new k4abt_skeleton_t();
+            for (int i = 0; i < count; i++)
+            {
+                var snap = bodies[i];
+                skel.Joints = snap.Joints;
+                ApplyBodySkeleton(snap.Id, in skel);
+            }
+        }
+
         private void Update()
         {
             if (!_bound) TryBindSource();
-            if (!_trackerReady || !showSkeleton) return;
+            if (!showSkeleton) return;
 
-            // Drain whatever the tracker has produced this frame; non-blocking.
-            _seenThisFrame.Clear();
-            while (true)
+            // Worker mode: skeletons were already applied via OnWorkerSkeletons (the host
+            // has DefaultExecutionOrder(-100) so it ran before us this frame). _seenThisFrame
+            // is populated by ApplyBodySkeleton inside that handler. We just need to GC.
+            // In-process mode: clear and drain pop_result here.
+            if (useWorker)
             {
-                var rc = K4ABTNative.k4abt_tracker_pop_result(_tracker, out System.IntPtr bodyFrame, 0);
-                if (rc != k4a_wait_result_t.K4A_WAIT_RESULT_SUCCEEDED) break;
-                _diagPoppedFrames++;
-                try
+                if (!_workerStarted) { /* will start on first HandleRawFrame */ }
+            }
+            else
+            {
+                if (!_trackerReady) return;
+                _seenThisFrame.Clear();
+                while (true)
                 {
-                    uint nBodies = K4ABTNative.k4abt_frame_get_num_bodies(bodyFrame);
-                    _diagBodiesSeen += (int)nBodies;
-                    for (uint i = 0; i < nBodies; i++)
+                    var rc = K4ABTNative.k4abt_tracker_pop_result(_tracker, out System.IntPtr bodyFrame, 0);
+                    if (rc != k4a_wait_result_t.K4A_WAIT_RESULT_SUCCEEDED) break;
+                    _diagPoppedFrames++;
+                    try
                     {
-                        uint id = K4ABTNative.k4abt_frame_get_body_id(bodyFrame, i);
-                        if (id == K4ABTConsts.K4ABT_INVALID_BODY_ID) continue;
-                        if (K4ABTNative.k4abt_frame_get_body_skeleton(bodyFrame, i, out var skel)
-                            != k4a_result_t.K4A_RESULT_SUCCEEDED) continue;
-
-                        if (!_bodies.TryGetValue(id, out var visual))
+                        uint nBodies = K4ABTNative.k4abt_frame_get_num_bodies(bodyFrame);
+                        _diagBodiesSeen += (int)nBodies;
+                        for (uint i = 0; i < nBodies; i++)
                         {
-                            // Hard cap: if the dict is full, evict the oldest unseen body
-                            // before allocating a new visual. Without this we'd leak 32+ GOs
-                            // every time k4abt assigns a new id (which can happen per frame
-                            // when tracking is unstable, freezing Unity within seconds).
-                            EvictIfFull();
-                            visual = new BodyVisual(transform, id, jointRadius, skeletonColor,
-                                showTrails, trailDuration, trailWidth,
-                                trailColorMode, trailFlatColor);
-                            _bodies[id] = visual;
+                            uint id = K4ABTNative.k4abt_frame_get_body_id(bodyFrame, i);
+                            if (id == K4ABTConsts.K4ABT_INVALID_BODY_ID) continue;
+                            if (K4ABTNative.k4abt_frame_get_body_skeleton(bodyFrame, i, out var skel)
+                                != k4a_result_t.K4A_RESULT_SUCCEEDED) continue;
+                            ApplyBodySkeleton(id, in skel);
                         }
-                        visual.UpdateFromSkeleton(skel, jointRadius, showAnatomicalBones, skeletonColor);
-                        visual.ApplyTrailParams(showTrails, trailDuration, trailWidth, trailColorMode, trailFlatColor);
-                        _seenThisFrame.Add(id);
-                        _lastSeenFrame[id] = Time.frameCount;
                     }
-                }
-                finally
-                {
-                    K4ABTNative.k4abt_frame_release(bodyFrame);
+                    finally
+                    {
+                        K4ABTNative.k4abt_frame_release(bodyFrame);
+                    }
                 }
             }
 
@@ -409,6 +499,26 @@ namespace BodyTracking
                     _diagWindowStart = now;
                 }
             }
+        }
+
+        // Shared per-body update path used by both the in-process pop loop and the
+        // worker-event handler. Creates the BodyVisual on first sight (with eviction
+        // if we'd exceed maxBodies), then updates joints/bones/trails and stamps
+        // _lastSeenFrame so the GC pass at the end of Update can see we touched it.
+        private void ApplyBodySkeleton(uint id, in k4abt_skeleton_t skel)
+        {
+            if (!_bodies.TryGetValue(id, out var visual))
+            {
+                EvictIfFull();
+                visual = new BodyVisual(transform, id, jointRadius, skeletonColor,
+                    showTrails, trailDuration, trailWidth,
+                    trailColorMode, trailFlatColor);
+                _bodies[id] = visual;
+            }
+            visual.UpdateFromSkeleton(skel, jointRadius, showAnatomicalBones, skeletonColor);
+            visual.ApplyTrailParams(showTrails, trailDuration, trailWidth, trailColorMode, trailFlatColor);
+            _seenThisFrame.Add(id);
+            _lastSeenFrame[id] = Time.frameCount;
         }
 
         private void EvictIfFull()
