@@ -28,14 +28,17 @@ git checkout -b feature/issue-9-extrinsic-calibration
 ## アーキテクチャ概要
 
 ```
-[ChArUco / AprilTag ボードを物理空間に置く]
+[Scanned Reality DIN-A3 ChArUco PDF を物理空間に置く]
    ↓
-各 PointCloudRenderer の color フレームから marker を検出
+各 PointCloudRenderer の color フレームから marker を検出 (OpenCV for Unity)
    ↓
 各カメラ視点で marker pose (camN_tr_marker) を求める
    ↓
-基準カメラ（index 0）を world とする
-world_tr_camN = (cam0_tr_marker) * (camN_tr_marker)^-1
+全カメラ位置を marker 系で並べて、その centroid を world 原点とする (issue #6 確定仕様)
+  marker_tr_camN  = (camN_tr_marker)^-1                           （カメラ位置 = marker 系での camN 原点）
+  centroid_marker = mean_N(marker_tr_camN.translation)
+  world_tr_marker = T(-centroid_marker) （並進のみ、回転は marker 系を継承）
+  world_tr_camN   = world_tr_marker * marker_tr_camN
    ↓ ※ 表記・導出は「Transform 規約」節参照
 extrinsics.yaml の各 device エントリに `global_tr_colorCamera` として書き込み
    ↓
@@ -49,11 +52,15 @@ Read 時に読み戻して、live=Manager / playback=Recorder の各 GO transfor
 ### 表記とチェイン
 - 表記: `A_tr_B` は「**B 座標系の点を A 座標系へ変換する** 4x4」
 - 単位: 並進は **メートル**。回転は 3x3 row-major (YAML では rotation: 9 要素配列)
-- world 系の取り方: **基準カメラ (index 0) の color camera 系を world** とする → `global_tr_colorCamera[0] = identity`
+- world 系の取り方 (**issue #6 確定仕様**):
+  - **全カメラ位置の centroid を world 原点** とする (1 台なら identity)
+  - 回転軸は marker 系のものをそのまま採用 (= world と marker は並進のみで関連付け)
 - world 統合チェイン: marker 経由
   - `marker_tr_camN = (camN_tr_marker)^-1`
-  - `world_tr_camN = world_tr_marker * marker_tr_camN = global_tr_colorCamera[0] * (cam0_tr_marker) * (camN_tr_marker)^-1`
-  - 基準が identity なので実装上は `global_tr_colorCamera[N] = cam0_tr_marker * (camN_tr_marker)^-1`
+  - `centroid_marker = (1/N) * Σ_N translation(marker_tr_camN)`
+  - `world_tr_marker = T(-centroid_marker)` （回転は単位、並進だけ）
+  - `world_tr_camN = world_tr_marker * marker_tr_camN`
+  - 1 台のとき: `world_tr_marker = T(-marker_tr_cam0.translation)` なので `global_tr_colorCamera[0] = identity` になる (整合)
 
 ### 座標系（**OpenCV camera convention で統一**）
 
@@ -97,7 +104,7 @@ cameras:
     colorCamera_tr_depthCamera:    # SDK D2C (depth → color), meters
       rotation: [r00..r22]
       translation: [tx, ty, tz]
-    global_tr_colorCamera:         # NEW: world ← color camera, meters。基準カメラは identity
+    global_tr_colorCamera:         # world ← color camera, meters。1台の場合は identity、2台以上は centroid 原点
       rotation: [r00..r22]
       translation: [tx, ty, tz]
 ```
@@ -106,19 +113,17 @@ cameras:
 
 ## 設計判断
 
-### Marker フォーマット
-- **ChArUco** (Charuco = Chessboard + ArUco) を推奨：チェッカーで sub-pixel 精度、ArUco で個別マーカー識別
-- A4 〜 A2 印刷で十分（精度は紙のフラットさに依存するので硬い板に貼ると良い）
-- 参考: `cv::aruco::CharucoBoard` の dictionary は `DICT_4X4_50` あたりで十分
+### Marker フォーマット (**Scanned Reality 公式 ChArUco PDF**)
+- **ChArUco** (Chessboard + ArUco): チェッカーで sub-pixel 精度、ArUco で個別マーカー識別
+- **PDF**: Scanned Reality 公式 DIN-A3 50 ページ ChArUco PDF (issue #6 で確定。下流互換のため SR 既製パターンに合わせる)
+- Dictionary: SR 仕様に従う（`DICT_6X6_*` 系。実物の PDF を OpenCV `detectMarkers` で確認して固定する）
+- 板への貼り付け推奨（紙の波打ちで歪むと精度が落ちる）
 
-### Marker 検出ライブラリ
-3 つ選択肢：
-
-1. **OpenCV for Unity** (Asset Store 有料): 最も簡単、Unity ネイティブ
-2. **OpenCVSharp** (NuGet): Windows ネイティブ、P/Invoke 経由で Unity から使える
-3. **自前 ArUco 実装**: 実装コスト大、推奨しない
-
-最初は 2. OpenCVSharp が依存最小・ライセンス自由・Windows x64 で問題なし。
+### Marker 検出ライブラリ (**OpenCV for Unity 確定**)
+- **OpenCV for Unity** (Enox Software, Asset Store): フル ChArUco 対応 (`OpenCVForUnity.ArucoModule.CharucoBoard`, `Aruco.interpolateCornersCharuco`, `Aruco.estimatePoseCharucoBoard`)。ユーザー所有
+- 配置: 通常 `Assets/OpenCVForUnity/` (Asset インポート)
+- OpenCvSharp 系は採用しない (4.10 で ChArUco バインディング無し、過去バージョンへのダウングレードは不要)
+- DLL 欠損時の fallback: Calibration ウィンドウ起動時に `OpenCVForUnity.CoreModule.Mat` 等の存在確認、無ければ「OpenCV for Unity が未配置」と表示して機能を disable
 
 ### 撮影タイミング & timestamp スキュー検査
 - ユーザーが「Capture」ボタンを押した瞬間に全カメラの最新カラーフレームをスナップ
@@ -135,39 +140,39 @@ cameras:
 ## 段階的実装
 
 ### Phase 1: 依存追加（半日）
-1. **OpenCvSharp**:
-   - 取得: `OpenCvSharp4` 4.10.0.20240616 + `OpenCvSharp4.runtime.win` 4.10.0.20240616 を **NuGetForUnity** 経由 (推奨) または手動 DLL 配置
-   - 配置先: `Assets/Plugins/OpenCvSharp/` (Windows x64 only にプラットフォーム絞り)
-   - **Plugin import 設定**: `OpenCvSharpExtern.dll` は `CPU = x86_64` / `OS = Windows` のみチェック (他プラットフォームの自動 import を切る)
-   - DLL 欠損時の fallback: Calibration ウィンドウ起動時に `Type.GetType("OpenCvSharp.Cv2, OpenCvSharp")` で存在確認、無ければ「OpenCvSharp が未配置」とウィンドウに表示して機能を disable
+1. **OpenCV for Unity**:
+   - インポート: ユーザーが Unity Editor で Asset Store / Package Manager / Custom Package のいずれかから取り込む
+   - 配置先 (典型): `Assets/OpenCVForUnity/`
+   - リポジトリには含めない方針が普通 (Asset Store ライセンス考慮)。`.gitignore` に `Assets/OpenCVForUnity/` を追加検討。Plan の段階では「ユーザー手動インポート前提」とする
+   - 動作確認: `Cv2.getVersionString()` を Console に出力する smoke test スクリプト (`OpenCVForUnity.UnityUtils` で初期化が必要な場合あり)
 2. **YamlDotNet**:
-   - 取得: `YamlDotNet` 16.x を NuGetForUnity 経由
+   - 取得: `YamlDotNet` 16.x の管理 DLL を `Assets/Plugins/YamlDotNet/YamlDotNet.dll` に手動配置 (NuGet パッケージから抽出)
+   - 配置済 DLL の SHA-256 を CHECKSUMS.txt に記録
    - パース時は **safe mode**（型自動 deserialization 無し: `DeserializerBuilder` で `WithTypeConverter` を使わず素の `YamlStream` でノード走査）
-3. **バージョン pinning と checksum**:
-   - `Packages/manifest.json` または NuGetForUnity の `packages.config` に **exact version** を記録
-   - native DLL の SHA-256 を `Assets/Plugins/OpenCvSharp/CHECKSUMS.txt` に記載
-4. **`.gitignore` 確認**: `Assets/Plugins/OpenCvSharp/` を含める方針なら `.gitignore` から除外、含めないなら手順書化
-5. **動作確認**: 起動時に `Cv2.GetVersionString()` を Console に出力する smoke test スクリプト
+3. **動作確認**: Calibration メニューの "Check Dependencies" で OpenCV for Unity と YamlDotNet 両方の存在 + バージョン確認
 
 ### Phase 2: 1 カメラの marker pose 推定（1 日）
 1. `Assets/Scripts/Calibration/CharucoBoardSpec.cs` に board 仕様（squares X/Y, square length, marker length, dictionary）を ScriptableObject で持つ
 2. `Assets/Scripts/Calibration/MarkerPoseEstimator.cs`:
    - 入力: RGB8 byte[], width, height, intrinsic, distortion
-   - OpenCvSharp で `Mat` を作って ArUco 検出 → `EstimatePoseCharucoBoard`
+   - **OpenCV for Unity** で `Mat` を作って ArUco 検出 (`Aruco.detectMarkers`) → `Aruco.interpolateCornersCharuco` で sub-pixel 精度に補正 → `Aruco.estimatePoseCharucoBoard`
    - 出力: rvec, tvec から組み立てた 4x4 transform `cam_tr_marker`（color camera 系で見た marker）
 3. テスト: 1 台の Femto Bolt の color フレームを Editor 上で取得して board 検出できることを確認
 
 ### Phase 3: 複数カメラの pose を world 統合 + 数学テスト（1 日）
 1. `Assets/Scripts/Calibration/MultiCameraCalibrator.cs`:
    - 各 Renderer から最新カラーフレーム + device timestamp を取得
-   - timestamp スキュー > `maxSkewMs` のサンプルは reject
+   - 全カメラセットで timestamp スキューの `(max - min)` が `maxSkewMs` 超過なら**キャプチャセット全破棄**
    - 全カメラで marker 検出に成功したサンプルだけ採用
-   - 基準カメラ (Inspector で指定 / default index 0) の color camera 系を world とする
-   - 各 N について `global_tr_colorCamera[N] = cam0_tr_marker * (camN_tr_marker)^-1`
+   - **world 原点 = 全カメラ位置の centroid (issue #6 確定仕様)**:
+     - `marker_tr_camN = (camN_tr_marker)^-1` (各 N)
+     - `centroid_marker = (1/N) * Σ_N translation(marker_tr_camN)`
+     - `world_tr_marker = T(-centroid_marker)`  // 並進のみ、回転 = identity
+     - `global_tr_colorCamera[N] = world_tr_marker * marker_tr_camN`
 2. **EditMode テスト** `Assets/Tests/Editor/CalibrationMathTests.cs`:
-   - 既知の `world_tr_marker`, `world_tr_camN` を合成
-   - そこから生成した `camN_tr_marker` を入力としてチェイン計算 → 元の `world_tr_camN` と一致するか assert
-   - これで「marker 経由のチェイン」「逆行列の取り方」「row/col-major 取り違え」を catch
+   - (a) チェイン算術: 既知の `world_tr_camN` (centroid 基準) を合成 → そこから `camN_tr_marker` を逆算 → centroid アルゴリズム → 元の `world_tr_camN` と一致するか assert
+   - (b) basis 変換: `ExtrinsicsToUnityMatrix` で X 鏡像にならない (`S * M_ocv * S^-1` の確認)
+   - (c) centroid 不変性: 全 camN を同じ平行移動で動かしたら world 原点もその分動くことを確認 (sanity)
 3. 複数サンプル取得で平均 / 外れ値除外したい場合は次フェーズで対応、まずは 1 サンプルで動くこと
 
 ### Phase 4: extrinsics.yaml の保存と読み込み（1 日）
@@ -222,12 +227,12 @@ cameras:
   - v2 ヘッダ参照必須 — `C:\dev\OrbbecSDK_v2\include\libobsensor\h\` の `ObTypes.h` 等
   - K4A Wrapper 経路は使わない（calibration は color フレームベース、k4abt は無関係）
   - 動作検証は AI 自身が MCP + Editor.log で進める（CLAUDE.md L29 以降）
-- **依存配置**: OpenCvSharp / YamlDotNet の DLL 配置場所と pinning 方針を CLAUDE.md にも追記する
+- **依存配置**: OpenCV for Unity (Assets/OpenCVForUnity/, ユーザー手動インポート) と YamlDotNet (Assets/Plugins/YamlDotNet/, NuGet 抽出) を CLAUDE.md に記載
 
 ## オープン課題（着手中に決める）
 
-1. OpenCvSharp 配置: NuGetForUnity 経由を第一候補（manifest pinning が効く）
-2. board 仕様の標準化: 7x10 squares / 25mm square length あたりが定番だが、印刷サイズに合わせる
+1. SR DIN-A3 PDF の dictionary / 板寸法を実物 PDF で確認 (`DICT_6X6_*` 系のいずれか)
+2. OpenCV for Unity を `.gitignore` に入れるか含めるか (Asset Store ライセンス考慮)
 3. 複数サンプル平均 / 外れ値除外を Phase 7 として独立タスクにするか
 
 ## 完了の目安

@@ -2,7 +2,10 @@
 // one PointCloudRenderer GameObject per device. Owns the OrbbecRuntime
 // lifecycle for the scene.
 
+using System;
 using System.Collections.Generic;
+using System.IO;
+using Calibration;
 using Orbbec;
 using UnityEngine;
 
@@ -74,6 +77,15 @@ namespace PointCloud
                  "so re-enabling resumes immediately with no pipeline restart.")]
         public bool showPointClouds = true;
 
+        [Header("Extrinsics (issue #9)")]
+        [Tooltip("Apply per-device global_tr_colorCamera read from <extrinsicsRoot>/calibration/" +
+                 "extrinsics.yaml to each spawned renderer GO. Off → renderers stay at the manager's " +
+                 "local origin (legacy behavior).")]
+        public bool applyExtrinsics = false;
+        [Tooltip("Root directory for extrinsics.yaml lookup. Same root convention as " +
+                 "PointCloudRecorder.folderPath. Empty → Application.persistentDataPath/Recordings/recording.")]
+        public string extrinsicsRoot = string.Empty;
+
         [Header("Diagnostics")]
         public bool verboseLogging = true;
 
@@ -96,6 +108,8 @@ namespace PointCloud
                     Debug.Log($"  [{i}] {d}");
                 _renderers.Add(SpawnRenderer(d, i));
             }
+
+            if (applyExtrinsics) ApplyExtrinsicsToLive();
         }
 
         private void Update()
@@ -150,6 +164,71 @@ namespace PointCloud
             pcr.depthWorkMode = depthWorkMode;
 
             return pcr;
+        }
+
+        /// <summary>
+        /// Read <c><extrinsicsRoot>/calibration/extrinsics.yaml</c> and apply each
+        /// device's <c>global_tr_colorCamera</c> to the matching spawned renderer GO
+        /// (sets <c>localPosition</c> + <c>localRotation</c>; leaves <c>localScale</c>
+        /// alone so the existing per-renderer Y flip stays). Devices without a
+        /// matching yaml entry keep their default transform.
+        /// </summary>
+        public void ApplyExtrinsicsToLive()
+        {
+            string root = ResolveExtrinsicsRoot();
+            string path = Path.Combine(PointCloudRecording.CalibrationDir(root), "extrinsics.yaml");
+            if (!File.Exists(path))
+            {
+                if (verboseLogging)
+                    Debug.Log($"[{nameof(PointCloudCameraManager)}] applyExtrinsics: no file at {path}, skipping.");
+                return;
+            }
+
+            IReadOnlyList<PointCloudRecording.DeviceCalibration> calibrations;
+            try
+            {
+                calibrations = PointCloudRecording.ReadExtrinsicsYaml(root);
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning(
+                    $"[{nameof(PointCloudCameraManager)}] applyExtrinsics: parse failed for {path}: {e.Message}",
+                    this);
+                return;
+            }
+
+            int applied = 0;
+            foreach (var c in calibrations)
+            {
+                var renderer = FindRendererBySerial(c.Serial);
+                if (renderer == null) continue;
+                if (!c.GlobalTrColorCamera.HasValue) continue;
+                ExtrinsicsApply.ApplyToTransform(renderer.transform, c.GlobalTrColorCamera.Value);
+                applied++;
+            }
+            if (verboseLogging)
+                Debug.Log(
+                    $"[{nameof(PointCloudCameraManager)}] applyExtrinsics: applied to {applied}/{_renderers.Count} renderer(s) from {path}.");
+        }
+
+        private string ResolveExtrinsicsRoot()
+        {
+            string p = extrinsicsRoot;
+            if (string.IsNullOrWhiteSpace(p))
+                p = Path.Combine(Application.persistentDataPath, "Recordings", "recording");
+            else if (!Path.IsPathRooted(p))
+                p = Path.Combine(Application.persistentDataPath, p);
+            return p;
+        }
+
+        private PointCloudRenderer FindRendererBySerial(string serial)
+        {
+            for (int i = 0; i < _renderers.Count; i++)
+            {
+                var r = _renderers[i];
+                if (r != null && r.deviceSerial == serial) return r;
+            }
+            return null;
         }
 
         private ObMultiDeviceSyncMode ResolveSyncMode(int index)

@@ -1,0 +1,17 @@
+{
+    "name": "PointCloud",
+    "rootNamespace": "PointCloud",
+    "references": [
+        "Orbbec",
+        "Calibration"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": true,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

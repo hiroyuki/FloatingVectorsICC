@@ -1,0 +1,17 @@
+{
+    "name": "Calibration",
+    "rootNamespace": "Calibration",
+    "references": [
+        "GUID:cef0e9dabbfe59a4790acbf31c21f33e",
+        "Orbbec"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

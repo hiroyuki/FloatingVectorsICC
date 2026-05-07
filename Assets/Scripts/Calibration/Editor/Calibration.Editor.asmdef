@@ -1,0 +1,22 @@
+{
+    "name": "Calibration.Editor",
+    "rootNamespace": "Calibration.EditorTools",
+    "references": [
+        "GUID:cef0e9dabbfe59a4790acbf31c21f33e",
+        "GUID:0acc523941302664db1f4e527237feb3",
+        "Calibration",
+        "Orbbec",
+        "PointCloud"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
