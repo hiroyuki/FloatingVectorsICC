@@ -4,6 +4,10 @@
 #
 .utmp/
 .worktree/
+# Claude Code runtime lockfile (per-session, PID-bound)
+/.claude/scheduled_tasks.lock
+# Stray legacy auto-implement logs (kept outside the Unity project Library)
+/.worktrees/
 /[Ll]ibrary/
 /[Tt]emp/
 /[Oo]bj/
