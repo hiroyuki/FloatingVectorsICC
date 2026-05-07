@@ -273,7 +273,7 @@ GameObject:
   - component: {fileID: 925702424}
   - component: {fileID: 925702423}
   m_Layer: 0
-  m_Name: PointClouds
+  m_Name: PointCloudManager
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -308,6 +308,9 @@ MonoBehaviour:
   enableTimerSyncWithHost: 1
   enableGlobalTimestamp: 1
   depthWorkMode: 
+  showPointClouds: 1
+  applyExtrinsics: 0
+  extrinsicsRoot: 
   verboseLogging: 1
 --- !u!4 &925702424
 Transform:
@@ -698,6 +701,11 @@ MonoBehaviour:
   showAnatomicalBones: 0
   jointRadius: 0.02
   skeletonColor: {r: 0.2, g: 0.9, b: 1, a: 1}
+  showTrails: 1
+  trailColorMode: 0
+  trailFlatColor: {r: 1, g: 1, b: 1, a: 1}
+  trailDuration: 2
+  trailWidth: 0.005
   processingMode: 4
   smoothing: 0.4
   maxBodies: 4
