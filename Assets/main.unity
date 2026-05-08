@@ -666,6 +666,69 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!1 &1180694593
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 1180694594}
+  - component: {fileID: 1180694595}
+  m_Layer: 0
+  m_Name: '[MultiLive]'
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &1180694594
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1180694593}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 1238217650}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &1180694595
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1180694593}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 64d44e3c1d2cf3d45a5ff7dc7bab8b30, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::BodyTracking.BodyTrackingMultiLive
+  cameraManager: {fileID: 925702423}
+  workerHost: {fileID: 100997492}
+  showSkeleton: 1
+  showAnatomicalBones: 1
+  jointRadius: 0.05
+  skeletonColor: {r: 0.2, g: 0.9, b: 1, a: 1}
+  showTrails: 1
+  trailColorMode: 0
+  trailFlatColor: {r: 1, g: 1, b: 1, a: 1}
+  trailDuration: 2
+  trailWidth: 0.005
+  maxBodies: 4
+  unseenFramesBeforeDestroy: 60
+  mergeRadiusMeters: 0.3
+  continuityRadiusMeters: 0.5
+  maxSkewMs: 50
+  requireMinWorkerCount: 1
+  weightStrategy: 0
+  diagnosticLogging: 1
 --- !u!1 &1238217649
 GameObject:
   m_ObjectHideFlags: 0
@@ -698,6 +761,7 @@ Transform:
   - {fileID: 1314684716}
   - {fileID: 2103759210}
   - {fileID: 100997491}
+  - {fileID: 1180694594}
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &1314684715
@@ -739,7 +803,7 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1314684715}
-  m_Enabled: 1
+  m_Enabled: 0
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: f6e9a234c5d647189f8e7a1b2c3d4e5f, type: 3}
   m_Name: 
