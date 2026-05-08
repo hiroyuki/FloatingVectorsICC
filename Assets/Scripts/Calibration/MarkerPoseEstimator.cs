@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using OpenCVForUnity.ArucoModule;
 using OpenCVForUnity.Calib3dModule;
 using OpenCVForUnity.CoreModule;
 using OpenCVForUnity.ImgprocModule;
@@ -13,6 +12,13 @@ namespace Calibration
     /// OpenCV camera frame (+x right, +y down, +z forward, right-handed, meters).
     /// Result transforms are <c>cam_tr_marker</c> per the project transform convention
     /// (Plans/issue-9-multicam-extrinsic-calibration.md → Transform 規約).
+    ///
+    /// Implementation note: uses the OpenCV 4.7+ <c>CharucoDetector</c> +
+    /// <c>Calib3d.solvePnP</c> pipeline. The legacy <c>Aruco.detectMarkers</c> /
+    /// <c>Aruco.interpolateCornersCharuco</c> static methods both SEGV'd inside
+    /// the OpenCV-for-Unity native binding when given AprilTag dictionaries
+    /// (Editor crashes observed 2026-05-08), so we route everything through the
+    /// modern class-based API instead.
     /// </summary>
     public sealed class MarkerPoseEstimator : IDisposable
     {
@@ -20,6 +26,9 @@ namespace Calibration
         private readonly Dictionary _dict;
         private readonly CharucoBoard _board;
         private readonly DetectorParameters _detectorParams;
+        private readonly RefineParameters _refineParams;
+        private readonly CharucoParameters _charucoParams;
+        private readonly CharucoDetector _charucoDetector;
         private bool _disposed;
 
         public MarkerPoseEstimator(CharucoBoardSpec spec)
@@ -38,6 +47,18 @@ namespace Calibration
                 spec.markerLengthMeters,
                 _dict);
             _detectorParams = new DetectorParameters();
+            // Default minMarkerPerimeterRate (3%) silently drops markers smaller than
+            // ~3% of the image perimeter; at 1280x720 with 38 mm AprilTags at 1.5-2 m
+            // the markers fall below that cutoff. Lower to 0.005 (≈5 px markers).
+            // Empirically observed (Python sweep on dumped frames 2026-05-08): the
+            // other AprilTag-specific knobs (aprilTagMinClusterPixels, MaxLineFitMse,
+            // QuadSigma) had no effect on detection counts, and switching the corner
+            // refinement to CORNER_REFINE_APRILTAG actually hurt — it dropped one
+            // camera from 6 markers to 2. So we leave those at their defaults.
+            _detectorParams.set_minMarkerPerimeterRate(0.005);
+            _refineParams = new RefineParameters();
+            _charucoParams = new CharucoParameters();
+            _charucoDetector = new CharucoDetector(_board, _charucoParams, _detectorParams, _refineParams);
         }
 
         /// <summary>
@@ -88,8 +109,14 @@ namespace Calibration
 
             using var rgb = new Mat(height, width, CvType.CV_8UC3);
             rgb.put(0, 0, rgb8);
+            using var grayRaw = new Mat();
+            Imgproc.cvtColor(rgb, grayRaw, Imgproc.COLOR_RGB2GRAY);
+            // Global histogram equalization noticeably improves AprilTag detection on
+            // frames where the board has uneven brightness (the common indoor case)
+            // — empirically lifted N camera from 0 → 2 markers and Z from 6 → 8 markers
+            // on the dumped 2026-05-08 frames without harming any other config.
             using var gray = new Mat();
-            Imgproc.cvtColor(rgb, gray, Imgproc.COLOR_RGB2GRAY);
+            Imgproc.equalizeHist(grayRaw, gray);
 
             using var cameraMatrix = new Mat(3, 3, CvType.CV_64FC1);
             cameraMatrix.put(0, 0, new double[]
@@ -103,29 +130,78 @@ namespace Calibration
             double[] dist5 = new double[5];
             for (int i = 0; i < dist5.Length; i++)
                 dist5[i] = i < distortionBrownConrady.Length ? distortionBrownConrady[i] : 0.0;
-            using var distCoeffs = new Mat(1, 5, CvType.CV_64FC1);
-            distCoeffs.put(0, 0, dist5);
+            using var distCoeffs = new MatOfDouble(dist5);
 
-            var corners = new List<Mat>();
-            using var ids = new Mat();
+            using var charucoCorners = new Mat();   // Nx2 float, image-space chessboard corners
+            using var charucoIds = new Mat();       // Nx1 int, indices into board chessboard corner grid
+            var markerCornersList = new List<Mat>();
+            using var markerIds = new Mat();
             try
             {
-                Aruco.detectMarkers(gray, _dict, corners, ids, _detectorParams);
-                int detectedCount = ids.empty() ? 0 : (int)ids.total();
-                if (detectedCount == 0) return Result.Failed(0, 0);
+                // CharucoDetector runs both ArUco marker detection AND chessboard-corner
+                // interpolation in one call. We use the chessboard corners when there are
+                // enough of them (sub-pixel accurate), and fall back to the marker corners
+                // when the chessboard interpolation didn't get traction (typical for small
+                // / oblique boards where AprilTag still decodes 1-2 markers but the dense
+                // chessboard pass can't lock).
+                _charucoDetector.detectBoard(gray, charucoCorners, charucoIds, markerCornersList, markerIds);
 
-                using var charucoCorners = new Mat();
-                using var charucoIds = new Mat();
-                int interpolated = Aruco.interpolateCornersCharuco(
-                    corners, ids, gray, _board, charucoCorners, charucoIds, cameraMatrix, distCoeffs);
-                if (interpolated < 4)
-                    return Result.Failed(detectedCount, interpolated);
+                int detectedMarkers = markerIds.empty() ? 0 : (int)markerIds.total();
+                int interpolated = charucoCorners.empty() ? 0 : (int)charucoCorners.total();
 
+                MatOfPoint3f objPoints;
+                MatOfPoint2f imgPoints;
+
+                if (interpolated >= 4)
+                {
+                    // Preferred path: use chessboard corners (sub-pixel accurate).
+                    using var allObjPoints = _board.getChessboardCorners(); // Mx3 float, in meters
+                    int[] idsArr = new int[interpolated];
+                    charucoIds.get(0, 0, idsArr);
+                    float[] allObj = new float[(int)allObjPoints.total() * 3];
+                    allObjPoints.get(0, 0, allObj);
+                    float[] charucoCornersArr = new float[interpolated * 2];
+                    charucoCorners.get(0, 0, charucoCornersArr);
+
+                    var objList = new List<OpenCVForUnity.CoreModule.Point3>(interpolated);
+                    var imgList = new List<OpenCVForUnity.CoreModule.Point>(interpolated);
+                    for (int i = 0; i < interpolated; i++)
+                    {
+                        int id = idsArr[i];
+                        objList.Add(new OpenCVForUnity.CoreModule.Point3(
+                            allObj[id * 3 + 0], allObj[id * 3 + 1], allObj[id * 3 + 2]));
+                        imgList.Add(new OpenCVForUnity.CoreModule.Point(
+                            charucoCornersArr[i * 2 + 0], charucoCornersArr[i * 2 + 1]));
+                    }
+                    objPoints = new MatOfPoint3f();
+                    objPoints.fromList(objList);
+                    imgPoints = new MatOfPoint2f();
+                    imgPoints.fromList(imgList);
+                }
+                else if (detectedMarkers >= 1)
+                {
+                    // Fallback path: marker corners only. Each ArUco marker contributes 4
+                    // (2D ↔ 3D) correspondences. solvePnP needs 4 points → one marker is
+                    // enough when its 4 corners are well-separated.
+                    using var op = new Mat();
+                    using var ip = new Mat();
+                    _board.matchImagePoints(markerCornersList, markerIds, op, ip);
+                    int n = (int)op.total();
+                    if (n < 4) return Result.Failed(detectedMarkers, interpolated);
+                    objPoints = new MatOfPoint3f(op);
+                    imgPoints = new MatOfPoint2f(ip);
+                }
+                else
+                {
+                    return Result.Failed(detectedMarkers, interpolated);
+                }
+
+                using var _objPoints = objPoints;
+                using var _imgPoints = imgPoints;
                 using var rvec = new Mat();
                 using var tvec = new Mat();
-                bool ok = Aruco.estimatePoseCharucoBoard(
-                    charucoCorners, charucoIds, _board, cameraMatrix, distCoeffs, rvec, tvec);
-                if (!ok) return Result.Failed(detectedCount, interpolated);
+                bool ok = Calib3d.solvePnP(objPoints, imgPoints, cameraMatrix, distCoeffs, rvec, tvec);
+                if (!ok) return Result.Failed(detectedMarkers, interpolated);
 
                 using var rotMat = new Mat();
                 Calib3d.Rodrigues(rvec, rotMat);
@@ -138,7 +214,7 @@ namespace Calibration
                 return new Result
                 {
                     Success = true,
-                    DetectedMarkerCount = detectedCount,
+                    DetectedMarkerCount = detectedMarkers,
                     InterpolatedCornerCount = interpolated,
                     Rotation = rotation,
                     Translation = translation,
@@ -146,7 +222,7 @@ namespace Calibration
             }
             finally
             {
-                foreach (var c in corners) c.Dispose();
+                foreach (var m in markerCornersList) m.Dispose();
             }
         }
 
@@ -154,9 +230,12 @@ namespace Calibration
         {
             if (_disposed) return;
             _disposed = true;
+            _charucoDetector?.Dispose();
+            _charucoParams?.Dispose();
+            _refineParams?.Dispose();
+            _detectorParams?.Dispose();
             _board?.Dispose();
             _dict?.Dispose();
-            _detectorParams?.Dispose();
         }
     }
 }

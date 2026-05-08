@@ -299,7 +299,6 @@ MonoBehaviour:
   colorHeight: 720
   colorFps: 30
   alignTargetStream: 2
-  maxPointsPerDevice: 921600
   defaultBoundingBox: {fileID: 1151541767}
   defaultDecimater: {fileID: 173474409}
   defaultCumulative: {fileID: 18533122}
@@ -711,7 +710,7 @@ MonoBehaviour:
   maxBodies: 4
   unseenFramesBeforeDestroy: 60
   unseenFramesBeforeHide: 6
-  diagnosticLogging: 1
+  diagnosticLogging: 0
 --- !u!1 &2103759209
 GameObject:
   m_ObjectHideFlags: 0

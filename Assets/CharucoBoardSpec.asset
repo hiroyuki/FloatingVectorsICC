@@ -12,8 +12,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 8855e31987ede9c47ade74fd46a508b0, type: 3}
   m_Name: CharucoBoardSpec
   m_EditorClassIdentifier: Calibration::Calibration.CharucoBoardSpec
-  squaresX: 7
-  squaresY: 5
-  squareLengthMeters: 0.055
-  markerLengthMeters: 0.038
+  squaresX: 4
+  squaresY: 3
+  squareLengthMeters: 0.095
+  markerLengthMeters: 0.075
   dictionary: 21

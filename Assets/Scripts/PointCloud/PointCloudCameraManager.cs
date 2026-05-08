@@ -25,7 +25,6 @@ namespace PointCloud
         public uint colorFps = 30;
         [Tooltip("Stream that depth gets aligned TO via the Align filter (D2C target).")]
         public ObStreamType alignTargetStream = ObStreamType.Color;
-        public int maxPointsPerDevice = 1280 * 720;
 
         [Tooltip("Optional shared bounding box applied to every spawned renderer.")]
         public PointCloudBoundingBox defaultBoundingBox;
@@ -152,7 +151,7 @@ namespace PointCloud
             pcr.colorHeight = colorHeight;
             pcr.colorFps = colorFps;
             pcr.alignTargetStream = alignTargetStream;
-            pcr.maxPoints = maxPointsPerDevice;
+            pcr.maxPoints = ResolveMaxPointsPerDevice();
             pcr.pointMaterial = defaultPointMaterial;
             pcr.boundingBox = defaultBoundingBox;
             pcr.decimater = defaultDecimater;
@@ -229,6 +228,18 @@ namespace PointCloud
                 if (r != null && r.deviceSerial == serial) return r;
             }
             return null;
+        }
+
+        /// <summary>
+        /// Derive the per-device point buffer size from the active align target
+        /// stream — D2C aligns depth to color so the aligned cloud has
+        /// colorWidth*colorHeight points; C2D would produce depthWidth*depthHeight.
+        /// </summary>
+        private int ResolveMaxPointsPerDevice()
+        {
+            if (alignTargetStream == ObStreamType.Depth)
+                return checked((int)(depthWidth * depthHeight));
+            return checked((int)(colorWidth * colorHeight));
         }
 
         private ObMultiDeviceSyncMode ResolveSyncMode(int index)
