@@ -90,13 +90,9 @@ namespace BodyTracking
         private bool _workerStarted;
         private string _workerSerial;
 
-        // Per-body visuals: id -> Transform of a parent GameObject that owns 32 joint
-        // spheres + a Mesh holding bone line segments. We keep them around between
-        // frames so movement is smooth and we don't allocate every Update.
-        private readonly Dictionary<uint, BodyVisual> _bodies = new Dictionary<uint, BodyVisual>();
-        private readonly Dictionary<uint, int> _lastSeenFrame = new Dictionary<uint, int>();
-        private readonly HashSet<uint> _seenThisFrame = new HashSet<uint>();
-        private readonly List<uint> _toDestroy = new List<uint>();
+        // Per-body visuals: id -> BodyVisual. Lifecycle (create / GC on stale / hard
+        // cap eviction) lives in BodyVisualPool — shared with BodyTrackingMultiLive.
+        private BodyVisualPool _pool;
 
         [Header("Visual lifetime")]
         [Tooltip("Hard cap on cached BodyVisuals. K4abt body IDs can flap between frames " +
@@ -191,6 +187,7 @@ namespace BodyTracking
         private void OnEnable()
         {
             if (cameraManager == null) cameraManager = FindFirstObjectByType<PointCloudCameraManager>();
+            if (_pool == null) _pool = new BodyVisualPool(transform);
             TryBindSource();
         }
 
@@ -199,8 +196,7 @@ namespace BodyTracking
             UnbindSource();
             StopWorkerIfStarted();
             DestroyTracker();
-            foreach (var v in _bodies.Values) v.Destroy();
-            _bodies.Clear();
+            _pool?.DestroyAll();
         }
 
         private void StopWorkerIfStarted()
@@ -390,11 +386,12 @@ namespace BodyTracking
             // Reuse a scratch skel struct: BodyVisual.UpdateFromSkeleton just iterates
             // skel.Joints[i], so we can swap the joint array reference each iteration.
             var skel = new k4abt_skeleton_t();
+            var cfg = BuildVisualConfig();
             for (int i = 0; i < count; i++)
             {
                 var snap = bodies[i];
                 skel.Joints = snap.Joints;
-                ApplyBodySkeleton(snap.Id, in skel);
+                _pool.Apply(snap.Id, in skel, cfg);
             }
         }
 
@@ -404,9 +401,8 @@ namespace BodyTracking
             if (!showSkeleton) return;
 
             // Worker mode: skeletons were already applied via OnWorkerSkeletons (the host
-            // has DefaultExecutionOrder(-100) so it ran before us this frame). _seenThisFrame
-            // is populated by ApplyBodySkeleton inside that handler. We just need to GC.
-            // In-process mode: clear and drain pop_result here.
+            // has DefaultExecutionOrder(-100) so it ran before us this frame). We just
+            // need to GC stale visuals. In-process mode: drain pop_result first.
             if (useWorker)
             {
                 if (!_workerStarted) { /* will start on first HandleRawFrame */ }
@@ -414,7 +410,6 @@ namespace BodyTracking
             else
             {
                 if (!_trackerReady) return;
-                _seenThisFrame.Clear();
                 while (true)
                 {
                     var rc = K4ABTNative.k4abt_tracker_pop_result(_tracker, out System.IntPtr bodyFrame, 0);
@@ -430,7 +425,7 @@ namespace BodyTracking
                             if (id == K4ABTConsts.K4ABT_INVALID_BODY_ID) continue;
                             if (K4ABTNative.k4abt_frame_get_body_skeleton(bodyFrame, i, out var skel)
                                 != k4a_result_t.K4A_RESULT_SUCCEEDED) continue;
-                            ApplyBodySkeleton(id, in skel);
+                            _pool.Apply(id, in skel, BuildVisualConfig());
                         }
                     }
                     finally
@@ -445,23 +440,7 @@ namespace BodyTracking
             // Destroy() below, after unseenFramesBeforeDestroy ticks without a pop.
             // This eliminates the SetActive(true)/SetActive(false) toggle storm that
             // happened when the per-tick visibility check fluctuated between true/false.
-            _toDestroy.Clear();
-            foreach (var kv in _bodies)
-            {
-                int lastSeen = _lastSeenFrame.TryGetValue(kv.Key, out var f) ? f : -1;
-                int sinceLastSeen = Time.frameCount - lastSeen;
-                kv.Value.TickDiagAfterUpdate();
-                if (sinceLastSeen > unseenFramesBeforeDestroy)
-                {
-                    _toDestroy.Add(kv.Key);
-                }
-            }
-            foreach (var id in _toDestroy)
-            {
-                _bodies[id].Destroy();
-                _bodies.Remove(id);
-                _lastSeenFrame.Remove(id);
-            }
+            _pool.GcStale(unseenFramesBeforeDestroy);
 
             if (diagnosticLogging)
             {
@@ -473,7 +452,7 @@ namespace BodyTracking
                     // Probe a representative joint (PELVIS) so we know whether the visual
                     // is actually being placed somewhere visible or off in nowhere-land.
                     string sample = "<no body>";
-                    foreach (var kv in _bodies)
+                    foreach (var kv in _pool.Visuals)
                     {
                         var v = kv.Value;
                         float meanJump = v.JumpSamples > 0 ? v.SumJumpThisWindow / v.JumpSamples : 0f;
@@ -490,7 +469,7 @@ namespace BodyTracking
                         $"enq_dropped={_diagEnqueueDropped}/s " +
                         $"popped={_diagPoppedFrames}/s " +
                         $"bodies_seen={_diagBodiesSeen}/s " +
-                        $"alive_visuals={_bodies.Count} | {sample}",
+                        $"alive_visuals={_pool.Count} | {sample}",
                         this);
                     _diagEnqueueOk = 0;
                     _diagEnqueueDropped = 0;
@@ -501,49 +480,20 @@ namespace BodyTracking
             }
         }
 
-        // Shared per-body update path used by both the in-process pop loop and the
-        // worker-event handler. Creates the BodyVisual on first sight (with eviction
-        // if we'd exceed maxBodies), then updates joints/bones/trails and stamps
-        // _lastSeenFrame so the GC pass at the end of Update can see we touched it.
-        private void ApplyBodySkeleton(uint id, in k4abt_skeleton_t skel)
+        // Build the per-frame visual config struct so Inspector tweaks live-update
+        // without per-frame allocations (the struct is value-typed).
+        private BodyVisualConfig BuildVisualConfig() => new BodyVisualConfig
         {
-            if (!_bodies.TryGetValue(id, out var visual))
-            {
-                EvictIfFull();
-                visual = new BodyVisual(transform, id, jointRadius, skeletonColor,
-                    showTrails, trailDuration, trailWidth,
-                    trailColorMode, trailFlatColor);
-                _bodies[id] = visual;
-            }
-            visual.UpdateFromSkeleton(skel, jointRadius, showAnatomicalBones, skeletonColor);
-            visual.ApplyTrailParams(showTrails, trailDuration, trailWidth, trailColorMode, trailFlatColor);
-            _seenThisFrame.Add(id);
-            _lastSeenFrame[id] = Time.frameCount;
-        }
-
-        private void EvictIfFull()
-        {
-            while (_bodies.Count >= maxBodies)
-            {
-                uint oldestId = 0;
-                int oldestFrame = int.MaxValue;
-                bool any = false;
-                foreach (var kv in _bodies)
-                {
-                    int f = _lastSeenFrame.TryGetValue(kv.Key, out var v) ? v : -1;
-                    if (f < oldestFrame)
-                    {
-                        oldestFrame = f;
-                        oldestId = kv.Key;
-                        any = true;
-                    }
-                }
-                if (!any) break;
-                _bodies[oldestId].Destroy();
-                _bodies.Remove(oldestId);
-                _lastSeenFrame.Remove(oldestId);
-            }
-        }
+            JointRadius = jointRadius,
+            SkeletonColor = skeletonColor,
+            ShowAnatomicalBones = showAnatomicalBones,
+            ShowTrails = showTrails,
+            TrailDuration = trailDuration,
+            TrailWidth = trailWidth,
+            TrailColorMode = trailColorMode,
+            TrailFlatColor = trailFlatColor,
+            MaxBodies = maxBodies,
+        };
 
     }
 }

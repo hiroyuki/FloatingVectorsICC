@@ -182,12 +182,12 @@ namespace BodyTracking
         private int _clusterCount;
         private readonly List<(uint id, int conf)> _priorSorted = new();
 
-        // Persistent state across frames.
-        private readonly Dictionary<uint, BodyVisual> _bodies = new();
-        private readonly Dictionary<uint, int> _lastSeenFrame = new();
+        // Persistent state across frames. Per-body visuals + GC live in
+        // BodyVisualPool (Phase 5b); priorPelvis/priorMaxConf are MultiLive-specific
+        // continuity hints cleaned up via the pool's onEvicted callback.
+        private BodyVisualPool _pool;
         private readonly Dictionary<uint, Vector3> _priorPelvisById = new();
         private readonly Dictionary<uint, int> _priorMaxConfById = new();
-        private readonly List<uint> _toDestroy = new();
         private uint _nextMergedId = 1;
 
         // Reusable synthetic skeleton handed to BodyVisual.UpdateFromSkeleton.
@@ -220,6 +220,7 @@ namespace BodyTracking
             if (!ResolveDependencies()) { _disabledByGuard = true; enabled = false; return; }
             if (!CheckMutualExclusion()) { _disabledByGuard = true; enabled = false; return; }
 
+            if (_pool == null) _pool = new BodyVisualPool(transform);
             if (workerHost != null && !_hostSubscribed)
             {
                 workerHost.OnSkeletonsReady += OnWorkerSkeletons;
@@ -245,6 +246,9 @@ namespace BodyTracking
             {
                 if (r != null) r.OnRawFramesReady -= HandleRawFrame;
             }
+            _pool?.DestroyAll();
+            _priorPelvisById.Clear();
+            _priorMaxConfById.Clear();
             _boundRenderers.Clear();
         }
 
@@ -274,7 +278,7 @@ namespace BodyTracking
         {
             if (!showCrowdAlert) { _alertActive = false; return; }
 
-            int merged = _bodies.Count;
+            int merged = _pool != null ? _pool.Count : 0;
             float now = Time.realtimeSinceStartup;
 
             if (merged > 1)
@@ -474,7 +478,7 @@ namespace BodyTracking
                 $"snapshots/s={_diagSnapshotsRecv} dropped_stale/s={_diagDroppedStaleSnapshots} " +
                 $"clusters/s={_diagClustersFormed} persons/s={_diagPersonsOutput} " +
                 $"continuity_carry_over/s={_diagContinuityCarryOver} " +
-                $"alive_visuals={_bodies.Count} bodies_now={totalBodiesNow}",
+                $"alive_visuals={_pool.Count} bodies_now={totalBodiesNow}",
                 this);
             _diagSnapshotsRecv = 0;
             _diagDroppedStaleSnapshots = 0;
@@ -574,38 +578,26 @@ namespace BodyTracking
 
         private void ApplyMergedSkeletons()
         {
+            var cfg = BuildVisualConfig();
             for (int c = 0; c < _clusterCount; c++)
             {
                 var cluster = _clusterPool[c];
                 if (cluster.MemberIndices.Count < requireMinWorkerCount) continue;
                 BuildMergedSkeleton(cluster, ref _mergedSkel);
-                ApplyBodySkeleton(cluster.Id, in _mergedSkel);
+                _pool.Apply(cluster.Id, in _mergedSkel, cfg, OnVisualEvicted);
                 _diagPersonsOutput++;
             }
         }
 
         private void GcStaleVisuals()
         {
-            _toDestroy.Clear();
-            foreach (var kv in _bodies)
-            {
-                int lastSeen = _lastSeenFrame.TryGetValue(kv.Key, out var f) ? f : -1;
-                int sinceLastSeen = Time.frameCount - lastSeen;
-                kv.Value.TickDiagAfterUpdate();
-                if (sinceLastSeen > unseenFramesBeforeDestroy)
-                {
-                    _toDestroy.Add(kv.Key);
-                }
-            }
-            for (int i = 0; i < _toDestroy.Count; i++)
-            {
-                uint id = _toDestroy[i];
-                _bodies[id].Destroy();
-                _bodies.Remove(id);
-                _lastSeenFrame.Remove(id);
-                _priorPelvisById.Remove(id);
-                _priorMaxConfById.Remove(id);
-            }
+            _pool.GcStale(unseenFramesBeforeDestroy, OnVisualEvicted);
+        }
+
+        private void OnVisualEvicted(uint id)
+        {
+            _priorPelvisById.Remove(id);
+            _priorMaxConfById.Remove(id);
         }
 
         private void StashPriorState()
@@ -628,46 +620,18 @@ namespace BodyTracking
             }
         }
 
-        private void ApplyBodySkeleton(uint id, in k4abt_skeleton_t skel)
+        private BodyVisualConfig BuildVisualConfig() => new BodyVisualConfig
         {
-            if (!_bodies.TryGetValue(id, out var visual))
-            {
-                EvictIfFull();
-                visual = new BodyVisual(transform, id, jointRadius, skeletonColor,
-                    showTrails, trailDuration, trailWidth,
-                    trailColorMode, trailFlatColor);
-                _bodies[id] = visual;
-            }
-            visual.UpdateFromSkeleton(skel, jointRadius, showAnatomicalBones, skeletonColor);
-            visual.ApplyTrailParams(showTrails, trailDuration, trailWidth, trailColorMode, trailFlatColor);
-            _lastSeenFrame[id] = Time.frameCount;
-        }
-
-        private void EvictIfFull()
-        {
-            while (_bodies.Count >= maxBodies)
-            {
-                uint oldestId = 0;
-                int oldestFrame = int.MaxValue;
-                bool any = false;
-                foreach (var kv in _bodies)
-                {
-                    int f = _lastSeenFrame.TryGetValue(kv.Key, out var v) ? v : -1;
-                    if (f < oldestFrame)
-                    {
-                        oldestFrame = f;
-                        oldestId = kv.Key;
-                        any = true;
-                    }
-                }
-                if (!any) break;
-                _bodies[oldestId].Destroy();
-                _bodies.Remove(oldestId);
-                _lastSeenFrame.Remove(oldestId);
-                _priorPelvisById.Remove(oldestId);
-                _priorMaxConfById.Remove(oldestId);
-            }
-        }
+            JointRadius = jointRadius,
+            SkeletonColor = skeletonColor,
+            ShowAnatomicalBones = showAnatomicalBones,
+            ShowTrails = showTrails,
+            TrailDuration = trailDuration,
+            TrailWidth = trailWidth,
+            TrailColorMode = trailColorMode,
+            TrailFlatColor = trailFlatColor,
+            MaxBodies = maxBodies,
+        };
 
         // --- per-cluster merge (joint-by-joint) ---
 
