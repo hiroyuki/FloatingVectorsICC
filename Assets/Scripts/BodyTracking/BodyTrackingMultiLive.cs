@@ -113,6 +113,22 @@ namespace BodyTracking
                  "weight = level * level. v1 implements Linear only; Squared placeholder.")]
         public WeightStrategy weightStrategy = WeightStrategy.Linear;
 
+        [Header("Crowd alert")]
+        [Tooltip("Show on-screen warning when more than one merged person is detected. " +
+                 "Per CLAUDE.md this installation is single-person only.")]
+        public bool showCrowdAlert = true;
+
+        [Tooltip("Seconds the >1 person condition must hold before the alert appears (debounce).")]
+        [Min(0f)] public float alertOnDelaySeconds = 0.5f;
+
+        [Tooltip("Seconds the ≤1 person condition must hold before the alert hides (debounce).")]
+        [Min(0f)] public float alertOffDelaySeconds = 1.0f;
+
+        [Tooltip("Alert message text shown on the GUI overlay.")]
+        [TextArea(1, 4)]
+        public string alertMessage =
+            "複数人検出: 1人のみご利用ください\nMultiple people detected — please use solo";
+
         [Header("Diagnostics")]
         [Tooltip("Log per-second merge counters (clusters, persons, dropped stale, etc.).")]
         public bool diagnosticLogging = false;
@@ -192,6 +208,13 @@ namespace BodyTracking
         private int _diagContinuityCarryOver;
         private float _diagWindowStart;
 
+        // Crowd-alert debounce state. Uses Time.realtimeSinceStartup so the
+        // debounce works even when Time.timeScale is 0 (Editor Pause).
+        private float _multiPersonSince = -1f;
+        private float _singlePersonSince = -1f;
+        private bool _alertActive;
+        private GUIStyle _alertStyleCache;
+
         private void OnEnable()
         {
             if (!ResolveDependencies()) { _disabledByGuard = true; enabled = false; return; }
@@ -242,7 +265,59 @@ namespace BodyTracking
                 StashPriorState();
             }
 
+            UpdateCrowdAlert();
+
             if (diagnosticLogging) PerSecondDiag();
+        }
+
+        private void UpdateCrowdAlert()
+        {
+            if (!showCrowdAlert) { _alertActive = false; return; }
+
+            int merged = _bodies.Count;
+            float now = Time.realtimeSinceStartup;
+
+            if (merged > 1)
+            {
+                if (_multiPersonSince < 0f) _multiPersonSince = now;
+                _singlePersonSince = -1f;
+                if (!_alertActive && now - _multiPersonSince >= alertOnDelaySeconds)
+                    _alertActive = true;
+            }
+            else
+            {
+                _multiPersonSince = -1f;
+                if (_alertActive)
+                {
+                    if (_singlePersonSince < 0f) _singlePersonSince = now;
+                    if (now - _singlePersonSince >= alertOffDelaySeconds)
+                        _alertActive = false;
+                }
+            }
+        }
+
+        private void OnGUI()
+        {
+            if (!_alertActive) return;
+            if (_alertStyleCache == null)
+            {
+                _alertStyleCache = new GUIStyle(GUI.skin.label)
+                {
+                    fontSize = 32,
+                    alignment = TextAnchor.MiddleCenter,
+                    fontStyle = FontStyle.Bold,
+                    wordWrap = true,
+                };
+                _alertStyleCache.normal.textColor = new Color(1f, 0.55f, 0.15f, 1f);
+            }
+            float w = Mathf.Min(Screen.width - 40, 900);
+            float h = 140f;
+            var rect = new Rect((Screen.width - w) * 0.5f, Screen.height * 0.08f, w, h);
+            var prev = GUI.color;
+            GUI.color = new Color(0f, 0f, 0f, 0.75f);
+            GUI.DrawTexture(rect, Texture2D.whiteTexture);
+            GUI.color = prev;
+            GUI.Label(rect, alertMessage, _alertStyleCache);
         }
 
         // --- guards ---
