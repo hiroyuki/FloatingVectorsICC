@@ -7,7 +7,7 @@
         "Calibration",
         "Orbbec",
         "PointCloud",
-        "Assembly-CSharp"
+        "BodyTracking"
     ],
     "includePlatforms": [
         "Editor"
