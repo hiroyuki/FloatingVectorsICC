@@ -113,6 +113,13 @@ namespace BodyTracking
                  "weight = level * level. v1 implements Linear only; Squared placeholder.")]
         public WeightStrategy weightStrategy = WeightStrategy.Linear;
 
+        [Header("Debug")]
+        [Tooltip("Also render each worker's raw skeleton (pre-merge) in a hue derived " +
+                 "from the camera serial. Useful for comparing per-camera tracking quality " +
+                 "vs the merged output, and for seeing the confidence-weighted average " +
+                 "in action.")]
+        public bool showPerWorkerSkeletons = false;
+
         [Header("Crowd alert")]
         [Tooltip("Show on-screen warning when more than one merged person is detected. " +
                  "Per CLAUDE.md this installation is single-person only.")]
@@ -200,6 +207,14 @@ namespace BodyTracking
             Joints = new k4abt_joint_t[K4ABTConsts.K4ABT_JOINT_COUNT],
         };
 
+        // Per-worker debug pools + scratch skeleton for showPerWorkerSkeletons.
+        // Each pool draws one camera's raw bodies in a serial-derived hue.
+        private readonly Dictionary<string, BodyVisualPool> _perWorkerPools = new Dictionary<string, BodyVisualPool>();
+        private k4abt_skeleton_t _rawScratchSkel = new k4abt_skeleton_t
+        {
+            Joints = new k4abt_joint_t[K4ABTConsts.K4ABT_JOINT_COUNT],
+        };
+
         // Diagnostic counters.
         private int _diagSnapshotsRecv;
         private int _diagDroppedStaleSnapshots;
@@ -249,6 +264,7 @@ namespace BodyTracking
             _pool?.DestroyAll();
             _priorPelvisById.Clear();
             _priorMaxConfById.Clear();
+            ClearPerWorkerSkeletons();
             _boundRenderers.Clear();
         }
 
@@ -267,6 +283,12 @@ namespace BodyTracking
                 ApplyMergedSkeletons();
                 GcStaleVisuals();
                 StashPriorState();
+                if (showPerWorkerSkeletons) ApplyPerWorkerSkeletons();
+                else ClearPerWorkerSkeletons();
+            }
+            else if (_perWorkerPools.Count > 0)
+            {
+                ClearPerWorkerSkeletons();
             }
 
             UpdateCrowdAlert();
@@ -839,6 +861,80 @@ namespace BodyTracking
             }
             _clusterCount++;
             return c;
+        }
+
+        // --- per-worker raw skeleton debug (showPerWorkerSkeletons) ---
+
+        private void ApplyPerWorkerSkeletons()
+        {
+            // Reuse the candidate list built by CollectCandidates so we get only the
+            // bodies that survived the maxSkewMs gate and the pelvis-confidence filter.
+            var baseCfg = BuildVisualConfig();
+            for (int i = 0; i < _candidateCount; i++)
+            {
+                var cand = _candidatePool[i];
+                if (cand.Slot == null) continue;
+                string serial = cand.Slot.Serial;
+                if (!_perWorkerPools.TryGetValue(serial, out var pool))
+                {
+                    pool = new BodyVisualPool(transform);
+                    _perWorkerPools[serial] = pool;
+                }
+                BuildPerWorkerWorldSkeleton(cand, ref _rawScratchSkel);
+                var cfg = baseCfg;
+                cfg.SkeletonColor = ColorForSerial(serial);
+                cfg.MaxBodies = K4abtWorkerSharedLayout.MaxBodies;
+                pool.Apply((uint)cand.BodyIndex, in _rawScratchSkel, cfg);
+            }
+            // GC stale per-worker visuals on the same threshold as merged.
+            foreach (var pool in _perWorkerPools.Values)
+                pool.GcStale(unseenFramesBeforeDestroy);
+        }
+
+        private void ClearPerWorkerSkeletons()
+        {
+            if (_perWorkerPools.Count == 0) return;
+            foreach (var pool in _perWorkerPools.Values) pool.DestroyAll();
+            _perWorkerPools.Clear();
+        }
+
+        private void BuildPerWorkerWorldSkeleton(Candidate cand, ref k4abt_skeleton_t output)
+        {
+            var body = cand.Slot.Bodies[cand.BodyIndex];
+            Transform rendererT = cand.Slot.Renderer != null ? cand.Slot.Renderer.transform : null;
+            for (int j = 0; j < K4ABTConsts.K4ABT_JOINT_COUNT; j++)
+            {
+                var jt = body.Joints[j];
+                if ((int)jt.ConfidenceLevel <= 0)
+                {
+                    // Keep BodyVisual on its previous position for this joint.
+                    output.Joints[j] = new k4abt_joint_t { ConfidenceLevel = k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_NONE };
+                    continue;
+                }
+                Vector3 worldPos = SkeletonWorldTransform.ToWorld(jt.Position, rendererT);
+                output.Joints[j] = new k4abt_joint_t
+                {
+                    Position = new k4a_float3_t
+                    {
+                        X = worldPos.x * 1000f,
+                        Y = -worldPos.y * 1000f,
+                        Z = worldPos.z * 1000f,
+                    },
+                    Orientation = jt.Orientation,
+                    ConfidenceLevel = jt.ConfidenceLevel,
+                };
+            }
+        }
+
+        // Stable hash-based hue per camera serial. Keeps each worker visually distinct
+        // even across runs / reorderings without requiring per-serial Inspector entries.
+        private static Color ColorForSerial(string serial)
+        {
+            if (string.IsNullOrEmpty(serial)) return new Color(0.7f, 0.7f, 0.7f, 1f);
+            int hash = 17;
+            for (int i = 0; i < serial.Length; i++) hash = hash * 31 + serial[i];
+            float hue = (Mathf.Abs(hash) % 1000) / 1000f;
+            return Color.HSVToRGB(hue, 0.7f, 1f);
         }
     }
 }
