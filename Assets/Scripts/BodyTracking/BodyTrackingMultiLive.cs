@@ -120,6 +120,11 @@ namespace BodyTracking
                  "in action.")]
         public bool showPerWorkerSkeletons = false;
 
+        [Tooltip("Joint radius / trail width multiplier applied to per-worker raw " +
+                 "skeletons (so they sit visually smaller than the merged skeleton).")]
+        [Range(0.1f, 1f)]
+        public float perWorkerVisualScale = 0.5f;
+
         [Header("Crowd alert")]
         [Tooltip("Show on-screen warning when more than one merged person is detected. " +
                  "Per CLAUDE.md this installation is single-person only.")]
@@ -884,6 +889,9 @@ namespace BodyTracking
                 var cfg = baseCfg;
                 cfg.SkeletonColor = ColorForSerial(serial);
                 cfg.MaxBodies = K4abtWorkerSharedLayout.MaxBodies;
+                float scale = Mathf.Clamp(perWorkerVisualScale, 0.1f, 1f);
+                cfg.JointRadius = baseCfg.JointRadius * scale;
+                cfg.TrailWidth = baseCfg.TrailWidth * scale;
                 pool.Apply((uint)cand.BodyIndex, in _rawScratchSkel, cfg);
             }
             // GC stale per-worker visuals on the same threshold as merged.
@@ -926,15 +934,33 @@ namespace BodyTracking
             }
         }
 
-        // Stable hash-based hue per camera serial. Keeps each worker visually distinct
-        // even across runs / reorderings without requiring per-serial Inspector entries.
+        // Hash-into-palette per camera serial. Femto Bolt serials like
+        // CL8F253004Z and CL8F253004N differ in only the last byte; a continuous
+        // hue mapping still lands them close on the colour wheel even with FNV-1a.
+        // A discrete palette of well-spaced hues makes adjacent serials visually
+        // distinct, which is what matters for debug viz.
+        private static readonly Color[] s_workerPalette = new[]
+        {
+            new Color(0.95f, 0.30f, 0.20f, 1f), // red
+            new Color(0.20f, 0.70f, 0.95f, 1f), // cyan
+            new Color(0.95f, 0.80f, 0.20f, 1f), // yellow
+            new Color(0.55f, 0.95f, 0.30f, 1f), // green
+            new Color(0.80f, 0.30f, 0.95f, 1f), // purple
+            new Color(0.95f, 0.55f, 0.20f, 1f), // orange
+            new Color(0.30f, 0.95f, 0.80f, 1f), // teal
+            new Color(0.95f, 0.40f, 0.70f, 1f), // pink
+        };
+
         private static Color ColorForSerial(string serial)
         {
             if (string.IsNullOrEmpty(serial)) return new Color(0.7f, 0.7f, 0.7f, 1f);
-            int hash = 17;
-            for (int i = 0; i < serial.Length; i++) hash = hash * 31 + serial[i];
-            float hue = (Mathf.Abs(hash) % 1000) / 1000f;
-            return Color.HSVToRGB(hue, 0.7f, 1f);
+            uint hash = 2166136261u;
+            for (int i = 0; i < serial.Length; i++)
+            {
+                hash ^= serial[i];
+                hash *= 16777619u;
+            }
+            return s_workerPalette[hash % (uint)s_workerPalette.Length];
         }
     }
 }
