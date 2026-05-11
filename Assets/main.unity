@@ -714,7 +714,7 @@ MonoBehaviour:
   workerHost: {fileID: 100997492}
   showSkeleton: 1
   showAnatomicalBones: 1
-  jointRadius: 0.05
+  jointRadius: 0.015
   skeletonColor: {r: 0.2, g: 0.9, b: 1, a: 1}
   showTrails: 1
   trailColorMode: 0
@@ -728,6 +728,13 @@ MonoBehaviour:
   maxSkewMs: 50
   requireMinWorkerCount: 1
   weightStrategy: 0
+  showPerWorkerSkeletons: 0
+  perWorkerVisualScale: 0.5
+  showCrowdAlert: 1
+  alertOnDelaySeconds: 0.5
+  alertOffDelaySeconds: 1
+  alertMessage: "\u8907\u6570\u4EBA\u691C\u51FA: 1\u4EBA\u306E\u307F\u3054\u5229\u7528\u304F\u3060\u3055\u3044\nMultiple
+    people detected \u2014 please use solo"
   diagnosticLogging: 1
 --- !u!1 &1238217649
 GameObject:
