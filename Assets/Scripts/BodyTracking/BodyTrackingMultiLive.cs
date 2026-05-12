@@ -554,7 +554,12 @@ namespace BodyTracking
             if (!showSkeleton) return;
             if (workerHost == null) return;
 
-            if (!_latestBySerial.ContainsKey(serial))
+            bool slotExisted = _latestBySerial.ContainsKey(serial);
+            // Recovery path: worker may have crashed (Process.HasExited handled by
+            // K4abtWorkerHost.Update, which removes the session). Our slot still
+            // points at a dead serial — try StartWorker again so a new exe spawns.
+            bool needsSpawn = !slotExisted || !workerHost.HasSession(serial);
+            if (needsSpawn)
             {
                 if (RequiresApplyExtrinsics() && cameraManager != null && !cameraManager.applyExtrinsics)
                 {
@@ -574,11 +579,20 @@ namespace BodyTracking
                         frame.DepthWidth, frame.DepthHeight, irW, irH,
                         frame.ColorWidth, frame.ColorHeight))
                 {
-                    Debug.LogError($"[BodyTrackingMultiLive] StartWorker failed for serial='{serial}'", this);
+                    // StartWorker logs the underlying reason; don't spam this every frame.
+                    if (!slotExisted) Debug.LogError($"[BodyTrackingMultiLive] StartWorker failed for serial='{serial}'", this);
                     return;
                 }
-                var slot = new WorkerLatest { SourceTransform = sourceTransform, Serial = serial };
-                _latestBySerial[serial] = slot;
+                if (slotExisted)
+                {
+                    Debug.LogWarning($"[BodyTrackingMultiLive] re-spawned worker for serial='{serial}' (previous instance died)", this);
+                    _latestBySerial[serial].SourceTransform = sourceTransform;
+                    _latestBySerial[serial].BodyCount = 0;
+                }
+                else
+                {
+                    _latestBySerial[serial] = new WorkerLatest { SourceTransform = sourceTransform, Serial = serial };
+                }
             }
             else
             {
@@ -666,8 +680,11 @@ namespace BodyTracking
                 {
                     var body = slot.Bodies[i];
                     var pelvisJoint = body.Joints[kPelvisIdx];
-                    if ((int)pelvisJoint.ConfidenceLevel <= 0) continue; // pelvis NONE -> skip body
-
+                    // Earlier code skipped bodies whose pelvis was NONE, but that threw
+                    // away whole bodies whose other joints were perfectly trackable
+                    // (k4abt still emits a predicted pelvis position for occluded
+                    // joints). Keep the body and let the per-joint merge weigh the
+                    // pelvis at zero — clustering still works on the predicted pos.
                     Vector3 pelvisWorld = SkeletonWorldTransform.ToWorld(
                         pelvisJoint.Position,
                         slot.SourceTransform);
@@ -758,14 +775,20 @@ namespace BodyTracking
         private void StashPriorState()
         {
             // Snapshot the current frame's merged persons for next-frame continuity.
-            // We stash the seed candidate's world pelvis for each cluster; the seed
-            // is the highest-confidence detection in the cluster (or the carry-over
-            // seed). Use the seed instead of an averaged pelvis because the seed is
-            // the closest analogue to the last-frame "I saw this person here" datum.
-            // Old entries fade through the GC pass above (when their visual gets
-            // destroyed), so this dictionary is bounded by maxBodies.
-            _priorPelvisById.Clear();
-            _priorMaxConfById.Clear();
+            // We stash the seed candidate's world pelvis for each cluster.
+            //
+            // Critically, we do NOT clear when the current frame produced zero
+            // clusters. Worker output (~16-30 fps) is slower than Unity Update
+            // (60+ fps), so most Updates legitimately have stale snapshots and
+            // form no clusters. Clearing on those Updates would wipe the carry-
+            // over hint and force every fresh frame to assign a new id. Visual
+            // pool eviction (OnVisualEvicted) is the source of truth for when a
+            // prior should disappear long-term.
+            if (_clusterCount == 0) return;
+
+            // Only refresh the entries for clusters we actually emitted this frame.
+            // Other prior entries (e.g. a body briefly missing while the visual is
+            // still alive) stay around so the next fresh frame can reclaim them.
             for (int c = 0; c < _clusterCount; c++)
             {
                 var cluster = _clusterPool[c];
