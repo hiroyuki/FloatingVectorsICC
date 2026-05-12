@@ -338,21 +338,27 @@ namespace PointCloud
                     {
                         track.DepthFrames.AddRange(PointCloudRecording.ReadRcsv(depthPath));
                         totalDepth += track.DepthFrames.Count;
+                        var (dw, dh) = PointCloudRecording.ReadRcsvHeaderDimensions(depthPath);
+                        if (dw > 0 && dh > 0) { track.DepthWidth = dw; track.DepthHeight = dh; }
                     }
                     if (hasColor)
                     {
                         track.ColorFrames.AddRange(PointCloudRecording.ReadRcsv(colorPath));
                         totalColor += track.ColorFrames.Count;
+                        var (cw, ch) = PointCloudRecording.ReadRcsvHeaderDimensions(colorPath);
+                        if (cw > 0 && ch > 0) { track.ColorWidth = cw; track.ColorHeight = ch; }
                     }
                     if (hasIR)
                     {
                         track.IRFrames.AddRange(PointCloudRecording.ReadRcsv(irPath));
                         totalIR += track.IRFrames.Count;
+                        var (iw, ih) = PointCloudRecording.ReadRcsvHeaderDimensions(irPath);
+                        if (iw > 0 && ih > 0) { track.IRWidth = iw; track.IRHeight = ih; }
                     }
 
-                    // Dimensions are saved in the RCSV YAML header but we don't parse that back —
-                    // pull them from the first frame size + the configured renderer, if available.
-                    // As a fallback, infer from the live renderer's current settings.
+                    // Fall back to live renderer dimensions if the RCSV header was
+                    // missing values (older recordings). Harmless when the header
+                    // already populated everything.
                     FillDimensionsFromRenderer(track);
                 }
 

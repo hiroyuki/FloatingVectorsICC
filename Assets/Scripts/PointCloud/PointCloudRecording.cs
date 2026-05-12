@@ -133,6 +133,55 @@ namespace PointCloud
             return frames;
         }
 
+        /// <summary>
+        /// Read just the (width, height) recorded in an RCSV file's header. Used by
+        /// the playback path to recover image dimensions when no live PointCloudRenderer
+        /// is available (e.g. offline frame-by-frame eval with cameras disconnected).
+        /// Returns (0, 0) if the header lacks the keys or the file is malformed.
+        /// </summary>
+        public static (int width, int height) ReadRcsvHeaderDimensions(string filePath)
+        {
+            if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath)) return (0, 0);
+            using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            using var br = new BinaryReader(fs, Encoding.UTF8, leaveOpen: false);
+
+            var magic = Encoding.ASCII.GetString(br.ReadBytes(4));
+            if (magic != Magic) return (0, 0);
+            br.ReadUInt64(); // index chunk offset
+            br.ReadUInt64(); // reserved
+            uint headerTextSize = br.ReadUInt32();
+            if (headerTextSize == 0 || headerTextSize > 64 * 1024) return (0, 0);
+            byte[] headerBytes = br.ReadBytes((int)headerTextSize);
+            string headerText = Encoding.UTF8.GetString(headerBytes);
+            int w = ParseFirstYamlInt(headerText, "width");
+            int h = ParseFirstYamlInt(headerText, "height");
+            return (w, h);
+        }
+
+        // Tiny YAML scanner that returns the first value for `<key>:` in the header
+        // text. We don't want a full parser dependency for two ints; this looks for
+        // a line that starts (after trim) with the key + ':' and parses the integer.
+        private static int ParseFirstYamlInt(string yaml, string key)
+        {
+            if (string.IsNullOrEmpty(yaml)) return 0;
+            foreach (var rawLine in yaml.Split('\n'))
+            {
+                string line = rawLine.TrimStart();
+                if (!line.StartsWith(key, StringComparison.Ordinal)) continue;
+                int colon = line.IndexOf(':');
+                if (colon != key.Length) continue; // matched a longer key like "width_real"
+                string v = line.Substring(colon + 1).Trim();
+                int comment = v.IndexOf('#');
+                if (comment >= 0) v = v.Substring(0, comment).Trim();
+                if (int.TryParse(v, System.Globalization.NumberStyles.Integer,
+                                 System.Globalization.CultureInfo.InvariantCulture, out int n))
+                {
+                    return n;
+                }
+            }
+            return 0;
+        }
+
         // ------------------------------------------------------------------
         // Directory / file-path helpers (Scanned Reality-style layout)
         // ------------------------------------------------------------------
