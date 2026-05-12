@@ -52,6 +52,16 @@ namespace PointCloud
         [Tooltip("Playback rate multiplier (1.0 = real time).")]
         public float playbackRate = 1.0f;
 
+        /// <summary>
+        /// Fires once per advanced playback frame per device, with the same payload
+        /// shape a live PointCloudRenderer would produce in <c>OnRawFramesReady</c>.
+        /// Subscribers (e.g. BodyTrackingMultiLive) use this to run merge / inference
+        /// against recorded footage; frame-by-frame stepping then works via Unity's
+        /// built-in Pause + Step buttons because cursor advancement is driven by
+        /// <see cref="Time.timeAsDouble"/>.
+        /// </summary>
+        public event System.Action<string, ObCameraParam?, Transform, RawFrameData> OnPlaybackRawFrame;
+
         // --- Runtime state ---
         public State CurrentState { get; private set; } = State.Idle;
         public int RecordedFrameCount
@@ -573,7 +583,14 @@ namespace PointCloud
                         int colorIdx = Mathf.Min(cursor, track.ColorFrames.Count - 1);
                         colorFrame = track.ColorFrames[colorIdx];
                     }
+                    PointCloudRecording.Frame irFrame = null;
+                    if (track.IRFrames.Count > 0)
+                    {
+                        int irIdx = Mathf.Min(cursor, track.IRFrames.Count - 1);
+                        irFrame = track.IRFrames[irIdx];
+                    }
                     ReconstructAndUpload(track, depthFrame, colorFrame);
+                    FirePlaybackEvent(track, depthFrame, colorFrame, irFrame);
                 }
             }
 
@@ -632,6 +649,34 @@ namespace PointCloud
             track.PlaybackRenderer = mr;
             track.PlaybackMesh = null;
             track.PlaybackMeshCapacity = 0;
+        }
+
+        // Wraps the per-frame playback data in a RawFrameData and fires
+        // OnPlaybackRawFrame so downstream subscribers (e.g. BodyTrackingMultiLive)
+        // can run the same merge pipeline they use on live OnRawFramesReady.
+        private void FirePlaybackEvent(
+            DeviceTrack track,
+            PointCloudRecording.Frame depthFrame,
+            PointCloudRecording.Frame colorFrame,
+            PointCloudRecording.Frame irFrame)
+        {
+            if (OnPlaybackRawFrame == null) return;
+            if (depthFrame?.Bytes == null) return;
+            ulong tsUs = depthFrame.TimestampNs / 1000UL;
+            byte[] colorBytes = colorFrame?.Bytes;
+            int colorCount = colorBytes?.Length ?? 0;
+            byte[] irBytes = irFrame?.Bytes;
+            int irCount = irBytes?.Length ?? 0;
+            var raw = new RawFrameData(
+                depthBytes: depthFrame.Bytes, depthByteCount: depthFrame.Bytes.Length,
+                depthWidth: track.DepthWidth, depthHeight: track.DepthHeight,
+                colorBytes: colorBytes, colorByteCount: colorCount,
+                colorWidth: track.ColorWidth, colorHeight: track.ColorHeight,
+                irBytes: irBytes, irByteCount: irCount,
+                irWidth: track.IRWidth, irHeight: track.IRHeight,
+                timestampUs: tsUs);
+            Transform t = track.PlaybackObject != null ? track.PlaybackObject.transform : null;
+            OnPlaybackRawFrame.Invoke(track.Serial, track.CameraParam, t, raw);
         }
 
         private void ReconstructAndUpload(

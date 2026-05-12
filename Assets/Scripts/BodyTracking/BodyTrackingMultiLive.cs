@@ -28,6 +28,7 @@
 using System.Collections.Generic;
 using BodyTracking.MultiCam;
 using BodyTracking.Shared;
+using Orbbec;
 using PointCloud;
 using UnityEngine;
 
@@ -153,7 +154,12 @@ namespace BodyTracking
         // Update to do the world-space transform + clustering.
         internal sealed class WorkerLatest
         {
-            public PointCloudRenderer Renderer;
+            // Transform used for world-space conversion. For live frames this is the
+            // PointCloudRenderer.transform; for recorded playback it is the
+            // PointCloudRecorder's `_Playback_<serial>` GO transform. Both have the
+            // same convention (localPosition / localRotation from extrinsics, plus
+            // the per-mesh localScale.y = -1 that SkeletonWorldTransform ignores).
+            public Transform SourceTransform;
             public string Serial;
             public int BodyCount;
             public ulong CapturedTsNs; // raw frame ts from the worker
@@ -235,6 +241,8 @@ namespace BodyTracking
         private bool _alertActive;
         private GUIStyle _alertStyleCache;
 
+        private PointCloudRecorder _subscribedRecorder;
+
         private void OnEnable()
         {
             if (!ResolveDependencies()) { _disabledByGuard = true; enabled = false; return; }
@@ -246,6 +254,18 @@ namespace BodyTracking
                 workerHost.OnSkeletonsReady += OnWorkerSkeletons;
                 _hostSubscribed = true;
             }
+
+            // Wire recorded-playback source if a PointCloudRecorder is present in the
+            // scene. Live and playback can coexist: HandleRawFrame and the
+            // OnPlaybackRawFrame handler both funnel into DispatchRawFrame.
+            _subscribedRecorder = FindFirstObjectByType<PointCloudRecorder>();
+            if (_subscribedRecorder != null)
+                _subscribedRecorder.OnPlaybackRawFrame += OnPlaybackRawFrame;
+        }
+
+        private void OnPlaybackRawFrame(string serial, ObCameraParam? camParam, Transform sourceTransform, RawFrameData frame)
+        {
+            HandlePlaybackRawFrame(serial, camParam, sourceTransform, frame);
         }
 
         private void OnDisable()
@@ -254,6 +274,12 @@ namespace BodyTracking
             {
                 workerHost.OnSkeletonsReady -= OnWorkerSkeletons;
                 _hostSubscribed = false;
+            }
+
+            if (_subscribedRecorder != null)
+            {
+                _subscribedRecorder.OnPlaybackRawFrame -= OnPlaybackRawFrame;
+                _subscribedRecorder = null;
             }
 
             // Stop every worker we started; unbind from every renderer we attached to.
@@ -425,10 +451,26 @@ namespace BodyTracking
         // know depth/IR/color resolution and CameraParam is populated.
         private void HandleRawFrame(PointCloudRenderer src, RawFrameData frame)
         {
+            string serial = string.IsNullOrEmpty(src.deviceSerial) ? src.gameObject.name : src.deviceSerial;
+            DispatchRawFrame(serial, src.CameraParam, src.transform, frame);
+        }
+
+        /// <summary>
+        /// Adapter for the offline / recorded playback path. PointCloudRecorder fires
+        /// this with the same payload we'd build from a live PointCloudRenderer so
+        /// the merge pipeline runs without caring about the source.
+        /// </summary>
+        public void HandlePlaybackRawFrame(string serial, ObCameraParam? cameraParam, Transform sourceTransform, RawFrameData frame)
+        {
+            if (string.IsNullOrEmpty(serial)) return;
+            DispatchRawFrame(serial, cameraParam, sourceTransform, frame);
+        }
+
+        private void DispatchRawFrame(string serial, ObCameraParam? cameraParam, Transform sourceTransform, in RawFrameData frame)
+        {
             if (!showSkeleton) return;
             if (workerHost == null) return;
 
-            string serial = string.IsNullOrEmpty(src.deviceSerial) ? src.gameObject.name : src.deviceSerial;
             if (!_latestBySerial.ContainsKey(serial))
             {
                 if (RequiresApplyExtrinsics() && cameraManager != null && !cameraManager.applyExtrinsics)
@@ -442,25 +484,28 @@ namespace BodyTracking
                     return;
                 }
 
-                if (!src.CameraParam.HasValue) return; // wait until CameraParam is populated
+                if (!cameraParam.HasValue) return; // wait until CameraParam is populated
                 int irW = frame.IRWidth > 0 ? frame.IRWidth : frame.DepthWidth;
                 int irH = frame.IRHeight > 0 ? frame.IRHeight : frame.DepthHeight;
-                if (!workerHost.StartWorker(serial, src.CameraParam.Value,
+                if (!workerHost.StartWorker(serial, cameraParam.Value,
                         frame.DepthWidth, frame.DepthHeight, irW, irH,
                         frame.ColorWidth, frame.ColorHeight))
                 {
                     Debug.LogError($"[BodyTrackingMultiLive] StartWorker failed for serial='{serial}'", this);
                     return;
                 }
-                var slot = new WorkerLatest { Renderer = src, Serial = serial };
+                var slot = new WorkerLatest { SourceTransform = sourceTransform, Serial = serial };
                 _latestBySerial[serial] = slot;
+            }
+            else
+            {
+                // Keep the SourceTransform pointer fresh in case the caller swaps it
+                // (e.g. playback rebuilds the _Playback_<serial> GO between sessions).
+                _latestBySerial[serial].SourceTransform = sourceTransform;
             }
 
             if (!workerHost.IsReady(serial)) return;
 
-            // Forward depth + IR to the worker for inference. Reuse caller's byte arrays
-            // (the worker does its own seq-lock copy into the MMF, and PointCloudRenderer
-            // pools these buffers, so we don't need an extra copy here).
             int depthBytes = frame.DepthByteCount;
             byte[] ir = frame.IRBytes;
             int irBytes = frame.IRByteCount;
@@ -542,7 +587,7 @@ namespace BodyTracking
 
                     Vector3 pelvisWorld = SkeletonWorldTransform.ToWorld(
                         pelvisJoint.Position,
-                        slot.Renderer != null ? slot.Renderer.transform : null);
+                        slot.SourceTransform);
 
                     var c = AcquireCandidate();
                     c.Slot = slot;
@@ -691,8 +736,8 @@ namespace BodyTracking
                 if (level <= 0) continue; // NONE excluded from average
 
                 float weight = WeightFor(level);
-                Vector3 worldPos = SkeletonWorldTransform.ToWorld(jt.Position, cand.Slot.Renderer != null ? cand.Slot.Renderer.transform : null);
-                Quaternion worldRot = SkeletonWorldTransform.ToWorldRotation(jt.Orientation, cand.Slot.Renderer != null ? cand.Slot.Renderer.transform : null);
+                Vector3 worldPos = SkeletonWorldTransform.ToWorld(jt.Position, cand.Slot.SourceTransform);
+                Quaternion worldRot = SkeletonWorldTransform.ToWorldRotation(jt.Orientation, cand.Slot.SourceTransform);
 
                 wSum += weight;
                 posSum += worldPos * weight;
@@ -727,7 +772,7 @@ namespace BodyTracking
                 if (level <= 0) continue;
 
                 float weight = WeightFor(level);
-                Quaternion qLocal = SkeletonWorldTransform.ToWorldRotation(jt.Orientation, cand.Slot.Renderer != null ? cand.Slot.Renderer.transform : null);
+                Quaternion qLocal = SkeletonWorldTransform.ToWorldRotation(jt.Orientation, cand.Slot.SourceTransform);
                 if (Quaternion.Dot(qLocal, refRot) < 0f)
                 {
                     qLocal = new Quaternion(-qLocal.x, -qLocal.y, -qLocal.z, -qLocal.w);
@@ -909,7 +954,7 @@ namespace BodyTracking
         private void BuildPerWorkerWorldSkeleton(Candidate cand, ref k4abt_skeleton_t output)
         {
             var body = cand.Slot.Bodies[cand.BodyIndex];
-            Transform rendererT = cand.Slot.Renderer != null ? cand.Slot.Renderer.transform : null;
+            Transform rendererT = cand.Slot.SourceTransform;
             for (int j = 0; j < K4ABTConsts.K4ABT_JOINT_COUNT; j++)
             {
                 var jt = body.Joints[j];
