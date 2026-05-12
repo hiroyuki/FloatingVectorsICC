@@ -37,6 +37,11 @@ namespace PointCloud
         [Tooltip("Material used for playback meshes. If null, falls back to each source renderer's pointMaterial.")]
         public Material playbackMaterial;
 
+        [Tooltip("Optional bounding box used to cull playback points the same way live PointCloudRenderers do. " +
+                 "If null, the first PointCloudBoundingBox referenced by any live PointCloudRenderer in the " +
+                 "scene is used. Set filterMode=Disabled to disable culling without unassigning the reference.")]
+        public PointCloudBoundingBox boundingBox;
+
         [Header("Files")]
         [Tooltip("Root folder for recordings. Relative paths resolve under Application.persistentDataPath. " +
                  "Leave empty to use '<persistentDataPath>/Recordings/recording'.")]
@@ -47,6 +52,11 @@ namespace PointCloud
 
         [Header("Playback")]
         public bool loop = true;
+
+        [Tooltip("Render the reconstructed point cloud meshes during playback. " +
+                 "Toggle off to keep merge / BT running without the visual point cloud " +
+                 "(useful when only the body-tracking output is wanted).")]
+        public bool showPointClouds = true;
 
         [Min(0.01f)]
         [Tooltip("Playback rate multiplier (1.0 = real time).")]
@@ -177,7 +187,16 @@ namespace PointCloud
             public Mesh PlaybackMesh;
             public int PlaybackMeshCapacity;
             public int PlaybackCursor;
-            public NativeArray<ObColorPoint> ReconstructBuffer; // scratch for Reconstruct (sized once)
+
+            // GPU reconstruction buffers (replace CPU NativeArray<ObColorPoint>).
+            // Depth Y16 and color RGB8 are uploaded into raw byte buffers each
+            // frame; the compute shader unprojects into the mesh's vertex buffer
+            // directly. Scratch uint[]s exist because GraphicsBuffer.SetData
+            // requires the element type to match the buffer stride (4).
+            public GraphicsBuffer DepthGpu;
+            public GraphicsBuffer ColorGpu;
+            public uint[] DepthScratchU32;
+            public uint[] ColorScratchU32;
         }
 
         private readonly Dictionary<string, DeviceTrack> _tracks = new Dictionary<string, DeviceTrack>();
@@ -186,6 +205,14 @@ namespace PointCloud
             _subscribedHandlers = new Dictionary<PointCloudRenderer, Action<PointCloudRenderer, RawFrameData>>();
         private double _playbackWallStart;
         private ulong _playbackTrackStartNs;
+
+        [Header("Diagnostics")]
+        [Tooltip("Log per-second playback fire counts per serial (FirePlaybackEvent rate). " +
+                 "Useful to compare against K4abtWorkerHost enqueued/s when investigating " +
+                 "frame-rate drops between recording and worker enqueue.")]
+        public bool diagnosticLogging = false;
+        private readonly Dictionary<string, int> _diagFiresPerSerial = new Dictionary<string, int>();
+        private float _diagWindowStart;
 
         // --- Public API (invoked by Inspector buttons or runtime UI) ---
 
@@ -627,6 +654,7 @@ namespace PointCloud
                     ReconstructAndUpload(track, depthFrame, colorFrame);
                     FirePlaybackEvent(track, depthFrame, colorFrame, irFrame);
                 }
+                ApplyBoundingBoxFilter(track);
             }
 
             if (!anyRemaining)
@@ -641,6 +669,68 @@ namespace PointCloud
                     StopPlayback();
                 }
             }
+
+            if (diagnosticLogging) PerSecondDiag();
+        }
+
+        private void PerSecondDiag()
+        {
+            float now = Time.realtimeSinceStartup;
+            if (_diagWindowStart == 0f) _diagWindowStart = now;
+            if (now - _diagWindowStart < 1f) return;
+            var parts = new List<string>(_diagFiresPerSerial.Count);
+            foreach (var kv in _diagFiresPerSerial) parts.Add($"{kv.Key}={kv.Value}/s");
+            Debug.Log($"[PointCloudRecorder] playback_fires {string.Join(" ", parts)}", this);
+            foreach (var key in new List<string>(_diagFiresPerSerial.Keys)) _diagFiresPerSerial[key] = 0;
+            _diagWindowStart = now;
+        }
+
+        // Shader property IDs + MPB scratch shared across all playback meshes.
+        // Mirrors PointCloudRenderer.UpdateShaderFilterProperties so the
+        // playback path culls points with the same OBB the live path does.
+        private static readonly int kObbObjToBoxId = Shader.PropertyToID("_ObbObjToBox");
+        private static readonly int kObbModeId     = Shader.PropertyToID("_ObbMode");
+        private MaterialPropertyBlock _filterMpb;
+
+        private PointCloudBoundingBox ResolveBoundingBox()
+        {
+            if (boundingBox != null) return boundingBox;
+            // Late-bind from any live PointCloudRenderer that already references one
+            // (shared scene-level box pattern). When no live renderers exist
+            // (playback-only sessions), fall back to a scene-wide search so we still
+            // pick up the same box that authoring puts on the scene.
+            foreach (var r in CollectSourceRenderers())
+            {
+                if (r != null && r.boundingBox != null)
+                {
+                    boundingBox = r.boundingBox;
+                    return boundingBox;
+                }
+            }
+            boundingBox = FindFirstObjectByType<PointCloudBoundingBox>();
+            return boundingBox;
+        }
+
+        private void ApplyBoundingBoxFilter(DeviceTrack track)
+        {
+            if (track.PlaybackRenderer == null) return;
+            // Honor the showPointClouds toggle even while playback keeps reconstructing
+            // and firing BT events — only the visual mesh is hidden.
+            if (track.PlaybackRenderer.enabled != showPointClouds)
+                track.PlaybackRenderer.enabled = showPointClouds;
+            if (_filterMpb == null) _filterMpb = new MaterialPropertyBlock();
+            track.PlaybackRenderer.GetPropertyBlock(_filterMpb);
+
+            float obbMode = 0f;
+            var box = ResolveBoundingBox();
+            if (box != null && box.Mode != PointCloudBoundingBox.FilterMode.Disabled)
+            {
+                obbMode = box.Mode == PointCloudBoundingBox.FilterMode.KeepInside ? 1f : 2f;
+                var m = box.transform.worldToLocalMatrix * track.PlaybackObject.transform.localToWorldMatrix;
+                _filterMpb.SetMatrix(kObbObjToBoxId, m);
+            }
+            _filterMpb.SetFloat(kObbModeId, obbMode);
+            track.PlaybackRenderer.SetPropertyBlock(_filterMpb);
         }
 
         private void EnsurePlaybackObject(DeviceTrack track)
@@ -712,6 +802,46 @@ namespace PointCloud
                 timestampUs: tsUs);
             Transform t = track.PlaybackObject != null ? track.PlaybackObject.transform : null;
             OnPlaybackRawFrame.Invoke(track.Serial, track.CameraParam, t, raw);
+            if (diagnosticLogging)
+            {
+                _diagFiresPerSerial.TryGetValue(track.Serial, out var n);
+                _diagFiresPerSerial[track.Serial] = n + 1;
+            }
+        }
+
+        // Cached compute shader + property IDs. Loaded from Resources on first
+        // playback frame; failure falls back to CPU reconstruction so playback
+        // never goes silent on a missing shader asset.
+        private static ComputeShader s_reconstructShader;
+        private static int s_reconstructKernel = -1;
+        private static readonly int kId_Depth   = Shader.PropertyToID("_Depth");
+        private static readonly int kId_Color   = Shader.PropertyToID("_Color");
+        private static readonly int kId_Out     = Shader.PropertyToID("_Out");
+        private static readonly int kId_DepthW  = Shader.PropertyToID("_DepthW");
+        private static readonly int kId_DepthH  = Shader.PropertyToID("_DepthH");
+        private static readonly int kId_ColorW  = Shader.PropertyToID("_ColorW");
+        private static readonly int kId_ColorH  = Shader.PropertyToID("_ColorH");
+        private static readonly int kId_HasColor = Shader.PropertyToID("_HasColor");
+        private static readonly int kId_FxD = Shader.PropertyToID("_FxD");
+        private static readonly int kId_FyD = Shader.PropertyToID("_FyD");
+        private static readonly int kId_CxD = Shader.PropertyToID("_CxD");
+        private static readonly int kId_CyD = Shader.PropertyToID("_CyD");
+        private static readonly int kId_FxC = Shader.PropertyToID("_FxC");
+        private static readonly int kId_FyC = Shader.PropertyToID("_FyC");
+        private static readonly int kId_CxC = Shader.PropertyToID("_CxC");
+        private static readonly int kId_CyC = Shader.PropertyToID("_CyC");
+        private static readonly int kId_Rrow0 = Shader.PropertyToID("_Rrow0");
+        private static readonly int kId_Rrow1 = Shader.PropertyToID("_Rrow1");
+        private static readonly int kId_Rrow2 = Shader.PropertyToID("_Rrow2");
+        private static readonly int kId_T     = Shader.PropertyToID("_T");
+
+        private static bool TryLoadReconstructShader()
+        {
+            if (s_reconstructShader != null && s_reconstructKernel >= 0) return true;
+            s_reconstructShader = Resources.Load<ComputeShader>("PointCloudReconstruct");
+            if (s_reconstructShader == null) return false;
+            s_reconstructKernel = s_reconstructShader.FindKernel("CSMain");
+            return s_reconstructKernel >= 0;
         }
 
         private void ReconstructAndUpload(
@@ -731,56 +861,125 @@ namespace PointCloud
             }
             int dw = track.DepthWidth, dh = track.DepthHeight;
             if (dw <= 0 || dh <= 0) return;
+            if (!TryLoadReconstructShader())
+            {
+                Debug.LogError(
+                    $"[{nameof(PointCloudRecorder)}] PointCloudReconstruct compute shader not found in Resources/", this);
+                return;
+            }
 
             int capacity = dw * dh;
-            if (!track.ReconstructBuffer.IsCreated || track.ReconstructBuffer.Length < capacity)
-            {
-                if (track.ReconstructBuffer.IsCreated) track.ReconstructBuffer.Dispose();
-                track.ReconstructBuffer = new NativeArray<ObColorPoint>(
-                    capacity, Allocator.Persistent, NativeArrayOptions.UninitializedMemory);
-            }
-
-            int pointCount = PointReconstruction.Reconstruct(
-                depthFrame.Bytes, dw, dh,
-                colorFrame != null ? colorFrame.Bytes : null,
-                track.ColorWidth, track.ColorHeight,
-                track.CameraParam.Value,
-                track.ReconstructBuffer);
+            int cw = track.ColorWidth, ch = track.ColorHeight;
+            bool hasColor = colorFrame != null && colorFrame.Bytes != null && cw > 0 && ch > 0;
 
             EnsurePlaybackObject(track);
-            if (track.PlaybackMesh == null || track.PlaybackMeshCapacity < capacity)
+            EnsurePlaybackMesh(track, capacity);
+            EnsureDepthGpuBuffer(track, depthFrame.Bytes.Length);
+            EnsureColorGpuBuffer(track, hasColor ? colorFrame.Bytes.Length : 4);
+
+            // Upload depth + color into GPU raw buffers. Buffer stride is 4
+            // (uint), so we Blockcopy bytes into the uint[] scratch first.
+            int depthBytes = depthFrame.Bytes.Length;
+            Buffer.BlockCopy(depthFrame.Bytes, 0, track.DepthScratchU32, 0, depthBytes);
+            track.DepthGpu.SetData(track.DepthScratchU32, 0, 0, track.DepthScratchU32.Length);
+            if (hasColor)
             {
-                if (track.PlaybackMesh != null) Destroy(track.PlaybackMesh);
-                var mesh = new Mesh
-                {
-                    name = $"PlaybackMesh_{track.Serial}",
-                    indexFormat = IndexFormat.UInt32,
-                    bounds = new Bounds(Vector3.zero, Vector3.one * 100f),
-                };
-                var attrs = new[]
-                {
-                    new VertexAttributeDescriptor(VertexAttribute.Position, VertexAttributeFormat.Float32, 3, stream: 0),
-                    new VertexAttributeDescriptor(VertexAttribute.Color,    VertexAttributeFormat.Float32, 3, stream: 0),
-                };
-                mesh.SetVertexBufferParams(capacity, attrs);
-                mesh.SetIndexBufferParams(capacity, IndexFormat.UInt32);
-                var indices = new NativeArray<uint>(capacity, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
-                try
-                {
-                    for (int i = 0; i < capacity; i++) indices[i] = (uint)i;
-                    mesh.SetIndexBufferData(indices, 0, 0, capacity,
-                        MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
-                }
-                finally { indices.Dispose(); }
-                track.PlaybackMesh = mesh;
-                track.PlaybackMeshCapacity = capacity;
-                track.PlaybackFilter.sharedMesh = mesh;
+                int colorBytes = colorFrame.Bytes.Length;
+                Buffer.BlockCopy(colorFrame.Bytes, 0, track.ColorScratchU32, 0, colorBytes);
+                track.ColorGpu.SetData(track.ColorScratchU32, 0, 0, track.ColorScratchU32.Length);
             }
 
-            track.PlaybackMesh.SetVertexBufferData(track.ReconstructBuffer, 0, 0, pointCount,
-                flags: MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
-            track.PlaybackMesh.SetSubMesh(0, new SubMeshDescriptor(0, pointCount, MeshTopology.Points),
+            var cam = track.CameraParam.Value;
+            var shader = s_reconstructShader;
+            int k = s_reconstructKernel;
+            var vbuf = track.PlaybackMesh.GetVertexBuffer(0);
+
+            shader.SetBuffer(k, kId_Depth, track.DepthGpu);
+            shader.SetBuffer(k, kId_Color, track.ColorGpu);
+            shader.SetBuffer(k, kId_Out,   vbuf);
+            shader.SetInt(kId_DepthW, dw);
+            shader.SetInt(kId_DepthH, dh);
+            shader.SetInt(kId_ColorW, cw);
+            shader.SetInt(kId_ColorH, ch);
+            shader.SetInt(kId_HasColor, hasColor ? 1 : 0);
+            shader.SetFloat(kId_FxD, cam.DepthIntrinsic.Fx);
+            shader.SetFloat(kId_FyD, cam.DepthIntrinsic.Fy);
+            shader.SetFloat(kId_CxD, cam.DepthIntrinsic.Cx);
+            shader.SetFloat(kId_CyD, cam.DepthIntrinsic.Cy);
+            shader.SetFloat(kId_FxC, cam.RgbIntrinsic.Fx);
+            shader.SetFloat(kId_FyC, cam.RgbIntrinsic.Fy);
+            shader.SetFloat(kId_CxC, cam.RgbIntrinsic.Cx);
+            shader.SetFloat(kId_CyC, cam.RgbIntrinsic.Cy);
+            var R = cam.Transform.Rot;
+            shader.SetVector(kId_Rrow0, new Vector4(R[0], R[1], R[2], 0f));
+            shader.SetVector(kId_Rrow1, new Vector4(R[3], R[4], R[5], 0f));
+            shader.SetVector(kId_Rrow2, new Vector4(R[6], R[7], R[8], 0f));
+            var T = cam.Transform.Trans;
+            shader.SetVector(kId_T, new Vector4(T[0], T[1], T[2], 0f));
+
+            int gx = (dw + 7) / 8;
+            int gy = (dh + 7) / 8;
+            shader.Dispatch(k, gx, gy, 1);
+            vbuf.Dispose();
+
+            track.PlaybackMesh.SetSubMesh(0, new SubMeshDescriptor(0, capacity, MeshTopology.Points),
                 MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
+        }
+
+        // Build / resize the mesh so the compute can write into its vertex
+        // buffer directly. vertexBufferTarget = Raw is required for compute
+        // RWByteAddressBuffer access. Capacity is dw*dh (every depth pixel
+        // gets a vertex; invalid pixels are emitted offscreen and clip-culled).
+        private void EnsurePlaybackMesh(DeviceTrack track, int capacity)
+        {
+            if (track.PlaybackMesh != null && track.PlaybackMeshCapacity >= capacity) return;
+
+            if (track.PlaybackMesh != null) Destroy(track.PlaybackMesh);
+            var mesh = new Mesh
+            {
+                name = $"PlaybackMesh_{track.Serial}",
+                indexFormat = IndexFormat.UInt32,
+                bounds = new Bounds(Vector3.zero, Vector3.one * 100f),
+            };
+            mesh.vertexBufferTarget |= GraphicsBuffer.Target.Raw;
+            var attrs = new[]
+            {
+                new VertexAttributeDescriptor(VertexAttribute.Position, VertexAttributeFormat.Float32, 3, stream: 0),
+                new VertexAttributeDescriptor(VertexAttribute.Color,    VertexAttributeFormat.Float32, 3, stream: 0),
+            };
+            mesh.SetVertexBufferParams(capacity, attrs);
+            mesh.SetIndexBufferParams(capacity, IndexFormat.UInt32);
+            var indices = new NativeArray<uint>(capacity, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
+            try
+            {
+                for (int i = 0; i < capacity; i++) indices[i] = (uint)i;
+                mesh.SetIndexBufferData(indices, 0, 0, capacity,
+                    MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
+            }
+            finally { indices.Dispose(); }
+            track.PlaybackMesh = mesh;
+            track.PlaybackMeshCapacity = capacity;
+            track.PlaybackFilter.sharedMesh = mesh;
+        }
+
+        private static void EnsureDepthGpuBuffer(DeviceTrack track, int byteCount)
+        {
+            int uintCount = (byteCount + 3) / 4;
+            if (track.DepthGpu != null && track.DepthScratchU32 != null && track.DepthScratchU32.Length >= uintCount)
+                return;
+            track.DepthGpu?.Dispose();
+            track.DepthGpu = new GraphicsBuffer(GraphicsBuffer.Target.Raw, uintCount, sizeof(uint));
+            track.DepthScratchU32 = new uint[uintCount];
+        }
+
+        private static void EnsureColorGpuBuffer(DeviceTrack track, int byteCount)
+        {
+            int uintCount = Math.Max(1, (byteCount + 3) / 4);
+            if (track.ColorGpu != null && track.ColorScratchU32 != null && track.ColorScratchU32.Length >= uintCount)
+                return;
+            track.ColorGpu?.Dispose();
+            track.ColorGpu = new GraphicsBuffer(GraphicsBuffer.Target.Raw, uintCount, sizeof(uint));
+            track.ColorScratchU32 = new uint[uintCount];
         }
 
         // --- Lifecycle / helpers ---
@@ -814,7 +1013,10 @@ namespace PointCloud
             foreach (var kv in _tracks)
             {
                 var track = kv.Value;
-                if (track.ReconstructBuffer.IsCreated) track.ReconstructBuffer.Dispose();
+                track.DepthGpu?.Dispose(); track.DepthGpu = null;
+                track.ColorGpu?.Dispose(); track.ColorGpu = null;
+                track.DepthScratchU32 = null;
+                track.ColorScratchU32 = null;
                 if (track.PlaybackMesh != null)
                 {
                     if (Application.isPlaying) Destroy(track.PlaybackMesh);
@@ -895,93 +1097,4 @@ namespace PointCloud
         }
     }
 
-    /// <summary>
-    /// CPU-side Phase D reconstruction: raw depth Y16 + raw color RGB + intrinsics/distortion
-    /// + depth-to-color extrinsic (all in millimeters for translation) -> ObColorPoint array in
-    /// color-camera space (meters), packed densely (invalid-depth pixels skipped).
-    /// </summary>
-    internal static class PointReconstruction
-    {
-        public static unsafe int Reconstruct(
-            byte[] depthY16, int depthW, int depthH,
-            byte[] colorRgb8, int colorW, int colorH,
-            ObCameraParam cam,
-            NativeArray<ObColorPoint> output)
-        {
-            if (depthY16 == null || depthW <= 0 || depthH <= 0) return 0;
-            int expected = depthW * depthH * 2;
-            if (depthY16.Length < expected) return 0;
-
-            float fxD = cam.DepthIntrinsic.Fx, fyD = cam.DepthIntrinsic.Fy;
-            float cxD = cam.DepthIntrinsic.Cx, cyD = cam.DepthIntrinsic.Cy;
-            float fxC = cam.RgbIntrinsic.Fx,   fyC = cam.RgbIntrinsic.Fy;
-            float cxC = cam.RgbIntrinsic.Cx,   cyC = cam.RgbIntrinsic.Cy;
-
-            // SDK transform: rotation (depth->color) + translation in millimeters.
-            float r0 = cam.Transform.Rot[0], r1 = cam.Transform.Rot[1], r2 = cam.Transform.Rot[2];
-            float r3 = cam.Transform.Rot[3], r4 = cam.Transform.Rot[4], r5 = cam.Transform.Rot[5];
-            float r6 = cam.Transform.Rot[6], r7 = cam.Transform.Rot[7], r8 = cam.Transform.Rot[8];
-            float tx = cam.Transform.Trans[0], ty = cam.Transform.Trans[1], tz = cam.Transform.Trans[2];
-
-            bool hasColor = colorRgb8 != null && colorW > 0 && colorH > 0
-                            && colorRgb8.Length >= colorW * colorH * 3;
-            int outCount = 0;
-            int max = output.Length;
-
-            // Use a stub non-null empty array in the else-branch so `fixed` doesn't receive
-            // a null candidate (some C# versions reject the mixed ternary).
-            byte[] colorSrc = hasColor ? colorRgb8 : Array.Empty<byte>();
-
-            fixed (byte* depthP = depthY16)
-            fixed (byte* colorP = colorSrc)
-            {
-                ushort* depthPtr = (ushort*)depthP;
-                for (int v = 0; v < depthH; v++)
-                {
-                    for (int u = 0; u < depthW; u++)
-                    {
-                        if (outCount >= max) return outCount;
-                        ushort zRaw = depthPtr[v * depthW + u];
-                        if (zRaw == 0) continue;
-
-                        float z = zRaw; // mm
-                        float xD = (u - cxD) * z / fxD;
-                        float yD = (v - cyD) * z / fyD;
-
-                        // Transform to color camera space.
-                        float xC = r0 * xD + r1 * yD + r2 * z + tx;
-                        float yC = r3 * xD + r4 * yD + r5 * z + ty;
-                        float zC = r6 * xD + r7 * yD + r8 * z + tz;
-
-                        // Default color (grey) when sampling fails.
-                        float cr = 0.5f, cg = 0.5f, cb = 0.5f;
-                        if (hasColor && zC > 0f)
-                        {
-                            float uC = fxC * xC / zC + cxC;
-                            float vC = fyC * yC / zC + cyC;
-                            int iu = (int)uC;
-                            int iv = (int)vC;
-                            if (iu >= 0 && iu < colorW && iv >= 0 && iv < colorH)
-                            {
-                                byte* px = colorP + (iv * colorW + iu) * 3;
-                                cr = px[0] * (1.0f / 255f);
-                                cg = px[1] * (1.0f / 255f);
-                                cb = px[2] * (1.0f / 255f);
-                            }
-                        }
-
-                        output[outCount] = new ObColorPoint
-                        {
-                            X = xC * 0.001f, // mm -> m, in color camera space
-                            Y = yC * 0.001f,
-                            Z = zC * 0.001f,
-                            R = cr, G = cg, B = cb,
-                        };
-                        outCount++;
-                    }
-                }
-            }
-            return outCount;
-        }
-    }
 }

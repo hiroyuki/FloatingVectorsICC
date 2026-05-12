@@ -198,10 +198,12 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::PointCloud.PointCloudRecorder
   cameraManager: {fileID: 925702423}
   playbackMaterial: {fileID: 0}
+  boundingBox: {fileID: 0}
   folderPath: 
   datasetName: 
   loop: 1
   playbackRate: 1
+  diagnosticLogging: 0
 --- !u!4 &86788059
 Transform:
   m_ObjectHideFlags: 0
@@ -265,7 +267,7 @@ MonoBehaviour:
   k4aWrapperBinOverride: 
   btSdkBinOverride: 
   useWorker: 1
-  diagnosticLogging: 1
+  diagnosticLogging: 0
 --- !u!1 &173474408
 GameObject:
   m_ObjectHideFlags: 0
@@ -335,7 +337,7 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 925702422}
-  m_Enabled: 1
+  m_Enabled: 0
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 96892899ec43f7246a88f0b3f63d9e67, type: 3}
   m_Name: 
@@ -660,8 +662,8 @@ Transform:
   m_GameObject: {fileID: 1151541766}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0, y: 0, z: 1.994}
-  m_LocalScale: {x: 5, y: 5, z: 5}
+  m_LocalPosition: {x: -1.22, y: -0.73, z: 1.44}
+  m_LocalScale: {x: 2, y: 2, z: 2}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 0}
@@ -725,17 +727,18 @@ MonoBehaviour:
   unseenFramesBeforeDestroy: 60
   mergeRadiusMeters: 0.3
   continuityRadiusMeters: 0.5
-  maxSkewMs: 50
+  maxSkewMs: 500
   requireMinWorkerCount: 1
   weightStrategy: 0
-  showPerWorkerSkeletons: 0
+  showPerWorkerSkeletons: 1
   perWorkerVisualScale: 0.5
+  showDebugHud: 1
   showCrowdAlert: 1
   alertOnDelaySeconds: 0.5
   alertOffDelaySeconds: 1
   alertMessage: "\u8907\u6570\u4EBA\u691C\u51FA: 1\u4EBA\u306E\u307F\u3054\u5229\u7528\u304F\u3060\u3055\u3044\nMultiple
     people detected \u2014 please use solo"
-  diagnosticLogging: 1
+  diagnosticLogging: 0
 --- !u!1 &1238217649
 GameObject:
   m_ObjectHideFlags: 0
@@ -833,7 +836,7 @@ MonoBehaviour:
   maxBodies: 4
   unseenFramesBeforeDestroy: 60
   unseenFramesBeforeHide: 6
-  diagnosticLogging: 1
+  diagnosticLogging: 0
 --- !u!1 &2103759209
 GameObject:
   m_ObjectHideFlags: 0

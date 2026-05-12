@@ -1,0 +1,116 @@
+// GPU reconstruction of recorded point clouds. Replaces the CPU per-pixel
+// loop in PointReconstruction.Reconstruct so playback can keep up with
+// recording rate (~30 fps) instead of being limited by main-thread cost.
+//
+// One thread per depth pixel. Reads raw Y16 depth + raw RGB8 color from
+// ByteAddressBuffers (caller copies byte[] into them via SetData each
+// frame). Writes one Vertex per depth pixel to a GraphicsBuffer-backed
+// mesh vertex buffer (RWByteAddressBuffer; we lay out Vertex as 6 floats =
+// 24 bytes to match OBColorPoint / the PointCloudUnlit vertex layout).
+//
+// Invalid pixels (depth == 0) are emitted with a far-away position so the
+// clip stage discards them — the CPU path skips them to keep the vertex
+// count tight, but emitting all dw*dh per frame is cheaper than compaction
+// on GPU and the rasterizer culls them anyway.
+
+#pragma kernel CSMain
+
+ByteAddressBuffer _Depth;          // raw Y16 bytes (length = dw*dh*2)
+ByteAddressBuffer _Color;          // raw RGB8 bytes (length = cw*ch*3), unused if _HasColor==0
+RWByteAddressBuffer _Out;          // vertex buffer, 24 bytes per vertex
+
+uint _DepthW;
+uint _DepthH;
+uint _ColorW;
+uint _ColorH;
+uint _HasColor;
+
+float _FxD; float _FyD; float _CxD; float _CyD;
+float _FxC; float _FyC; float _CxC; float _CyC;
+
+// depth -> color rotation (row-major 3x3) + translation (mm).
+float3 _Rrow0;
+float3 _Rrow1;
+float3 _Rrow2;
+float3 _T;
+
+uint LoadDepthU16(uint u, uint v)
+{
+    uint byteOffset = (v * _DepthW + u) * 2u;
+    uint word = _Depth.Load(byteOffset & ~3u);
+    uint shift = (byteOffset & 2u) * 8u;
+    return (word >> shift) & 0xFFFFu;
+}
+
+float3 SampleColorRGB(int iu, int iv)
+{
+    if (_HasColor == 0u || iu < 0 || iv < 0 || iu >= (int)_ColorW || iv >= (int)_ColorH)
+        return float3(0.5, 0.5, 0.5);
+    uint byteOffset = ((uint)iv * _ColorW + (uint)iu) * 3u;
+    uint aligned = byteOffset & ~3u;
+    uint w0 = _Color.Load(aligned);
+    uint w1 = _Color.Load(aligned + 4u);
+    uint lane = byteOffset & 3u;
+    uint b0, b1, b2;
+    if (lane == 0u) {
+        b0 =  w0        & 0xFFu;
+        b1 = (w0 >>  8) & 0xFFu;
+        b2 = (w0 >> 16) & 0xFFu;
+    } else if (lane == 1u) {
+        b0 = (w0 >>  8) & 0xFFu;
+        b1 = (w0 >> 16) & 0xFFu;
+        b2 = (w0 >> 24) & 0xFFu;
+    } else if (lane == 2u) {
+        b0 = (w0 >> 16) & 0xFFu;
+        b1 = (w0 >> 24) & 0xFFu;
+        b2 =  w1        & 0xFFu;
+    } else {
+        b0 = (w0 >> 24) & 0xFFu;
+        b1 =  w1        & 0xFFu;
+        b2 = (w1 >>  8) & 0xFFu;
+    }
+    return float3((float)b0, (float)b1, (float)b2) * (1.0 / 255.0);
+}
+
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    uint u = id.x;
+    uint v = id.y;
+    if (u >= _DepthW || v >= _DepthH) return;
+
+    uint idx = v * _DepthW + u;
+    uint outByteOffset = idx * 24u;
+
+    uint zRaw = LoadDepthU16(u, v);
+    if (zRaw == 0u)
+    {
+        // Far-away marker: clip-stage discards the resulting screen-space pos.
+        _Out.Store3(outByteOffset,      asuint(float3(1e10, 1e10, 1e10)));
+        _Out.Store3(outByteOffset + 12u, asuint(float3(0.0, 0.0, 0.0)));
+        return;
+    }
+
+    float z  = (float)zRaw;
+    float xD = ((float)u - _CxD) * z / _FxD;
+    float yD = ((float)v - _CyD) * z / _FyD;
+
+    float3 pD = float3(xD, yD, z);
+    float xC = dot(_Rrow0, pD) + _T.x;
+    float yC = dot(_Rrow1, pD) + _T.y;
+    float zC = dot(_Rrow2, pD) + _T.z;
+
+    float3 col = float3(0.5, 0.5, 0.5);
+    if (_HasColor != 0u && zC > 0.0)
+    {
+        float uC = _FxC * xC / zC + _CxC;
+        float vC = _FyC * yC / zC + _CyC;
+        col = SampleColorRGB((int)uC, (int)vC);
+    }
+
+    // mm -> m, in color-camera space (matches the CPU reconstruction).
+    float3 posM = float3(xC, yC, zC) * 0.001;
+
+    _Out.Store3(outByteOffset,        asuint(posM));
+    _Out.Store3(outByteOffset + 12u, asuint(col));
+}
