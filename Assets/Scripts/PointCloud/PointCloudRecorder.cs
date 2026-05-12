@@ -221,6 +221,30 @@ namespace PointCloud
                 int totalColorFrames = 0;
                 int totalIRFrames = 0;
 
+                // Preserve existing global_tr_colorCamera values written by the
+                // CalibrationWindow (issue #9). Save used to overwrite extrinsics.yaml
+                // with identity transforms, wiping the calibration; now we read the
+                // file first and pass the prior per-serial value through.
+                var existingGlobalBySerial = new Dictionary<string, ObExtrinsic>();
+                try
+                {
+                    string extPath = Path.Combine(PointCloudRecording.CalibrationDir(root), "extrinsics.yaml");
+                    if (File.Exists(extPath))
+                    {
+                        foreach (var cal in PointCloudRecording.ReadExtrinsicsYaml(root))
+                        {
+                            if (cal.GlobalTrColorCamera.HasValue)
+                                existingGlobalBySerial[cal.Serial] = cal.GlobalTrColorCamera.Value;
+                        }
+                    }
+                }
+                catch (Exception preserveEx)
+                {
+                    Debug.LogWarning(
+                        $"[{nameof(PointCloudRecorder)}] could not read existing extrinsics.yaml " +
+                        $"to preserve global_tr_colorCamera: {preserveEx.Message}", this);
+                }
+
                 // Compute centroid of camera positions so extrinsics.yaml puts world origin at
                 // the centroid for multi-device setups (identity for a single device).
                 var centroid = Vector3.zero;
@@ -276,6 +300,9 @@ namespace PointCloud
                     if (track.CameraParam.HasValue)
                     {
                         var p = track.CameraParam.Value;
+                        ObExtrinsic? preservedGlobal = null;
+                        if (existingGlobalBySerial.TryGetValue(track.Serial, out var preserved))
+                            preservedGlobal = preserved;
                         calibrations.Add(new PointCloudRecording.DeviceCalibration
                         {
                             Serial           = track.Serial,
@@ -284,7 +311,9 @@ namespace PointCloud
                             ColorDistortion  = p.RgbDistortion,
                             DepthDistortion  = p.DepthDistortion,
                             DepthToColor     = p.Transform,
-                            GlobalTrColorCamera = null, // identity; Phase E fills this in
+                            // Pass through whatever the CalibrationWindow wrote earlier;
+                            // null means identity (single-cam or pre-calibration recordings).
+                            GlobalTrColorCamera = preservedGlobal,
                         });
                     }
                 }
