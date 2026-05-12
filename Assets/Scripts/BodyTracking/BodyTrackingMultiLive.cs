@@ -99,9 +99,12 @@ namespace BodyTracking
         public float continuityRadiusMeters = 0.5f;
 
         [Tooltip("Maximum staleness (ms) for a worker snapshot to participate in this frame's " +
-                 "merge. Snapshots older than this are dropped to avoid temporal ghosting.")]
-        [Range(16, 200)]
-        public int maxSkewMs = 50;
+                 "merge. Snapshots older than this are dropped to avoid temporal ghosting. " +
+                 "Must comfortably exceed the slowest expected worker output interval — k4abt " +
+                 "runs at the depth stream fps (typically 15–30 Hz = 33–66 ms), so 200 ms gives " +
+                 "headroom for jitter while still rejecting genuinely stale frames.")]
+        [Range(16, 500)]
+        public int maxSkewMs = 200;
 
         [Tooltip("Minimum number of worker snapshots required for a cluster to emit a person. " +
                  "Set to 2 to require multi-camera agreement; 1 (default) accepts single-cam " +
@@ -234,9 +237,11 @@ namespace BodyTracking
         // Diagnostic counters.
         private int _diagSnapshotsRecv;
         private int _diagDroppedStaleSnapshots;
+        private int _diagFreshIterations; // CollectCandidates: slot non-empty AND not stale (= candidate built)
         private int _diagClustersFormed;
         private int _diagPersonsOutput;
         private int _diagContinuityCarryOver;
+        private float _diagMaxObservedAgeMs;
         private float _diagWindowStart;
 
         // Crowd-alert debounce state. Uses Time.realtimeSinceStartup so the
@@ -645,12 +650,15 @@ namespace BodyTracking
             Debug.Log(
                 $"[BodyTrackingMultiLive] workers={boundWorkers} " +
                 $"snapshots/s={_diagSnapshotsRecv} dropped_stale/s={_diagDroppedStaleSnapshots} " +
+                $"fresh_iter/s={_diagFreshIterations} max_age_ms={_diagMaxObservedAgeMs:F0} " +
                 $"clusters/s={_diagClustersFormed} persons/s={_diagPersonsOutput} " +
                 $"continuity_carry_over/s={_diagContinuityCarryOver} " +
                 $"alive_visuals={_pool.Count} bodies_now={totalBodiesNow}",
                 this);
             _diagSnapshotsRecv = 0;
             _diagDroppedStaleSnapshots = 0;
+            _diagFreshIterations = 0;
+            _diagMaxObservedAgeMs = 0f;
             _diagClustersFormed = 0;
             _diagPersonsOutput = 0;
             _diagContinuityCarryOver = 0;
@@ -671,11 +679,14 @@ namespace BodyTracking
             {
                 var slot = kv.Value;
                 if (slot == null || slot.BodyCount == 0) continue;
+                float ageMs = (now - slot.CapturedAtRealtime) * 1000f;
+                if (ageMs > _diagMaxObservedAgeMs) _diagMaxObservedAgeMs = ageMs;
                 if (now - slot.CapturedAtRealtime > maxSkewSec)
                 {
                     _diagDroppedStaleSnapshots += slot.BodyCount;
                     continue;
                 }
+                _diagFreshIterations += slot.BodyCount;
                 for (int i = 0; i < slot.BodyCount; i++)
                 {
                     var body = slot.Bodies[i];
