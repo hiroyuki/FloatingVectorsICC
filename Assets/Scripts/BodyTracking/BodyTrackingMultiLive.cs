@@ -126,6 +126,11 @@ namespace BodyTracking
         [Range(0.1f, 1f)]
         public float perWorkerVisualScale = 0.5f;
 
+        [Tooltip("Draw an OnGUI overlay listing per-worker bodies, per-cluster members, " +
+                 "and merged persons. Useful during Editor Pause / Step for frame-by-frame " +
+                 "evaluation against recorded playback.")]
+        public bool showDebugHud = false;
+
         [Header("Crowd alert")]
         [Tooltip("Show on-screen warning when more than one merged person is detected. " +
                  "Per CLAUDE.md this installation is single-person only.")]
@@ -375,6 +380,84 @@ namespace BodyTracking
             GUI.DrawTexture(rect, Texture2D.whiteTexture);
             GUI.color = prev;
             GUI.Label(rect, alertMessage, _alertStyleCache);
+
+            if (showDebugHud) DrawDebugHud();
+        }
+
+        private GUIStyle _hudStyleCache;
+        private readonly System.Text.StringBuilder _hudSb = new System.Text.StringBuilder(2048);
+
+        private void DrawDebugHud()
+        {
+            if (_hudStyleCache == null)
+            {
+                _hudStyleCache = new GUIStyle(GUI.skin.label)
+                {
+                    fontSize = 12,
+                    alignment = TextAnchor.UpperLeft,
+                    wordWrap = false,
+                    richText = true,
+                };
+                _hudStyleCache.normal.textColor = new Color(0.95f, 0.95f, 0.95f, 1f);
+            }
+
+            _hudSb.Clear();
+            // Time.timeScale == 0 is a reasonable proxy for "Editor Paused" without
+            // pulling in UnityEditor.* (which would break player builds).
+            bool paused = Time.timeScale <= 0.0001f;
+            _hudSb.AppendLine($"<b>[BodyTrackingMultiLive Debug]</b> {(paused ? "PAUSED" : "running")}  frame={Time.frameCount}");
+            _hudSb.AppendLine($"workers={_latestBySerial.Count} candidates={_candidateCount} clusters={_clusterCount} merged={_pool.Count}");
+
+            // Per-worker bodies
+            foreach (var kv in _latestBySerial)
+            {
+                var slot = kv.Value;
+                _hudSb.AppendLine($"<color=#9cf>worker {slot.Serial}</color>  bodies={slot.BodyCount}  ts_ms={slot.CapturedTsNs / 1000000UL}");
+                for (int b = 0; b < slot.BodyCount; b++)
+                {
+                    var body = slot.Bodies[b];
+                    int conf = MaxConfidenceInBody(body);
+                    var pelvis = body.Joints[kPelvisIdx].Position;
+                    _hudSb.AppendLine($"  body[{b}] id={body.Id} maxConf={conf} pelvis_mm=({pelvis.X:F0},{pelvis.Y:F0},{pelvis.Z:F0})");
+                }
+            }
+
+            // Per-cluster contents
+            for (int c = 0; c < _clusterCount; c++)
+            {
+                var cl = _clusterPool[c];
+                _hudSb.AppendLine($"<color=#fc9>cluster[{c}]</color> id={cl.Id} carryOver={cl.IsCarryOver} members={cl.MemberIndices.Count}");
+                for (int m = 0; m < cl.MemberIndices.Count; m++)
+                {
+                    var cand = _candidatePool[cl.MemberIndices[m]];
+                    _hudSb.AppendLine($"  {cand.Slot.Serial} body[{cand.BodyIndex}] pelvisW=({cand.PelvisWorld.x:F2},{cand.PelvisWorld.y:F2},{cand.PelvisWorld.z:F2}) maxConf={cand.MaxConfidence}");
+                }
+            }
+
+            // Per-joint pelvis confidence summary across workers for the first cluster's members
+            if (_clusterCount > 0)
+            {
+                var firstCluster = _clusterPool[0];
+                _hudSb.AppendLine($"<color=#9f9>cluster[0] pelvis joint conf per worker</color>");
+                for (int m = 0; m < firstCluster.MemberIndices.Count; m++)
+                {
+                    var cand = _candidatePool[firstCluster.MemberIndices[m]];
+                    var pelvisJoint = cand.Slot.Bodies[cand.BodyIndex].Joints[kPelvisIdx];
+                    _hudSb.Append($"  {cand.Slot.Serial}: pelvis conf={(int)pelvisJoint.ConfidenceLevel}");
+                    _hudSb.AppendLine();
+                }
+            }
+
+            var content = new GUIContent(_hudSb.ToString());
+            var size = _hudStyleCache.CalcSize(content);
+            float w = Mathf.Min(size.x + 16, Screen.width - 20);
+            float h = Mathf.Min(size.y + 16, Screen.height - 20);
+            var rect = new Rect(10, 10, w, h);
+            var prev = GUI.color;
+            GUI.color = new Color(0f, 0f, 0f, 0.75f);
+            GUI.DrawTexture(rect, Texture2D.whiteTexture);
+            GUI.color = prev;
+            GUI.Label(new Rect(rect.x + 8, rect.y + 8, rect.width - 16, rect.height - 16), content, _hudStyleCache);
         }
 
         // --- guards ---
