@@ -43,8 +43,8 @@ namespace BodyTracking
 
         [Range(0f, 0.99f)]
         [Tooltip("Lerp-based low-pass on the per-joint trajectory. 0 = raw samples, " +
-                 "~0.9 = heavy smoothing. Forward-only EMA — same definition as " +
-                 "BodyTrackingLive.trailSmoothing so playback matches the live look.")]
+                 "~0.9 = heavy smoothing. Forward-only EMA used only for offline playback " +
+                 "trail visualization (live skeleton uses the 1€ filter in BodyVisual).")]
         public float smoothing = 0f;
 
         [Header("Accel heatmap (ColorMode.AccelHeatmap)")]

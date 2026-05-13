@@ -63,11 +63,24 @@ namespace BodyTracking
         [Tooltip("Trail width in meters at the head (= the joint). Tail tapers to ~0.")]
         public float trailWidth = 0.005f;
 
-        [Range(0f, 0.99f)]
-        [Tooltip("Lerp-based low-pass on the joint position that feeds the trail mesh. " +
-                 "0 = raw k4abt output, ~0.9 = heavy smoothing. Forward-only (no future " +
-                 "samples available in live mode) so higher values introduce visible lag.")]
-        public float trailSmoothing = 0f;
+        [Header("One-Euro filter (1€)")]
+        [Tooltip("Speed-adaptive low-pass applied to each joint position in BodyVisual. " +
+                 "Heavy smoothing when the joint is near-stationary, releases as it moves " +
+                 "fast — replaces the old flat-EMA trailSmoothing knob.")]
+        public bool useOneEuroFilter = true;
+        [Range(0.1f, 10f)]
+        [Tooltip("Cutoff frequency (Hz) when the joint is at rest. Lower = stronger smoothing " +
+                 "when not moving. 1 Hz is a reasonable default for hand-scale motion.")]
+        public float oneEuroMinCutoff = 1.0f;
+        [Range(0f, 5f)]
+        [Tooltip("How aggressively cutoff rises with joint speed (in Hz per m/s, roughly). " +
+                 "Larger = filter releases sooner as the joint moves. Too large and noise leaks " +
+                 "through during motion; too small and fast motion lags.")]
+        public float oneEuroBeta = 0.5f;
+        [Range(0.1f, 10f)]
+        [Tooltip("Cutoff (Hz) of the velocity estimator inside the filter. Typically 1 Hz; " +
+                 "rarely needs tuning.")]
+        public float oneEuroDerivCutoff = 1.0f;
 
         [Tooltip("Acceleration value (m/s^2) that maps to the cold/base trail color. " +
                  "Same semantics as MotionLineRenderer.accelMin on the playback side.")]
@@ -520,7 +533,10 @@ namespace BodyTracking
             TrailColorMode = trailColorMode,
             TrailFlatColor = trailFlatColor,
             MaxBodies = maxBodies,
-            TrailSmoothing = trailSmoothing,
+            UseOneEuroFilter = useOneEuroFilter,
+            OneEuroMinCutoff = oneEuroMinCutoff,
+            OneEuroBeta = oneEuroBeta,
+            OneEuroDerivCutoff = oneEuroDerivCutoff,
             AccelMin = accelMin,
             AccelMax = accelMax,
             AccelHotColor = accelHotColor,

@@ -25,7 +25,10 @@ namespace BodyTracking
         public BodyTrackingLive.TrailColorMode TrailColorMode;
         public Color TrailFlatColor;
         public int MaxBodies;
-        public float TrailSmoothing;
+        public bool UseOneEuroFilter;
+        public float OneEuroMinCutoff;
+        public float OneEuroBeta;
+        public float OneEuroDerivCutoff;
         public float AccelMin;
         public float AccelMax;
         public Color AccelHotColor;
@@ -73,7 +76,7 @@ namespace BodyTracking
                     cfg.TrailColorMode, cfg.TrailFlatColor);
                 _bodies[id] = visual;
             }
-            visual.UpdateFromSkeleton(skel, cfg.JointRadius, cfg.ShowAnatomicalBones, cfg.SkeletonColor, cfg.TrailSmoothing);
+            visual.UpdateFromSkeleton(skel, in cfg);
             visual.ApplyTrailParams(cfg.ShowTrails, cfg.TrailDuration, cfg.TrailWidth, cfg.TrailColorMode, cfg.TrailFlatColor,
                 cfg.AccelMin, cfg.AccelMax, cfg.AccelHotColor);
             _lastSeenFrame[id] = Time.frameCount;

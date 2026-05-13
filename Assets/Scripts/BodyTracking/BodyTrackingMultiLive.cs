@@ -78,12 +78,6 @@ namespace BodyTracking
         [Tooltip("Trail width (m) at the head; tail tapers to ~0.")]
         public float trailWidth = 0.005f;
 
-        [Range(0f, 0.99f)]
-        [Tooltip("Lerp-based low-pass on the joint position that feeds the trail mesh. " +
-                 "0 = raw k4abt output, ~0.9 = heavy smoothing. Forward-only EMA — same " +
-                 "definition as MotionLineRenderer.smoothing on the playback side.")]
-        public float trailSmoothing = 0f;
-
         [Tooltip("Acceleration value (m/s^2) that maps to the cold/base trail color. " +
                  "Same semantics as MotionLineRenderer.accelMin on the playback side.")]
         public float accelMin = 0f;
@@ -105,18 +99,29 @@ namespace BodyTracking
                  "principled but in practice MADE THE 'flying bone' problem WORSE (16x more " +
                  "bigJumps): MED↔LOW flapping on either camera abruptly switched the merged " +
                  "result between two stationary-but-different-by-0.5m positions. Kept as a " +
-                 "toggle for A/B comparison; the actual fix lives in mergeSmoothing below.")]
+                 "toggle for A/B comparison; the One-Euro filter below is the actual fix.")]
         public bool dropLowWhenHigherAvailable = false;
 
-        [Range(0f, 0.99f)]
-        [Tooltip("Temporal EMA applied to the merged world position before it's handed to " +
-                 "BodyVisual. 0 = raw merge (cameras swap → instant bone flying), 0.5 = halve " +
-                 "frame-to-frame deltas (typically below the 0.4m kTrailJumpResetMeters in " +
-                 "BodyVisual, so the bigJump snap-and-clear path no longer fires), 0.9 = " +
-                 "heavy smoothing with visible lag. Operates at merge time so it survives " +
-                 "BodyVisual's bigJump bypass (which is what made the BodyVisual-side " +
-                 "trailSmoothing ineffective for fast-moving extremities).")]
-        public float mergeSmoothing = 0.5f;
+        [Header("One-Euro filter (1€)")]
+        [Tooltip("Speed-adaptive low-pass applied to each joint position in BodyVisual. " +
+                 "When the joint is near-stationary cutoff is low (heavy smoothing kills the " +
+                 "camera-swap jumps that produced the 'flying bones'); when the joint moves " +
+                 "fast cutoff rises so the filter follows the real motion with low lag. " +
+                 "Replaces the old mergeSmoothing / trailSmoothing flat EMAs.")]
+        public bool useOneEuroFilter = true;
+        [Range(0.1f, 10f)]
+        [Tooltip("Cutoff frequency (Hz) when the joint is at rest. Lower = stronger smoothing " +
+                 "when not moving. 1 Hz is a reasonable default for hand-scale motion.")]
+        public float oneEuroMinCutoff = 1.0f;
+        [Range(0f, 5f)]
+        [Tooltip("How aggressively cutoff rises with joint speed (in Hz per m/s, roughly). " +
+                 "Larger = filter releases sooner as the joint moves. Too large and noise leaks " +
+                 "through during motion; too small and fast motion lags.")]
+        public float oneEuroBeta = 0.5f;
+        [Range(0.1f, 10f)]
+        [Tooltip("Cutoff (Hz) of the velocity estimator inside the filter. Typically 1 Hz; " +
+                 "rarely needs tuning.")]
+        public float oneEuroDerivCutoff = 1.0f;
 
         [Header("BigJump logging")]
         [Tooltip("When on, emit a [BIGJUMP] log line whenever any merged joint moves more " +
@@ -274,10 +279,6 @@ namespace BodyTracking
         // (both cameras agree on the new pos), merge swap (cameras disagree and the
         // merge weight shifts), or occlusion (one camera dropped to NONE).
         private readonly Dictionary<uint, Vector3[]> _prevMergedPosByCluster = new();
-
-        // Per-joint smoothed merged position kept across frames. EMA: smoothed = lerp(prev_smoothed, raw, 1 - mergeSmoothing).
-        // Separate from _prevMergedPosByCluster (which holds raw values for BIGJUMP delta detection).
-        private readonly Dictionary<uint, Vector3[]> _smoothedMergedPosByCluster = new();
 
         // Reusable synthetic skeleton handed to BodyVisual.UpdateFromSkeleton.
         // We encode merged world joint positions back into k4a camera-local mm
@@ -845,7 +846,6 @@ namespace BodyTracking
             _priorPelvisById.Remove(id);
             _priorMaxConfById.Remove(id);
             _prevMergedPosByCluster.Remove(id);
-            _smoothedMergedPosByCluster.Remove(id);
         }
 
         private void StashPriorState()
@@ -1001,7 +1001,10 @@ namespace BodyTracking
             TrailColorMode = trailColorMode,
             TrailFlatColor = trailFlatColor,
             MaxBodies = maxBodies,
-            TrailSmoothing = trailSmoothing,
+            UseOneEuroFilter = useOneEuroFilter,
+            OneEuroMinCutoff = oneEuroMinCutoff,
+            OneEuroBeta = oneEuroBeta,
+            OneEuroDerivCutoff = oneEuroDerivCutoff,
             AccelMin = accelMin,
             AccelMax = accelMax,
             AccelHotColor = accelHotColor,
@@ -1126,35 +1129,15 @@ namespace BodyTracking
 
             Vector3 mergedPosWorld = posSum / wSum;
 
-            // BIGJUMP detection uses raw merged (so the diagnostic measures the input
-            // to smoothing, not the output — that's what tells us if the underlying
-            // merge is unstable).
+            // BIGJUMP detection runs on the raw merged position — the diagnostic
+            // measures the input to BodyVisual's One-Euro filter, not the output,
+            // which is what tells us whether the underlying merge is unstable.
             if (logBigJumps) LogBigJumpIfAny(cluster, jointIndex, mergedPosWorld);
 
-            // Temporal EMA on the merged world position. Operates here (not in
-            // BodyVisual) because BodyVisual's bigJump path bypasses its own
-            // smoothing — by absorbing camera-swap deltas at this layer we keep
-            // bigJump from firing for fast-moving extremities.
-            if (mergeSmoothing > 0f)
-            {
-                if (!_smoothedMergedPosByCluster.TryGetValue(cluster.Id, out var smArr))
-                {
-                    smArr = new Vector3[K4ABTConsts.K4ABT_JOINT_COUNT];
-                    for (int i = 0; i < smArr.Length; i++) smArr[i] = new Vector3(float.NaN, 0f, 0f);
-                    _smoothedMergedPosByCluster[cluster.Id] = smArr;
-                }
-                Vector3 prevSm = smArr[jointIndex];
-                if (float.IsNaN(prevSm.x))
-                {
-                    smArr[jointIndex] = mergedPosWorld;
-                }
-                else
-                {
-                    float alpha = 1f - Mathf.Clamp(mergeSmoothing, 0f, 0.99f);
-                    smArr[jointIndex] = Vector3.Lerp(prevSm, mergedPosWorld, alpha);
-                    mergedPosWorld = smArr[jointIndex];
-                }
-            }
+            // Position smoothing now lives in BodyVisual (1€ filter, per-joint). The
+            // previous merge-stage One-Euro / mergeSmoothing EMAs were removed
+            // because they layered redundant flat low-passes on top of the same
+            // signal — see BodyVisual.UpdateFromSkeleton.
 
             // Pass 2: hemisphere-aligned weighted quaternion sum.
             Vector4 qSum = Vector4.zero;

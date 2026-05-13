@@ -50,6 +50,13 @@ namespace BodyTracking
         private JointTrailMesh[] _trails;
         private bool[] _jointEverValid; // first-valid bookkeeping for trail Clear() seeding
 
+        // One-Euro filter state per joint. Smoothing parameters come from the
+        // owning MonoBehaviour's Inspector (passed each pop via BodyVisualConfig).
+        // This is the only joint-position smoother in the pipeline — mergeSmoothing
+        // and trailSmoothing EMAs were removed because they were redundant flat
+        // low-passes layered on top of this speed-adaptive filter.
+        private readonly OneEuroVec3[] _oneEuro = new OneEuroVec3[K4ABTConsts.K4ABT_JOINT_COUNT];
+
         public BodyVisual(Transform parent, uint id, float jointRadius, Color color,
                           bool showTrails, float trailDuration, float trailWidth,
                           BodyTrackingLive.TrailColorMode trailColorMode, Color trailFlatColor)
@@ -110,19 +117,19 @@ namespace BodyTracking
             for (int i = 0; i < _boneIndices.Length; i++) _boneIndices[i] = i;
         }
 
-        public void UpdateFromSkeleton(in k4abt_skeleton_t skel, float jointRadius,
-                                        bool showBones, Color color, float trailSmoothing = 0f)
+        public void UpdateFromSkeleton(in k4abt_skeleton_t skel, in BodyVisualConfig cfg)
         {
             // Each pop refreshes the last-known position for every joint with at least
             // LOW confidence. Joints whose confidence flaps below LOW keep their previous
             // position (don't toggle SetActive — that's what produced per-joint flicker
             // when a body was being tracked at the edge of the depth model's range).
-            // Big single-frame jump that suggests the joint was re-detected at a new location
-            // (id swap inside k4abt, brief tracking loss, etc.). Clearing the trail when this
-            // happens prevents a long stray line from appearing through space. 0.4 m / frame
-            // at 30 Hz = 12 m/s — well above natural human joint velocity.
-            const float kTrailJumpResetMeters = 0.4f;
-            float emaAlpha = 1f - Mathf.Clamp(trailSmoothing, 0f, 0.99f);
+            // Position smoothing is delegated to the per-joint One-Euro filter below;
+            // the old firstTime branch still snaps without filtering so the trail does
+            // not draw a segment back to the origin on a body's first valid frame.
+            float jointRadius = cfg.JointRadius;
+            bool showBones = cfg.ShowAnatomicalBones;
+            Color color = cfg.SkeletonColor;
+            float dt = Time.deltaTime;
 
             for (int i = 0; i < _joints.Length; i++)
             {
@@ -131,22 +138,24 @@ namespace BodyTracking
                 if (j.ConfidenceLevel >= k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW)
                 {
                     _lastFreshFrame[i] = Time.frameCount;
-                    var newPos = BodyTrackingLive.K4AmmToUnity(j.Position);
+                    var rawPos = BodyTrackingLive.K4AmmToUnity(j.Position);
                     bool firstTime = _jointEverValid != null && !_jointEverValid[i];
-                    bool bigJump = !firstTime &&
-                                   (newPos - _jointPositions[i]).sqrMagnitude > kTrailJumpResetMeters * kTrailJumpResetMeters;
                     _jointValid[i] = true;
 
-                    if (firstTime || bigJump)
+                    if (firstTime)
                     {
                         // Snap the joint to its real position WITHOUT drawing a trail back
-                        // to the previous (or origin) location.
-                        _jointPositions[i] = newPos;
-                        _joints[i].localPosition = newPos;
+                        // to the origin. Also seed the 1€ filter with this sample so the
+                        // next pop's velocity estimate is zero rather than huge.
+                        _jointPositions[i] = rawPos;
+                        _oneEuro[i].Reset();
+                        if (cfg.UseOneEuroFilter)
+                            _oneEuro[i].Filter(rawPos, dt, cfg.OneEuroMinCutoff, cfg.OneEuroBeta, cfg.OneEuroDerivCutoff);
+                        _joints[i].localPosition = rawPos;
                         if (_trails != null && _trails[i] != null)
                         {
                             _trails[i].Clear();
-                            _trails[i].AddSample(Time.timeAsDouble, newPos);
+                            _trails[i].AddSample(Time.timeAsDouble, rawPos);
                         }
                         if (_jointEverValid != null) _jointEverValid[i] = true;
                         _joints[i].localScale = Vector3.one * (jointRadius * 2f);
@@ -154,12 +163,14 @@ namespace BodyTracking
                         continue;
                     }
 
+                    Vector3 newPos = cfg.UseOneEuroFilter
+                        ? _oneEuro[i].Filter(rawPos, dt, cfg.OneEuroMinCutoff, cfg.OneEuroBeta, cfg.OneEuroDerivCutoff)
+                        : rawPos;
+
                     float jump = (newPos - _jointPositions[i]).magnitude;
                     _lastJump[i] = jump;
                     if (jump > _maxJumpThisWindow[i]) _maxJumpThisWindow[i] = jump;
-                    _jointPositions[i] = emaAlpha >= 1f
-                        ? newPos
-                        : Vector3.Lerp(_jointPositions[i], newPos, emaAlpha);
+                    _jointPositions[i] = newPos;
                     if (_trails != null && _trails[i] != null)
                         _trails[i].AddSample(Time.timeAsDouble, _jointPositions[i]);
                 }
