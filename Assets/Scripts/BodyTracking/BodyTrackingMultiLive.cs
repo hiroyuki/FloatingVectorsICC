@@ -78,6 +78,56 @@ namespace BodyTracking
         [Tooltip("Trail width (m) at the head; tail tapers to ~0.")]
         public float trailWidth = 0.005f;
 
+        [Range(0f, 0.99f)]
+        [Tooltip("Lerp-based low-pass on the joint position that feeds the trail mesh. " +
+                 "0 = raw k4abt output, ~0.9 = heavy smoothing. Forward-only EMA — same " +
+                 "definition as MotionLineRenderer.smoothing on the playback side.")]
+        public float trailSmoothing = 0f;
+
+        [Tooltip("Acceleration value (m/s^2) that maps to the cold/base trail color. " +
+                 "Same semantics as MotionLineRenderer.accelMin on the playback side.")]
+        public float accelMin = 0f;
+
+        [Tooltip("Acceleration value (m/s^2) that maps to the hot color. Default 56 " +
+                 "comes from the p95 of the reference recording.")]
+        public float accelMax = 56f;
+
+        [Tooltip("Hot end of the AccelHeatmap. The cold end is trailFlatColor.")]
+        public Color accelHotColor = Color.red;
+
+        [Tooltip("If true, accelMax is replaced every frame by a rolling p95 of |a| " +
+                 "across all joints — same auto behavior as MotionLineRenderer.autoAccelMax. " +
+                 "Avoids having to hand-tune accelMax for each scene/recording.")]
+        public bool autoAccelMax = false;
+
+        [Tooltip("If true, when at least one camera reports MED or HIGH confidence for a " +
+                 "joint, all other cameras' LOW samples are dropped from the merge. Sounded " +
+                 "principled but in practice MADE THE 'flying bone' problem WORSE (16x more " +
+                 "bigJumps): MED↔LOW flapping on either camera abruptly switched the merged " +
+                 "result between two stationary-but-different-by-0.5m positions. Kept as a " +
+                 "toggle for A/B comparison; the actual fix lives in mergeSmoothing below.")]
+        public bool dropLowWhenHigherAvailable = false;
+
+        [Range(0f, 0.99f)]
+        [Tooltip("Temporal EMA applied to the merged world position before it's handed to " +
+                 "BodyVisual. 0 = raw merge (cameras swap → instant bone flying), 0.5 = halve " +
+                 "frame-to-frame deltas (typically below the 0.4m kTrailJumpResetMeters in " +
+                 "BodyVisual, so the bigJump snap-and-clear path no longer fires), 0.9 = " +
+                 "heavy smoothing with visible lag. Operates at merge time so it survives " +
+                 "BodyVisual's bigJump bypass (which is what made the BodyVisual-side " +
+                 "trailSmoothing ineffective for fast-moving extremities).")]
+        public float mergeSmoothing = 0.5f;
+
+        [Header("BigJump logging")]
+        [Tooltip("When on, emit a [BIGJUMP] log line whenever any merged joint moves more " +
+                 "than bigJumpLogThresholdMeters between frames. Each line lists the per-" +
+                 "camera raw position + confidence so the cause can be classified.")]
+        public bool logBigJumps = false;
+        [Tooltip("Threshold (meters) for emitting a [BIGJUMP] log. Slightly tighter than " +
+                 "BodyVisual.kTrailJumpResetMeters (0.4) so jumps just under that ceiling " +
+                 "(which still cause visible 'arm flying' artifacts) are captured too.")]
+        public float bigJumpLogThresholdMeters = 0.3f;
+
         [Header("Visual lifetime")]
         [Tooltip("Hard cap on cached BodyVisuals. Same role as BodyTrackingLive.maxBodies.")]
         [Min(1)] public int maxBodies = 4;
@@ -215,6 +265,19 @@ namespace BodyTracking
         private readonly Dictionary<uint, Vector3> _priorPelvisById = new();
         private readonly Dictionary<uint, int> _priorMaxConfById = new();
         private uint _nextMergedId = 1;
+
+        // BigJump-event diagnostics. When logBigJumps is on, every frame we compare
+        // the new merged world position of each joint against the previous frame's
+        // merged value; if the delta exceeds bigJumpLogThresholdMeters we emit one
+        // [BIGJUMP] line per joint with each contributing camera's raw position +
+        // confidence. Used to classify whether bone jumps come from k4abt NN noise
+        // (both cameras agree on the new pos), merge swap (cameras disagree and the
+        // merge weight shifts), or occlusion (one camera dropped to NONE).
+        private readonly Dictionary<uint, Vector3[]> _prevMergedPosByCluster = new();
+
+        // Per-joint smoothed merged position kept across frames. EMA: smoothed = lerp(prev_smoothed, raw, 1 - mergeSmoothing).
+        // Separate from _prevMergedPosByCluster (which holds raw values for BIGJUMP delta detection).
+        private readonly Dictionary<uint, Vector3[]> _smoothedMergedPosByCluster = new();
 
         // Reusable synthetic skeleton handed to BodyVisual.UpdateFromSkeleton.
         // We encode merged world joint positions back into k4a camera-local mm
@@ -781,6 +844,8 @@ namespace BodyTracking
         {
             _priorPelvisById.Remove(id);
             _priorMaxConfById.Remove(id);
+            _prevMergedPosByCluster.Remove(id);
+            _smoothedMergedPosByCluster.Remove(id);
         }
 
         private void StashPriorState()
@@ -809,6 +874,122 @@ namespace BodyTracking
             }
         }
 
+        private void LateUpdate()
+        {
+            var cam = Camera.main;
+            if (_pool != null) _pool.TickTrails(cam, autoAccelMax);
+            if (_perWorkerPools != null)
+                foreach (var p in _perWorkerPools.Values)
+                    p.TickTrails(cam, autoAccelMax);
+        }
+
+        /// <summary>
+        /// Per-joint detail dump: confidence + last-frame-fresh + last inter-pop jump
+        /// (meters) + window-max jump. Reset window-max after reading by passing reset=true.
+        /// Use to find which joints are flapping fast even while staying at LOW+ confidence.
+        /// </summary>
+        public string DumpJointJumps(bool reset, float minJumpToList)
+        {
+            if (_pool == null) return "(pool null)";
+            int curFrame = Time.frameCount;
+            var sb = new System.Text.StringBuilder();
+            sb.AppendFormat("[JointJumps] frame={0} bodies={1} (listing joints with windowMaxJump > {2:F2}m)\n",
+                curFrame, _pool.Count, minJumpToList);
+            foreach (var kv in _pool.Visuals)
+            {
+                var bv = kv.Value;
+                sb.AppendFormat("body {0}:\n", kv.Key);
+                for (int i = 0; i < K4ABTConsts.K4ABT_JOINT_COUNT; i++)
+                {
+                    float wm = bv.MaxJumpInWindow(i);
+                    if (wm < minJumpToList) continue;
+                    int sinceFresh = curFrame - bv.LastFreshFrame(i);
+                    sb.AppendFormat("  {0,-22} conf={1,-32} sinceFresh={2,3}f  lastJump={3:F3}m  windowMax={4:F3}m\n",
+                        (k4abt_joint_id_t)i, bv.LastConfidence(i), sinceFresh,
+                        bv.LastJumpMeters(i), wm);
+                }
+                if (reset) bv.ResetJumpWindow();
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>Snapshot of the merge pipeline state for live debugging.</summary>
+        public string DumpPipelineState()
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.AppendFormat("workers={0} candidates={1} clusters={2} merged={3} snapsRecv={4} dropStale={5} freshIter={6}\n",
+                _latestBySerial.Count, _candidateCount, _clusterCount,
+                _pool != null ? _pool.Count : 0,
+                _diagSnapshotsRecv, _diagDroppedStaleSnapshots, _diagFreshIterations);
+            foreach (var kv in _latestBySerial)
+            {
+                var w = kv.Value;
+                float ageMs = (Time.realtimeSinceStartup - w.CapturedAtRealtime) * 1000f;
+                sb.AppendFormat("  serial={0} bodyCount={1} ageMs={2:F0}\n", kv.Key, w.BodyCount, ageMs);
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// Diagnostic for the "flying bones" investigation. Classifies each bone
+        /// of every merged body by endpoint freshness (using BodyVisual's stashed
+        /// per-joint confidence + last-fresh-frame). Returns a multi-line summary
+        /// suitable for Debug.Log.
+        /// </summary>
+        public string DumpBoneFreshness()
+        {
+            if (_pool == null) return "(pool null)";
+            int curFrame = Time.frameCount;
+            var sb = new System.Text.StringBuilder();
+            sb.AppendFormat("[BoneFreshness] frame={0} bodies={1}\n", curFrame, _pool.Count);
+            foreach (var kv in _pool.Visuals)
+            {
+                var bv = kv.Value;
+                int[] tally = new int[4];
+                int stale10 = 0, stale30 = 0;
+                for (int i = 0; i < K4ABTConsts.K4ABT_JOINT_COUNT; i++)
+                {
+                    var c = bv.LastConfidence(i);
+                    int ci = Mathf.Clamp((int)c, 0, 3);
+                    tally[ci]++;
+                    int sinceFresh = curFrame - bv.LastFreshFrame(i);
+                    if (bv.JointValid(i) && sinceFresh > 10) stale10++;
+                    if (bv.JointValid(i) && sinceFresh > 30) stale30++;
+                }
+                sb.AppendFormat("body {0}: conf NONE/LOW/MED/HIGH = {1}/{2}/{3}/{4}  stale>10f={5} stale>30f={6}\n",
+                    kv.Key, tally[0], tally[1], tally[2], tally[3], stale10, stale30);
+
+                int both = 0, oneStale = 0, bothStale = 0, notDrawn = 0;
+                var stretchHits = new System.Text.StringBuilder();
+                for (int b = 0; b < BodyTrackingLive.s_bones.Length; b++)
+                {
+                    var bone = BodyTrackingLive.s_bones[b];
+                    int ia = (int)bone.a, ic = (int)bone.b;
+                    bool va = bv.JointValid(ia), vc = bv.JointValid(ic);
+                    if (!va || !vc) { notDrawn++; continue; }
+                    var ca = bv.LastConfidence(ia);
+                    var cc = bv.LastConfidence(ic);
+                    bool freshA = ca >= k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW;
+                    bool freshC = cc >= k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW;
+                    if (freshA && freshC) both++;
+                    else if (!freshA && !freshC) bothStale++;
+                    else
+                    {
+                        oneStale++;
+                        int sA = curFrame - bv.LastFreshFrame(ia);
+                        int sC = curFrame - bv.LastFreshFrame(ic);
+                        float len = Vector3.Distance(bv.JointPosition(ia), bv.JointPosition(ic));
+                        if (stretchHits.Length < 1500)
+                            stretchHits.AppendFormat("  {0}-{1} len={2:F2}m staleA={3}f({4}) staleC={5}f({6})\n",
+                                bone.a, bone.b, len, sA, ca, sC, cc);
+                    }
+                }
+                sb.AppendFormat("  bones: bothFresh={0} oneStale={1} bothStale={2} notDrawn={3}\n{4}",
+                    both, oneStale, bothStale, notDrawn, stretchHits);
+            }
+            return sb.ToString();
+        }
+
         private BodyVisualConfig BuildVisualConfig() => new BodyVisualConfig
         {
             JointRadius = jointRadius,
@@ -820,6 +1001,10 @@ namespace BodyTracking
             TrailColorMode = trailColorMode,
             TrailFlatColor = trailFlatColor,
             MaxBodies = maxBodies,
+            TrailSmoothing = trailSmoothing,
+            AccelMin = accelMin,
+            AccelMax = accelMax,
+            AccelHotColor = accelHotColor,
         };
 
         // --- per-cluster merge (joint-by-joint) ---
@@ -832,8 +1017,70 @@ namespace BodyTracking
             }
         }
 
+        // BigJump diagnostic: compare new merged world position to previous frame's
+        // and, if delta > bigJumpLogThresholdMeters, emit a single Debug.Log line
+        // listing each contributing camera's raw world position + confidence so the
+        // cause can be classified post-hoc (NN noise / merge swap / occlusion).
+        private void LogBigJumpIfAny(Cluster cluster, int jointIndex, Vector3 mergedPosWorld)
+        {
+            if (!_prevMergedPosByCluster.TryGetValue(cluster.Id, out var prevArr))
+            {
+                prevArr = new Vector3[K4ABTConsts.K4ABT_JOINT_COUNT];
+                // sentinel: NaN means "no prior sample yet"
+                for (int i = 0; i < prevArr.Length; i++) prevArr[i] = new Vector3(float.NaN, 0f, 0f);
+                _prevMergedPosByCluster[cluster.Id] = prevArr;
+            }
+
+            var prev = prevArr[jointIndex];
+            if (!float.IsNaN(prev.x))
+            {
+                float delta = Vector3.Distance(prev, mergedPosWorld);
+                if (delta > bigJumpLogThresholdMeters)
+                {
+                    var sb = new System.Text.StringBuilder();
+                    sb.AppendFormat("[BIGJUMP] frame={0} body={1} joint={2} delta={3:F3}m prev=({4:F2},{5:F2},{6:F2}) new=({7:F2},{8:F2},{9:F2})",
+                        Time.frameCount, cluster.Id, (k4abt_joint_id_t)jointIndex,
+                        delta, prev.x, prev.y, prev.z, mergedPosWorld.x, mergedPosWorld.y, mergedPosWorld.z);
+                    for (int m = 0; m < cluster.MemberIndices.Count; m++)
+                    {
+                        var cand = _candidatePool[cluster.MemberIndices[m]];
+                        var jt = cand.Slot.Bodies[cand.BodyIndex].Joints[jointIndex];
+                        if (jt.ConfidenceLevel >= k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW)
+                        {
+                            Vector3 worldPos = SkeletonWorldTransform.ToWorld(jt.Position, cand.Slot.SourceTransform);
+                            sb.AppendFormat(" | cam={0} conf={1} pos=({2:F2},{3:F2},{4:F2})",
+                                cand.Slot.Serial, jt.ConfidenceLevel, worldPos.x, worldPos.y, worldPos.z);
+                        }
+                        else
+                        {
+                            sb.AppendFormat(" | cam={0} conf={1}", cand.Slot.Serial, jt.ConfidenceLevel);
+                        }
+                    }
+                    Debug.Log(sb.ToString(), this);
+                }
+            }
+            prevArr[jointIndex] = mergedPosWorld;
+        }
+
         private void MergeJoint(Cluster cluster, int jointIndex, ref k4abt_joint_t outJoint)
         {
+            // Pre-pass: peak confidence across cameras for this joint. If any camera
+            // is MED+ and dropLowWhenHigherAvailable is on, raise the floor so LOW
+            // contributions (typically k4abt body-model inferences for an occluded
+            // joint, off by ~0.5m from the visible camera) are excluded entirely.
+            int peakConf = 0;
+            for (int mp = 0; mp < cluster.MemberIndices.Count; mp++)
+            {
+                int lvl = (int)_candidatePool[cluster.MemberIndices[mp]]
+                    .Slot.Bodies[_candidatePool[cluster.MemberIndices[mp]].BodyIndex]
+                    .Joints[jointIndex].ConfidenceLevel;
+                if (lvl > peakConf) peakConf = lvl;
+            }
+            int minAcceptLevel = (dropLowWhenHigherAvailable
+                && peakConf >= (int)k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_MEDIUM)
+                ? (int)k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_MEDIUM
+                : (int)k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW;
+
             // Pass 1: find the highest-confidence sample to use as the
             // hemisphere reference for the quaternion mean. Also accumulate
             // weighted positions in this same pass so we touch each member once.
@@ -850,7 +1097,7 @@ namespace BodyTracking
                 var cand = _candidatePool[cluster.MemberIndices[m]];
                 var jt = cand.Slot.Bodies[cand.BodyIndex].Joints[jointIndex];
                 int level = (int)jt.ConfidenceLevel;
-                if (level <= 0) continue; // NONE excluded from average
+                if (level < minAcceptLevel) continue; // NONE always excluded; LOW conditionally excluded
 
                 float weight = WeightFor(level);
                 Vector3 worldPos = SkeletonWorldTransform.ToWorld(jt.Position, cand.Slot.SourceTransform);
@@ -879,6 +1126,36 @@ namespace BodyTracking
 
             Vector3 mergedPosWorld = posSum / wSum;
 
+            // BIGJUMP detection uses raw merged (so the diagnostic measures the input
+            // to smoothing, not the output — that's what tells us if the underlying
+            // merge is unstable).
+            if (logBigJumps) LogBigJumpIfAny(cluster, jointIndex, mergedPosWorld);
+
+            // Temporal EMA on the merged world position. Operates here (not in
+            // BodyVisual) because BodyVisual's bigJump path bypasses its own
+            // smoothing — by absorbing camera-swap deltas at this layer we keep
+            // bigJump from firing for fast-moving extremities.
+            if (mergeSmoothing > 0f)
+            {
+                if (!_smoothedMergedPosByCluster.TryGetValue(cluster.Id, out var smArr))
+                {
+                    smArr = new Vector3[K4ABTConsts.K4ABT_JOINT_COUNT];
+                    for (int i = 0; i < smArr.Length; i++) smArr[i] = new Vector3(float.NaN, 0f, 0f);
+                    _smoothedMergedPosByCluster[cluster.Id] = smArr;
+                }
+                Vector3 prevSm = smArr[jointIndex];
+                if (float.IsNaN(prevSm.x))
+                {
+                    smArr[jointIndex] = mergedPosWorld;
+                }
+                else
+                {
+                    float alpha = 1f - Mathf.Clamp(mergeSmoothing, 0f, 0.99f);
+                    smArr[jointIndex] = Vector3.Lerp(prevSm, mergedPosWorld, alpha);
+                    mergedPosWorld = smArr[jointIndex];
+                }
+            }
+
             // Pass 2: hemisphere-aligned weighted quaternion sum.
             Vector4 qSum = Vector4.zero;
             for (int m = 0; m < cluster.MemberIndices.Count; m++)
@@ -886,7 +1163,7 @@ namespace BodyTracking
                 var cand = _candidatePool[cluster.MemberIndices[m]];
                 var jt = cand.Slot.Bodies[cand.BodyIndex].Joints[jointIndex];
                 int level = (int)jt.ConfidenceLevel;
-                if (level <= 0) continue;
+                if (level < minAcceptLevel) continue;
 
                 float weight = WeightFor(level);
                 Quaternion qLocal = SkeletonWorldTransform.ToWorldRotation(jt.Orientation, cand.Slot.SourceTransform);

@@ -25,6 +25,10 @@ namespace BodyTracking
         public BodyTrackingLive.TrailColorMode TrailColorMode;
         public Color TrailFlatColor;
         public int MaxBodies;
+        public float TrailSmoothing;
+        public float AccelMin;
+        public float AccelMax;
+        public Color AccelHotColor;
     }
 
     internal sealed class BodyVisualPool
@@ -33,6 +37,16 @@ namespace BodyTracking
         private readonly Dictionary<uint, BodyVisual> _bodies = new Dictionary<uint, BodyVisual>();
         private readonly Dictionary<uint, int> _lastSeenFrame = new Dictionary<uint, int>();
         private readonly List<uint> _toDestroy = new List<uint>();
+
+        // Rolling window of |a| samples across every visible body + joint. Used by
+        // TickTrails when autoAccelMax is on to pick a heatmap hot-end (p95) that
+        // adapts to the recording instead of a hand-tuned Inspector constant.
+        // Window size: 32 joints × ~30 Hz × ~1 s = ~960; 1024 keeps roughly one
+        // second of context per body without unbounded growth.
+        private const int kAccelWindowSize = 1024;
+        private readonly Queue<float> _accelWindow = new Queue<float>(kAccelWindowSize);
+        private readonly List<float> _accelScratch = new List<float>(kAccelWindowSize);
+        private readonly List<float> _latestAccelsScratch = new List<float>(64);
 
         public BodyVisualPool(Transform parent) { _parent = parent; }
 
@@ -59,9 +73,46 @@ namespace BodyTracking
                     cfg.TrailColorMode, cfg.TrailFlatColor);
                 _bodies[id] = visual;
             }
-            visual.UpdateFromSkeleton(skel, cfg.JointRadius, cfg.ShowAnatomicalBones, cfg.SkeletonColor);
-            visual.ApplyTrailParams(cfg.ShowTrails, cfg.TrailDuration, cfg.TrailWidth, cfg.TrailColorMode, cfg.TrailFlatColor);
+            visual.UpdateFromSkeleton(skel, cfg.JointRadius, cfg.ShowAnatomicalBones, cfg.SkeletonColor, cfg.TrailSmoothing);
+            visual.ApplyTrailParams(cfg.ShowTrails, cfg.TrailDuration, cfg.TrailWidth, cfg.TrailColorMode, cfg.TrailFlatColor,
+                cfg.AccelMin, cfg.AccelMax, cfg.AccelHotColor);
             _lastSeenFrame[id] = Time.frameCount;
+        }
+
+        /// <summary>
+        /// Rebuild every body's per-joint trail mesh against <paramref name="cam"/> for
+        /// billboard orientation. Called once per frame from the owning MonoBehaviour's
+        /// LateUpdate so positions/colors are fresh and old samples expire on schedule
+        /// even when k4abt doesn't pop a new body frame this Update. When
+        /// <paramref name="autoAccelMax"/> is true, computes a rolling p95 across all
+        /// joints and overrides every JointTrailMesh's accelMax with it so the
+        /// AccelHeatmap palette stretches across the actual motion range.
+        /// </summary>
+        public void TickTrails(Camera cam, bool autoAccelMax)
+        {
+            // Feed the rolling window with the latest |a| from every joint.
+            _latestAccelsScratch.Clear();
+            foreach (var v in _bodies.Values) v.CollectLatestAccels(_latestAccelsScratch);
+            for (int i = 0; i < _latestAccelsScratch.Count; i++)
+            {
+                float a = _latestAccelsScratch[i];
+                if (a <= 0f) continue;
+                _accelWindow.Enqueue(a);
+                while (_accelWindow.Count > kAccelWindowSize) _accelWindow.Dequeue();
+            }
+
+            if (autoAccelMax && _accelWindow.Count > 0)
+            {
+                _accelScratch.Clear();
+                _accelScratch.AddRange(_accelWindow);
+                _accelScratch.Sort();
+                int n = _accelScratch.Count;
+                float p95 = _accelScratch[Mathf.Clamp((int)(n * 0.95f), 0, n - 1)];
+                if (p95 > 0f)
+                    foreach (var v in _bodies.Values) v.SetTrailAccelMax(p95);
+            }
+
+            foreach (var v in _bodies.Values) v.TickTrails(cam);
         }
 
         /// <summary>

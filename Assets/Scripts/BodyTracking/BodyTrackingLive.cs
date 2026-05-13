@@ -46,7 +46,7 @@ namespace BodyTracking
                  "Equivalent to the Motion Line view but live, frame by frame.")]
         public bool showTrails = true;
 
-        public enum TrailColorMode { PerJointHue, FlatColor }
+        public enum TrailColorMode { PerJointHue, FlatColor, PerBody, AccelHeatmap }
 
         [Tooltip("PerJointHue gives each K4ABT joint a distinct color so individual limbs are " +
                  "traceable. FlatColor uses trailFlatColor for every joint.")]
@@ -62,6 +62,28 @@ namespace BodyTracking
         [Range(0.001f, 0.05f)]
         [Tooltip("Trail width in meters at the head (= the joint). Tail tapers to ~0.")]
         public float trailWidth = 0.005f;
+
+        [Range(0f, 0.99f)]
+        [Tooltip("Lerp-based low-pass on the joint position that feeds the trail mesh. " +
+                 "0 = raw k4abt output, ~0.9 = heavy smoothing. Forward-only (no future " +
+                 "samples available in live mode) so higher values introduce visible lag.")]
+        public float trailSmoothing = 0f;
+
+        [Tooltip("Acceleration value (m/s^2) that maps to the cold/base trail color. " +
+                 "Same semantics as MotionLineRenderer.accelMin on the playback side.")]
+        public float accelMin = 0f;
+
+        [Tooltip("Acceleration value (m/s^2) that maps to the hot color. Default 56 " +
+                 "comes from the p95 of the reference recording.")]
+        public float accelMax = 56f;
+
+        [Tooltip("Hot end of the AccelHeatmap. The cold end is trailFlatColor.")]
+        public Color accelHotColor = Color.red;
+
+        [Tooltip("If true, accelMax is replaced every frame by a rolling p95 of |a| " +
+                 "across all joints — same auto behavior as MotionLineRenderer.autoAccelMax. " +
+                 "Avoids having to hand-tune accelMax for each scene/recording.")]
+        public bool autoAccelMax = false;
 
         [Header("Tracker")]
         [Tooltip("BT processing mode. DirectML works on most Windows GPUs without CUDA.")]
@@ -482,6 +504,11 @@ namespace BodyTracking
 
         // Build the per-frame visual config struct so Inspector tweaks live-update
         // without per-frame allocations (the struct is value-typed).
+        private void LateUpdate()
+        {
+            if (_pool != null) _pool.TickTrails(Camera.main, autoAccelMax);
+        }
+
         private BodyVisualConfig BuildVisualConfig() => new BodyVisualConfig
         {
             JointRadius = jointRadius,
@@ -493,6 +520,10 @@ namespace BodyTracking
             TrailColorMode = trailColorMode,
             TrailFlatColor = trailFlatColor,
             MaxBodies = maxBodies,
+            TrailSmoothing = trailSmoothing,
+            AccelMin = accelMin,
+            AccelMax = accelMax,
+            AccelHotColor = accelHotColor,
         };
 
     }

@@ -76,6 +76,28 @@ Unity上でリアルタイムにポイントクラウドとして描画する。
 
 カメラデバイスが応答しなくなった等の物理層の問題（USB再接続など）はユーザーにしか対処できないので、その場合のみ依頼する。
 
+#### Editor が非フォーカスだと play loop が止まる
+
+Editor ウィンドウがフォーカス外（ユーザーが Claude チャットを操作している間など）だと、デフォルトで `Application.runInBackground = false` のため Play 中でも Update が呼ばれず `Time.frameCount` も進まない。`EditorApplication.isPlaying=True` のまま「Play してるのに動いてない」状態になる。
+
+対処: 動作確認系の RunCommand スクリプトの先頭で必ず `Application.runInBackground = true;` を実行する。これだけで Editor が裏でも tick する。
+
+#### Playback ベースのボディトラッキング（BodyTrackingMultiLive）
+
+ライブの Femto Bolt 接続が無い／録画データを使う場合、シーン構成は以下：
+
+- `PointCloudRecorder` (例: `CameraRecorder`) が RCSV を読み込む
+- Inspector の **Play ボタン**で playback を開始すると `OnPlaybackRawFrame` イベントが発火
+- `BodyTrackingMultiLive` が `K4abtWorkerHost` 経由で k4abt worker を spawn し、playback フレームを worker に流す
+- ライブ時の `PointCloudRenderer` の代わりに `_Playback_<serial>` GO が source transform になる
+
+ハマりどころ:
+
+- **Recorder.Play 状態は EnterPlaymode / ExitPlaymode で消える** — Stop してから Play し直すと、再生は自動再開しない。Recorder Inspector の Play ボタンを再度押す必要がある。Stop/Recompile/Play サイクルを繰り返すと毎回 user に再生再押下を依頼するハメになるので、極力 Play を保ったまま検証する
+- 既存の playback セッションが流れ終わると `_latestBySerial.Count` が 0 になり worker が消える。snapsRecv は累積カウンタなので増え続けるが、現在の worker 数は別途確認すること
+- `BodyTrackingMultiLive.enabled` が false になると `OnDisable` で `_latestBySerial.Clear()` + `workerHost.StopWorker(...)` が走り、playback を再開するだけでは復活しない（component を enable し直す必要がある）
+- 同時に `BodyTrackingLive` を有効化すると mutual-exclusion チェックで自分が disable される（CheckMutualExclusion）。シーンに両方ある場合は片方だけ enabled にする
+
 ### P/Invokeラッパー（Assets\Scripts\Orbbec\）
 - OrbbecNative.cs: 全P/Invoke宣言をまとめる
   - DllImportの対象は "OrbbecSDK"（拡張子なし）
