@@ -1,9 +1,6 @@
 // Per-body skeleton visual: 32 joint markers + a single line-list mesh of
-// bones + per-joint TrailRenderers. Extracted verbatim from BodyTrackingLive
-// (issue #7) so multi-camera body tracking (issue #11) can reuse the same
-// visual code path. Behavior is intentionally unchanged from the previous
-// nested-class location — Phase 5b will introduce a BodyVisualPool
-// abstraction on top.
+// bones + per-joint TrailRenderers. Used by BodyTrackingMultiLive's pool to
+// draw merged and per-worker skeletons.
 
 using System.Collections.Generic;
 using UnityEngine;
@@ -59,7 +56,7 @@ namespace BodyTracking
 
         public BodyVisual(Transform parent, uint id, float jointRadius, Color color,
                           bool showTrails, float trailDuration, float trailWidth,
-                          BodyTrackingLive.TrailColorMode trailColorMode, Color trailFlatColor)
+                          BodyTrackingShared.TrailColorMode trailColorMode, Color trailFlatColor)
         {
             _bodyId = id;
             _root = new GameObject($"Body_{id}");
@@ -96,7 +93,7 @@ namespace BodyTracking
                 var c = TrailColorFor(i, id, trailColorMode, trailFlatColor);
                 _trails[i].Configure(showTrails, trailDuration, trailWidth, c, Color.red,
                     0f, 56f,
-                    trailColorMode == BodyTrackingLive.TrailColorMode.AccelHeatmap
+                    trailColorMode == BodyTrackingShared.TrailColorMode.AccelHeatmap
                         ? JointTrailMesh.ColorMode.AccelHeatmap
                         : JointTrailMesh.ColorMode.Base);
             }
@@ -112,8 +109,8 @@ namespace BodyTracking
             SetMaterialColor(_bonesMat, color);
             _bonesRenderer.sharedMaterial = _bonesMat;
 
-            _boneVerts = new Vector3[BodyTrackingLive.s_bones.Length * 2];
-            _boneIndices = new int[BodyTrackingLive.s_bones.Length * 2];
+            _boneVerts = new Vector3[BodyTrackingShared.Bones.Length * 2];
+            _boneIndices = new int[BodyTrackingShared.Bones.Length * 2];
             for (int i = 0; i < _boneIndices.Length; i++) _boneIndices[i] = i;
         }
 
@@ -138,7 +135,7 @@ namespace BodyTracking
                 if (j.ConfidenceLevel >= k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW)
                 {
                     _lastFreshFrame[i] = Time.frameCount;
-                    var rawPos = BodyTrackingLive.K4AmmToUnity(j.Position);
+                    var rawPos = BodyTrackingShared.K4AmmToUnity(j.Position);
                     bool firstTime = _jointEverValid != null && !_jointEverValid[i];
                     _jointValid[i] = true;
 
@@ -186,9 +183,9 @@ namespace BodyTracking
             if (showBones)
             {
                 int v = 0;
-                for (int b = 0; b < BodyTrackingLive.s_bones.Length; b++)
+                for (int b = 0; b < BodyTrackingShared.Bones.Length; b++)
                 {
-                    var (a, c) = BodyTrackingLive.s_bones[b];
+                    var (a, c) = BodyTrackingShared.Bones[b];
                     if (_jointValid[(int)a] && _jointValid[(int)c])
                     {
                         _boneVerts[v++] = _jointPositions[(int)a];
@@ -365,16 +362,16 @@ namespace BodyTracking
             return s_trailMat;
         }
 
-        private static Color TrailColorFor(int jointIndex, uint bodyId, BodyTrackingLive.TrailColorMode mode, Color flat)
+        private static Color TrailColorFor(int jointIndex, uint bodyId, BodyTrackingShared.TrailColorMode mode, Color flat)
         {
             // AccelHeatmap mode treats flat as the cold (base) end; per-vertex
             // interpolation toward hot is done inside JointTrailMesh.
-            if (mode == BodyTrackingLive.TrailColorMode.FlatColor ||
-                mode == BodyTrackingLive.TrailColorMode.AccelHeatmap) return flat;
-            int idx = mode == BodyTrackingLive.TrailColorMode.PerBody
+            if (mode == BodyTrackingShared.TrailColorMode.FlatColor ||
+                mode == BodyTrackingShared.TrailColorMode.AccelHeatmap) return flat;
+            int idx = mode == BodyTrackingShared.TrailColorMode.PerBody
                 ? (int)(bodyId % 12u)
                 : jointIndex;
-            int total = mode == BodyTrackingLive.TrailColorMode.PerBody
+            int total = mode == BodyTrackingShared.TrailColorMode.PerBody
                 ? 12
                 : K4ABTConsts.K4ABT_JOINT_COUNT;
             float h = (idx % total) / (float)total;
@@ -384,11 +381,11 @@ namespace BodyTracking
 
         // Live-tweakable trail params from the Inspector (no need to re-spawn visuals).
         public void ApplyTrailParams(bool show, float duration, float width,
-                                      BodyTrackingLive.TrailColorMode mode, Color flat,
+                                      BodyTrackingShared.TrailColorMode mode, Color flat,
                                       float accelMin, float accelMax, Color accelHotColor)
         {
             if (_trails == null) return;
-            JointTrailMesh.ColorMode jmMode = mode == BodyTrackingLive.TrailColorMode.AccelHeatmap
+            JointTrailMesh.ColorMode jmMode = mode == BodyTrackingShared.TrailColorMode.AccelHeatmap
                 ? JointTrailMesh.ColorMode.AccelHeatmap
                 : JointTrailMesh.ColorMode.Base;
             for (int i = 0; i < _trails.Length; i++)

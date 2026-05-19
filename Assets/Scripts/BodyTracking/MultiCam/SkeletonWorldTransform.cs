@@ -4,7 +4,7 @@
 // Why we do not call rendererTransform.TransformPoint directly:
 //   PointCloudRenderer sets transform.localScale.y = -|y| as the per-mesh
 //   OpenCV→Unity Y flip for point cloud vertices. K4AmmToUnity already does
-//   the same Y flip on the joint position (BodyTrackingLive.K4AmmToUnity).
+//   the same Y flip on the joint position (BodyTrackingShared.K4AmmToUnity).
 //   Calling rendererTransform.TransformPoint would apply the mesh scale a
 //   second time, producing a mirrored result. Instead we compose a transform
 //   from localPosition + localRotation + Vector3.one (skipping localScale)
@@ -22,12 +22,12 @@ namespace BodyTracking.MultiCam
         /// <summary>
         /// Convert a k4abt joint position (mm, OpenCV camera-local) to world space (m, Unity).
         /// When <paramref name="rendererTransform"/> is null or the renderer is at the
-        /// world origin, the result reduces to <see cref="BodyTrackingLive.K4AmmToUnity"/>.
+        /// world origin, the result reduces to <see cref="BodyTrackingShared.K4AmmToUnity"/>.
         /// </summary>
         public static Vector3 ToWorld(in k4a_float3_t jointMm, Transform rendererTransform)
         {
             // 1. mm/OpenCV → m/Unity-local (Y flip, mm→m).
-            Vector3 unityLocal = BodyTrackingLive.K4AmmToUnity(jointMm);
+            Vector3 unityLocal = BodyTrackingShared.K4AmmToUnity(jointMm);
 
             if (rendererTransform == null) return unityLocal;
 
@@ -65,7 +65,7 @@ namespace BodyTracking.MultiCam
 
         /// <summary>
         /// Build the 4x4 matrix that maps a Unity-camera-local point (i.e. the output of
-        /// <see cref="BodyTrackingLive.K4AmmToUnity"/>) to world coordinates, using the
+        /// <see cref="BodyTrackingShared.K4AmmToUnity"/>) to world coordinates, using the
         /// renderer's localPosition/localRotation and the parent chain's full
         /// localToWorldMatrix. Renderer's own localScale is intentionally ignored.
         /// </summary>

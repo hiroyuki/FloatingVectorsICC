@@ -47,11 +47,10 @@ namespace BodyTracking
         public K4abtWorkerHost workerHost;
 
         [Header("Display")]
-        [Tooltip("Master switch for skeleton rendering. Mirror of BodyTrackingLive.showSkeleton " +
-                 "so the Inspector workflow is consistent across the two paths.")]
+        [Tooltip("Master switch for skeleton rendering.")]
         public bool showSkeleton = true;
 
-        [Tooltip("Show the bone lines between joints. Same toggle as BodyTrackingLive.")]
+        [Tooltip("Show the bone lines between joints.")]
         public bool showAnatomicalBones = true;
 
         [Tooltip("Joint marker radius (m).")]
@@ -64,8 +63,8 @@ namespace BodyTracking
         [Tooltip("Attach a TrailRenderer to each merged joint so motion leaves a line in real time.")]
         public bool showTrails = true;
 
-        [Tooltip("PerJointHue / FlatColor — same semantics as BodyTrackingLive.")]
-        public BodyTrackingLive.TrailColorMode trailColorMode = BodyTrackingLive.TrailColorMode.PerJointHue;
+        [Tooltip("PerJointHue assigns each joint a distinct hue. FlatColor uses trailFlatColor for every joint.")]
+        public BodyTrackingShared.TrailColorMode trailColorMode = BodyTrackingShared.TrailColorMode.PerJointHue;
 
         [Tooltip("Trail color in FlatColor mode (also tints PerJointHue).")]
         public Color trailFlatColor = Color.white;
@@ -134,7 +133,9 @@ namespace BodyTracking
         public float bigJumpLogThresholdMeters = 0.3f;
 
         [Header("Visual lifetime")]
-        [Tooltip("Hard cap on cached BodyVisuals. Same role as BodyTrackingLive.maxBodies.")]
+        [Tooltip("Hard cap on cached BodyVisuals. K4abt body IDs can flap between frames when " +
+                 "tracking is unstable; without a cap we'd allocate 32 GameObjects + Mesh + Material " +
+                 "per id forever and freeze Unity. Single-person sessions rarely need more than 2.")]
         [Min(1)] public int maxBodies = 4;
 
         [Tooltip("Destroy a BodyVisual that hasn't been seen for this many Update ticks.")]
@@ -163,7 +164,7 @@ namespace BodyTracking
 
         [Tooltip("Minimum number of worker snapshots required for a cluster to emit a person. " +
                  "Set to 2 to require multi-camera agreement; 1 (default) accepts single-cam " +
-                 "detections too — equivalent to BodyTrackingLive in 1-camera scenarios.")]
+                 "detections too — that's the right setting for a single-camera scene.")]
         [Min(1)]
         public int requireMinWorkerCount = 1;
 
@@ -320,7 +321,6 @@ namespace BodyTracking
         private void OnEnable()
         {
             if (!ResolveDependencies()) { _disabledByGuard = true; enabled = false; return; }
-            if (!CheckMutualExclusion()) { _disabledByGuard = true; enabled = false; return; }
 
             if (_pool == null) _pool = new BodyVisualPool(transform);
             if (workerHost != null && !_hostSubscribed)
@@ -554,29 +554,9 @@ namespace BodyTracking
             return true;
         }
 
-        // BodyTrackingLive and BodyTrackingMultiLive cannot coexist: K4abtWorkerHost.StartWorker
-        // returns false on duplicate serial, and BodyTrackingLive falls back to in-process
-        // tracking on that path — leading to two BT pipelines on the same source.
-        private bool CheckMutualExclusion()
-        {
-            var lives = FindObjectsByType<BodyTrackingLive>(FindObjectsInactive.Exclude, FindObjectsSortMode.None);
-            int activeLives = 0;
-            foreach (var l in lives) if (l != null && l.enabled) activeLives++;
-            if (activeLives > 0)
-            {
-                Debug.LogError(
-                    "[BodyTrackingMultiLive] BodyTrackingLive is also enabled in this scene. " +
-                    "The two paths cannot coexist (worker session conflict). Disable one of them. " +
-                    "MultiLive disabling itself.", this);
-                return false;
-            }
-            return true;
-        }
-
         // applyExtrinsics is required only when more than one camera is active OR when
         // the user has asked for multi-worker agreement. Single-camera (1 renderer,
-        // requireMinWorkerCount==1) tolerates identity transforms and behaves like
-        // BodyTrackingLive in that fallback case.
+        // requireMinWorkerCount==1) tolerates identity transforms and runs without it.
         private bool RequiresApplyExtrinsics()
         {
             if (cameraManager == null) return false;
@@ -961,9 +941,9 @@ namespace BodyTracking
 
                 int both = 0, oneStale = 0, bothStale = 0, notDrawn = 0;
                 var stretchHits = new System.Text.StringBuilder();
-                for (int b = 0; b < BodyTrackingLive.s_bones.Length; b++)
+                for (int b = 0; b < BodyTrackingShared.Bones.Length; b++)
                 {
-                    var bone = BodyTrackingLive.s_bones[b];
+                    var bone = BodyTrackingShared.Bones[b];
                     int ia = (int)bone.a, ic = (int)bone.b;
                     bool va = bv.JointValid(ia), vc = bv.JointValid(ic);
                     if (!va || !vc) { notDrawn++; continue; }

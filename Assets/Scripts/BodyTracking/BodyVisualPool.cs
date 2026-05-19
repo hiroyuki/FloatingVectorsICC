@@ -1,7 +1,5 @@
-// Shared per-body visual lifecycle / GC owned by either BodyTrackingLive
-// (single in-process tracker) or BodyTrackingMultiLive (merged multi-worker).
-// Phase 5b of issue #11: dedupe ~80 lines of EvictIfFull + ApplyBodySkeleton
-// + GC loop that used to live in both MonoBehaviours.
+// Per-body visual lifecycle / GC owned by BodyTrackingMultiLive.
+// Handles EvictIfFull + ApplyBodySkeleton + GC loop.
 
 using System;
 using System.Collections.Generic;
@@ -22,7 +20,7 @@ namespace BodyTracking
         public bool ShowTrails;
         public float TrailDuration;
         public float TrailWidth;
-        public BodyTrackingLive.TrailColorMode TrailColorMode;
+        public BodyTrackingShared.TrailColorMode TrailColorMode;
         public Color TrailFlatColor;
         public int MaxBodies;
         public bool UseOneEuroFilter;

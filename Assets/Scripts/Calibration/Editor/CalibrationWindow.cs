@@ -28,7 +28,7 @@ namespace Calibration.EditorTools
 
         // -------- Inspector-style fields (serialized so the user can leave dialog open) --------
         [SerializeField] private CharucoBoardSpec _boardSpec;
-        [SerializeField] private float _maxSkewMs = 16f;
+        [SerializeField] private float _maxSkewMs = 50f;
         [SerializeField] private string _extrinsicsRoot = string.Empty;
 
         // -------- Runtime state --------
@@ -44,7 +44,7 @@ namespace Calibration.EditorTools
         // adjacent). The body-tracking machinery isn't relevant for calibration, so
         // the calibration window auto-disables it while open and restores on close.
         private static readonly string[] BodyTrackingTypeNames = {
-            "BodyTracking.BodyTrackingLive, Assembly-CSharp",
+            "BodyTracking.BodyTrackingMultiLive, Assembly-CSharp",
             "BodyTracking.BodyTrackingPlayback, Assembly-CSharp",
         };
         private readonly Dictionary<Behaviour, bool> _suspendedBodyTracking = new Dictionary<Behaviour, bool>();
@@ -74,7 +74,10 @@ namespace Calibration.EditorTools
         {
             public DateTime CapturedAtUtc;
             public double SkewMs;
-            public bool AcceptedAllCameras;
+            // Only the skew gate hard-rejects samples now. Partial detection (some
+            // cameras saw the board, others didn't) is FINE — Solve stitches edges
+            // across samples via PairwiseCalibrationMath. See DoSolve.
+            public bool SkewOk;
             public List<CameraResult> Cameras;
         }
 
@@ -96,7 +99,7 @@ namespace Calibration.EditorTools
         }
 
         /// <summary>
-        /// Find every active <c>BodyTrackingLive</c> / <c>BodyTrackingPlayback</c>
+        /// Find every active <c>BodyTrackingMultiLive</c> / <c>BodyTrackingPlayback</c>
         /// component, save its <c>enabled</c> state, and disable it. Reverts on
         /// <see cref="RestoreBodyTracking"/>. We use reflection so the calibration
         /// asmdef stays decoupled from the BodyTracking code in Assembly-CSharp.
@@ -244,14 +247,19 @@ namespace Calibration.EditorTools
             for (int i = 0; i < _samples.Count; i++)
             {
                 var s = _samples[i];
-                EditorGUILayout.LabelField(
-                    $"#{i} {s.CapturedAtUtc:HH:mm:ss}  skew={s.SkewMs:0.0}ms  " +
-                    (s.AcceptedAllCameras ? "OK" : "REJECTED"));
+                int detectedCount = 0;
+                if (s.Cameras != null)
+                    foreach (var c in s.Cameras) if (c.Detected) detectedCount++;
+                int total = s.Cameras != null ? s.Cameras.Count : 0;
+                string header = s.SkewOk
+                    ? $"#{i} {s.CapturedAtUtc:HH:mm:ss}  skew={s.SkewMs:0.0}ms  detected {detectedCount}/{total}"
+                    : $"#{i} {s.CapturedAtUtc:HH:mm:ss}  skew={s.SkewMs:0.0}ms  REJECTED (skew)";
+                EditorGUILayout.LabelField(header);
                 if (s.Cameras != null)
                 {
                     foreach (var c in s.Cameras)
                         EditorGUILayout.LabelField($"   {c.Serial}: " +
-                            (c.Detected ? $"detected (markers={c.Markers}, corners={c.Corners})" : "no detection"));
+                            (c.Detected ? $"OK (markers={c.Markers}, corners={c.Corners})" : $"no detection (markers={c.Markers})"));
                 }
             }
             EditorGUILayout.EndScrollView();
@@ -348,7 +356,7 @@ namespace Calibration.EditorTools
                 {
                     CapturedAtUtc = DateTime.UtcNow,
                     SkewMs = skewMs,
-                    AcceptedAllCameras = skewOk,
+                    SkewOk = skewOk,
                     Cameras = new List<CameraResult>(snapshots.Count),
                 };
 
@@ -361,7 +369,7 @@ namespace Calibration.EditorTools
                     return;
                 }
 
-                bool allDetected = true;
+                int detected = 0;
                 foreach (var s in snapshots)
                 {
                     var distArr = new double[]
@@ -374,7 +382,6 @@ namespace Calibration.EditorTools
                         distArr);
                     if (!res.Success)
                     {
-                        allDetected = false;
                         sample.Cameras.Add(new CameraResult
                         {
                             Serial = s.renderer.deviceSerial,
@@ -384,6 +391,7 @@ namespace Calibration.EditorTools
                         });
                         continue;
                     }
+                    detected++;
                     sample.Cameras.Add(new CameraResult
                     {
                         Serial = s.renderer.deviceSerial,
@@ -393,11 +401,9 @@ namespace Calibration.EditorTools
                         CamTrMarker = new Rigid3d(res.Rotation, res.Translation),
                     });
                 }
-                sample.AcceptedAllCameras = allDetected;
                 _samples.Add(sample);
-                SetStatus(allDetected
-                    ? $"Captured #{_samples.Count - 1}: {snapshots.Count} cameras detected (skew {skewMs:0.0}ms)."
-                    : $"Captured #{_samples.Count - 1}: not all cameras detected (skew {skewMs:0.0}ms). Solve will use later samples.");
+                SetStatus($"Captured #{_samples.Count - 1}: {detected}/{snapshots.Count} cameras detected " +
+                          $"(skew {skewMs:0.0}ms). Pairs in this sample contribute edges to the solve graph.");
             }
             catch (Exception e)
             {
@@ -410,47 +416,84 @@ namespace Calibration.EditorTools
         {
             try
             {
-                // Find the most recent sample where all cameras detected. Multi-sample
-                // averaging is deferred (open issue 3 in plan).
-                CaptureSample? chosen = null;
-                for (int i = _samples.Count - 1; i >= 0; i--)
+                // Stable camera index = current renderer order. cam0 (the first renderer
+                // in the manager's list) becomes world origin via PairwiseCalibrationMath.
+                var serials = new List<string>();
+                foreach (var r in _manager.Renderers)
                 {
-                    if (_samples[i].AcceptedAllCameras) { chosen = _samples[i]; break; }
+                    if (r == null || string.IsNullOrEmpty(r.deviceSerial)) continue;
+                    serials.Add(r.deviceSerial);
                 }
-                if (chosen == null)
+                if (serials.Count == 0)
                 {
-                    SetStatus("Solve aborted: no fully-detected sample yet. Capture again.", warn: true);
+                    SetStatus("Solve aborted: no renderers with serials in scene.", warn: true);
                     return;
                 }
-                var s = chosen.Value;
-                var camTrMarker = new Rigid3d[s.Cameras.Count];
-                for (int i = 0; i < s.Cameras.Count; i++) camTrMarker[i] = s.Cameras[i].CamTrMarker;
+                var serialToIdx = new Dictionary<string, int>();
+                for (int i = 0; i < serials.Count; i++) serialToIdx[serials[i]] = i;
 
-                var globalTrColor = CentroidCalibrationMath.SolveGlobalTrColorCamera(camTrMarker);
-
-                LogSolveDebug(s, camTrMarker, globalTrColor);
-
-                // Build calibration entries by pulling intrinsics + D2C from the live
-                // renderers (matched by serial).
-                var calibrations = new List<PointCloudRecording.DeviceCalibration>(s.Cameras.Count);
-                for (int i = 0; i < s.Cameras.Count; i++)
+                // Flatten every detected observation across every skew-accepted sample.
+                // Partial-detection samples are FINE — pairs whose two endpoints both
+                // detected in the same sample become an edge.
+                var observations = new List<PairwiseCalibrationMath.Observation>();
+                for (int si = 0; si < _samples.Count; si++)
                 {
-                    var renderer = FindRenderer(s.Cameras[i].Serial);
+                    var s = _samples[si];
+                    if (!s.SkewOk || s.Cameras == null) continue;
+                    foreach (var c in s.Cameras)
+                    {
+                        if (!c.Detected) continue;
+                        if (!serialToIdx.TryGetValue(c.Serial, out var idx)) continue;
+                        observations.Add(new PairwiseCalibrationMath.Observation
+                        {
+                            SampleIndex = si,
+                            CameraIndex = idx,
+                            CamTrMarker = c.CamTrMarker,
+                        });
+                    }
+                }
+                if (observations.Count == 0)
+                {
+                    SetStatus("Solve aborted: no detections in any sample. Capture again with the board visible.", warn: true);
+                    return;
+                }
+
+                var solve = PairwiseCalibrationMath.Solve(serials.Count, observations);
+
+                var unreachable = new List<string>();
+                for (int i = 0; i < serials.Count; i++)
+                    if (!solve.Reachable[i]) unreachable.Add(serials[i]);
+                if (unreachable.Count > 0)
+                {
+                    SetStatus(
+                        $"Solve aborted: camera(s) [{string.Join(", ", unreachable)}] have no path to cam0 ({serials[0]}). " +
+                        "Capture additional sample(s) where each of them shares the board view with the connected set " +
+                        $"({SerialsOfReachable(serials, solve.Reachable)}).",
+                        warn: true);
+                    return;
+                }
+
+                LogSolveDebug(serials, observations, solve);
+
+                var calibrations = new List<PointCloudRecording.DeviceCalibration>(serials.Count);
+                for (int i = 0; i < serials.Count; i++)
+                {
+                    var renderer = FindRenderer(serials[i]);
                     if (renderer == null || !renderer.CameraParam.HasValue)
                     {
-                        SetStatus($"Solve aborted: {s.Cameras[i].Serial} no longer in scene.", warn: true);
+                        SetStatus($"Solve aborted: {serials[i]} no longer in scene.", warn: true);
                         return;
                     }
                     var p = renderer.CameraParam.Value;
                     calibrations.Add(new PointCloudRecording.DeviceCalibration
                     {
-                        Serial = s.Cameras[i].Serial,
+                        Serial = serials[i],
                         ColorIntrinsic = p.RgbIntrinsic,
                         DepthIntrinsic = p.DepthIntrinsic,
                         ColorDistortion = p.RgbDistortion,
                         DepthDistortion = p.DepthDistortion,
                         DepthToColor = p.Transform,
-                        GlobalTrColorCamera = ToObExtrinsicMm(globalTrColor[i]),
+                        GlobalTrColorCamera = ToObExtrinsicMm(solve.GlobalTrCamera[i]),
                     });
                 }
 
@@ -464,6 +507,18 @@ namespace Calibration.EditorTools
                 SetStatus($"Solve failed: {e.Message}", warn: true);
                 Debug.LogException(e);
             }
+        }
+
+        private static string SerialsOfReachable(List<string> serials, bool[] reachable)
+        {
+            var sb = new StringBuilder();
+            for (int i = 0; i < serials.Count; i++)
+            {
+                if (!reachable[i]) continue;
+                if (sb.Length > 0) sb.Append(", ");
+                sb.Append(serials[i]);
+            }
+            return sb.ToString();
         }
 
         private void DoReset()
@@ -526,38 +581,61 @@ namespace Calibration.EditorTools
                 string root = ResolveRoot();
                 string dumpDir = Path.Combine(PointCloudRecording.CalibrationDir(root), "_dump");
                 Directory.CreateDirectory(dumpDir);
+
+                // Reuse the same estimator we'd use for Capture so the overlay reflects
+                // the actual detector pipeline (gray + equalizeHist + the configured
+                // CharucoBoardSpec). When _boardSpec is null we still dump the raw frame.
+                bool canAnnotate = _boardSpec != null;
+                if (canAnnotate) EnsureEstimator();
+
                 int saved = 0;
                 foreach (var r in _manager.Renderers)
                 {
                     if (r == null) continue;
                     if (!_latest.TryGetValue(r, out var f) || !f.HasFrame) continue;
 
-                    // The raw buffer is row-major top-to-bottom (standard image convention),
-                    // but Unity's Texture2D treats the first byte as the BOTTOM-left pixel.
-                    // Flip rows so the saved PNG matches what the camera actually sees.
-                    int rowBytes = f.Width * 3;
-                    byte[] flipped = new byte[f.Rgb8.Length];
-                    for (int y = 0; y < f.Height; y++)
-                    {
-                        Buffer.BlockCopy(f.Rgb8, y * rowBytes,
-                                         flipped, (f.Height - 1 - y) * rowBytes, rowBytes);
-                    }
-                    var tex = new Texture2D(f.Width, f.Height, TextureFormat.RGB24, mipChain: false);
-                    tex.SetPixelData(flipped, 0);
-                    tex.Apply(updateMipmaps: false, makeNoLongerReadable: false);
+                    string serial = Sanitize(r.deviceSerial);
+                    WriteRgb8Png(Path.Combine(dumpDir, $"{serial}.png"), f.Rgb8, f.Width, f.Height);
 
-                    string outPath = Path.Combine(dumpDir, $"{Sanitize(r.deviceSerial)}.png");
-                    File.WriteAllBytes(outPath, tex.EncodeToPNG());
-                    UnityEngine.Object.DestroyImmediate(tex);
+                    if (canAnnotate)
+                    {
+                        var det = _estimator.DetectAndAnnotate(f.Rgb8, f.Width, f.Height);
+                        WriteRgb8Png(Path.Combine(dumpDir, $"{serial}_annotated.png"),
+                            det.AnnotatedRgb8, f.Width, f.Height);
+                        string ids = det.MarkerIds.Length == 0 ? "none" : string.Join(",", det.MarkerIds);
+                        Debug.Log($"[CalibrationWindow] {r.deviceSerial}: markers={det.DetectedMarkerCount} " +
+                                  $"interpolated={det.InterpolatedCornerCount} ids=[{ids}]");
+                    }
                     saved++;
                 }
-                SetStatus($"Dumped {saved} frame(s) to {dumpDir}");
+                string suffix = canAnnotate
+                    ? " (raw + _annotated.png — see console for per-camera marker counts)"
+                    : " (no Board spec set → raw only; assign one to also dump annotated)";
+                SetStatus($"Dumped {saved} frame(s) to {dumpDir}{suffix}");
             }
             catch (Exception e)
             {
                 SetStatus($"Dump failed: {e.Message}", warn: true);
                 Debug.LogException(e);
             }
+        }
+
+        // Save row-major top-to-bottom RGB8 bytes as a PNG, flipping rows to match
+        // Texture2D's bottom-up convention.
+        private static void WriteRgb8Png(string outPath, byte[] rgb8, int width, int height)
+        {
+            int rowBytes = width * 3;
+            byte[] flipped = new byte[rgb8.Length];
+            for (int y = 0; y < height; y++)
+            {
+                Buffer.BlockCopy(rgb8, y * rowBytes,
+                                 flipped, (height - 1 - y) * rowBytes, rowBytes);
+            }
+            var tex = new Texture2D(width, height, TextureFormat.RGB24, mipChain: false);
+            tex.SetPixelData(flipped, 0);
+            tex.Apply(updateMipmaps: false, makeNoLongerReadable: false);
+            File.WriteAllBytes(outPath, tex.EncodeToPNG());
+            UnityEngine.Object.DestroyImmediate(tex);
         }
 
         private static string Sanitize(string s)
@@ -568,78 +646,58 @@ namespace Calibration.EditorTools
         }
 
         /// <summary>
-        /// Verbose log of every step in the centroid solve, plus what the live
-        /// renderer transforms end up at after applying the result. Written to
-        /// console AND <c>&lt;extrinsicsRoot&gt;/calibration/_dump/solve_debug.log</c>
-        /// for offline inspection. Sanity-check landmarks:
-        ///   - cam0 should land at world origin with identity rotation
-        ///   - sum of cameras' world translations should be ~0 (centroid invariant)
-        ///   - cam-pair distances in world should match cam-pair distances in marker frame
+        /// Verbose log of the pair-wise solve: which sample bridged each pair,
+        /// the BFS chain from cam0 to each camera, and the final Unity transforms
+        /// each renderer GO will land at after ExtrinsicsApply. Written to console
+        /// AND <c>&lt;extrinsicsRoot&gt;/calibration/_dump/solve_debug.log</c> for
+        /// offline inspection. Sanity-check landmarks:
+        ///   - cam0 should be identity (t=0, rot=0)
+        ///   - long chains (>2 hops) accumulate error — prefer adding direct samples
         /// </summary>
-        private void LogSolveDebug(CaptureSample s, Rigid3d[] camTrMarker, Rigid3d[] globalTrColor)
+        private void LogSolveDebug(List<string> serials,
+                                    List<PairwiseCalibrationMath.Observation> observations,
+                                    PairwiseCalibrationMath.SolveResult solve)
         {
             var sb = new StringBuilder();
-            sb.AppendLine($"=== Solve debug @ {DateTime.UtcNow:o} ===");
-            sb.AppendLine($"Sample skew={s.SkewMs:0.0}ms cameras={s.Cameras.Count}");
+            sb.AppendLine($"=== Pairwise solve debug @ {DateTime.UtcNow:o} ===");
+            sb.AppendLine($"cameras={serials.Count}  observations={observations.Count}");
+            sb.AppendLine($"world frame = cam0 = {serials[0]} (cam0 pinned to identity, world axes = cam0 color-camera axes)");
             sb.AppendLine();
 
-            sb.AppendLine("--- inputs (cam_tr_marker, OpenCV camera frame, meters) ---");
-            for (int i = 0; i < s.Cameras.Count; i++)
+            sb.AppendLine("--- per-camera path from cam0 (BFS, shortest hops) ---");
+            for (int i = 0; i < serials.Count; i++)
             {
-                var c = s.Cameras[i];
-                var m = camTrMarker[i];
-                sb.AppendLine($"  [{i}] {c.Serial}");
-                sb.AppendLine($"      markers={c.Markers}, corners={c.Corners}");
-                sb.AppendLine($"      t = {V(m.Translation)}");
-                sb.AppendLine($"      euler(deg, ZYX) = {Eul(m.Rotation)}");
+                var path = solve.PathFromCam0[i];
+                string hops = path.Count == 0 ? "<unreachable>" : string.Join(" → ", path.ConvertAll(idx => $"[{idx}]"));
+                sb.AppendLine($"  [{i}] {serials[i]}: {hops}");
             }
 
-            // marker_tr_cam (camera position seen from the board)
             sb.AppendLine();
-            sb.AppendLine("--- marker_tr_cam (= inverse: camera positions in marker frame) ---");
-            double cx = 0, cy = 0, cz = 0;
-            var markerTrCam = new Rigid3d[camTrMarker.Length];
-            for (int i = 0; i < camTrMarker.Length; i++)
+            sb.AppendLine("--- pair edges used (a→b, sample that contributed the cam_a_tr_cam_b) ---");
+            foreach (var kv in solve.EdgeSampleIndex)
             {
-                markerTrCam[i] = camTrMarker[i].Inverse();
-                cx += markerTrCam[i].Translation[0];
-                cy += markerTrCam[i].Translation[1];
-                cz += markerTrCam[i].Translation[2];
-                sb.AppendLine($"  [{i}] t_in_marker = {V(markerTrCam[i].Translation)}");
-            }
-            int n = camTrMarker.Length;
-            sb.AppendLine($"  centroid_in_marker = ({cx / n:0.000}, {cy / n:0.000}, {cz / n:0.000})");
-
-            sb.AppendLine();
-            sb.AppendLine("--- output global_tr_colorCamera (cam0 should be identity) ---");
-            for (int i = 0; i < globalTrColor.Length; i++)
-            {
-                sb.AppendLine($"  [{i}] {s.Cameras[i].Serial}");
-                sb.AppendLine($"      t (m) = {V(globalTrColor[i].Translation)}");
-                sb.AppendLine($"      euler(deg, ZYX) = {Eul(globalTrColor[i].Rotation)}");
+                if (kv.Key.from >= kv.Key.to) continue; // print undirected once
+                sb.AppendLine($"  [{kv.Key.from}] {serials[kv.Key.from]} ↔ [{kv.Key.to}] {serials[kv.Key.to]}  (from sample #{kv.Value})");
             }
 
-            // Pair-wise distances: invariant should hold (rigid transform preserves distances).
             sb.AppendLine();
-            sb.AppendLine("--- pairwise distance check (marker frame vs world; must match) ---");
-            for (int i = 0; i < n; i++)
-                for (int j = i + 1; j < n; j++)
-                {
-                    double dM = Dist(markerTrCam[i].Translation, markerTrCam[j].Translation);
-                    double dW = Dist(globalTrColor[i].Translation, globalTrColor[j].Translation);
-                    sb.AppendLine($"  [{i}]↔[{j}]  marker-frame {dM:0.000}m   world {dW:0.000}m   delta {dW - dM:+0.0000;-0.0000;0}");
-                }
+            sb.AppendLine("--- output global_tr_colorCamera ---");
+            for (int i = 0; i < serials.Count; i++)
+            {
+                var g = solve.GlobalTrCamera[i];
+                sb.AppendLine($"  [{i}] {serials[i]}{(solve.Reachable[i] ? "" : "  <unreachable>")}");
+                sb.AppendLine($"      t (m) = {V(g.Translation)}");
+                sb.AppendLine($"      euler(deg, ZYX) = {Eul(g.Rotation)}");
+            }
 
-            // After-apply Unity transforms: where the renderer GO actually ends up after
-            // ExtrinsicsApply. Useful to see the basis-change result.
             sb.AppendLine();
             sb.AppendLine("--- after-apply Unity transforms (renderer.transform localPos/Rot) ---");
-            for (int i = 0; i < globalTrColor.Length; i++)
+            for (int i = 0; i < serials.Count; i++)
             {
-                var ocv = ToObExtrinsicMm(globalTrColor[i]);
+                var ocv = ToObExtrinsicMm(solve.GlobalTrCamera[i]);
                 ExtrinsicsApply.ToUnityLocal(in ocv, out var pos, out var rot);
                 var euler = rot.eulerAngles;
-                sb.AppendLine($"  [{i}] {s.Cameras[i].Serial}");
+                sb.AppendLine($"  [{i}] {serials[i]}");
                 sb.AppendLine($"      Unity localPosition  (m) = ({pos.x:0.000}, {pos.y:0.000}, {pos.z:0.000})");
                 sb.AppendLine($"      Unity localEulerAngles(°) = ({euler.x:0.0}, {euler.y:0.0}, {euler.z:0.0})");
             }
@@ -657,12 +715,6 @@ namespace Calibration.EditorTools
         }
 
         private static string V(double[] t) => $"({t[0]:+0.000;-0.000;0}, {t[1]:+0.000;-0.000;0}, {t[2]:+0.000;-0.000;0})";
-
-        private static double Dist(double[] a, double[] b)
-        {
-            double dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2];
-            return Math.Sqrt(dx * dx + dy * dy + dz * dz);
-        }
 
         // Row-major 3x3 → ZYX intrinsic Euler angles in degrees (yaw, pitch, roll style).
         private static string Eul(double[] r)

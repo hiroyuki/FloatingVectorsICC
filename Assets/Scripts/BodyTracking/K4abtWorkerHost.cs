@@ -29,7 +29,7 @@ using Debug = UnityEngine.Debug;
 
 namespace BodyTracking
 {
-    // Execute Update before any subscriber to OnSkeletonsReady (e.g. BodyTrackingLive)
+    // Execute Update before any subscriber to OnSkeletonsReady (e.g. BodyTrackingMultiLive)
     // so the populated state from this frame's worker output is visible when those
     // scripts run their own Update GC / housekeeping pass.
     [DefaultExecutionOrder(-100)]
@@ -47,8 +47,8 @@ namespace BodyTracking
         [Tooltip("Optional override for the BT SDK bin path. Empty = use WorkerBootstrap default.")]
         public string btSdkBinOverride = "";
 
-        [Tooltip("Master enable. BodyTrackingLive checks this when it decides between in-process " +
-                 "and worker-process tracking.")]
+        [Tooltip("Master enable. BodyTrackingMultiLive requires this to be true; with it off " +
+                 "no worker process is spawned and no skeletons are produced.")]
         public bool useWorker = false;
 
         [Tooltip("Log per-second host-side counters (produced/dropped/consumed) to the Unity console.")]

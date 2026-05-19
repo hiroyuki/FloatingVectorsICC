@@ -109,22 +109,6 @@ namespace BodyTracking
         {
             ClearTrajectories();
 
-            // k4abt allows only one tracker per process. If Live is running it owns the
-            // tracker, so we have to disable it (its OnDisable destroys the tracker)
-            // before creating ours, or k4abt_tracker_create hangs / fails.
-            BodyTrackingLive live = null;
-            bool liveWasEnabled = false;
-            var allMb = UnityEngine.Object.FindObjectsByType<MonoBehaviour>(FindObjectsInactive.Include, FindObjectsSortMode.None);
-            foreach (var mb in allMb)
-            {
-                if (mb is BodyTrackingLive l) { live = l; liveWasEnabled = l.enabled; break; }
-            }
-            if (live != null && liveWasEnabled)
-            {
-                live.enabled = false;
-                // OnDisable runs synchronously, freeing the k4abt tracker slot.
-            }
-
             var tracks = recorder.GetRecordedDepthTracks();
             PointCloudRecorder.RecordedDepthTrack pick = null;
             foreach (var t in tracks)
@@ -250,7 +234,7 @@ namespace BodyTracking
                                 {
                                     var joint = skel.Joints[j];
                                     if (joint.ConfidenceLevel < k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW) continue;
-                                    var pos = BodyTrackingLive.K4AmmToUnity(joint.Position);
+                                    var pos = BodyTrackingShared.K4AmmToUnity(joint.Position);
                                     AppendSample(id, (k4abt_joint_id_t)j, tSec, pos, joint.ConfidenceLevel);
                                 }
                             }
@@ -284,9 +268,6 @@ namespace BodyTracking
                 K4ACalibration.Free(calibration);
                 _processing = null;
             }
-
-            // Re-enable Live (re-creates its tracker on next frame) if we paused it.
-            if (live != null && liveWasEnabled && !live.enabled) live.enabled = true;
 
             try { OnTrajectoriesReady?.Invoke(); }
             catch (Exception e) { Debug.LogException(e, this); }

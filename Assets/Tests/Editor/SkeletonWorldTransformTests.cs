@@ -36,7 +36,7 @@ namespace Calibration.Tests
             // jointMm = (1000, -500, 2000) (mm, OpenCV: +x right, +y down, +z fwd)
             // K4AmmToUnity → (1.0, 0.5, 2.0) — Y flipped, mm→m.
             var joint = Mm(1000f, -500f, 2000f);
-            Vector3 expected = BodyTrackingLive.K4AmmToUnity(joint);
+            Vector3 expected = BodyTrackingShared.K4AmmToUnity(joint);
             Vector3 actual = SkeletonWorldTransform.ToWorld(joint, null);
             AssertApprox(expected, actual, "null transform");
         }
@@ -53,7 +53,7 @@ namespace Calibration.Tests
                 t.localScale = Vector3.one;
 
                 var joint = Mm(1000f, -500f, 2000f);
-                AssertApprox(BodyTrackingLive.K4AmmToUnity(joint),
+                AssertApprox(BodyTrackingShared.K4AmmToUnity(joint),
                              SkeletonWorldTransform.ToWorld(joint, t),
                              "identity transform");
             }
@@ -98,14 +98,14 @@ namespace Calibration.Tests
                 t.localScale = new Vector3(1f, -1f, 1f);
 
                 var joint = Mm(500f, -800f, 1500f);
-                Vector3 expected = BodyTrackingLive.K4AmmToUnity(joint); // (0.5, 0.8, 1.5)
+                Vector3 expected = BodyTrackingShared.K4AmmToUnity(joint); // (0.5, 0.8, 1.5)
                 Vector3 actual = SkeletonWorldTransform.ToWorld(joint, t);
                 AssertApprox(expected, actual, "scale.y=-1 must not change skeleton (a)");
 
                 // Reference 'wrong' path — TransformPoint would Y-flip again. We
                 // assert the helper's output differs from the wrong path so a
                 // future refactor that accidentally uses TransformPoint fails this test.
-                Vector3 wrong = t.TransformPoint(BodyTrackingLive.K4AmmToUnity(joint));
+                Vector3 wrong = t.TransformPoint(BodyTrackingShared.K4AmmToUnity(joint));
                 Assert.AreNotEqual(wrong.y, actual.y,
                     "regression guard: TransformPoint result must differ from helper output");
             }

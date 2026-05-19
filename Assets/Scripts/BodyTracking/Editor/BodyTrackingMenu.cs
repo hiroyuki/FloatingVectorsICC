@@ -1,7 +1,7 @@
 // One-click setup for the body tracking pipeline. Adds a "BodyTracking" parent
-// GameObject with two children — Live (skeleton overlay) and Playback (motion
-// line) — pre-wired to the first PointCloudRenderer / PointCloudRecorder in
-// the scene. Avoids hand-editing main.unity from outside the Editor.
+// GameObject with two children — MultiLive (skeleton overlay, single- or
+// multi-camera) and Playback (motion line). Avoids hand-editing main.unity
+// from outside the Editor.
 
 using PointCloud;
 using UnityEditor;
@@ -21,22 +21,24 @@ namespace BodyTracking.EditorTools
                 Undo.RegisterCreatedObjectUndo(parent, "Create BodyTracking root");
             }
 
-            // Live skeleton overlay.
-            var live = parent.transform.Find("Live")?.gameObject;
+            // Live skeleton overlay (single- or multi-camera via K4abtWorkerHost).
+            var live = parent.transform.Find("MultiLive")?.gameObject;
             if (live == null)
             {
-                live = new GameObject("Live");
+                live = new GameObject("MultiLive");
                 live.transform.SetParent(parent.transform, false);
-                Undo.RegisterCreatedObjectUndo(live, "Create Live");
+                Undo.RegisterCreatedObjectUndo(live, "Create MultiLive");
             }
-            var liveComp = live.GetComponent<BodyTrackingLive>();
-            if (liveComp == null) liveComp = Undo.AddComponent<BodyTrackingLive>(live);
-            // PointCloudRenderer is runtime-spawned by PointCloudCameraManager, so we
-            // wire the manager instead and let BodyTrackingLive late-bind to the first
-            // renderer once it appears.
+            var liveComp = live.GetComponent<BodyTrackingMultiLive>();
+            if (liveComp == null) liveComp = Undo.AddComponent<BodyTrackingMultiLive>(live);
             if (liveComp.cameraManager == null)
             {
                 liveComp.cameraManager = Object.FindFirstObjectByType<PointCloudCameraManager>();
+                EditorUtility.SetDirty(liveComp);
+            }
+            if (liveComp.workerHost == null)
+            {
+                liveComp.workerHost = Object.FindFirstObjectByType<K4abtWorkerHost>();
                 EditorUtility.SetDirty(liveComp);
             }
 
