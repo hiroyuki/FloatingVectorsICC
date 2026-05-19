@@ -73,6 +73,11 @@ namespace PointCloud
         public uint colorWidth = 1280;
         public uint colorHeight = 720;
         public uint colorFps = 30;
+        [Tooltip("Color stream pixel format. RGB = uncompressed 24-bit (~6 MB/frame at 1080p, " +
+                 "saturates USB3 with 4 cameras). MJPG = JPEG-compressed (~0.6 MB/frame, ~10x " +
+                 "bandwidth reduction); OrbbecSDK's AlignFilter / PointCloudFilter handle the " +
+                 "internal decode. Match the format OrbbecViewer used for any reference recording.")]
+        public ObFormat colorFormat = ObFormat.RGB;
 
         [Tooltip("Enable the Femto Bolt's passive IR stream. k4abt body tracking uses it as the " +
                  "real IR cue instead of the depth-as-IR fallback (which makes detections stop " +
@@ -96,6 +101,10 @@ namespace PointCloud
                  "Run the 'Log Supported Sync Modes' context menu after the device is open to see " +
                  "the actual bitmap reported by your unit.")]
         public ObMultiDeviceSyncMode syncMode = ObMultiDeviceSyncMode.Secondary;
+        [Tooltip("When true, calls ob_device_set_multi_device_sync_config with the syncMode above. " +
+                 "Set false to inherit whatever sync mode the device already has (e.g. configured " +
+                 "via OrbbecViewer). Useful when managing Hub Pro / Primary-Secondary externally.")]
+        public bool applySyncConfig = true;
         [Tooltip("Per-trigger image-capture delay in microseconds. Stagger across devices to reduce " +
                  "iToF NIR pulse interference. The camera manager fills this with 160µs * deviceIndex.")]
         public int trigger2ImageDelayUs = 0;
@@ -128,6 +137,16 @@ namespace PointCloud
         public int maxPoints = 640 * 576;
         [Tooltip("Material used for the points. Use Orbbec/PointCloudUnlit or compatible.")]
         public Material pointMaterial;
+
+        [Tooltip("Reconstruct point cloud on GPU via PointCloudReconstruct.compute. Skips " +
+                 "OrbbecSDK's CPU PointCloudFilter and the main-thread Mesh.SetVertexBufferData " +
+                 "upload (which becomes the bottleneck at 1080p with 4 cameras). Vertex count = " +
+                 "depthWidth*depthHeight regardless of color resolution; color is sampled per-depth " +
+                 "via D2C inside the shader. Same pipeline the playback path already uses. " +
+                 "LIMITATIONS: cumulative snapshots and OnFrameUploaded callbacks need the CPU " +
+                 "vertex buffer and are NOT emitted in GPU mode (a warning is logged at Start " +
+                 "if either is wired). Switch to CPU mode to use those features.")]
+        public bool useGpuReconstruction = true;
         [Tooltip("Negate Y on the GameObject's transform. The SDK emits points in image coordinates " +
                  "(Y points down); flipping Y maps them to Unity's Y-up convention.")]
         public bool flipY = true;
@@ -151,7 +170,7 @@ namespace PointCloud
         [Tooltip("When on, logs captured / consumed / dropped fps once per second to the Unity console. " +
                  "captured = SDK frames published by the capture thread, consumed = frames uploaded to the " +
                  "Mesh on the main thread, dropped = publish-but-unread frames (capture outpacing Update).")]
-        public bool logFps = false;
+        public bool logFps = true;
 
         /// <summary>
         /// Fires each frame after the point cloud mesh has been updated. Subscribers receive the
@@ -185,6 +204,7 @@ namespace PointCloud
         private OrbbecConfig _config;
         private OrbbecFilter _alignFilter;
         private OrbbecFilter _pointCloudFilter;
+        private OrbbecFilter _colorFormatConverter;  // null unless colorFormat == MJPG
 
         // --- Threading ---
         private Thread _captureThread;
@@ -198,6 +218,128 @@ namespace PointCloud
         private MeshFilter _meshFilter;
         private MeshRenderer _meshRenderer;
         private Mesh _mesh;
+
+        // --- GPU reconstruction (mirrors PointCloudRecorder's playback path so
+        // live and playback share the same compute kernel and vertex layout). ---
+        private GraphicsBuffer _depthGpu;
+        private GraphicsBuffer _colorGpu;
+        private uint[] _depthScratchU32;
+        private uint[] _colorScratchU32;
+        private static ComputeShader s_reconstructShader;
+        private static int s_reconstructKernel = -1;
+        private static readonly int kId_Depth   = Shader.PropertyToID("_Depth");
+        private static readonly int kId_Color   = Shader.PropertyToID("_Color");
+        private static readonly int kId_Out     = Shader.PropertyToID("_Out");
+        private static readonly int kId_DepthW  = Shader.PropertyToID("_DepthW");
+        private static readonly int kId_DepthH  = Shader.PropertyToID("_DepthH");
+        private static readonly int kId_ColorW  = Shader.PropertyToID("_ColorW");
+        private static readonly int kId_ColorH  = Shader.PropertyToID("_ColorH");
+        private static readonly int kId_HasColor = Shader.PropertyToID("_HasColor");
+        private static readonly int kId_FxD = Shader.PropertyToID("_FxD");
+        private static readonly int kId_FyD = Shader.PropertyToID("_FyD");
+        private static readonly int kId_CxD = Shader.PropertyToID("_CxD");
+        private static readonly int kId_CyD = Shader.PropertyToID("_CyD");
+        private static readonly int kId_FxC = Shader.PropertyToID("_FxC");
+        private static readonly int kId_FyC = Shader.PropertyToID("_FyC");
+        private static readonly int kId_CxC = Shader.PropertyToID("_CxC");
+        private static readonly int kId_CyC = Shader.PropertyToID("_CyC");
+        private static readonly int kId_Rrow0 = Shader.PropertyToID("_Rrow0");
+        private static readonly int kId_Rrow1 = Shader.PropertyToID("_Rrow1");
+        private static readonly int kId_Rrow2 = Shader.PropertyToID("_Rrow2");
+        private static readonly int kId_T     = Shader.PropertyToID("_T");
+
+        private static bool TryLoadReconstructShader()
+        {
+            if (s_reconstructShader != null && s_reconstructKernel >= 0) return true;
+            s_reconstructShader = Resources.Load<ComputeShader>("PointCloudReconstruct");
+            if (s_reconstructShader == null) return false;
+            s_reconstructKernel = s_reconstructShader.FindKernel("CSMain");
+            return s_reconstructKernel >= 0;
+        }
+
+        // GPU live reconstruction. Mirrors PointCloudRecorder.ReconstructAndUpload
+        // but reads from the live capture slot instead of a recorded Frame.
+        private int DispatchGpuReconstruction(SlotPool.Slot slot)
+        {
+            if (!CameraParam.HasValue) return 0;
+            if (!TryLoadReconstructShader())
+            {
+                Debug.LogError($"[{nameof(PointCloudRenderer)}] PointCloudReconstruct compute shader not found in Resources/", this);
+                return 0;
+            }
+            int dw = slot.DepthWidth > 0 ? slot.DepthWidth : (int)depthWidth;
+            int dh = slot.DepthHeight > 0 ? slot.DepthHeight : (int)depthHeight;
+            int cw = slot.ColorWidth;
+            int ch = slot.ColorHeight;
+            bool hasColor = slot.ColorByteCount > 0 && cw > 0 && ch > 0;
+            int capacity = dw * dh;
+
+            EnsureDepthGpuBuffer(slot.DepthByteCount);
+            EnsureColorGpuBuffer(hasColor ? slot.ColorByteCount : 4);
+
+            // Upload depth + color into GPU raw buffers. Buffer stride is 4 (uint),
+            // so we BlockCopy bytes into a uint[] scratch first.
+            Buffer.BlockCopy(slot.DepthBytes, 0, _depthScratchU32, 0, slot.DepthByteCount);
+            _depthGpu.SetData(_depthScratchU32, 0, 0, _depthScratchU32.Length);
+            if (hasColor)
+            {
+                Buffer.BlockCopy(slot.ColorBytes, 0, _colorScratchU32, 0, slot.ColorByteCount);
+                _colorGpu.SetData(_colorScratchU32, 0, 0, _colorScratchU32.Length);
+            }
+
+            var cam = CameraParam.Value;
+            var shader = s_reconstructShader;
+            int k = s_reconstructKernel;
+            var vbuf = _mesh.GetVertexBuffer(0);
+
+            shader.SetBuffer(k, kId_Depth, _depthGpu);
+            shader.SetBuffer(k, kId_Color, _colorGpu);
+            shader.SetBuffer(k, kId_Out,   vbuf);
+            shader.SetInt(kId_DepthW, dw);
+            shader.SetInt(kId_DepthH, dh);
+            shader.SetInt(kId_ColorW, cw);
+            shader.SetInt(kId_ColorH, ch);
+            shader.SetInt(kId_HasColor, hasColor ? 1 : 0);
+            shader.SetFloat(kId_FxD, cam.DepthIntrinsic.Fx);
+            shader.SetFloat(kId_FyD, cam.DepthIntrinsic.Fy);
+            shader.SetFloat(kId_CxD, cam.DepthIntrinsic.Cx);
+            shader.SetFloat(kId_CyD, cam.DepthIntrinsic.Cy);
+            shader.SetFloat(kId_FxC, cam.RgbIntrinsic.Fx);
+            shader.SetFloat(kId_FyC, cam.RgbIntrinsic.Fy);
+            shader.SetFloat(kId_CxC, cam.RgbIntrinsic.Cx);
+            shader.SetFloat(kId_CyC, cam.RgbIntrinsic.Cy);
+            var R = cam.Transform.Rot;
+            shader.SetVector(kId_Rrow0, new Vector4(R[0], R[1], R[2], 0f));
+            shader.SetVector(kId_Rrow1, new Vector4(R[3], R[4], R[5], 0f));
+            shader.SetVector(kId_Rrow2, new Vector4(R[6], R[7], R[8], 0f));
+            var T = cam.Transform.Trans;
+            shader.SetVector(kId_T, new Vector4(T[0], T[1], T[2], 0f));
+
+            int gx = (dw + 7) / 8;
+            int gy = (dh + 7) / 8;
+            shader.Dispatch(k, gx, gy, 1);
+            vbuf.Dispose();
+
+            return capacity;
+        }
+
+        private void EnsureDepthGpuBuffer(int byteCount)
+        {
+            int u32Count = (byteCount + 3) / 4;
+            if (_depthGpu != null && _depthGpu.count >= u32Count) { return; }
+            _depthGpu?.Dispose();
+            _depthGpu = new GraphicsBuffer(GraphicsBuffer.Target.Raw, u32Count, 4);
+            _depthScratchU32 = new uint[u32Count];
+        }
+
+        private void EnsureColorGpuBuffer(int byteCount)
+        {
+            int u32Count = (byteCount + 3) / 4;
+            if (_colorGpu != null && _colorGpu.count >= u32Count) { return; }
+            _colorGpu?.Dispose();
+            _colorGpu = new GraphicsBuffer(GraphicsBuffer.Target.Raw, u32Count, 4);
+            _colorScratchU32 = new uint[u32Count];
+        }
 
         // --- Public state ---
         public bool IsCapturing => _captureThread != null && _captureThread.IsAlive;
@@ -240,6 +382,7 @@ namespace PointCloud
                 return;
             }
 
+
             try
             {
                 OpenDevice();
@@ -278,25 +421,39 @@ namespace PointCloud
             {
                 try
                 {
-                    int n = Math.Min(slot.PointCount, maxPoints);
+                    int n;
+                    if (useGpuReconstruction)
+                    {
+                        _stageSw.Restart();
+                        n = DispatchGpuReconstruction(slot);
+                        _stageSw.Stop();
+                        if (logFps) _meshTicks += _stageSw.ElapsedTicks;
+                    }
+                    else
+                    {
+                        n = Math.Min(slot.PointCount, maxPoints);
 
-                    _stageSw.Restart();
-                    cumulative?.OnFrame(slot.Buffer, n, transform, pointMaterial);
-                    _stageSw.Stop();
-                    if (logFps) _cumulTicks += _stageSw.ElapsedTicks;
+                        _stageSw.Restart();
+                        cumulative?.OnFrame(slot.Buffer, n, transform, pointMaterial);
+                        _stageSw.Stop();
+                        if (logFps) _cumulTicks += _stageSw.ElapsedTicks;
 
-                    _stageSw.Restart();
-                    _mesh.SetVertexBufferData(slot.Buffer, 0, 0, n,
-                        flags: MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
-                    _mesh.SetSubMesh(0, new SubMeshDescriptor(0, n, MeshTopology.Points),
-                        MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
-                    _stageSw.Stop();
-                    if (logFps) _meshTicks += _stageSw.ElapsedTicks;
+                        _stageSw.Restart();
+                        _mesh.SetVertexBufferData(slot.Buffer, 0, 0, n,
+                            flags: MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
+                        _mesh.SetSubMesh(0, new SubMeshDescriptor(0, n, MeshTopology.Points),
+                            MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
+                        _stageSw.Stop();
+                        if (logFps) _meshTicks += _stageSw.ElapsedTicks;
+                    }
 
                     LastPointCount = n;
                     LastTimestampUs = slot.TimestampUs;
                     _consumedCount++;
-                    OnFrameUploaded?.Invoke(this, slot.Buffer, n, slot.TimestampUs);
+                    if (!useGpuReconstruction)
+                        OnFrameUploaded?.Invoke(this, slot.Buffer, n, slot.TimestampUs);
+                    else if (OnFrameUploaded != null) WarnGpuModeSkipsCpuFeatures(ref _warnedOnFrameUploaded, "OnFrameUploaded");
+                    if (useGpuReconstruction && cumulative != null) WarnGpuModeSkipsCpuFeatures(ref _warnedCumulative, $"cumulative ({cumulative.name})");
 
                     if (OnRawFramesReady != null && slot.DepthByteCount > 0 && slot.ColorByteCount > 0)
                     {
@@ -325,38 +482,31 @@ namespace PointCloud
             UpdateFpsDiagnostics();
         }
 
-        private static readonly int _ObbObjToBoxId = Shader.PropertyToID("_ObbObjToBox");
-        private static readonly int _ObbModeId     = Shader.PropertyToID("_ObbMode");
-        private static readonly int _DecimKeepId   = Shader.PropertyToID("_DecimKeep");
-        private static readonly int _DecimFrameId  = Shader.PropertyToID("_DecimFrame");
+        // Set to true the first time we skip a CPU-vertex-dependent feature in
+        // GPU mode so the warning fires once per session per feature instead of
+        // every frame. Lives on the instance because subscribers can attach after
+        // Start() (Unity's OnEnable / Start ordering across components is undefined),
+        // so a one-shot Start-time check missed late-binding consumers.
+        private bool _warnedOnFrameUploaded;
+        private bool _warnedCumulative;
+
+        private void WarnGpuModeSkipsCpuFeatures(ref bool warnedFlag, string featureLabel)
+        {
+            if (warnedFlag) return;
+            warnedFlag = true;
+            Debug.LogWarning(
+                $"[{nameof(PointCloudRenderer)}] {deviceSerial}: useGpuReconstruction=true skips " +
+                $"the CPU PointCloudFilter, so {featureLabel} cannot fire (no CPU vertex buffer). " +
+                "Disable useGpuReconstruction (CPU mode) or remove the consumer to silence this.",
+                this);
+        }
+
         private MaterialPropertyBlock _mpb;
 
         private void UpdateShaderFilterProperties()
         {
             if (_mpb == null) _mpb = new MaterialPropertyBlock();
-            _meshRenderer.GetPropertyBlock(_mpb);
-
-            // OBB: shader expects renderer-object-space -> box-local matrix.
-            float obbMode = 0f;
-            if (boundingBox != null)
-            {
-                var mode = boundingBox.Mode;
-                if (mode != PointCloudBoundingBox.FilterMode.Disabled)
-                {
-                    obbMode = mode == PointCloudBoundingBox.FilterMode.KeepInside ? 1f : 2f;
-                    var m = boundingBox.transform.worldToLocalMatrix * transform.localToWorldMatrix;
-                    _mpb.SetMatrix(_ObbObjToBoxId, m);
-                }
-            }
-            _mpb.SetFloat(_ObbModeId, obbMode);
-
-            // Decimation: reuse the same KeepRatio the CPU path used; Enabled=false -> keep all.
-            float decimKeep = 1f;
-            if (decimater != null && decimater.Enabled) decimKeep = Mathf.Clamp01(decimater.KeepRatio);
-            _mpb.SetFloat(_DecimKeepId, decimKeep);
-            _mpb.SetFloat(_DecimFrameId, Time.frameCount);
-
-            _meshRenderer.SetPropertyBlock(_mpb);
+            PointCloudShaderFilters.Apply(_meshRenderer, _mpb, transform, boundingBox, decimater);
         }
 
         private void UpdateFpsDiagnostics()
@@ -424,6 +574,8 @@ namespace PointCloud
                 Destroy(_mesh);
                 _mesh = null;
             }
+            _depthGpu?.Dispose(); _depthGpu = null;
+            _colorGpu?.Dispose(); _colorGpu = null;
             _slots?.Dispose();
             _slots = null;
         }
@@ -442,7 +594,11 @@ namespace PointCloud
 
             // Multi-device sync and timer sync must happen after the device is open but
             // before the pipeline starts, otherwise the sync-mode switch can race the stream.
-            ApplySyncConfig();
+            // applySyncConfig=false skips this so the device inherits whatever was set
+            // externally (e.g. via OrbbecViewer).
+            if (applySyncConfig) ApplySyncConfig();
+            else Debug.Log($"[{nameof(PointCloudRenderer)}] {deviceSerial}: applySyncConfig=false, " +
+                           "leaving device-side sync mode untouched.", this);
             if (timerSyncWithHost)
             {
                 try { _device.TimerSyncWithHost(); }
@@ -484,7 +640,7 @@ namespace PointCloud
 
             _config = new OrbbecConfig();
             _config.EnableVideoStream(ObStreamType.Depth, depthWidth, depthHeight, depthFps, ObFormat.Y16);
-            _config.EnableVideoStream(ObStreamType.Color, colorWidth, colorHeight, colorFps, ObFormat.RGB);
+            _config.EnableVideoStream(ObStreamType.Color, colorWidth, colorHeight, colorFps, colorFormat);
             if (enableIRStream)
             {
                 // Femto Bolt's passive IR stream matches depth (same dimensions, Y16, same fps).
@@ -523,16 +679,37 @@ namespace PointCloud
             _pointCloudFilter.SetConfigValue("pointFormat", (double)ObFormat.RGBPoint);
             _pointCloudFilter.SetConfigValue("coordinateDataScale", 0.001); // mm -> m
             _pointCloudFilter.SetConfigValue("colorDataNormalization", 1.0); // 0-255 -> 0-1
+
+            // MJPG color frames need a host-side decode to RGB before the GPU
+            // recon shader (or recording / playback color sampling) can read
+            // them. OrbbecSDK ships a FormatConverter that handles this on the
+            // CPU. The convertType enum matches ObTypes.h OBConvertFormat:
+            // FORMAT_MJPG_TO_RGB = 7.
+            if (colorFormat == ObFormat.MJPG)
+            {
+                _colorFormatConverter = new OrbbecFilter("FormatConverter");
+                _colorFormatConverter.SetConfigValue("convertType", 7.0);
+            }
         }
 
         private void BuildMesh()
         {
+            // GPU recon mode emits exactly depthW*depthH vertices per frame (one per
+            // depth pixel; invalid pixels are pushed offscreen by the compute shader).
+            // CPU mode sizes the vertex buffer at color resolution because the
+            // PointCloudFilter outputs one vertex per color pixel.
+            int capacity = useGpuReconstruction
+                ? checked((int)(depthWidth * depthHeight))
+                : maxPoints;
+
             _mesh = new Mesh
             {
                 name = $"PointCloud_{deviceSerial}",
                 indexFormat = IndexFormat.UInt32,
                 bounds = new Bounds(Vector3.zero, Vector3.one * 100f),
             };
+            // RWByteAddressBuffer access from the compute kernel needs Raw target.
+            if (useGpuReconstruction) _mesh.vertexBufferTarget |= GraphicsBuffer.Target.Raw;
 
             // Vertex layout = OBColorPoint (position float3 + color float3, 24 bytes).
             var attrs = new[]
@@ -540,24 +717,28 @@ namespace PointCloud
                 new VertexAttributeDescriptor(VertexAttribute.Position, VertexAttributeFormat.Float32, 3, stream: 0),
                 new VertexAttributeDescriptor(VertexAttribute.Color,    VertexAttributeFormat.Float32, 3, stream: 0),
             };
-            _mesh.SetVertexBufferParams(maxPoints, attrs);
+            _mesh.SetVertexBufferParams(capacity, attrs);
 
             // Identity index buffer for MeshTopology.Points.
             // (try/finally instead of `using` because `using` makes the variable
             //  readonly, which blocks NativeArray's indexer set on a struct.)
-            _mesh.SetIndexBufferParams(maxPoints, IndexFormat.UInt32);
-            var indices = new NativeArray<uint>(maxPoints, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
+            _mesh.SetIndexBufferParams(capacity, IndexFormat.UInt32);
+            var indices = new NativeArray<uint>(capacity, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
             try
             {
-                for (int i = 0; i < maxPoints; i++) indices[i] = (uint)i;
-                _mesh.SetIndexBufferData(indices, 0, 0, maxPoints,
+                for (int i = 0; i < capacity; i++) indices[i] = (uint)i;
+                _mesh.SetIndexBufferData(indices, 0, 0, capacity,
                     MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
             }
             finally
             {
                 indices.Dispose();
             }
-            _mesh.SetSubMesh(0, new SubMeshDescriptor(0, 0, MeshTopology.Points),
+            // GPU mode keeps the full submesh exposed (kernel writes every vertex
+            // every frame; invalid pixels self-cull). CPU mode starts empty and
+            // is sized per-frame by the upload path.
+            int initialCount = useGpuReconstruction ? capacity : 0;
+            _mesh.SetSubMesh(0, new SubMeshDescriptor(0, initialCount, MeshTopology.Points),
                 MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
 
             _meshFilter.sharedMesh = _mesh;
@@ -754,37 +935,60 @@ namespace PointCloud
                             : depthFrame.SystemTimestampUs;
                     }
 
-                    using var aligned = _alignFilter.Process(frameset);
-                    if (aligned == null) continue;
-
-                    using var points = _pointCloudFilter.Process(aligned);
-                    if (points == null) continue;
-
-                    if (points.Format != ObFormat.RGBPoint) continue;
-
-                    int pointCount = (int)(points.DataSize / (uint)UnsafeUtility.SizeOf<ObColorPoint>());
-                    if (pointCount <= 0) continue;
-                    if (pointCount > maxPoints) pointCount = maxPoints;
-
-                    var slot = _slots.AcquireWrite();
-                    if (slot == null) continue;
-
-                    unsafe
+                    SlotPool.Slot slot;
+                    if (useGpuReconstruction)
                     {
-                        UnsafeUtility.MemCpy(
-                            NativeArrayUnsafeUtility.GetUnsafePtr(slot.Buffer),
-                            (void*)points.DataPointer,
-                            (long)pointCount * UnsafeUtility.SizeOf<ObColorPoint>());
+                        // GPU mode: skip align + pointcloud filter (the compute shader
+                        // re-does D2C and per-pixel projection on the GPU). We only need
+                        // the raw depth+color bytes captured below.
+                        slot = _slots.AcquireWrite();
+                        if (slot == null) continue;
+                        slot.PointCount = 0; // unused; mesh capacity is fixed at depthW*depthH
                     }
-                    slot.PointCount = pointCount;
+                    else
+                    {
+                        using var aligned = _alignFilter.Process(frameset);
+                        if (aligned == null) continue;
+
+                        using var points = _pointCloudFilter.Process(aligned);
+                        if (points == null) continue;
+
+                        if (points.Format != ObFormat.RGBPoint) continue;
+
+                        int pointCount = (int)(points.DataSize / (uint)UnsafeUtility.SizeOf<ObColorPoint>());
+                        if (pointCount <= 0) continue;
+                        if (pointCount > maxPoints) pointCount = maxPoints;
+
+                        slot = _slots.AcquireWrite();
+                        if (slot == null) continue;
+
+                        unsafe
+                        {
+                            UnsafeUtility.MemCpy(
+                                NativeArrayUnsafeUtility.GetUnsafePtr(slot.Buffer),
+                                (void*)points.DataPointer,
+                                (long)pointCount * UnsafeUtility.SizeOf<ObColorPoint>());
+                        }
+                        slot.PointCount = pointCount;
+                    }
                     slot.TimestampUs = frameTimestampUs;
 
                     // Raw pre-D2C depth + color — pulled off the original frameset (the align
                     // filter produces a new frameset, it doesn't mutate this one).
                     CopyRawStream(frameset.GetDepthFrame, slot.DepthBytes,
                                   out slot.DepthByteCount, out slot.DepthWidth, out slot.DepthHeight);
-                    CopyRawStream(frameset.GetColorFrame, slot.ColorBytes,
-                                  out slot.ColorByteCount, out slot.ColorWidth, out slot.ColorHeight);
+                    // MJPG stream: decode to RGB via SDK's FormatConverter before the
+                    // GPU shader (and recording) consumes the bytes — the shader reads
+                    // raw RGB triplets, not JPEG bitstream.
+                    if (_colorFormatConverter != null)
+                    {
+                        CopyConvertedColorFrame(frameset, slot);
+                    }
+                    else
+                    {
+                        CopyRawStream(frameset.GetColorFrame, slot.ColorBytes,
+                                      out slot.ColorByteCount, out slot.ColorWidth, out slot.ColorHeight);
+                    }
                     if (enableIRStream)
                     {
                         CopyRawStream(frameset.GetIRFrame, slot.IRBytes,
@@ -843,6 +1047,43 @@ namespace PointCloud
             }
         }
 
+        // Like CopyRawStream but runs the color frame through _colorFormatConverter
+        // (MJPG → RGB) before copying bytes into the slot. Resizes slot.ColorBytes
+        // if the decoded RGB exceeds the current capacity (decoded size at 1080p is
+        // 1920*1080*3 = 6.22 MB, which the renderer pre-sized for).
+        private void CopyConvertedColorFrame(OrbbecFrame frameset, SlotPool.Slot slot)
+        {
+            OrbbecFrame raw = null, converted = null;
+            try
+            {
+                raw = frameset.GetColorFrame();
+                if (raw == null) { slot.ColorByteCount = 0; return; }
+                converted = _colorFormatConverter.Process(raw);
+                if (converted == null) { slot.ColorByteCount = 0; return; }
+                int size = (int)converted.DataSize;
+                if (size <= 0) { slot.ColorByteCount = 0; return; }
+                if (size > slot.ColorBytes.Length)
+                {
+                    // Resize on the fly. Should only happen once at startup if the
+                    // pre-allocated buffer was sized for MJPG (smaller than RGB).
+                    slot.ColorBytes = new byte[size];
+                }
+                Marshal.Copy(converted.DataPointer, slot.ColorBytes, 0, size);
+                slot.ColorByteCount = size;
+                slot.ColorWidth = (int)converted.VideoWidth;
+                slot.ColorHeight = (int)converted.VideoHeight;
+            }
+            catch
+            {
+                slot.ColorByteCount = 0; slot.ColorWidth = 0; slot.ColorHeight = 0;
+            }
+            finally
+            {
+                converted?.Dispose();
+                raw?.Dispose();
+            }
+        }
+
         private void ShutdownCapture()
         {
             if (_timerSyncCoro != null)
@@ -862,6 +1103,7 @@ namespace PointCloud
 
             _pointCloudFilter?.Dispose(); _pointCloudFilter = null;
             _alignFilter?.Dispose(); _alignFilter = null;
+            _colorFormatConverter?.Dispose(); _colorFormatConverter = null;
             _pipeline?.Dispose(); _pipeline = null;
             _config?.Dispose(); _config = null;
             _device?.Dispose(); _device = null;

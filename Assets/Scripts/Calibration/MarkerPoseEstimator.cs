@@ -183,13 +183,36 @@ namespace Calibration
                     // Fallback path: marker corners only. Each ArUco marker contributes 4
                     // (2D ↔ 3D) correspondences. solvePnP needs 4 points → one marker is
                     // enough when its 4 corners are well-separated.
+                    //
+                    // Lifetime gotcha: OpenCVForUnity's MatOfPoint3f(Mat) / MatOfPoint2f(Mat)
+                    // wrap the source Mat without copying. If we keep the wrappers alive past
+                    // the `using` scope of the source Mats, solvePnP reads freed memory and
+                    // silently returns false. So we copy the numeric data out and rebuild
+                    // through fromList — same pattern the chessboard branch above already uses.
                     using var op = new Mat();
                     using var ip = new Mat();
                     _board.matchImagePoints(markerCornersList, markerIds, op, ip);
                     int n = (int)op.total();
                     if (n < 4) return Result.Failed(detectedMarkers, interpolated);
-                    objPoints = new MatOfPoint3f(op);
-                    imgPoints = new MatOfPoint2f(ip);
+
+                    float[] objArr = new float[n * 3];
+                    op.get(0, 0, objArr);
+                    float[] imgArr = new float[n * 2];
+                    ip.get(0, 0, imgArr);
+
+                    var objList = new List<OpenCVForUnity.CoreModule.Point3>(n);
+                    var imgList = new List<OpenCVForUnity.CoreModule.Point>(n);
+                    for (int i = 0; i < n; i++)
+                    {
+                        objList.Add(new OpenCVForUnity.CoreModule.Point3(
+                            objArr[i * 3 + 0], objArr[i * 3 + 1], objArr[i * 3 + 2]));
+                        imgList.Add(new OpenCVForUnity.CoreModule.Point(
+                            imgArr[i * 2 + 0], imgArr[i * 2 + 1]));
+                    }
+                    objPoints = new MatOfPoint3f();
+                    objPoints.fromList(objList);
+                    imgPoints = new MatOfPoint2f();
+                    imgPoints.fromList(imgList);
                 }
                 else
                 {
@@ -224,6 +247,108 @@ namespace Calibration
             {
                 foreach (var m in markerCornersList) m.Dispose();
             }
+        }
+
+        /// <summary>
+        /// Detection-only debug pass. Runs the same gray + equalizeHist + detectBoard
+        /// pipeline as <see cref="Estimate"/> but skips solvePnP. Returns counts plus
+        /// an RGB8 image with detected markers / chessboard corners overlaid. Use this
+        /// to see exactly what the detector saw when Capture's "no detection" path
+        /// fired — typical fixes are exposure, board orientation, or dictionary mismatch.
+        /// Output buffer is the same dimensions as input; markers drawn as cyan quads
+        /// + magenta ID labels, interpolated chessboard corners drawn as yellow dots.
+        /// </summary>
+        public DebugDetection DetectAndAnnotate(byte[] rgb8, int width, int height)
+        {
+            if (_disposed) throw new ObjectDisposedException(nameof(MarkerPoseEstimator));
+            if (rgb8 == null) throw new ArgumentNullException(nameof(rgb8));
+            if (rgb8.Length != width * height * 3)
+                throw new ArgumentException(
+                    $"rgb8 length {rgb8.Length} doesn't match width*height*3 = {width * height * 3}");
+
+            using var rgb = new Mat(height, width, CvType.CV_8UC3);
+            rgb.put(0, 0, rgb8);
+            using var grayRaw = new Mat();
+            Imgproc.cvtColor(rgb, grayRaw, Imgproc.COLOR_RGB2GRAY);
+            using var gray = new Mat();
+            Imgproc.equalizeHist(grayRaw, gray);
+
+            using var charucoCorners = new Mat();
+            using var charucoIds = new Mat();
+            var markerCornersList = new List<Mat>();
+            using var markerIds = new Mat();
+            try
+            {
+                _charucoDetector.detectBoard(gray, charucoCorners, charucoIds, markerCornersList, markerIds);
+
+                int detectedMarkers = markerIds.empty() ? 0 : (int)markerIds.total();
+                int interpolated = charucoCorners.empty() ? 0 : (int)charucoCorners.total();
+
+                int[] idsArr = detectedMarkers > 0 ? new int[detectedMarkers] : null;
+                if (detectedMarkers > 0) markerIds.get(0, 0, idsArr);
+
+                // Cyan marker outlines + magenta ID text.
+                var cyan    = new Scalar(0,   255, 255);
+                var magenta = new Scalar(255, 0,   255);
+                var yellow  = new Scalar(255, 255, 0);
+                for (int m = 0; m < markerCornersList.Count; m++)
+                {
+                    var corners = markerCornersList[m]; // 1x4 CV_32FC2 typically
+                    int n = (int)(corners.total()); // expect 4
+                    if (n < 4) continue;
+                    float[] pts = new float[n * 2];
+                    corners.get(0, 0, pts);
+                    var p0 = new OpenCVForUnity.CoreModule.Point(pts[0], pts[1]);
+                    var p1 = new OpenCVForUnity.CoreModule.Point(pts[2], pts[3]);
+                    var p2 = new OpenCVForUnity.CoreModule.Point(pts[4], pts[5]);
+                    var p3 = new OpenCVForUnity.CoreModule.Point(pts[6], pts[7]);
+                    Imgproc.line(rgb, p0, p1, cyan, 2);
+                    Imgproc.line(rgb, p1, p2, cyan, 2);
+                    Imgproc.line(rgb, p2, p3, cyan, 2);
+                    Imgproc.line(rgb, p3, p0, cyan, 2);
+                    if (idsArr != null && m < idsArr.Length)
+                    {
+                        var label = new OpenCVForUnity.CoreModule.Point(
+                            (p0.x + p2.x) * 0.5, (p0.y + p2.y) * 0.5);
+                        Imgproc.putText(rgb, idsArr[m].ToString(), label,
+                            Imgproc.FONT_HERSHEY_SIMPLEX, 0.7, magenta, 2);
+                    }
+                }
+
+                if (interpolated > 0)
+                {
+                    float[] cc = new float[interpolated * 2];
+                    charucoCorners.get(0, 0, cc);
+                    for (int i = 0; i < interpolated; i++)
+                    {
+                        var pt = new OpenCVForUnity.CoreModule.Point(cc[i * 2], cc[i * 2 + 1]);
+                        Imgproc.circle(rgb, pt, 4, yellow, -1);
+                    }
+                }
+
+                byte[] annotated = new byte[rgb8.Length];
+                rgb.get(0, 0, annotated);
+
+                return new DebugDetection
+                {
+                    DetectedMarkerCount = detectedMarkers,
+                    InterpolatedCornerCount = interpolated,
+                    MarkerIds = idsArr ?? Array.Empty<int>(),
+                    AnnotatedRgb8 = annotated,
+                };
+            }
+            finally
+            {
+                foreach (var m in markerCornersList) m.Dispose();
+            }
+        }
+
+        public struct DebugDetection
+        {
+            public int DetectedMarkerCount;
+            public int InterpolatedCornerCount;
+            public int[] MarkerIds;
+            public byte[] AnnotatedRgb8;
         }
 
         public void Dispose()

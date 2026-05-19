@@ -51,6 +51,26 @@ namespace CameraControl
         [Tooltip("Max seconds between two left-clicks to count as a double-click and reset to the default pose.")]
         public float doubleClickInterval = 0.3f;
 
+        [Header("Auto orbit (idle)")]
+        [Tooltip("When no mouse input for autoOrbitIdleSeconds, slowly rotate the camera " +
+                 "around the pivot for a 3D-revealing preview. Mouse drag instantly takes over.")]
+        public bool autoOrbit = true;
+        [Tooltip("Seconds of mouse idleness before auto-orbit kicks in.")]
+        [Min(0f)] public float autoOrbitIdleSeconds = 0.5f;
+        [Tooltip("Yaw degrees / second during auto-orbit. Sign sets direction.")]
+        public float autoOrbitYawSpeedDeg = 8f;
+        [Tooltip("Sine amplitude (meters) added vertically to the camera position.")]
+        public float autoOrbitBobAmpMeters = 0.25f;
+        [Tooltip("Frequency (Hz) of the vertical bob.")]
+        public float autoOrbitBobFreqHz = 0.07f;
+        [Tooltip("Sine amplitude (meters) added to the orbit distance — gentle push-in / pull-out.")]
+        public float autoOrbitDollyAmpMeters = 0.6f;
+        [Tooltip("Frequency (Hz) of the dolly bob. Pick something different from bob freq so they don't beat.")]
+        public float autoOrbitDollyFreqHz = 0.05f;
+
+        private float _lastInputTime;
+        private float _autoTimeAccum;
+
         private Vector3 _pivotPoint;
         private Vector3 _panOffset;
         private float _yaw;
@@ -104,6 +124,11 @@ namespace CameraControl
             dx *= axisToPixels;
             dy *= axisToPixels;
 
+            // Treat any mouse button being held as user input even when motion delta
+            // is zero — otherwise the auto-orbit timer expires mid-hold and the
+            // camera starts drifting under the user's hand. Mouse-wheel scroll
+            // updates this further below.
+            bool hadInput = Input.GetMouseButton(0) || Input.GetMouseButton(1) || Input.GetMouseButton(2);
             if (Input.GetMouseButton(0))
             {
                 _yaw += dx * orbitSpeed;
@@ -130,11 +155,29 @@ namespace CameraControl
             {
                 distance *= Mathf.Exp(-scroll * zoomSpeed * 10f);
                 distance = Mathf.Clamp(distance, minDistance, maxDistance);
+                hadInput = true;
+            }
+
+            // Auto-orbit when mouse has been idle for autoOrbitIdleSeconds. The bob
+            // and dolly are added to the live values *for this frame only* (not
+            // baked back into _yaw / distance) so resuming manual control after
+            // auto-orbit doesn't drift the saved zoom.
+            if (hadInput) _lastInputTime = Time.unscaledTime;
+            float dollyOffset = 0f;
+            float verticalBob = 0f;
+            if (autoOrbit && Time.unscaledTime - _lastInputTime >= autoOrbitIdleSeconds)
+            {
+                _autoTimeAccum += Time.deltaTime;
+                _yaw += autoOrbitYawSpeedDeg * Time.deltaTime;
+                float twoPi = 2f * Mathf.PI;
+                verticalBob = Mathf.Sin(twoPi * autoOrbitBobFreqHz * _autoTimeAccum) * autoOrbitBobAmpMeters;
+                dollyOffset = Mathf.Sin(twoPi * autoOrbitDollyFreqHz * _autoTimeAccum) * autoOrbitDollyAmpMeters;
             }
 
             Quaternion rot = Quaternion.Euler(_pitch, _yaw, 0f);
-            Vector3 offset = rot * new Vector3(0f, 0f, -distance);
-            transform.position = _pivotPoint + offset;
+            float effectiveDistance = Mathf.Max(0.01f, distance + dollyOffset);
+            Vector3 offset = rot * new Vector3(0f, 0f, -effectiveDistance);
+            transform.position = _pivotPoint + offset + Vector3.up * verticalBob;
             transform.rotation = rot;
         }
 

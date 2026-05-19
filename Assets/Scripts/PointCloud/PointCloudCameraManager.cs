@@ -13,6 +13,14 @@ namespace PointCloud
 {
     public class PointCloudCameraManager : MonoBehaviour
     {
+        [Header("Mode")]
+        [Tooltip("When ON, Start() does NOT enumerate Femto Bolt devices or spawn live " +
+                 "PointCloudRenderers — Play simply drives PointCloudRecorder playback of " +
+                 "whatever recording PointCloudRecorder.folderPath points at. Use to test " +
+                 "scenes without the camera rig plugged in. When OFF the original live " +
+                 "capture path runs.")]
+        public bool playbackOnly = false;
+
         [Tooltip("Material assigned to spawned renderers.")]
         public Material defaultPointMaterial;
 
@@ -23,6 +31,10 @@ namespace PointCloud
         public uint colorWidth = 1280;
         public uint colorHeight = 720;
         public uint colorFps = 30;
+        [Tooltip("Color stream pixel format applied to every spawned renderer. RGB = uncompressed " +
+                 "(saturates USB3 with 4 cameras at 1080p). MJPG = compressed (~10x lighter, " +
+                 "matches OrbbecViewer's default).")]
+        public ObFormat colorFormat = ObFormat.RGB;
         [Tooltip("Stream that depth gets aligned TO via the Align filter (D2C target).")]
         public ObStreamType alignTargetStream = ObStreamType.Color;
 
@@ -43,6 +55,11 @@ namespace PointCloud
                  "Secondary, not SecondarySynced — observed bitmap 0x000F = FreeRun|Standalone|" +
                  "Primary|Secondary.")]
         public SyncTopology syncTopology = SyncTopology.SyncHubPro;
+        [Tooltip("When true, every spawned renderer rewrites the device's sync config on pipeline " +
+                 "start using syncTopology above. Set false to leave the device's existing sync " +
+                 "mode alone (e.g. when configured externally via OrbbecViewer / Sync Hub Pro " +
+                 "tooling). syncTopology is ignored in that case.")]
+        public bool applySyncConfig = true;
         [Tooltip("Stagger trigger2ImageDelayUs across devices to reduce iToF NIR pulse interference. " +
                  "Each device gets index * step microseconds. 0 disables the stagger.")]
         [Min(0)]
@@ -56,9 +73,9 @@ namespace PointCloud
 
         public enum SyncTopology
         {
-            /// <summary>Sync Hub Pro: hub fans trigger pulses out → every device set to Secondary.</summary>
+            /// <summary>Sync Hub Pro: hub fans trigger out, cam0 = Primary (seeds the chain), rest = Secondary.</summary>
             SyncHubPro = 0,
-            /// <summary>Camera-to-camera daisy chain: index 0 = Primary, rest = Secondary.</summary>
+            /// <summary>Camera-to-camera daisy chain: cam0 = Primary, rest = Secondary.</summary>
             DaisyChain = 1,
             /// <summary>No hardware sync; each device runs Standalone (use only for single-camera or testing).</summary>
             Standalone = 2,
@@ -95,6 +112,13 @@ namespace PointCloud
 
         private void Start()
         {
+            if (playbackOnly)
+            {
+                if (verboseLogging)
+                    Debug.Log($"[{nameof(PointCloudCameraManager)}] playbackOnly=true; skipping device enumeration. " +
+                              "PointCloudRecorder will drive playback from its folderPath.");
+                return;
+            }
             var ctx = OrbbecRuntime.Context;
             var devices = ctx.QueryDevices();
             if (verboseLogging)
@@ -135,6 +159,27 @@ namespace PointCloud
             OrbbecRuntime.RequestShutdown();
         }
 
+        /// <summary>
+        /// Destroy every spawned PointCloudRenderer GameObject so its capture
+        /// thread / OrbbecSDK pipeline tears down and releases the USB device.
+        /// Called by PointCloudRecorder.Read so playback runs without the live
+        /// cameras competing for USB bandwidth / GPU. Manager itself stays alive
+        /// but won't re-spawn (Start only ran once). Re-connecting requires
+        /// reloading the scene (or re-entering Play mode).
+        /// </summary>
+        public void DestroyAllRenderers()
+        {
+            for (int i = 0; i < _renderers.Count; i++)
+            {
+                var r = _renderers[i];
+                if (r == null) continue;
+                // GameObject destruction triggers PointCloudRenderer.OnDestroy
+                // which joins the capture thread and disposes the pipeline.
+                UnityEngine.Object.Destroy(r.gameObject);
+            }
+            _renderers.Clear();
+        }
+
         private PointCloudRenderer SpawnRenderer(OrbbecDeviceDescriptor desc, int index)
         {
             var go = new GameObject($"PointCloud[{index}] {desc.Name} ({desc.Serial})");
@@ -150,6 +195,7 @@ namespace PointCloud
             pcr.colorWidth = colorWidth;
             pcr.colorHeight = colorHeight;
             pcr.colorFps = colorFps;
+            pcr.colorFormat = colorFormat;
             pcr.alignTargetStream = alignTargetStream;
             pcr.maxPoints = ResolveMaxPointsPerDevice();
             pcr.pointMaterial = defaultPointMaterial;
@@ -157,6 +203,7 @@ namespace PointCloud
             pcr.decimater = defaultDecimater;
             pcr.cumulative = defaultCumulative;
             pcr.syncMode = ResolveSyncMode(index);
+            pcr.applySyncConfig = applySyncConfig;
             pcr.trigger2ImageDelayUs = trigger2ImageDelayStepUs * index;
             pcr.timerSyncWithHost = enableTimerSyncWithHost;
             pcr.enableGlobalTimestamp = enableGlobalTimestamp;
@@ -210,7 +257,15 @@ namespace PointCloud
                     $"[{nameof(PointCloudCameraManager)}] applyExtrinsics: applied to {applied}/{_renderers.Count} renderer(s) from {path}.");
         }
 
-        private string ResolveExtrinsicsRoot()
+        /// <summary>
+        /// Resolves <see cref="extrinsicsRoot"/> to an absolute path: empty string
+        /// defaults to <c>&lt;persistentDataPath&gt;/Recordings/recording</c>;
+        /// non-empty relative paths are taken under <c>persistentDataPath</c>.
+        /// Exposed so PointCloudRecorder.Save/Read can inherit the same calibration
+        /// the live renderers used — recordings inherit the rig's current setup
+        /// rather than starting from identity in a fresh folder.
+        /// </summary>
+        public string ResolveExtrinsicsRoot()
         {
             string p = extrinsicsRoot;
             if (string.IsNullOrWhiteSpace(p))
@@ -247,10 +302,10 @@ namespace PointCloud
             switch (syncTopology)
             {
                 case SyncTopology.SyncHubPro:
-                    // Hub generates the trigger; every camera is a passive receiver.
-                    return ObMultiDeviceSyncMode.Secondary;
                 case SyncTopology.DaisyChain:
-                    // First camera generates the pulse; the rest receive (and forward via VSYNC_OUT).
+                    // Femto Bolt sync requires exactly one Primary even when a Sync Hub Pro
+                    // is fanning the trigger pulses. cam0 is Primary so its VSYNC OUT seeds
+                    // the chain / hub; the remaining cameras are Secondary receivers.
                     return index == 0 ? ObMultiDeviceSyncMode.Primary : ObMultiDeviceSyncMode.Secondary;
                 default:
                     return ObMultiDeviceSyncMode.Standalone;

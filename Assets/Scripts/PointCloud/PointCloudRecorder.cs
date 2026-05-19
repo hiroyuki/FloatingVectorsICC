@@ -16,6 +16,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading.Tasks;
 using Orbbec;
 using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
@@ -41,6 +42,10 @@ namespace PointCloud
                  "If null, the first PointCloudBoundingBox referenced by any live PointCloudRenderer in the " +
                  "scene is used. Set filterMode=Disabled to disable culling without unassigning the reference.")]
         public PointCloudBoundingBox boundingBox;
+
+        [Tooltip("Optional random decimater applied to playback points (mirrors the live PointCloudRenderer.decimater path). " +
+                 "If null, the first PointCloudDecimater in the scene is used.")]
+        public PointCloudDecimater decimater;
 
         [Header("Files")]
         [Tooltip("Root folder for recordings. Relative paths resolve under Application.persistentDataPath. " +
@@ -210,8 +215,21 @@ namespace PointCloud
         [Tooltip("Log per-second playback fire counts per serial (FirePlaybackEvent rate). " +
                  "Useful to compare against K4abtWorkerHost enqueued/s when investigating " +
                  "frame-rate drops between recording and worker enqueue.")]
-        public bool diagnosticLogging = false;
+        public bool diagnosticLogging = true;
         private readonly Dictionary<string, int> _diagFiresPerSerial = new Dictionary<string, int>();
+
+        // Per-second recording diagnostics, populated in HandleRawFrame and emitted
+        // by PerSecondDiag when diagnosticLogging is on. Lets us spot capture-side
+        // drops AT RECORDING TIME — by the time the RCSV is on disk the gap is
+        // baked in, so we have to catch it live.
+        private sealed class RecordWindowStats
+        {
+            public int Frames;       // count this second
+            public long Bytes;       // depth+color+IR bytes enqueued this second
+            public double MaxGapMs;  // largest inter-frame gap this second
+            public ulong LastTsNs;   // previous frame's timestamp for gap calc
+        }
+        private readonly Dictionary<string, RecordWindowStats> _diagRecordPerSerial = new Dictionary<string, RecordWindowStats>();
         private float _diagWindowStart;
 
         // --- Public API (invoked by Inspector buttons or runtime UI) ---
@@ -248,10 +266,15 @@ namespace PointCloud
                 int totalColorFrames = 0;
                 int totalIRFrames = 0;
 
-                // Preserve existing global_tr_colorCamera values written by the
-                // CalibrationWindow (issue #9). Save used to overwrite extrinsics.yaml
-                // with identity transforms, wiping the calibration; now we read the
-                // file first and pass the prior per-serial value through.
+                // Build the per-serial extrinsics map used for the calibration entries
+                // written below. Priority:
+                //   1. Existing recording-local yaml that already has non-identity
+                //      values (= prior calibration session for THIS recording).
+                //   2. The live PointCloudCameraManager's yaml (= the rig calibration
+                //      Live was using when this recording was made — without this
+                //      fallback, fresh recording folders end up with identity
+                //      extrinsics even when Live was correctly calibrated).
+                //   3. Identity (nothing else available).
                 var existingGlobalBySerial = new Dictionary<string, ObExtrinsic>();
                 try
                 {
@@ -260,7 +283,8 @@ namespace PointCloud
                     {
                         foreach (var cal in PointCloudRecording.ReadExtrinsicsYaml(root))
                         {
-                            if (cal.GlobalTrColorCamera.HasValue)
+                            if (cal.GlobalTrColorCamera.HasValue
+                                && !IsIdentityExtrinsic(cal.GlobalTrColorCamera.Value))
                                 existingGlobalBySerial[cal.Serial] = cal.GlobalTrColorCamera.Value;
                         }
                     }
@@ -270,6 +294,31 @@ namespace PointCloud
                     Debug.LogWarning(
                         $"[{nameof(PointCloudRecorder)}] could not read existing extrinsics.yaml " +
                         $"to preserve global_tr_colorCamera: {preserveEx.Message}", this);
+                }
+                // Fallback: pull anything missing from the Live manager's yaml so a
+                // fresh recording folder inherits the rig calibration automatically.
+                if (cameraManager != null)
+                {
+                    try
+                    {
+                        string liveRoot = cameraManager.ResolveExtrinsicsRoot();
+                        string livePath = Path.Combine(PointCloudRecording.CalibrationDir(liveRoot), "extrinsics.yaml");
+                        if (File.Exists(livePath))
+                        {
+                            foreach (var cal in PointCloudRecording.ReadExtrinsicsYaml(liveRoot))
+                            {
+                                if (existingGlobalBySerial.ContainsKey(cal.Serial)) continue;
+                                if (cal.GlobalTrColorCamera.HasValue
+                                    && !IsIdentityExtrinsic(cal.GlobalTrColorCamera.Value))
+                                    existingGlobalBySerial[cal.Serial] = cal.GlobalTrColorCamera.Value;
+                            }
+                        }
+                    }
+                    catch (Exception liveEx)
+                    {
+                        Debug.LogWarning(
+                            $"[{nameof(PointCloudRecorder)}] could not read live manager's extrinsics.yaml: {liveEx.Message}", this);
+                    }
                 }
 
                 // Compute centroid of camera positions so extrinsics.yaml puts world origin at
@@ -429,9 +478,22 @@ namespace PointCloud
                 // (per Plans/issue-9-multicam-extrinsic-calibration.md → Phase 4).
                 int extrinsicsApplied = LoadExtrinsicsFromYaml(root);
 
+                // Free the live Femto Bolt pipelines now that the recording is on
+                // disk in memory — the user pressed Read to play back, so the live
+                // cameras compete for USB bandwidth and double-render the same
+                // subjects. Live capture cannot be resumed without reloading the
+                // scene; this is intentional (Read = commit to playback mode).
+                int liveDestroyed = 0;
+                if (cameraManager != null)
+                {
+                    liveDestroyed = cameraManager.Renderers.Count;
+                    cameraManager.DestroyAllRenderers();
+                }
+
                 SetStatus(
                     $"Loaded {totalDepth} depth / {totalColor} color / {totalIR} IR frame(s) across {_tracks.Count} device(s)"
                     + (extrinsicsApplied > 0 ? $", extrinsics applied to {extrinsicsApplied} device(s)" : "")
+                    + (liveDestroyed > 0 ? $", disconnected {liveDestroyed} live camera(s)" : "")
                     + $" from {root}");
 
                 try { OnTracksLoaded?.Invoke(); }
@@ -445,6 +507,29 @@ namespace PointCloud
         }
 
         /// <summary>
+        /// Re-read extrinsics.yaml and push the latest <c>global_tr_colorCamera</c>
+        /// to any existing <c>_Playback_*</c> GameObject's transform. Called from
+        /// StartPlayback so the user doesn't have to press Read after a fresh
+        /// CalibrationWindow Solve & Write.
+        /// </summary>
+        private void RefreshExtrinsicsAndReapply()
+        {
+            string root = ResolveRoot();
+            int applied = LoadExtrinsicsFromYaml(root);
+            if (applied == 0) return;
+            foreach (var kv in _tracks)
+            {
+                var t = kv.Value;
+                if (t.PlaybackObject == null) continue;
+                if (!t.GlobalTrColorCamera.HasValue) continue;
+                // ApplyToTransform sets localPosition/Rotation; localScale stays at
+                // the (1, -1, 1) Y-flip from EnsurePlaybackObject.
+                Calibration.ExtrinsicsApply.ApplyToTransform(
+                    t.PlaybackObject.transform, t.GlobalTrColorCamera.Value);
+            }
+        }
+
+        /// <summary>
         /// Read <c>calibration/extrinsics.yaml</c> if present and populate each
         /// matching track's <see cref="DeviceTrack.CameraParam"/> and
         /// <see cref="DeviceTrack.GlobalTrColorCamera"/>. Returns the number of
@@ -453,38 +538,71 @@ namespace PointCloud
         private int LoadExtrinsicsFromYaml(string root)
         {
             string path = Path.Combine(PointCloudRecording.CalibrationDir(root), "extrinsics.yaml");
-            if (!File.Exists(path)) return 0;
-
-            IReadOnlyList<PointCloudRecording.DeviceCalibration> calibrations;
-            try
+            IReadOnlyList<PointCloudRecording.DeviceCalibration> calibrations = null;
+            if (File.Exists(path))
             {
-                calibrations = PointCloudRecording.ReadExtrinsicsYaml(root);
-            }
-            catch (Exception e)
-            {
-                Debug.LogWarning($"[{nameof(PointCloudRecorder)}] extrinsics.yaml present but failed to parse: {e.Message}", this);
-                return 0;
+                try { calibrations = PointCloudRecording.ReadExtrinsicsYaml(root); }
+                catch (Exception e)
+                {
+                    Debug.LogWarning($"[{nameof(PointCloudRecorder)}] extrinsics.yaml present but failed to parse: {e.Message}", this);
+                }
             }
 
             int withGlobal = 0;
-            foreach (var c in calibrations)
+            if (calibrations != null)
             {
-                if (!_tracks.TryGetValue(c.Serial, out var track)) continue;
-                // Calibration metadata: keep RCSV-derived dimensions as the source of truth
-                // (per plan: yaml intrinsic.width/height is calibration-time and may drift
-                // from the actual recorded stream shape if the mode changes).
-                track.CameraParam = new ObCameraParam
+                foreach (var c in calibrations)
                 {
-                    DepthIntrinsic = c.DepthIntrinsic,
-                    RgbIntrinsic = c.ColorIntrinsic,
-                    DepthDistortion = c.DepthDistortion,
-                    RgbDistortion = c.ColorDistortion,
-                    Transform = c.DepthToColor,
-                    IsMirrored = false,
-                };
-                track.GlobalTrColorCamera = c.GlobalTrColorCamera;
-                if (c.GlobalTrColorCamera.HasValue && !IsIdentityExtrinsic(c.GlobalTrColorCamera.Value))
-                    withGlobal++;
+                    if (!_tracks.TryGetValue(c.Serial, out var track)) continue;
+                    // Calibration metadata: keep RCSV-derived dimensions as the source of truth
+                    // (per plan: yaml intrinsic.width/height is calibration-time and may drift
+                    // from the actual recorded stream shape if the mode changes).
+                    track.CameraParam = new ObCameraParam
+                    {
+                        DepthIntrinsic = c.DepthIntrinsic,
+                        RgbIntrinsic = c.ColorIntrinsic,
+                        DepthDistortion = c.DepthDistortion,
+                        RgbDistortion = c.ColorDistortion,
+                        Transform = c.DepthToColor,
+                        IsMirrored = false,
+                    };
+                    track.GlobalTrColorCamera = c.GlobalTrColorCamera;
+                    if (c.GlobalTrColorCamera.HasValue && !IsIdentityExtrinsic(c.GlobalTrColorCamera.Value))
+                        withGlobal++;
+                }
+            }
+
+            // Fallback for old recordings whose yaml is missing entirely or has
+            // only identity values: pull the missing per-serial transform from the
+            // live PointCloudCameraManager's yaml. Same "Live and Playback share
+            // one rig calibration" principle as the Save side.
+            if (cameraManager != null)
+            {
+                try
+                {
+                    string liveRoot = cameraManager.ResolveExtrinsicsRoot();
+                    string livePath = Path.Combine(PointCloudRecording.CalibrationDir(liveRoot), "extrinsics.yaml");
+                    if (File.Exists(livePath) && liveRoot != root)
+                    {
+                        foreach (var c in PointCloudRecording.ReadExtrinsicsYaml(liveRoot))
+                        {
+                            if (!_tracks.TryGetValue(c.Serial, out var track)) continue;
+                            bool needFallback = !track.GlobalTrColorCamera.HasValue
+                                || IsIdentityExtrinsic(track.GlobalTrColorCamera.Value);
+                            if (!needFallback) continue;
+                            if (c.GlobalTrColorCamera.HasValue
+                                && !IsIdentityExtrinsic(c.GlobalTrColorCamera.Value))
+                            {
+                                track.GlobalTrColorCamera = c.GlobalTrColorCamera;
+                                withGlobal++;
+                            }
+                        }
+                    }
+                }
+                catch (Exception liveEx)
+                {
+                    Debug.LogWarning($"[{nameof(PointCloudRecorder)}] live manager extrinsics fallback failed: {liveEx.Message}", this);
+                }
             }
             return withGlobal;
         }
@@ -529,6 +647,10 @@ namespace PointCloud
                 track.CameraParam = r.CameraParam;
             }
             CurrentState = State.Recording;
+            // Reset per-second diag state so a new recording's first frame doesn't
+            // compute a huge gap against a stale timestamp from the previous run.
+            _diagRecordPerSerial.Clear();
+            _diagWindowStart = 0f;
             SetStatus($"Recording ({_subscribed.Count} device(s))…");
         }
 
@@ -549,6 +671,23 @@ namespace PointCloud
             if (!track.CameraParam.HasValue) track.CameraParam = src.CameraParam;
 
             ulong timestampNs = raw.TimestampUs * 1000UL;
+
+            if (diagnosticLogging)
+            {
+                if (!_diagRecordPerSerial.TryGetValue(serial, out var rs))
+                {
+                    rs = new RecordWindowStats();
+                    _diagRecordPerSerial[serial] = rs;
+                }
+                rs.Frames++;
+                rs.Bytes += raw.DepthByteCount + raw.ColorByteCount + raw.IRByteCount;
+                if (rs.LastTsNs != 0)
+                {
+                    double gapMs = (timestampNs - rs.LastTsNs) / 1e6;
+                    if (gapMs > rs.MaxGapMs) rs.MaxGapMs = gapMs;
+                }
+                rs.LastTsNs = timestampNs;
+            }
 
             if (raw.DepthByteCount > 0)
             {
@@ -587,6 +726,12 @@ namespace PointCloud
                 return;
             }
 
+            // Refresh extrinsics from yaml so a fresh calibration written between
+            // Read and Play is picked up without forcing the user to press Read
+            // again. Also re-applies the new global_tr_colorCamera to any existing
+            // _Playback_* GameObject (their transforms were set on first creation).
+            RefreshExtrinsicsAndReapply();
+
             ulong firstTs = ulong.MaxValue;
             bool anyFrames = false;
             foreach (var kv in _tracks)
@@ -615,8 +760,28 @@ namespace PointCloud
             SetStatus("Playback stopped.");
         }
 
+        private void Start()
+        {
+            // PointCloudCameraManager.playbackOnly means "don't connect to live devices,
+            // play this folder instead". When set, auto-Load the configured folderPath
+            // and immediately enter playback so pressing Editor Play "just works".
+            if (cameraManager != null && cameraManager.playbackOnly)
+            {
+                Load();
+                if (CurrentState == State.Idle && RecordedFrameCount > 0)
+                    TogglePlay();
+            }
+        }
+
         private void Update()
         {
+            // Recording has no per-tick work, but we still want the per-second
+            // diag heartbeat to log capture-side fps / drops while it's happening.
+            if (CurrentState == State.Recording)
+            {
+                if (diagnosticLogging) PerSecondDiag();
+                return;
+            }
             if (CurrentState != State.Playing) return;
             double elapsedSec = (Time.timeAsDouble - _playbackWallStart) * Mathf.Max(0.01f, playbackRate);
             ulong elapsedNs = (ulong)Math.Max(0.0, elapsedSec * 1_000_000_000.0);
@@ -677,19 +842,45 @@ namespace PointCloud
         {
             float now = Time.realtimeSinceStartup;
             if (_diagWindowStart == 0f) _diagWindowStart = now;
-            if (now - _diagWindowStart < 1f) return;
-            var parts = new List<string>(_diagFiresPerSerial.Count);
-            foreach (var kv in _diagFiresPerSerial) parts.Add($"{kv.Key}={kv.Value}/s");
-            Debug.Log($"[PointCloudRecorder] playback_fires {string.Join(" ", parts)}", this);
-            foreach (var key in new List<string>(_diagFiresPerSerial.Keys)) _diagFiresPerSerial[key] = 0;
+            float elapsed = now - _diagWindowStart;
+            if (elapsed < 1f) return;
+
+            if (CurrentState == State.Recording && _diagRecordPerSerial.Count > 0)
+            {
+                var parts = new List<string>(_diagRecordPerSerial.Count);
+                foreach (var kv in _diagRecordPerSerial)
+                {
+                    double fps = kv.Value.Frames / elapsed;
+                    double mbps = kv.Value.Bytes / 1048576.0 / elapsed;
+                    parts.Add($"{TruncSerial(kv.Key)}={fps:F1}fps,{mbps:F1}MB/s,gap={kv.Value.MaxGapMs:F0}ms");
+                }
+                Debug.Log($"[PointCloudRecorder REC] {string.Join(" | ", parts)}", this);
+                foreach (var key in new List<string>(_diagRecordPerSerial.Keys))
+                {
+                    var rs = _diagRecordPerSerial[key];
+                    rs.Frames = 0; rs.Bytes = 0; rs.MaxGapMs = 0;
+                }
+            }
+
+            if (CurrentState == State.Playing && _diagFiresPerSerial.Count > 0)
+            {
+                var parts = new List<string>(_diagFiresPerSerial.Count);
+                foreach (var kv in _diagFiresPerSerial) parts.Add($"{kv.Key}={kv.Value}/s");
+                Debug.Log($"[PointCloudRecorder PLAY] playback_fires {string.Join(" ", parts)}", this);
+                foreach (var key in new List<string>(_diagFiresPerSerial.Keys)) _diagFiresPerSerial[key] = 0;
+            }
+
             _diagWindowStart = now;
         }
 
-        // Shader property IDs + MPB scratch shared across all playback meshes.
-        // Mirrors PointCloudRenderer.UpdateShaderFilterProperties so the
-        // playback path culls points with the same OBB the live path does.
-        private static readonly int kObbObjToBoxId = Shader.PropertyToID("_ObbObjToBox");
-        private static readonly int kObbModeId     = Shader.PropertyToID("_ObbMode");
+        private static string TruncSerial(string s)
+        {
+            if (string.IsNullOrEmpty(s) || s.Length <= 6) return s;
+            return s.Substring(s.Length - 6);
+        }
+
+        // Per-frame MPB scratch handed to PointCloudShaderFilters.Apply so the
+        // playback path stays bit-for-bit identical with the live PointCloudRenderer.
         private MaterialPropertyBlock _filterMpb;
 
         private PointCloudBoundingBox ResolveBoundingBox()
@@ -711,6 +902,17 @@ namespace PointCloud
             return boundingBox;
         }
 
+        private PointCloudDecimater ResolveDecimater()
+        {
+            if (decimater != null) return decimater;
+            foreach (var r in CollectSourceRenderers())
+            {
+                if (r != null && r.decimater != null) { decimater = r.decimater; return decimater; }
+            }
+            decimater = FindFirstObjectByType<PointCloudDecimater>();
+            return decimater;
+        }
+
         private void ApplyBoundingBoxFilter(DeviceTrack track)
         {
             if (track.PlaybackRenderer == null) return;
@@ -719,18 +921,8 @@ namespace PointCloud
             if (track.PlaybackRenderer.enabled != showPointClouds)
                 track.PlaybackRenderer.enabled = showPointClouds;
             if (_filterMpb == null) _filterMpb = new MaterialPropertyBlock();
-            track.PlaybackRenderer.GetPropertyBlock(_filterMpb);
-
-            float obbMode = 0f;
-            var box = ResolveBoundingBox();
-            if (box != null && box.Mode != PointCloudBoundingBox.FilterMode.Disabled)
-            {
-                obbMode = box.Mode == PointCloudBoundingBox.FilterMode.KeepInside ? 1f : 2f;
-                var m = box.transform.worldToLocalMatrix * track.PlaybackObject.transform.localToWorldMatrix;
-                _filterMpb.SetMatrix(kObbObjToBoxId, m);
-            }
-            _filterMpb.SetFloat(kObbModeId, obbMode);
-            track.PlaybackRenderer.SetPropertyBlock(_filterMpb);
+            PointCloudShaderFilters.Apply(track.PlaybackRenderer, _filterMpb,
+                track.PlaybackObject.transform, ResolveBoundingBox(), ResolveDecimater());
         }
 
         private void EnsurePlaybackObject(DeviceTrack track)
