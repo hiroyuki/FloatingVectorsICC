@@ -99,6 +99,12 @@ namespace BodyTracking
         [Tooltip("Trail width (m) at the head; tail tapers to ~0.")]
         public float trailWidth = 0.005f;
 
+        [Range(0.001f, 0.05f)]
+        [Tooltip("Radius (m) of the tube mesh drawn for each anatomical bone segment. " +
+                 "Independent from trailWidth — joint sphere radius / trail width do not " +
+                 "influence this. Has no effect when Show Anatomical Bones is off.")]
+        public float boneWidth = 0.005f;
+
         [Range(0f, 0.5f)]
         [Tooltip("Parametric step for additional interpolation-point trails along each bone. " +
                  "0 disables them (only joint trails draw). 0.1 → 9 interp points per bone, " +
@@ -1008,6 +1014,7 @@ namespace BodyTracking
             ShowTrails = showTrails,
             TrailDuration = trailDuration,
             TrailWidth = trailWidth,
+            BoneWidth = boneWidth,
             TrailColorMode = trailColorMode,
             TrailFlatColor = trailFlatColor,
             FrameHue = new BodyTrackingShared.FrameHueParams
