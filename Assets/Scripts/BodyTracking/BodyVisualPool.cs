@@ -30,6 +30,13 @@ namespace BodyTracking
         public float AccelMin;
         public float AccelMax;
         public Color AccelHotColor;
+
+        // Parametric step (in (0, 1)) for additional interpolation-point trails
+        // along each bone, on top of the per-joint trails. 0 disables them. 0.1
+        // gives 9 interp points per bone, 0.05 gives 19 — uniform spacing along
+        // the bone parameter so the visual density is consistent regardless of
+        // bone length.
+        public float BoneTrailStep;
     }
 
     internal sealed class BodyVisualPool

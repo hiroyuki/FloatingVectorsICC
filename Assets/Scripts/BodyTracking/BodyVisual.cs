@@ -47,6 +47,17 @@ namespace BodyTracking
         private JointTrailMesh[] _trails;
         private bool[] _jointEverValid; // first-valid bookkeeping for trail Clear() seeding
 
+        // Per-bone interpolation-point trails. One JointTrailMesh per parametric
+        // interp slot per bone (excluding endpoints — those are already covered
+        // by the per-joint trails). _currentBoneTrailStep records the step used
+        // to build _boneTrails so ApplyTrailParams can detect a config change
+        // and rebuild the array. _boneEverValid mirrors _jointEverValid so the
+        // first sample for a freshly-valid bone seeds the trail without drawing
+        // a segment from the origin.
+        private List<JointTrailMesh>[] _boneTrails;
+        private bool[] _boneEverValid;
+        private float _currentBoneTrailStep;
+
         // One-Euro filter state per joint. Smoothing parameters come from the
         // owning MonoBehaviour's Inspector (passed each pop via BodyVisualConfig).
         // This is the only joint-position smoother in the pipeline — mergeSmoothing
@@ -180,6 +191,45 @@ namespace BodyTracking
                 }
             }
 
+            // Feed interpolation-point trails along each bone (in addition to
+            // the per-joint trails fed above). Lives in the same local space as
+            // _jointPositions so positions just lerp directly. Sampling cadence
+            // follows the joint loop (= one sample per merged pop).
+            EnsureBoneTrails(cfg.BoneTrailStep);
+            if (_boneTrails != null && _currentBoneTrailStep > 0f)
+            {
+                double now = Time.timeAsDouble;
+                for (int b = 0; b < BodyTrackingShared.Bones.Length; b++)
+                {
+                    var (ja, jc) = BodyTrackingShared.Bones[b];
+                    int ia = (int)ja, ic = (int)jc;
+                    if (!_jointValid[ia] || !_jointValid[ic]) continue;
+                    var meshList = _boneTrails[b];
+                    if (meshList == null || meshList.Count == 0) continue;
+                    Vector3 pA = _jointPositions[ia];
+                    Vector3 pC = _jointPositions[ic];
+                    bool firstTime = _boneEverValid != null && !_boneEverValid[b];
+                    int count = meshList.Count;
+                    for (int k = 0; k < count; k++)
+                    {
+                        float t = (k + 1) * _currentBoneTrailStep;
+                        Vector3 p = Vector3.Lerp(pA, pC, t);
+                        var tr = meshList[k];
+                        if (tr == null) continue;
+                        if (firstTime)
+                        {
+                            tr.Clear();
+                            tr.AddSample(now, p);
+                        }
+                        else
+                        {
+                            tr.AddSample(now, p);
+                        }
+                    }
+                    if (firstTime && _boneEverValid != null) _boneEverValid[b] = true;
+                }
+            }
+
             if (showBones)
             {
                 int v = 0;
@@ -287,6 +337,7 @@ namespace BodyTracking
             if (_trails != null)
                 for (int i = 0; i < _trails.Length; i++)
                     if (_trails[i] != null) _trails[i].Destroy();
+            DestroyBoneTrails();
             if (_bonesMesh != null) Object.Destroy(_bonesMesh);
             if (_root != null) Object.Destroy(_root);
         }
@@ -296,19 +347,41 @@ namespace BodyTracking
         // skeleton update so vertex positions / colors are fresh.
         public void TickTrails(Camera cam)
         {
-            if (_trails == null) return;
             double now = Time.timeAsDouble;
-            for (int i = 0; i < _trails.Length; i++)
-                if (_trails[i] != null) _trails[i].Rebuild(now, cam);
+            if (_trails != null)
+            {
+                for (int i = 0; i < _trails.Length; i++)
+                    if (_trails[i] != null) _trails[i].Rebuild(now, cam);
+            }
+            if (_boneTrails != null)
+            {
+                for (int b = 0; b < _boneTrails.Length; b++)
+                {
+                    var list = _boneTrails[b];
+                    if (list == null) continue;
+                    for (int k = 0; k < list.Count; k++)
+                        if (list[k] != null) list[k].Rebuild(now, cam);
+                }
+            }
         }
 
         /// <summary>Feed every joint's latest |a| into <paramref name="sink"/> so the
         /// pool can build a rolling window across all visible bodies / joints.</summary>
         public void CollectLatestAccels(List<float> sink)
         {
-            if (_trails == null) return;
-            for (int i = 0; i < _trails.Length; i++)
-                if (_trails[i] != null) sink.Add(_trails[i].LastAccel);
+            if (_trails != null)
+                for (int i = 0; i < _trails.Length; i++)
+                    if (_trails[i] != null) sink.Add(_trails[i].LastAccel);
+            if (_boneTrails != null)
+            {
+                for (int b = 0; b < _boneTrails.Length; b++)
+                {
+                    var list = _boneTrails[b];
+                    if (list == null) continue;
+                    for (int k = 0; k < list.Count; k++)
+                        if (list[k] != null) sink.Add(list[k].LastAccel);
+                }
+            }
         }
 
         /// <summary>Override the trail accelMax for every joint of this body. Used
@@ -316,9 +389,19 @@ namespace BodyTracking
         /// here so all trails share the same hot-end calibration.</summary>
         public void SetTrailAccelMax(float v)
         {
-            if (_trails == null) return;
-            for (int i = 0; i < _trails.Length; i++)
-                if (_trails[i] != null) _trails[i].SetAccelMax(v);
+            if (_trails != null)
+                for (int i = 0; i < _trails.Length; i++)
+                    if (_trails[i] != null) _trails[i].SetAccelMax(v);
+            if (_boneTrails != null)
+            {
+                for (int b = 0; b < _boneTrails.Length; b++)
+                {
+                    var list = _boneTrails[b];
+                    if (list == null) continue;
+                    for (int k = 0; k < list.Count; k++)
+                        if (list[k] != null) list[k].SetAccelMax(v);
+                }
+            }
         }
 
         private static Shader ResolveUnlitShader()
@@ -384,18 +467,91 @@ namespace BodyTracking
                                       BodyTrackingShared.TrailColorMode mode, Color flat,
                                       float accelMin, float accelMax, Color accelHotColor)
         {
-            if (_trails == null) return;
             JointTrailMesh.ColorMode jmMode = mode == BodyTrackingShared.TrailColorMode.AccelHeatmap
                 ? JointTrailMesh.ColorMode.AccelHeatmap
                 : JointTrailMesh.ColorMode.Base;
-            for (int i = 0; i < _trails.Length; i++)
+            if (_trails != null)
             {
-                var tr = _trails[i];
-                if (tr == null) continue;
-                var baseColor = TrailColorFor(i, _bodyId, mode, flat);
-                tr.Configure(show, duration, width, baseColor, accelHotColor,
-                    accelMin, accelMax, jmMode);
+                for (int i = 0; i < _trails.Length; i++)
+                {
+                    var tr = _trails[i];
+                    if (tr == null) continue;
+                    var baseColor = TrailColorFor(i, _bodyId, mode, flat);
+                    tr.Configure(show, duration, width, baseColor, accelHotColor,
+                        accelMin, accelMax, jmMode);
+                }
             }
+            if (_boneTrails != null)
+            {
+                for (int b = 0; b < _boneTrails.Length; b++)
+                {
+                    var list = _boneTrails[b];
+                    if (list == null) continue;
+                    // Color each bone-interp trail from its bone's start-joint hue
+                    // so PerJointHue keeps a recognizable gradient along each limb.
+                    int colorJointIdx = (int)BodyTrackingShared.Bones[b].a;
+                    var baseColor = TrailColorFor(colorJointIdx, _bodyId, mode, flat);
+                    for (int k = 0; k < list.Count; k++)
+                    {
+                        var tr = list[k];
+                        if (tr == null) continue;
+                        tr.Configure(show, duration, width, baseColor, accelHotColor,
+                            accelMin, accelMax, jmMode);
+                    }
+                }
+            }
+        }
+
+        // Build (or rebuild) the per-bone interp-trail array to match the given
+        // parametric step. step <= 0 destroys the array (feature off). Trails
+        // are configured with default values; the caller (BodyVisualPool.Apply)
+        // is expected to invoke ApplyTrailParams immediately after, which writes
+        // the real show/duration/width/color. Same JointTrailMesh material is
+        // shared with the per-joint trails so the heatmap palette renders the
+        // same way for both.
+        private void EnsureBoneTrails(float step)
+        {
+            // Treat NaN / negatives as off.
+            if (!(step > 0f)) step = 0f;
+            if (Mathf.Approximately(step, _currentBoneTrailStep)) return;
+
+            DestroyBoneTrails();
+            _currentBoneTrailStep = step;
+            if (step <= 0f) return;
+
+            int boneCount = BodyTrackingShared.Bones.Length;
+            int interpCount = Mathf.Min(Mathf.FloorToInt((1f - 1e-6f) / step), 64);
+            if (interpCount <= 0) return;
+
+            var mat = ResolveTrailMaterial();
+            _boneTrails = new List<JointTrailMesh>[boneCount];
+            _boneEverValid = new bool[boneCount];
+            for (int b = 0; b < boneCount; b++)
+            {
+                var list = new List<JointTrailMesh>(interpCount);
+                var bone = BodyTrackingShared.Bones[b];
+                for (int k = 0; k < interpCount; k++)
+                {
+                    string name = $"BoneTrail_{bone.a}_{bone.b}_{k}";
+                    list.Add(new JointTrailMesh(_root.transform, name, mat));
+                }
+                _boneTrails[b] = list;
+            }
+        }
+
+        private void DestroyBoneTrails()
+        {
+            if (_boneTrails == null) return;
+            for (int b = 0; b < _boneTrails.Length; b++)
+            {
+                var list = _boneTrails[b];
+                if (list == null) continue;
+                for (int k = 0; k < list.Count; k++)
+                    if (list[k] != null) list[k].Destroy();
+            }
+            _boneTrails = null;
+            _boneEverValid = null;
+            _currentBoneTrailStep = 0f;
         }
     }
 }

@@ -77,6 +77,14 @@ namespace BodyTracking
         [Tooltip("Trail width (m) at the head; tail tapers to ~0.")]
         public float trailWidth = 0.005f;
 
+        [Range(0f, 0.5f)]
+        [Tooltip("Parametric step for additional interpolation-point trails along each bone. " +
+                 "0 disables them (only joint trails draw). 0.1 → 9 interp points per bone, " +
+                 "0.05 → 19. Uniform spacing along the bone parameter so visual density is " +
+                 "consistent regardless of bone length. Each interp point gets its own trail " +
+                 "fed at the same cadence as joint trails.")]
+        public float boneTrailStep = 0f;
+
         [Tooltip("Acceleration value (m/s^2) that maps to the cold/base trail color. " +
                  "Same semantics as MotionLineRenderer.accelMin on the playback side.")]
         public float accelMin = 0f;
@@ -988,6 +996,7 @@ namespace BodyTracking
             AccelMin = accelMin,
             AccelMax = accelMax,
             AccelHotColor = accelHotColor,
+            BoneTrailStep = boneTrailStep,
         };
 
         // --- per-cluster merge (joint-by-joint) ---
