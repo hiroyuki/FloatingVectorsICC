@@ -20,6 +20,11 @@ namespace BodyTracking
         public bool ShowTrails;
         public float TrailDuration;
         public float TrailWidth;
+
+        // Radius (m) of the tube mesh drawn for each anatomical bone segment. Fed
+        // to BodyVisual on every UpdateFromSkeleton so Inspector tweaks take effect
+        // live without spawning a new visual. Independent from TrailWidth.
+        public float BoneWidth;
         public BodyTrackingShared.TrailColorMode TrailColorMode;
         public Color TrailFlatColor;
         public BodyTrackingShared.FrameHueParams FrameHue;

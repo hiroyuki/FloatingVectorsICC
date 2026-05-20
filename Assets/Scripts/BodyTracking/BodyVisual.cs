@@ -1,4 +1,4 @@
-// Per-body skeleton visual: 32 joint markers + a single line-list mesh of
+// Per-body skeleton visual: 32 joint markers + a single tube mesh of
 // bones + per-joint TrailRenderers. Used by BodyTrackingMultiLive's pool to
 // draw merged and per-worker skeletons.
 
@@ -41,8 +41,16 @@ namespace BodyTracking
         private readonly Mesh _bonesMesh;
         private readonly MeshRenderer _bonesRenderer;
         private readonly Material _bonesMat;
+        // Tube mesh buffers for the anatomical bones. Each bone segment owns a
+        // contiguous slice of 2 * kBoneTubeSides vertices (head ring at jointA +
+        // tail ring at jointC) and kBoneTubeSides * 6 triangle indices. Sized
+        // once in the constructor against BodyTrackingShared.Bones.Length and
+        // refilled in place every frame — triangle indices and vertex colors
+        // never change so they're populated once up front.
         private readonly Vector3[] _boneVerts;
-        private readonly int[] _boneIndices;
+        private readonly Vector3[] _boneNormals;
+        private readonly Color[] _boneColors;
+        private readonly int[] _boneTris;
 
         private JointTrailMesh[] _trails;
         private bool[] _jointEverValid; // first-valid bookkeeping for trail Clear() seeding
@@ -114,16 +122,76 @@ namespace BodyTracking
             _bonesGO.transform.SetParent(_root.transform, false);
             var mf = _bonesGO.AddComponent<MeshFilter>();
             _bonesRenderer = _bonesGO.AddComponent<MeshRenderer>();
+            // Bones max out at Bones.Length * 2 * kBoneTubeSides verts (744 with
+            // the current 31-bone, 12-side config) so UInt16 is plenty.
             _bonesMesh = new Mesh { name = "Bones", indexFormat = UnityEngine.Rendering.IndexFormat.UInt16 };
+            _bonesMesh.MarkDynamic();
             mf.sharedMesh = _bonesMesh;
 
-            _bonesMat = new Material(unlitShader);
+            // Bone tubes are PBR-shaded via TrailLit (same shader as the per-joint
+            // trails) so they catch scene lighting and read as 3D cylinders. The
+            // material instance is per-BodyVisual (not the s_trailMat singleton)
+            // because skeletonColor lives in _BaseColor here while every bone
+            // vertex carries a fixed white color — TrailLit multiplies them so a
+            // shared white-_BaseColor singleton wouldn't pick up skeletonColor.
+            _bonesMat = new Material(ResolveTrailLitShader()) { name = "BT_Bones" };
             SetMaterialColor(_bonesMat, color);
             _bonesRenderer.sharedMaterial = _bonesMat;
 
-            _boneVerts = new Vector3[BodyTrackingShared.Bones.Length * 2];
-            _boneIndices = new int[BodyTrackingShared.Bones.Length * 2];
-            for (int i = 0; i < _boneIndices.Length; i++) _boneIndices[i] = i;
+            int boneCount = BodyTrackingShared.Bones.Length;
+            int vertsPerBone = 2 * kBoneTubeSides;
+            int trisPerBone = kBoneTubeSides * 6;
+            _boneVerts = new Vector3[boneCount * vertsPerBone];
+            _boneNormals = new Vector3[boneCount * vertsPerBone];
+            _boneColors = new Color[boneCount * vertsPerBone];
+            _boneTris = new int[boneCount * trisPerBone];
+
+            // Per-vertex color stays white forever: bone hue comes from the
+            // material's _BaseColor (skeletonColor), and TrailLit multiplies the
+            // two. Triangle indices are fixed by the tube topology so they're
+            // populated once here too. Per frame we only rewrite positions and
+            // normals (and collapse-to-point for invalid bones).
+            for (int i = 0; i < _boneColors.Length; i++) _boneColors[i] = Color.white;
+            for (int b = 0; b < boneCount; b++)
+            {
+                int vBase = b * vertsPerBone;
+                int tBase = b * trisPerBone;
+                int ringA = vBase;
+                int ringB = vBase + kBoneTubeSides;
+                for (int k = 0; k < kBoneTubeSides; k++)
+                {
+                    int kNext = (k + 1) % kBoneTubeSides;
+                    int t = tBase + k * 6;
+                    _boneTris[t + 0] = ringA + k;
+                    _boneTris[t + 1] = ringB + k;
+                    _boneTris[t + 2] = ringA + kNext;
+                    _boneTris[t + 3] = ringA + kNext;
+                    _boneTris[t + 4] = ringB + k;
+                    _boneTris[t + 5] = ringB + kNext;
+                }
+            }
+        }
+
+        // Sides around each bone tube's circular cross-section. Kept at 12 so it
+        // matches JointTrailMesh.kTubeSides — joint trails and bone tubes share
+        // visual silhouette. If you bump this, update the trail constant too.
+        private const int kBoneTubeSides = 12;
+
+        // Pre-computed unit-circle offsets (cos, sin) reused every frame to
+        // place each ring vertex without per-vertex trig.
+        private static readonly float[] s_boneRingCos = BuildBoneRingCos();
+        private static readonly float[] s_boneRingSin = BuildBoneRingSin();
+        private static float[] BuildBoneRingCos()
+        {
+            var a = new float[kBoneTubeSides];
+            for (int k = 0; k < kBoneTubeSides; k++) a[k] = Mathf.Cos(2f * Mathf.PI * k / kBoneTubeSides);
+            return a;
+        }
+        private static float[] BuildBoneRingSin()
+        {
+            var a = new float[kBoneTubeSides];
+            for (int k = 0; k < kBoneTubeSides; k++) a[k] = Mathf.Sin(2f * Mathf.PI * k / kBoneTubeSides);
+            return a;
         }
 
         public void UpdateFromSkeleton(in k4abt_skeleton_t skel, in BodyVisualConfig cfg)
@@ -233,31 +301,7 @@ namespace BodyTracking
 
             if (showBones)
             {
-                int v = 0;
-                for (int b = 0; b < BodyTrackingShared.Bones.Length; b++)
-                {
-                    var (a, c) = BodyTrackingShared.Bones[b];
-                    if (_jointValid[(int)a] && _jointValid[(int)c])
-                    {
-                        _boneVerts[v++] = _jointPositions[(int)a];
-                        _boneVerts[v++] = _jointPositions[(int)c];
-                    }
-                }
-                // Pad unused slots to last valid vertex so the line list stays well-formed.
-                if (v == 0)
-                {
-                    _bonesMesh.Clear();
-                }
-                else
-                {
-                    var verts = new Vector3[v];
-                    var idx = new int[v];
-                    System.Array.Copy(_boneVerts, verts, v);
-                    for (int i = 0; i < v; i++) idx[i] = i;
-                    _bonesMesh.Clear();
-                    _bonesMesh.vertices = verts;
-                    _bonesMesh.SetIndices(idx, MeshTopology.Lines, 0, true);
-                }
+                RebuildBoneTubes(Mathf.Max(0f, cfg.BoneWidth));
                 SetMaterialColor(_bonesMat, color);
                 if (!_bonesGO.activeSelf) _bonesGO.SetActive(true);
             }
@@ -265,6 +309,85 @@ namespace BodyTracking
             {
                 if (_bonesGO.activeSelf) _bonesGO.SetActive(false);
             }
+        }
+
+        // Build the bones mesh as a single tube-tri soup: each bone segment gets
+        // two rings of kBoneTubeSides verts (head=jointA, tail=jointC) stitched
+        // by side triangles. No taper — both rings share radius=boneWidth. The
+        // frame per bone is built fresh from the tangent (no parallel-transport
+        // chain across bones since bones don't form a continuous curve). Bones
+        // whose endpoints aren't both valid collapse to a single point so their
+        // triangles degenerate (zero area, GPU draws nothing visible) while the
+        // mesh keeps a fixed vertex/index layout — avoids reallocating arrays
+        // every frame as bones come and go. Normals are analytical radial outward
+        // so the shader reads a smooth cylinder under PBR lighting.
+        private void RebuildBoneTubes(float radius)
+        {
+            int boneCount = BodyTrackingShared.Bones.Length;
+            int vertsPerBone = 2 * kBoneTubeSides;
+            bool anyValid = false;
+
+            for (int b = 0; b < boneCount; b++)
+            {
+                var (ja, jc) = BodyTrackingShared.Bones[b];
+                int ia = (int)ja, ic = (int)jc;
+                int vBase = b * vertsPerBone;
+                int ringA = vBase;
+                int ringB = vBase + kBoneTubeSides;
+
+                if (!_jointValid[ia] || !_jointValid[ic])
+                {
+                    // Collapse this bone to the origin so its triangles have zero
+                    // area. Normal is arbitrary (Vector3.up) — won't render anyway.
+                    for (int k = 0; k < vertsPerBone; k++)
+                    {
+                        _boneVerts[vBase + k] = Vector3.zero;
+                        _boneNormals[vBase + k] = Vector3.up;
+                    }
+                    continue;
+                }
+
+                Vector3 pA = _jointPositions[ia];
+                Vector3 pC = _jointPositions[ic];
+                Vector3 tangent = pC - pA;
+                tangent = tangent.sqrMagnitude > 1e-12f ? tangent.normalized : Vector3.forward;
+
+                Vector3 seed = Mathf.Abs(Vector3.Dot(tangent, Vector3.up)) < 0.95f
+                    ? Vector3.up
+                    : Vector3.right;
+                Vector3 right = Vector3.Cross(tangent, seed);
+                if (right.sqrMagnitude < 1e-12f) right = Vector3.Cross(tangent, Vector3.right);
+                right = right.sqrMagnitude > 1e-12f ? right.normalized : Vector3.right;
+                Vector3 up = Vector3.Cross(right, tangent);
+                up = up.sqrMagnitude > 1e-12f ? up.normalized : Vector3.up;
+
+                for (int k = 0; k < kBoneTubeSides; k++)
+                {
+                    float cosk = s_boneRingCos[k];
+                    float sink = s_boneRingSin[k];
+                    Vector3 radial = right * cosk + up * sink;
+                    _boneVerts[ringA + k] = pA + radial * radius;
+                    _boneNormals[ringA + k] = radial;
+                    _boneVerts[ringB + k] = pC + radial * radius;
+                    _boneNormals[ringB + k] = radial;
+                }
+                anyValid = true;
+            }
+
+            if (!anyValid)
+            {
+                _bonesMesh.Clear();
+                return;
+            }
+
+            // Clear first so the vertex count / triangle count swap atomically —
+            // otherwise Unity warns when you assign vertices smaller than the
+            // current triangle index range.
+            _bonesMesh.Clear();
+            _bonesMesh.vertices = _boneVerts;
+            _bonesMesh.normals = _boneNormals;
+            _bonesMesh.colors = _boneColors;
+            _bonesMesh.SetTriangles(_boneTris, 0, true);
         }
 
         public int SetActiveCallsTrue { get; private set; }
@@ -443,13 +566,23 @@ namespace BodyTracking
         private static Material ResolveTrailMaterial()
         {
             if (s_trailMat != null) return s_trailMat;
+            s_trailMat = new Material(ResolveTrailLitShader()) { name = "BT_Trail" };
+            SetMaterialColor(s_trailMat, Color.white);
+            return s_trailMat;
+        }
+
+        // Shared shader resolution chain for TrailLit-shaded geometry (per-joint
+        // trails AND bone tubes). Each caller still allocates its own Material
+        // instance: bones write skeletonColor into _BaseColor with white vertex
+        // colors, while the trail singleton keeps _BaseColor=white and uses the
+        // per-vertex heatmap, so the two can't share one Material.
+        private static Shader ResolveTrailLitShader()
+        {
             Shader s = Shader.Find("BodyTracking/TrailLit");
             if (s == null) s = Shader.Find("BodyTracking/TrailOverlay");
             if (s == null) s = Shader.Find("Universal Render Pipeline/Particles/Unlit");
             if (s == null) s = Shader.Find("Sprites/Default");
-            s_trailMat = new Material(s) { name = "BT_Trail" };
-            SetMaterialColor(s_trailMat, Color.white);
-            return s_trailMat;
+            return s;
         }
 
         private static Color TrailColorFor(int jointIndex, uint bodyId, BodyTrackingShared.TrailColorMode mode, Color flat,
@@ -463,9 +596,12 @@ namespace BodyTracking
             {
                 // Hue cycles with Time.frameCount; S/V come from frameHue. flat.a
                 // is preserved as a global trail alpha multiplier so the existing
-                // fade behavior in JointTrailMesh.Rebuild still works.
-                Color hue = BodyTrackingShared.FrameHueRGB(in frameHue, Time.frameCount);
-                return new Color(hue.r, hue.g, hue.b, flat.a);
+                // fade behavior in JointTrailMesh.Rebuild still works. Local is
+                // named distinctly from the per-joint `hue` below: C# CS0136
+                // forbids declaring the same name twice in nested scopes of the
+                // same method, and the per-joint branch already binds `hue`.
+                Color frameHueColor = BodyTrackingShared.FrameHueRGB(in frameHue, Time.frameCount);
+                return new Color(frameHueColor.r, frameHueColor.g, frameHueColor.b, flat.a);
             }
             int idx = mode == BodyTrackingShared.TrailColorMode.PerBody
                 ? (int)(bodyId % 12u)
