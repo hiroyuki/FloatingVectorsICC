@@ -79,6 +79,12 @@ namespace PointCloud
 
         // --- Runtime state ---
         public State CurrentState { get; private set; } = State.Idle;
+
+        /// <summary>True while playback is paused (CurrentState stays at Playing).
+        /// Cursor advancement and OnPlaybackRawFrame events are halted; resuming
+        /// shifts the wall-clock origin so the playhead picks up where it left off.
+        /// </summary>
+        public bool IsPaused { get; private set; }
         public int RecordedFrameCount
         {
             get
@@ -210,6 +216,7 @@ namespace PointCloud
             _subscribedHandlers = new Dictionary<PointCloudRenderer, Action<PointCloudRenderer, RawFrameData>>();
         private double _playbackWallStart;
         private ulong _playbackTrackStartNs;
+        private double _pauseWallStart;
 
         [Header("Diagnostics")]
         [Tooltip("Log per-second playback fire counts per serial (FirePlaybackEvent rate). " +
@@ -246,6 +253,32 @@ namespace PointCloud
         {
             if (CurrentState == State.Playing) StopPlayback();
             else StartPlayback();
+        }
+
+        [ContextMenu("Toggle Pause")]
+        public void TogglePause()
+        {
+            if (CurrentState != State.Playing) return;
+            if (IsPaused) ResumePlayback();
+            else PausePlayback();
+        }
+
+        public void PausePlayback()
+        {
+            if (CurrentState != State.Playing || IsPaused) return;
+            IsPaused = true;
+            _pauseWallStart = Time.timeAsDouble;
+            SetStatus("Playback paused.");
+        }
+
+        public void ResumePlayback()
+        {
+            if (CurrentState != State.Playing || !IsPaused) return;
+            // Shift the wall-clock origin so the playhead resumes from where it
+            // was paused instead of jumping forward by the paused duration.
+            _playbackWallStart += Time.timeAsDouble - _pauseWallStart;
+            IsPaused = false;
+            SetStatus($"Playing {_tracks.Count} device(s)…");
         }
 
         [ContextMenu("Save")]
@@ -750,6 +783,7 @@ namespace PointCloud
             }
             _playbackTrackStartNs = firstTs == ulong.MaxValue ? 0 : firstTs;
             _playbackWallStart = Time.timeAsDouble;
+            IsPaused = false;
             CurrentState = State.Playing;
             SetStatus($"Playing {_tracks.Count} device(s)…");
         }
@@ -757,6 +791,7 @@ namespace PointCloud
         private void StopPlayback()
         {
             CurrentState = State.Idle;
+            IsPaused = false;
             SetStatus("Playback stopped.");
         }
 
@@ -783,6 +818,15 @@ namespace PointCloud
                 return;
             }
             if (CurrentState != State.Playing) return;
+
+            // Spacebar toggles pause/resume during playback (issue #17).
+            if (Input.GetKeyDown(KeyCode.Space)) TogglePause();
+
+            if (IsPaused)
+            {
+                if (diagnosticLogging) PerSecondDiag();
+                return;
+            }
             double elapsedSec = (Time.timeAsDouble - _playbackWallStart) * Mathf.Max(0.01f, playbackRate);
             ulong elapsedNs = (ulong)Math.Max(0.0, elapsedSec * 1_000_000_000.0);
             ulong playheadNs = _playbackTrackStartNs + elapsedNs;
