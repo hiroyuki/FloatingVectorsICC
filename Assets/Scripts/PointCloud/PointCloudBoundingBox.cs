@@ -24,7 +24,7 @@ namespace PointCloud
 
         [Header("Visualization")]
         [Tooltip("Show a wireframe of the box in both Scene view (Gizmos) and Game view (runtime mesh).")]
-        public bool showVisualization = true;
+        public bool showVisualization = false;
 
         [Tooltip("Color of the wireframe box.")]
         public Color color = new Color(0.2f, 1f, 0.4f, 1f);
