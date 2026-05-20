@@ -1,9 +1,13 @@
-// Per-joint quad-strip trail mesh. Replaces Unity's TrailRenderer in BodyVisual
-// so we can paint per-vertex acceleration heatmaps (TrailRenderer only supports
-// a single time-axis colorGradient). Behavior parity with TrailRenderer:
-// camera-aligned billboard, width tapering from head to tail, sample TTL by
-// trailDuration. Sample positions are kept in the joint's parent-local space so
-// the trail follows skeleton transforms exactly like the sphere joints do.
+// Per-joint tube trail mesh. Replaces Unity's TrailRenderer in BodyVisual so
+// we can paint per-vertex acceleration heatmaps (TrailRenderer only supports
+// a single time-axis colorGradient). Each sample emits a ring of kTubeSides
+// vertices around the centerline; consecutive rings are stitched with quads
+// to form a closed tube. Frames are propagated by parallel transport so the
+// tube does not twist as the curve bends. Behavior parity with the previous
+// quad-strip: width (= tube radius here) tapers from head to tail, sample TTL
+// by trailDuration, vertex-color heatmap. Sample positions stay in the joint's
+// parent-local space so the trail follows skeleton transforms exactly like
+// the sphere joints do.
 
 using System.Collections.Generic;
 using UnityEngine;
@@ -132,19 +136,48 @@ namespace BodyTracking
                 _samples.RemoveRange(0, _samples.Count - kMaxSamples);
         }
 
+        // Number of sides around the tube's circular cross-section. 6 gives a
+        // recognizably round profile without exploding the index count
+        // (kTubeSides × 6 tri indices per inter-sample segment).
+        private const int kTubeSides = 6;
+
+        // Pre-computed unit-circle offsets (cos, sin) for each side. Filled once
+        // and reused every Rebuild to skip per-vertex trig.
+        private static readonly float[] s_ringCos = BuildRingCos();
+        private static readonly float[] s_ringSin = BuildRingSin();
+        private static float[] BuildRingCos()
+        {
+            var a = new float[kTubeSides];
+            for (int k = 0; k < kTubeSides; k++) a[k] = Mathf.Cos(2f * Mathf.PI * k / kTubeSides);
+            return a;
+        }
+        private static float[] BuildRingSin()
+        {
+            var a = new float[kTubeSides];
+            for (int k = 0; k < kTubeSides; k++) a[k] = Mathf.Sin(2f * Mathf.PI * k / kTubeSides);
+            return a;
+        }
+
         public void Rebuild(double currentTime, Camera cam)
         {
+            // cam was used by the old billboard quad-strip; tube geometry is
+            // camera-independent so we ignore it. The parameter stays for API
+            // parity with callers (BodyVisualPool.TickTrails).
+            _ = cam;
             if (!_show) { _mesh.Clear(); return; }
             DropOldSamples(currentTime);
 
             int n = _samples.Count;
             if (n < 2) { _mesh.Clear(); return; }
 
-            if (_verts == null || _verts.Length != n * 2)
+            int vertsPerRing = kTubeSides;
+            int totalVerts = n * vertsPerRing;
+            int totalTris = (n - 1) * kTubeSides * 6;
+            if (_verts == null || _verts.Length != totalVerts)
             {
-                _verts = new Vector3[n * 2];
-                _colors = new Color[n * 2];
-                _tris = new int[(n - 1) * 6];
+                _verts = new Vector3[totalVerts];
+                _colors = new Color[totalVerts];
+                _tris = new int[totalTris];
             }
             if (_medianAccels == null || _medianAccels.Length < n)
                 _medianAccels = new float[Mathf.Max(n, 64)];
@@ -161,33 +194,67 @@ namespace BodyTracking
                 _medianAccels[i] = s_medBuf[len / 2];
             }
 
-            // Billboard offset axis = perpendicular to (tangent, camera-forward).
-            // Compute camera forward in the local space of _go so offsets compose
-            // correctly with the parent transform hierarchy.
-            Vector3 camFwdLocal = cam != null
-                ? _go.transform.InverseTransformDirection(cam.transform.forward)
-                : Vector3.forward;
+            // Parallel-transport frame: pick an initial 'right' perpendicular to
+            // the first tangent, then for every subsequent sample project the
+            // previous 'right' onto the plane perpendicular to the new tangent.
+            // This keeps the tube from twisting as the curve bends and avoids
+            // the discontinuity you get from rebuilding the frame from a fixed
+            // up-vector at every sample.
+            Vector3 prevRight = Vector3.zero;
+            Vector3 prevUp = Vector3.zero;
+            bool haveFrame = false;
 
             for (int i = 0; i < n; i++)
             {
                 var s = _samples[i];
                 double age = currentTime - s.Time;
                 float headness = Mathf.Clamp01(1f - (float)(age / _duration));
-                float w = _width * headness;
+                float radius = _width * headness;
 
                 Vector3 tangent;
-                if (n == 1)             tangent = Vector3.right;
-                else if (i == 0)        tangent = _samples[1].Pos - s.Pos;
+                if (i == 0)             tangent = _samples[1].Pos - s.Pos;
                 else if (i == n - 1)    tangent = s.Pos - _samples[n - 2].Pos;
                 else                    tangent = _samples[i + 1].Pos - _samples[i - 1].Pos;
-                tangent = tangent.sqrMagnitude > 1e-12f ? tangent.normalized : Vector3.right;
+                tangent = tangent.sqrMagnitude > 1e-12f ? tangent.normalized : Vector3.forward;
 
-                Vector3 right = Vector3.Cross(tangent, camFwdLocal);
-                if (right.sqrMagnitude < 1e-12f) right = Vector3.Cross(tangent, Vector3.up);
-                right = right.sqrMagnitude > 1e-12f ? right.normalized : Vector3.right;
-
-                _verts[i * 2 + 0] = s.Pos - right * w;
-                _verts[i * 2 + 1] = s.Pos + right * w;
+                Vector3 right, up;
+                if (!haveFrame)
+                {
+                    // Seed with a perpendicular that isn't parallel to tangent.
+                    Vector3 seed = Mathf.Abs(Vector3.Dot(tangent, Vector3.up)) < 0.95f
+                        ? Vector3.up
+                        : Vector3.right;
+                    right = Vector3.Cross(tangent, seed);
+                    if (right.sqrMagnitude < 1e-12f) right = Vector3.Cross(tangent, Vector3.right);
+                    right = right.sqrMagnitude > 1e-12f ? right.normalized : Vector3.right;
+                    up = Vector3.Cross(right, tangent);
+                    up = up.sqrMagnitude > 1e-12f ? up.normalized : Vector3.up;
+                    haveFrame = true;
+                }
+                else
+                {
+                    // Project prevRight onto plane perpendicular to new tangent.
+                    right = prevRight - tangent * Vector3.Dot(prevRight, tangent);
+                    if (right.sqrMagnitude < 1e-12f)
+                    {
+                        // Fallback if prevRight became parallel to new tangent
+                        // (sharp ~180° turn). Use prevUp instead, then reseed
+                        // if that also degenerates.
+                        right = prevUp - tangent * Vector3.Dot(prevUp, tangent);
+                        if (right.sqrMagnitude < 1e-12f)
+                        {
+                            Vector3 seed = Mathf.Abs(Vector3.Dot(tangent, Vector3.up)) < 0.95f
+                                ? Vector3.up
+                                : Vector3.right;
+                            right = Vector3.Cross(tangent, seed);
+                        }
+                    }
+                    right = right.normalized;
+                    up = Vector3.Cross(right, tangent);
+                    up = up.sqrMagnitude > 1e-12f ? up.normalized : Vector3.up;
+                }
+                prevRight = right;
+                prevUp = up;
 
                 Color c;
                 if (_mode == ColorMode.AccelHeatmap)
@@ -200,20 +267,34 @@ namespace BodyTracking
                     c = _baseColor;
                 }
                 c.a *= headness;
-                _colors[i * 2 + 0] = c;
-                _colors[i * 2 + 1] = c;
+
+                int baseIdx = i * vertsPerRing;
+                for (int k = 0; k < kTubeSides; k++)
+                {
+                    Vector3 offset = right * (s_ringCos[k] * radius) + up * (s_ringSin[k] * radius);
+                    _verts[baseIdx + k] = s.Pos + offset;
+                    _colors[baseIdx + k] = c;
+                }
             }
 
+            // Stitch consecutive rings with two triangles per side. Wrap the
+            // side index modulo kTubeSides to close the tube.
             for (int i = 0; i < n - 1; i++)
             {
-                int v = i * 2;
-                int t = i * 6;
-                _tris[t + 0] = v + 0;
-                _tris[t + 1] = v + 1;
-                _tris[t + 2] = v + 2;
-                _tris[t + 3] = v + 2;
-                _tris[t + 4] = v + 1;
-                _tris[t + 5] = v + 3;
+                int ringA = i * vertsPerRing;
+                int ringB = (i + 1) * vertsPerRing;
+                int triBase = i * kTubeSides * 6;
+                for (int k = 0; k < kTubeSides; k++)
+                {
+                    int kNext = (k + 1) % kTubeSides;
+                    int t = triBase + k * 6;
+                    _tris[t + 0] = ringA + k;
+                    _tris[t + 1] = ringB + k;
+                    _tris[t + 2] = ringA + kNext;
+                    _tris[t + 3] = ringA + kNext;
+                    _tris[t + 4] = ringB + k;
+                    _tris[t + 5] = ringB + kNext;
+                }
             }
 
             _mesh.Clear();
