@@ -69,6 +69,28 @@ namespace BodyTracking
         [Tooltip("Trail color in FlatColor mode (also tints PerJointHue).")]
         public Color trailFlatColor = Color.white;
 
+        [Header("Trail FrameHue mode")]
+        [Tooltip("FrameHue mode: hue cycles around this center hue (0..1) as a function of Time.frameCount.")]
+        [Range(0f, 1f)]
+        public float frameHueCenter = 0.5f;
+
+        [Tooltip("FrameHue mode: hue sweep width around the center (0..1). 0 = static hue, 1 = full color wheel.")]
+        [Range(0f, 1f)]
+        public float frameHueRange = 1f;
+
+        [Tooltip("FrameHue mode: HSV Saturation (0..1).")]
+        [Range(0f, 1f)]
+        public float frameHueSaturation = 0.85f;
+
+        [Tooltip("FrameHue mode: HSV Value / brightness (0..1).")]
+        [Range(0f, 1f)]
+        public float frameHueValue = 1f;
+
+        [Tooltip("FrameHue mode: number of frames per full sine cycle of the hue oscillation. " +
+                 "At 60 fps, 120 ≈ a 2-second wave.")]
+        [Min(1f)]
+        public float frameHueCyclePeriodFrames = 120f;
+
         [Min(0.05f)]
         [Tooltip("How long (s) each trail segment stays visible before fading out.")]
         public float trailDuration = 2.0f;
@@ -988,6 +1010,14 @@ namespace BodyTracking
             TrailWidth = trailWidth,
             TrailColorMode = trailColorMode,
             TrailFlatColor = trailFlatColor,
+            FrameHue = new BodyTrackingShared.FrameHueParams
+            {
+                CenterHue = frameHueCenter,
+                HueRange = frameHueRange,
+                Saturation = frameHueSaturation,
+                Value = frameHueValue,
+                CyclePeriodFrames = frameHueCyclePeriodFrames,
+            },
             MaxBodies = maxBodies,
             UseOneEuroFilter = useOneEuroFilter,
             OneEuroMinCutoff = oneEuroMinCutoff,
