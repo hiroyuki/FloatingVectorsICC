@@ -129,3 +129,7 @@ InitTestScene*.unity*
 
 # Auto-generated scenes by play mode tests
 /[Aa]ssets/[Ii]nit[Tt]est[Ss]cene*.unity*
+
+# Per-issue implementation summary written by claude-basics/auto_implement_issues.sh.
+# Posted to the issue as a comment; not a permanent repo artifact.
+IMPLEMENTATION_NOTES.md
