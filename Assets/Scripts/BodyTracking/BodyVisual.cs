@@ -67,7 +67,8 @@ namespace BodyTracking
 
         public BodyVisual(Transform parent, uint id, float jointRadius, Color color,
                           bool showTrails, float trailDuration, float trailWidth,
-                          BodyTrackingShared.TrailColorMode trailColorMode, Color trailFlatColor)
+                          BodyTrackingShared.TrailColorMode trailColorMode, Color trailFlatColor,
+                          BodyTrackingShared.FrameHueParams frameHue)
         {
             _bodyId = id;
             _root = new GameObject($"Body_{id}");
@@ -101,7 +102,7 @@ namespace BodyTracking
                 // the body's local space with the joint sphere (we feed it sample positions
                 // in the same local frame as _jointPositions).
                 _trails[i] = new JointTrailMesh(_root.transform, $"Trail_{(k4abt_joint_id_t)i}", trailMat);
-                var c = TrailColorFor(i, id, trailColorMode, trailFlatColor);
+                var c = TrailColorFor(i, id, trailColorMode, trailFlatColor, frameHue);
                 _trails[i].Configure(showTrails, trailDuration, trailWidth, c, Color.red,
                     0f, 56f,
                     trailColorMode == BodyTrackingShared.TrailColorMode.AccelHeatmap
@@ -451,12 +452,21 @@ namespace BodyTracking
             return s_trailMat;
         }
 
-        private static Color TrailColorFor(int jointIndex, uint bodyId, BodyTrackingShared.TrailColorMode mode, Color flat)
+        private static Color TrailColorFor(int jointIndex, uint bodyId, BodyTrackingShared.TrailColorMode mode, Color flat,
+                                            BodyTrackingShared.FrameHueParams frameHue)
         {
             // AccelHeatmap mode treats flat as the cold (base) end; per-vertex
             // interpolation toward hot is done inside JointTrailMesh.
             if (mode == BodyTrackingShared.TrailColorMode.FlatColor ||
                 mode == BodyTrackingShared.TrailColorMode.AccelHeatmap) return flat;
+            if (mode == BodyTrackingShared.TrailColorMode.FrameHue)
+            {
+                // Hue cycles with Time.frameCount; S/V come from frameHue. flat.a
+                // is preserved as a global trail alpha multiplier so the existing
+                // fade behavior in JointTrailMesh.Rebuild still works.
+                Color hue = BodyTrackingShared.FrameHueRGB(in frameHue, Time.frameCount);
+                return new Color(hue.r, hue.g, hue.b, flat.a);
+            }
             int idx = mode == BodyTrackingShared.TrailColorMode.PerBody
                 ? (int)(bodyId % 12u)
                 : jointIndex;
@@ -471,7 +481,8 @@ namespace BodyTracking
         // Live-tweakable trail params from the Inspector (no need to re-spawn visuals).
         public void ApplyTrailParams(bool show, float duration, float width,
                                       BodyTrackingShared.TrailColorMode mode, Color flat,
-                                      float accelMin, float accelMax, Color accelHotColor)
+                                      float accelMin, float accelMax, Color accelHotColor,
+                                      BodyTrackingShared.FrameHueParams frameHue)
         {
             JointTrailMesh.ColorMode jmMode = mode == BodyTrackingShared.TrailColorMode.AccelHeatmap
                 ? JointTrailMesh.ColorMode.AccelHeatmap
@@ -482,7 +493,7 @@ namespace BodyTracking
                 {
                     var tr = _trails[i];
                     if (tr == null) continue;
-                    var baseColor = TrailColorFor(i, _bodyId, mode, flat);
+                    var baseColor = TrailColorFor(i, _bodyId, mode, flat, frameHue);
                     tr.Configure(show, duration, width, baseColor, accelHotColor,
                         accelMin, accelMax, jmMode);
                 }
@@ -496,7 +507,7 @@ namespace BodyTracking
                     // Color each bone-interp trail from its bone's start-joint hue
                     // so PerJointHue keeps a recognizable gradient along each limb.
                     int colorJointIdx = (int)BodyTrackingShared.Bones[b].a;
-                    var baseColor = TrailColorFor(colorJointIdx, _bodyId, mode, flat);
+                    var baseColor = TrailColorFor(colorJointIdx, _bodyId, mode, flat, frameHue);
                     for (int k = 0; k < list.Count; k++)
                     {
                         var tr = list[k];

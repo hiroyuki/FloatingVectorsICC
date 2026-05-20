@@ -22,6 +22,7 @@ namespace BodyTracking
         public float TrailWidth;
         public BodyTrackingShared.TrailColorMode TrailColorMode;
         public Color TrailFlatColor;
+        public BodyTrackingShared.FrameHueParams FrameHue;
         public int MaxBodies;
         public bool UseOneEuroFilter;
         public float OneEuroMinCutoff;
@@ -78,12 +79,12 @@ namespace BodyTracking
                 EvictIfFull(cfg.MaxBodies, onEvicted);
                 visual = new BodyVisual(_parent, id, cfg.JointRadius, cfg.SkeletonColor,
                     cfg.ShowTrails, cfg.TrailDuration, cfg.TrailWidth,
-                    cfg.TrailColorMode, cfg.TrailFlatColor);
+                    cfg.TrailColorMode, cfg.TrailFlatColor, cfg.FrameHue);
                 _bodies[id] = visual;
             }
             visual.UpdateFromSkeleton(skel, in cfg);
             visual.ApplyTrailParams(cfg.ShowTrails, cfg.TrailDuration, cfg.TrailWidth, cfg.TrailColorMode, cfg.TrailFlatColor,
-                cfg.AccelMin, cfg.AccelMax, cfg.AccelHotColor);
+                cfg.AccelMin, cfg.AccelMax, cfg.AccelHotColor, cfg.FrameHue);
             _lastSeenFrame[id] = Time.frameCount;
         }
 
