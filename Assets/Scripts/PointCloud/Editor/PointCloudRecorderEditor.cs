@@ -42,6 +42,12 @@ namespace PointCloud.EditorTools
                     {
                         if (GUILayout.Button(playLabel)) t.TogglePlay();
                     }
+
+                    string pauseLabel = t.IsPaused ? "Resume" : "Pause";
+                    using (new EditorGUI.DisabledScope(t.CurrentState != PointCloudRecorder.State.Playing))
+                    {
+                        if (GUILayout.Button(pauseLabel)) t.TogglePause();
+                    }
                 }
             }
 
