@@ -131,9 +131,10 @@ Shader "BodyTracking/TrailLit"
 
                 half3 albedo = _BaseColor.rgb * IN.color.rgb;
 
-                // Always-double-sided: flip the normal for back faces so the
-                // rear of a camera-aligned billboard (or the inside of a tube
-                // if the camera enters it) isn't lit by the inverted normal.
+                // Double-sided: flip the normal for back faces so the inside
+                // of the tube (visible at open head/tail rings, and when the
+                // camera enters thin geometry) isn't lit by the inverted
+                // normal. Cull Off in the pass makes both sides drawable.
                 float3 N = normalize(IN.normalWS);
                 if (facing < 0) N = -N;
 
