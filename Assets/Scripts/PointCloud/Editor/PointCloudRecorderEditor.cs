@@ -51,6 +51,18 @@ namespace PointCloud.EditorTools
                 }
             }
 
+            // Frame-step row (issue #19). Enabled only while playing; the
+            // recorder auto-pauses on first press so the user can hold ←/→
+            // without a separate Pause click.
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                using (new EditorGUI.DisabledScope(t.CurrentState != PointCloudRecorder.State.Playing))
+                {
+                    if (GUILayout.Button("◀ Step")) t.StepBackward();
+                    if (GUILayout.Button("Step ▶")) t.StepForward();
+                }
+            }
+
             using (new EditorGUILayout.HorizontalScope())
             {
                 using (new EditorGUI.DisabledScope(t.RecordedFrameCount == 0))

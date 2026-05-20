@@ -281,6 +281,153 @@ namespace PointCloud
             SetStatus($"Playing {_tracks.Count} device(s)…");
         }
 
+        /// <summary>
+        /// Advance each device's playback cursor by exactly one depth frame and
+        /// re-emit the frame so the reconstructed mesh + downstream BT pipeline
+        /// updates. No-op outside playback. Auto-pauses if currently playing.
+        /// </summary>
+        [ContextMenu("Step Forward")]
+        public void StepForward()
+        {
+            if (CurrentState != State.Playing) return;
+            if (!IsPaused) PausePlayback();
+            StepCursor(+1);
+        }
+
+        /// <summary>
+        /// Move each device's playback cursor back by one depth frame and
+        /// re-emit the frame. No-op outside playback. Auto-pauses if currently
+        /// playing.
+        /// </summary>
+        [ContextMenu("Step Backward")]
+        public void StepBackward()
+        {
+            if (CurrentState != State.Playing) return;
+            if (!IsPaused) PausePlayback();
+            StepCursor(-1);
+        }
+
+        /// <summary>
+        /// All-or-nothing cursor shift by <paramref name="delta"/> (±1 for
+        /// arrow-key stepping). If EVERY non-empty track can shift its cursor
+        /// by delta (within [0, Count-1]), every track moves and re-fires its
+        /// playback frame. If any track is at its boundary, no track moves —
+        /// this keeps multi-device inspection at a coherent frame instead of
+        /// leaving the scene at mixed timestamps. The wall-clock origin is
+        /// then shifted so a subsequent Resume continues from the stepped
+        /// playhead. Playhead is clamped to be strictly less than every
+        /// track's next-frame timestamp so the Update() auto-advance does not
+        /// fire extra frames on resume.
+        /// </summary>
+        private void StepCursor(int delta)
+        {
+            if (_tracks.Count == 0) return;
+
+            // All-or-nothing precheck: every non-empty track must be able to
+            // move its cursor by delta without leaving [0, Count-1].
+            bool anyNonEmpty = false;
+            foreach (var kv in _tracks)
+            {
+                var track = kv.Value;
+                if (track.DepthFrames.Count == 0) continue;
+                anyNonEmpty = true;
+                int newCursor = track.PlaybackCursor + delta;
+                if (newCursor < 0 || newCursor >= track.DepthFrames.Count)
+                {
+                    SetStatus(delta > 0
+                        ? $"Step forward: track {track.Serial} at last frame ({track.PlaybackCursor + 1}/{track.DepthFrames.Count})."
+                        : $"Step backward: track {track.Serial} at first frame.");
+                    return;
+                }
+            }
+            if (!anyNonEmpty) return;
+
+            ulong maxSteppedTs = 0;
+            ulong minNextTs = ulong.MaxValue;
+            foreach (var kv in _tracks)
+            {
+                var track = kv.Value;
+                if (track.DepthFrames.Count == 0) continue;
+                int newCursor = track.PlaybackCursor + delta;
+                SetCursorAndEmit(track, newCursor);
+                ulong ts = track.DepthFrames[newCursor].TimestampNs;
+                if (ts > maxSteppedTs) maxSteppedTs = ts;
+                int next = newCursor + 1;
+                if (next < track.DepthFrames.Count)
+                {
+                    ulong nextTs = track.DepthFrames[next].TimestampNs;
+                    if (nextTs < minNextTs) minNextTs = nextTs;
+                }
+            }
+
+            // Valid playhead range for keeping every cursor at its stepped
+            // frame on resume is [maxSteppedTs, minNextTs). If the range is
+            // non-empty pick maxSteppedTs (sits exactly on the latest stepped
+            // frame). If empty — pathological mixed framerate where one
+            // track's next frame falls before another's stepped frame —
+            // prefer minNextTs-1 to suppress Update()'s auto-advance on
+            // resume; this is the lesser of two evils vs. the original
+            // max-only anchor that allowed silent frame skips. Floor at
+            // _playbackTrackStartNs so SyncWallClockTo's ulong subtraction
+            // can never underflow.
+            ulong newPlayhead = maxSteppedTs;
+            if (minNextTs != ulong.MaxValue && minNextTs <= newPlayhead)
+                newPlayhead = minNextTs > 0 ? minNextTs - 1 : 0;
+            if (newPlayhead < _playbackTrackStartNs)
+                newPlayhead = _playbackTrackStartNs;
+
+            SyncWallClockTo(newPlayhead);
+            double seconds = (newPlayhead - _playbackTrackStartNs) / 1_000_000_000.0;
+            SetStatus($"Stepped {(delta > 0 ? "→" : "←")} to {seconds:0.000}s (paused)");
+        }
+
+        /// <summary>
+        /// Apply <paramref name="cursor"/> to <paramref name="track"/> and run
+        /// the same reconstruct + fire-event + bbox-filter chain Update() would
+        /// run on a natural cursor advance, so stepping is visually identical
+        /// to the live playhead crossing this frame.
+        /// </summary>
+        private void SetCursorAndEmit(DeviceTrack track, int cursor)
+        {
+            track.PlaybackCursor = cursor;
+            var depthFrame = track.DepthFrames[cursor];
+            PointCloudRecording.Frame colorFrame = null;
+            if (track.ColorFrames.Count > 0)
+            {
+                int colorIdx = Mathf.Min(cursor, track.ColorFrames.Count - 1);
+                colorFrame = track.ColorFrames[colorIdx];
+            }
+            PointCloudRecording.Frame irFrame = null;
+            if (track.IRFrames.Count > 0)
+            {
+                int irIdx = Mathf.Min(cursor, track.IRFrames.Count - 1);
+                irFrame = track.IRFrames[irIdx];
+            }
+            ReconstructAndUpload(track, depthFrame, colorFrame);
+            FirePlaybackEvent(track, depthFrame, colorFrame, irFrame);
+            ApplyBoundingBoxFilter(track);
+        }
+
+        /// <summary>
+        /// Shift _playbackWallStart so the running playhead expression
+        /// (Time.timeAsDouble - _playbackWallStart) * playbackRate evaluates
+        /// to (playheadNs - _playbackTrackStartNs)/1e9 right now. Also resets
+        /// _pauseWallStart so ResumePlayback's pause-delta correction adds
+        /// zero — i.e. resume continues from the stepped playhead.
+        /// </summary>
+        private void SyncWallClockTo(ulong playheadNs)
+        {
+            float rate = Mathf.Max(0.01f, playbackRate);
+            // Defensive: avoid ulong underflow if a future caller passes a
+            // playhead below the track origin. Callers in this file already
+            // floor at _playbackTrackStartNs, but guard for robustness.
+            ulong fromOrigin = playheadNs > _playbackTrackStartNs
+                ? playheadNs - _playbackTrackStartNs : 0UL;
+            double elapsedSec = fromOrigin / 1_000_000_000.0 / rate;
+            _playbackWallStart = Time.timeAsDouble - elapsedSec;
+            if (IsPaused) _pauseWallStart = Time.timeAsDouble;
+        }
+
         [ContextMenu("Save")]
         public void Save()
         {
@@ -821,6 +968,11 @@ namespace PointCloud
 
             // Spacebar toggles pause/resume during playback (issue #17).
             if (Input.GetKeyDown(KeyCode.Space)) TogglePause();
+            // Left / Right arrow step the cursor by one frame for close
+            // inspection of generated mesh + BT output (issue #19).
+            // Stepping auto-pauses if playback is still running.
+            if (Input.GetKeyDown(KeyCode.RightArrow)) StepForward();
+            if (Input.GetKeyDown(KeyCode.LeftArrow))  StepBackward();
 
             if (IsPaused)
             {
