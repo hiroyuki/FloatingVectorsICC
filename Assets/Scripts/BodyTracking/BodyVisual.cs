@@ -97,7 +97,7 @@ namespace BodyTracking
                 sphere.name = ((k4abt_joint_id_t)i).ToString();
                 _joints[i] = sphere.transform;
 
-                // Quad-strip trail mesh per joint. Lives as a child of _root so it shares
+                // Tube trail mesh per joint. Lives as a child of _root so it shares
                 // the body's local space with the joint sphere (we feed it sample positions
                 // in the same local frame as _jointPositions).
                 _trails[i] = new JointTrailMesh(_root.transform, $"Trail_{(k4abt_joint_id_t)i}", trailMat);

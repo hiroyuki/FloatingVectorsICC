@@ -33,6 +33,7 @@ namespace BodyTracking
         private readonly List<Sample> _samples = new List<Sample>();
 
         private Vector3[] _verts;
+        private Vector3[] _normals;
         private Color[] _colors;
         private int[] _tris;
         private float[] _medianAccels;
@@ -140,10 +141,11 @@ namespace BodyTracking
                 _samples.RemoveRange(0, _samples.Count - kMaxSamples);
         }
 
-        // Number of sides around the tube's circular cross-section. 6 gives a
-        // recognizably round profile without exploding the index count
-        // (kTubeSides × 6 tri indices per inter-sample segment).
-        private const int kTubeSides = 6;
+        // Number of sides around the tube's circular cross-section. 12 reads as
+        // smoothly round under PBR lighting — the previous 6 left a visible
+        // hex silhouette at typical viewing distances. Inter-sample index
+        // count is kTubeSides × 6.
+        private const int kTubeSides = 12;
 
         // Pre-computed unit-circle offsets (cos, sin) for each side. Filled once
         // and reused every Rebuild to skip per-vertex trig.
@@ -180,6 +182,7 @@ namespace BodyTracking
             if (_verts == null || _verts.Length != totalVerts)
             {
                 _verts = new Vector3[totalVerts];
+                _normals = new Vector3[totalVerts];
                 _colors = new Color[totalVerts];
                 _tris = new int[totalTris];
             }
@@ -275,8 +278,17 @@ namespace BodyTracking
                 int baseIdx = i * vertsPerRing;
                 for (int k = 0; k < kTubeSides; k++)
                 {
-                    Vector3 offset = right * (s_ringCos[k] * radius) + up * (s_ringSin[k] * radius);
-                    _verts[baseIdx + k] = s.Pos + offset;
+                    float cosk = s_ringCos[k];
+                    float sink = s_ringSin[k];
+                    // Analytical radial normal: for a circular cross-section the
+                    // outward normal at each ring vertex is exactly the unit
+                    // radial direction. This is continuous around the ring (so
+                    // PBR shading reads as a smooth cylinder instead of the
+                    // faceted hex Mesh.RecalculateNormals produced) and is
+                    // exact rather than averaged.
+                    Vector3 radial = right * cosk + up * sink;
+                    _verts[baseIdx + k] = s.Pos + radial * radius;
+                    _normals[baseIdx + k] = radial;
                     _colors[baseIdx + k] = c;
                 }
             }
@@ -303,14 +315,9 @@ namespace BodyTracking
 
             _mesh.Clear();
             _mesh.vertices = _verts;
+            _mesh.normals = _normals;
             _mesh.colors = _colors;
             _mesh.triangles = _tris;
-            // Smoothed per-vertex normals so the TrailLit (URP Lit) shader has
-            // something to light against. Cheap enough at the trail's vertex
-            // counts (~1k verts/joint at the kMaxSamples ceiling), and works
-            // for both the camera-aligned quad strip geometry and any future
-            // tube swap-in without bespoke per-topology normal math.
-            _mesh.RecalculateNormals();
 
             // Replace LastAccel with the medianed value at the head so the pool's
             // rolling p95 window reads the same value the vertex colors use.
