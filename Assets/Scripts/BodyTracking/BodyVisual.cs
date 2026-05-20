@@ -429,15 +429,21 @@ namespace BodyTracking
             m.color = c;
         }
 
-        // Single shared material for every JointTrailMesh. Uses TrailOverlay
-        // (vertex-color + alpha-blend + ZTest Always) so the per-vertex
-        // acceleration heatmap actually reaches the framebuffer; the
-        // SkeletonOverlay shader used for joints/bones discards mesh.colors.
+        // Single shared material for every JointTrailMesh. Prefers TrailLit
+        // (URP PBR + per-vertex color tint + ShadowCaster + DepthNormals so
+        // SSAO from the PC_Renderer feature attaches automatically) so the
+        // trail catches scene lighting and reads as a 3D shape instead of a
+        // flat overlay. Falls back to TrailOverlay (the old unlit alpha-blend
+        // path) if TrailLit failed to compile, then to URP particle / sprite
+        // shaders as a last resort. The per-vertex acceleration heatmap is
+        // preserved through the chain — TrailLit multiplies it into the
+        // PBR albedo, TrailOverlay passes it through unlit.
         private static Material s_trailMat;
         private static Material ResolveTrailMaterial()
         {
             if (s_trailMat != null) return s_trailMat;
-            Shader s = Shader.Find("BodyTracking/TrailOverlay");
+            Shader s = Shader.Find("BodyTracking/TrailLit");
+            if (s == null) s = Shader.Find("BodyTracking/TrailOverlay");
             if (s == null) s = Shader.Find("Universal Render Pipeline/Particles/Unlit");
             if (s == null) s = Shader.Find("Sprites/Default");
             s_trailMat = new Material(s) { name = "BT_Trail" };

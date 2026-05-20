@@ -68,8 +68,12 @@ namespace BodyTracking
             _go.transform.SetParent(parent, false);
             _mf = _go.AddComponent<MeshFilter>();
             _mr = _go.AddComponent<MeshRenderer>();
+            // Don't cast shadows — the trail rebuilds every frame with thin
+            // taper-to-zero geometry, which produces flickery self-shadows.
+            // Do receive shadows so the trail darkens consistently with the
+            // rest of the scene under the TrailLit PBR shader.
             _mr.shadowCastingMode = ShadowCastingMode.Off;
-            _mr.receiveShadows = false;
+            _mr.receiveShadows = true;
             _mr.sharedMaterial = mat;
             _mesh = new Mesh { name = name + ".trail", indexFormat = IndexFormat.UInt32 };
             _mesh.MarkDynamic();
@@ -301,6 +305,12 @@ namespace BodyTracking
             _mesh.vertices = _verts;
             _mesh.colors = _colors;
             _mesh.triangles = _tris;
+            // Smoothed per-vertex normals so the TrailLit (URP Lit) shader has
+            // something to light against. Cheap enough at the trail's vertex
+            // counts (~1k verts/joint at the kMaxSamples ceiling), and works
+            // for both the camera-aligned quad strip geometry and any future
+            // tube swap-in without bespoke per-topology normal math.
+            _mesh.RecalculateNormals();
 
             // Replace LastAccel with the medianed value at the head so the pool's
             // rolling p95 window reads the same value the vertex colors use.
