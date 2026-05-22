@@ -34,6 +34,12 @@ namespace PointCloud
         [Tooltip("Maximum number of snapshots to keep. Oldest are dropped when exceeded. 0 = unlimited.")]
         public int maxSnapshots = 0;
 
+        [Tooltip("Optional capsule filter. When assigned and its Mode is KeepInside/KeepOutside, each " +
+                 "snapshot is pre-filtered on CPU so only the points passing the capsule test are " +
+                 "frozen in space. Pair with PointCloudRenderer.capsuleFilter (same instance) to " +
+                 "fixate the BT-tube-interior points as a body movement trail.")]
+        public PointCloudCapsuleFilter capsuleFilter;
+
         public int SnapshotCount => _snapshots.Count;
 
         private readonly List<GameObject> _snapshots = new List<GameObject>();
@@ -84,13 +90,47 @@ namespace PointCloud
         {
             Clear();
             if (_sharedIndices.IsCreated) _sharedIndices.Dispose();
+            if (_filterScratch.IsCreated) _filterScratch.Dispose();
         }
+
+        // Reusable destination for capsule-filtered snapshots (allocated lazily,
+        // grown as needed). Holds the subset of `buffer` that passed the capsule
+        // test in world space; copied straight into the snapshot mesh below.
+        private NativeArray<ObColorPoint> _filterScratch;
 
         private void CaptureSnapshot(NativeArray<ObColorPoint> buffer, int count, Transform rendererTransform, Material fallbackMaterial)
         {
             // Points stay in renderer-local space; the snapshot GO's world transform is
             // frozen to match the renderer's current world transform, so no per-point
             // CPU matrix multiply is needed. This is the hot path for interval=1.
+            //
+            // When a capsule filter is wired and active, we instead transform each
+            // point to world space, test it against the capsule union, and keep
+            // only the survivors. The snapshot then renders only those frozen
+            // points — accumulating across frames forms a body-motion trail.
+            NativeArray<ObColorPoint> srcBuffer = buffer;
+            int srcCount = count;
+            if (capsuleFilter != null
+                && capsuleFilter.Mode != PointCloudCapsuleFilter.FilterMode.Disabled)
+            {
+                // KeepInside with an empty capsule list culls every point on the
+                // live shader path; mirror that here so cumulative snapshots
+                // don't accidentally freeze the full cloud while the body is
+                // momentarily lost. KeepOutside with empty list keeps every
+                // point (no exclusion zone), again mirroring the shader.
+                if (capsuleFilter.CapsuleCount == 0)
+                {
+                    if (capsuleFilter.Mode == PointCloudCapsuleFilter.FilterMode.KeepInside) return;
+                    // KeepOutside + empty -> pass-through (srcBuffer/srcCount unchanged).
+                }
+                else
+                {
+                    EnsureFilterScratch(count);
+                    srcCount = FilterByCapsules(buffer, count, _filterScratch, rendererTransform);
+                    if (srcCount == 0) return;
+                    srcBuffer = _filterScratch;
+                }
+            }
 
             var mesh = new Mesh
             {
@@ -104,17 +144,17 @@ namespace PointCloud
                 new VertexAttributeDescriptor(VertexAttribute.Position, VertexAttributeFormat.Float32, 3, stream: 0),
                 new VertexAttributeDescriptor(VertexAttribute.Color,    VertexAttributeFormat.Float32, 3, stream: 0),
             };
-            mesh.SetVertexBufferParams(count, attrs);
+            mesh.SetVertexBufferParams(srcCount, attrs);
             // SetVertexBufferData copies into the mesh's own storage, so reusing `buffer`
-            // next frame is safe.
-            mesh.SetVertexBufferData(buffer, 0, 0, count,
+            // / `_filterScratch` next frame is safe.
+            mesh.SetVertexBufferData(srcBuffer, 0, 0, srcCount,
                 flags: MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
 
-            mesh.SetIndexBufferParams(count, IndexFormat.UInt32);
-            EnsureSharedIndices(count);
-            mesh.SetIndexBufferData(_sharedIndices, 0, 0, count,
+            mesh.SetIndexBufferParams(srcCount, IndexFormat.UInt32);
+            EnsureSharedIndices(srcCount);
+            mesh.SetIndexBufferData(_sharedIndices, 0, 0, srcCount,
                 MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
-            mesh.SetSubMesh(0, new SubMeshDescriptor(0, count, MeshTopology.Points),
+            mesh.SetSubMesh(0, new SubMeshDescriptor(0, srcCount, MeshTopology.Points),
                 MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
 
             var go = new GameObject($"_Snapshot_{_snapshots.Count}");
@@ -152,6 +192,38 @@ namespace PointCloud
             if (_sharedIndices.IsCreated) _sharedIndices.Dispose();
             _sharedIndices = new NativeArray<uint>(count, Allocator.Persistent, NativeArrayOptions.UninitializedMemory);
             for (int i = 0; i < count; i++) _sharedIndices[i] = (uint)i;
+        }
+
+        private void EnsureFilterScratch(int capacity)
+        {
+            if (_filterScratch.IsCreated && _filterScratch.Length >= capacity) return;
+            if (_filterScratch.IsCreated) _filterScratch.Dispose();
+            _filterScratch = new NativeArray<ObColorPoint>(capacity, Allocator.Persistent,
+                NativeArrayOptions.UninitializedMemory);
+        }
+
+        // Copy the subset of `src[0..count)` that passes the capsule test (in
+        // world space) into `dst`, preserving order. Returns the survivor count.
+        // Points are transformed local -> world via rendererTransform's TRS
+        // because the capsule list is held in world space (single source of
+        // truth shared between live shader filter and this CPU pre-filter).
+        private int FilterByCapsules(NativeArray<ObColorPoint> src, int count,
+                                      NativeArray<ObColorPoint> dst, Transform rendererTransform)
+        {
+            var l2w = rendererTransform.localToWorldMatrix;
+            int written = 0;
+            for (int i = 0; i < count; i++)
+            {
+                var p = src[i];
+                Vector3 wp = l2w.MultiplyPoint3x4(new Vector3(p.X, p.Y, p.Z));
+                bool inside = capsuleFilter.ContainsWorldPoint(wp);
+                bool keep = capsuleFilter.Mode == PointCloudCapsuleFilter.FilterMode.KeepInside
+                    ? inside
+                    : !inside;
+                if (!keep) continue;
+                dst[written++] = p;
+            }
+            return written;
         }
 
         private void DestroySnapshotAt(int index)

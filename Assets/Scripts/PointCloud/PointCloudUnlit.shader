@@ -17,6 +17,8 @@ Shader "Orbbec/PointCloudUnlit"
         _ObbMode    ("OBB Mode (0=Disabled 1=KeepInside 2=KeepOutside)", Float) = 0
         _DecimKeep  ("Decimation Keep Ratio [0..1]", Float) = 1
         _DecimFrame ("Decimation Frame Counter",   Float) = 0
+        _CapsMode   ("Capsule Mode (0=Disabled 1=KeepInside 2=KeepOutside)", Float) = 0
+        _CapsCount  ("Capsule Count", Float) = 0
     }
     SubShader
     {
@@ -40,6 +42,16 @@ Shader "Orbbec/PointCloudUnlit"
             float    _ObbMode;
             float    _DecimKeep;
             float    _DecimFrame;
+            // Capsule-union filter. _CapsMode == 0 -> disabled (pass-through);
+            // 1 -> KeepInside (pass if inside any capsule); 2 -> KeepOutside.
+            // _CapsA[i].xyz = world endpoint A, _CapsA[i].w = capsule radius.
+            // _CapsB[i].xyz = world endpoint B, _CapsB[i].w unused. _CapsCount
+            // is the live count (0..PointCloudCapsuleFilter.MaxCapsules). Bump
+            // the array length in lockstep with that constant.
+            float    _CapsMode;
+            float    _CapsCount;
+            float4   _CapsA[64];
+            float4   _CapsB[64];
 
             struct appdata
             {
@@ -76,10 +88,43 @@ Shader "Orbbec/PointCloudUnlit"
                 return u < _DecimKeep;
             }
 
+            // True iff worldPos is inside the union of the first _CapsCount
+            // capsules. Each capsule is a segment (_CapsA[i].xyz -> _CapsB[i].xyz)
+            // with radius _CapsA[i].w. Mode 1 keeps inside, mode 2 keeps outside,
+            // mode 0 is pass-through.
+            bool PassCapsules(float3 worldPos)
+            {
+                if (_CapsMode < 0.5) return true;
+                int n = (int)_CapsCount;
+                bool insideAny = false;
+                for (int i = 0; i < n; i++)
+                {
+                    float3 a = _CapsA[i].xyz;
+                    float3 b = _CapsB[i].xyz;
+                    float  r = _CapsA[i].w;
+                    float3 ab = b - a;
+                    float ab2 = dot(ab, ab);
+                    float3 closest;
+                    if (ab2 < 1e-12)
+                    {
+                        closest = a;
+                    }
+                    else
+                    {
+                        float t = saturate(dot(worldPos - a, ab) / ab2);
+                        closest = a + t * ab;
+                    }
+                    float3 d = worldPos - closest;
+                    if (dot(d, d) <= r * r) { insideAny = true; break; }
+                }
+                return (_CapsMode < 1.5) ? insideAny : !insideAny;
+            }
+
             v2f vert(appdata v)
             {
                 v2f o;
-                bool keep = PassObb(v.vertex.xyz) && PassDecim(v.vid);
+                float3 wp = mul(unity_ObjectToWorld, float4(v.vertex.xyz, 1.0)).xyz;
+                bool keep = PassObb(v.vertex.xyz) && PassDecim(v.vid) && PassCapsules(wp);
                 // x > w => outside clip volume => primitive culled on every GPU.
                 o.vertex = keep
                     ? UnityObjectToClipPos(v.vertex)
