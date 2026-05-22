@@ -47,6 +47,11 @@ namespace PointCloud
                  "If null, the first PointCloudDecimater in the scene is used.")]
         public PointCloudDecimater decimater;
 
+        [Tooltip("Optional capsule filter applied to playback points (mirrors the live PointCloudRenderer.capsuleFilter path). " +
+                 "If null, the first PointCloudCapsuleFilter referenced by any live PointCloudRenderer is used, then " +
+                 "the first one found in the scene. Set Mode=Disabled to disable culling without unassigning.")]
+        public PointCloudCapsuleFilter capsuleFilter;
+
         [Header("Files")]
         [Tooltip("Root folder for recordings. Relative paths resolve under Application.persistentDataPath. " +
                  "Leave empty to use '<persistentDataPath>/Recordings/recording'.")]
@@ -1109,6 +1114,21 @@ namespace PointCloud
             return decimater;
         }
 
+        private PointCloudCapsuleFilter ResolveCapsuleFilter()
+        {
+            if (capsuleFilter != null) return capsuleFilter;
+            foreach (var r in CollectSourceRenderers())
+            {
+                if (r != null && r.capsuleFilter != null)
+                {
+                    capsuleFilter = r.capsuleFilter;
+                    return capsuleFilter;
+                }
+            }
+            capsuleFilter = FindFirstObjectByType<PointCloudCapsuleFilter>();
+            return capsuleFilter;
+        }
+
         private void ApplyBoundingBoxFilter(DeviceTrack track)
         {
             if (track.PlaybackRenderer == null) return;
@@ -1118,7 +1138,8 @@ namespace PointCloud
                 track.PlaybackRenderer.enabled = showPointClouds;
             if (_filterMpb == null) _filterMpb = new MaterialPropertyBlock();
             PointCloudShaderFilters.Apply(track.PlaybackRenderer, _filterMpb,
-                track.PlaybackObject.transform, ResolveBoundingBox(), ResolveDecimater());
+                track.PlaybackObject.transform, ResolveBoundingBox(), ResolveDecimater(),
+                ResolveCapsuleFilter());
         }
 
         private void EnsurePlaybackObject(DeviceTrack track)

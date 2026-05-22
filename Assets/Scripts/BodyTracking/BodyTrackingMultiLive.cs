@@ -1006,6 +1006,39 @@ namespace BodyTracking
             return sb.ToString();
         }
 
+        /// <summary>
+        /// Iterate every active body in the merged pool and write each valid bone
+        /// (both endpoints valid) as a world-space capsule into
+        /// <paramref name="filter"/>. Existing entries in the filter are cleared
+        /// first. <paramref name="radius"/> is applied to every capsule. Stops
+        /// once the filter's capacity is reached. Returns the number of capsules
+        /// written.
+        /// </summary>
+        public int PublishBoneCapsulesWorld(PointCloud.PointCloudCapsuleFilter filter, float radius)
+        {
+            if (filter == null) return 0;
+            filter.Clear();
+            if (_pool == null) return 0;
+            int written = 0;
+            foreach (var kv in _pool.Visuals)
+            {
+                var bv = kv.Value;
+                if (bv == null || !bv.IsActive) continue;
+                var bones = BodyTrackingShared.Bones;
+                for (int b = 0; b < bones.Length; b++)
+                {
+                    int ia = (int)bones[b].a;
+                    int ic = (int)bones[b].b;
+                    if (!bv.JointValid(ia) || !bv.JointValid(ic)) continue;
+                    Vector3 wa = bv.WorldOf(bv.JointPosition(ia));
+                    Vector3 wc = bv.WorldOf(bv.JointPosition(ic));
+                    if (!filter.TryAdd(wa, wc, radius)) return written;
+                    written++;
+                }
+            }
+            return written;
+        }
+
         private BodyVisualConfig BuildVisualConfig() => new BodyVisualConfig
         {
             JointRadius = jointRadius,

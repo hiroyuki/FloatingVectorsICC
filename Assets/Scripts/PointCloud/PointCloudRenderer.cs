@@ -161,6 +161,14 @@ namespace PointCloud
                  "each point is independently dropped in the vertex shader via a per-vertex hash.")]
         public PointCloudDecimater decimater;
 
+        [Header("Capsule filter")]
+        [Tooltip("Optional capsule-union filter (typically driven by BodyTracking.BodyTubeCapsuleFeeder). " +
+                 "When assigned and its Mode is not Disabled, points are tested in the vertex shader " +
+                 "against the world-space capsules (bone tubes) and culled per its KeepInside/KeepOutside " +
+                 "mode. Used to keep only the point cloud inside the body tube volume as a movement-trail " +
+                 "source (combine with PointCloudCumulative to fixate the filtered points in space).")]
+        public PointCloudCapsuleFilter capsuleFilter;
+
         [Header("Cumulative")]
         [Tooltip("Optional cumulative snapshotter. When assigned and its No Erase toggle is on, " +
                  "snapshots are captured every 'interval' frames and kept visible until cleared.")]
@@ -506,7 +514,7 @@ namespace PointCloud
         private void UpdateShaderFilterProperties()
         {
             if (_mpb == null) _mpb = new MaterialPropertyBlock();
-            PointCloudShaderFilters.Apply(_meshRenderer, _mpb, transform, boundingBox, decimater);
+            PointCloudShaderFilters.Apply(_meshRenderer, _mpb, transform, boundingBox, decimater, capsuleFilter);
         }
 
         private void UpdateFpsDiagnostics()
