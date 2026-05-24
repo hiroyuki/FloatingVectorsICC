@@ -20,6 +20,20 @@ Shader "Orbbec/PointCloudShadow"
         _ObbMode    ("OBB Mode (0=Disabled 1=KeepInside 2=KeepOutside)", Float) = 0
         _DecimKeep  ("Decimation Keep Ratio [0..1]", Float) = 1
         _DecimFrame ("Decimation Frame Counter",   Float) = 0
+        // World-space XZ offset added to each vertex after floor projection. Used
+        // by FloorOrigin's multi-tap soft shadow to jitter each tap into a Gauss
+        // disc; per-tap alpha is folded into _ShadowColor.a by the caller so N
+        // taps integrate to the same total opacity as a single hard tap.
+        _BlurOffset ("Blur Offset (XZ world)", Vector) = (0, 0, 0, 0)
+
+        // Light model. 0 = orthographic projection straight down to _FloorY
+        // (the original behavior). 1 = directional light: rays along _LightDir.
+        // 2 = positional point light at _LightPos. _LightDir.y must be < 0 in
+        // mode 1, and _LightPos.y must be above the vertex Y in mode 2; the
+        // vertex shader rejects (= offscreens) any vertex that fails these.
+        _LightMode  ("Light Mode (0=Ortho 1=Dir 2=Point)", Float) = 0
+        _LightDir   ("Light Direction (world, downward)", Vector) = (0, -1, 0, 0)
+        _LightPos   ("Light Position (world)", Vector)            = (0, 3, 0, 0)
     }
     SubShader
     {
@@ -44,6 +58,10 @@ Shader "Orbbec/PointCloudShadow"
             float    _DecimFrame;
             float4   _ShadowColor;
             float    _FloorY;
+            float4   _BlurOffset;
+            float    _LightMode;
+            float4   _LightDir;
+            float4   _LightPos;
 
             struct appdata
             {
@@ -80,11 +98,42 @@ Shader "Orbbec/PointCloudShadow"
             v2f vert(appdata v)
             {
                 v2f o;
-                bool keep = PassObb(v.vertex.xyz) && PassDecim(v.vid);
-                float4 worldPos = mul(unity_ObjectToWorld, v.vertex);
-                worldPos.y = _FloorY;
-                o.vertex = keep
-                    ? mul(UNITY_MATRIX_VP, worldPos)
+                float keep = (PassObb(v.vertex.xyz) && PassDecim(v.vid)) ? 1.0 : 0.0;
+
+                float3 V = mul(unity_ObjectToWorld, v.vertex).xyz;
+                float3 floored;
+                if (_LightMode < 0.5)
+                {
+                    // Orthographic — drop Y straight to the floor plane.
+                    floored = float3(V.x, _FloorY, V.z);
+                }
+                else if (_LightMode < 1.5)
+                {
+                    // Directional — march along _LightDir until y = _FloorY.
+                    // Guards: dy must be solidly negative (light pointing down)
+                    // AND t positive (vertex above floor). Either failure → cull
+                    // by zeroing keep so the vertex is offscreened below.
+                    float dy = _LightDir.y;
+                    float t  = (dy < -0.001) ? (_FloorY - V.y) / dy : -1.0;
+                    keep    *= (t > 0.0) ? 1.0 : 0.0;
+                    floored  = V + t * _LightDir.xyz;
+                }
+                else
+                {
+                    // Positional point light — ray from _LightPos through V to floor.
+                    // Guards: vertex must be below the light AND projection in front
+                    // of the light. Same offscreen-on-failure pattern.
+                    float3 L  = _LightPos.xyz;
+                    float  vy = V.y - L.y;
+                    float  s  = (vy < -0.001) ? (_FloorY - L.y) / vy : -1.0;
+                    keep     *= (s > 0.0) ? 1.0 : 0.0;
+                    floored   = L + s * (V - L);
+                }
+                floored.x += _BlurOffset.x;
+                floored.z += _BlurOffset.z;
+
+                o.vertex = (keep > 0.5)
+                    ? mul(UNITY_MATRIX_VP, float4(floored, 1.0))
                     : float4(2.0, 2.0, 2.0, 1.0);
                 return o;
             }

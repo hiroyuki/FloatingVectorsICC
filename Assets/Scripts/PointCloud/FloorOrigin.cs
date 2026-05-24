@@ -57,9 +57,44 @@ namespace PointCloud
         [Tooltip("Project active PointCloudRenderers onto the floor plane as a drop shadow.")]
         public bool showShadow = true;
 
-        [Tooltip("RGBA color of the shadow points. Alpha controls per-point opacity " +
-                 "(stacked points darken via additive alpha-blending).")]
+        [Tooltip("RGBA color of the shadow. Alpha controls per-pixel opacity " +
+                 "(stacked geometry darkens via alpha-blending).")]
         public Color shadowColor = new Color(0f, 0f, 0f, 0.5f);
+
+        [Tooltip("Multi-tap soft-shadow radius in world-space meters (XZ). The " +
+                 "shadow mesh is redrawn shadowBlurSamples times with each tap " +
+                 "offset into a Gauss disc of this radius. 0 = hard shadow.")]
+        [Min(0f)] public float shadowBlurRadius = 0.05f;
+
+        [Tooltip("Number of jittered taps when shadowBlurRadius > 0. More = " +
+                 "smoother but linearly more draw calls per BT mesh. 1 = no blur.")]
+        [Range(1, 16)] public int shadowBlurSamples = 8;
+
+        public enum ShadowLightMode { OrthographicDown, Directional, Positional }
+
+        [Header("Shadow light")]
+        [Tooltip("OrthographicDown = vertices dropped straight to the floor plane " +
+                 "(no light position needed). Directional = parallel rays along " +
+                 "lightDirection (sun-style; shadows stretch toward the opposite " +
+                 "direction). Positional = perspective projection from lightPosition " +
+                 "(point-light style; shadows grow larger with vertex height).")]
+        public ShadowLightMode lightMode = ShadowLightMode.OrthographicDown;
+
+        [Tooltip("World-space light direction (will be normalized). Only used in " +
+                 "Directional mode. Y must be negative (light pointing down). " +
+                 "lightTransform.forward overrides this if assigned.")]
+        public Vector3 lightDirection = new Vector3(0.2f, -1f, 0.1f);
+
+        [Tooltip("World-space light position. Only used in Positional mode. Y must " +
+                 "be above the casting geometry. lightTransform.position overrides " +
+                 "this if assigned.")]
+        public Vector3 lightPosition = new Vector3(0f, 3f, 0f);
+
+        [Tooltip("Optional driver Transform. When assigned, its world position and " +
+                 "forward direction take precedence over the manual lightPosition / " +
+                 "lightDirection values — drop in a Light component or empty GO and " +
+                 "move it in the Scene view to position the shadow interactively.")]
+        public Transform lightTransform;
 
         [Header("Rendering")]
         [Tooltip("Layer used for the grid and shadow draws. Set to a layer the camera renders.")]
@@ -79,6 +114,8 @@ namespace PointCloud
 
         // Cached list reused each LateUpdate to avoid the FindObjectsByType allocation.
         private static readonly List<PointCloudRenderer> s_rendererScratch = new List<PointCloudRenderer>(8);
+        // Reused per-MultiLive sweep so GetComponentsInChildren doesn't allocate per frame.
+        private static readonly List<MeshRenderer> s_meshRendererScratch = new List<MeshRenderer>(128);
 
         // Shader property IDs (mirror PointCloudShaderFilters + PointCloudShadow.shader).
         private static readonly int kObbObjToBox = Shader.PropertyToID("_ObbObjToBox");
@@ -87,6 +124,33 @@ namespace PointCloud
         private static readonly int kDecimFrame  = Shader.PropertyToID("_DecimFrame");
         private static readonly int kFloorY      = Shader.PropertyToID("_FloorY");
         private static readonly int kShadowColor = Shader.PropertyToID("_ShadowColor");
+        private static readonly int kBlurOffset  = Shader.PropertyToID("_BlurOffset");
+        private static readonly int kLightMode   = Shader.PropertyToID("_LightMode");
+        private static readonly int kLightDir    = Shader.PropertyToID("_LightDir");
+        private static readonly int kLightPos    = Shader.PropertyToID("_LightPos");
+
+        // Pre-computed Poisson-disc-like offsets in [-1,1] XZ space, scaled at
+        // draw-time by shadowBlurRadius. Up to 16 entries are referenced; we
+        // only consume the first shadowBlurSamples of them per draw.
+        private static readonly Vector2[] s_blurOffsets =
+        {
+            new Vector2( 0.000f,  0.000f),
+            new Vector2( 0.707f,  0.000f),
+            new Vector2(-0.707f,  0.000f),
+            new Vector2( 0.000f,  0.707f),
+            new Vector2( 0.000f, -0.707f),
+            new Vector2( 0.500f,  0.500f),
+            new Vector2(-0.500f,  0.500f),
+            new Vector2( 0.500f, -0.500f),
+            new Vector2(-0.500f, -0.500f),
+            new Vector2( 0.965f,  0.260f),
+            new Vector2(-0.260f,  0.965f),
+            new Vector2(-0.965f, -0.260f),
+            new Vector2( 0.260f, -0.965f),
+            new Vector2( 0.866f, -0.500f),
+            new Vector2(-0.866f,  0.500f),
+            new Vector2( 0.130f,  0.225f),
+        };
 
         private void OnEnable()
         {
@@ -202,41 +266,147 @@ namespace PointCloud
         private void DrawShadows()
         {
             float floorY = transform.position.y;
-            s_rendererScratch.Clear();
-            // Only live PointCloudRenderers cast a shadow. Snapshots / playback meshes are
-            // out of scope for the initial drop-shadow implementation.
-            var found = FindObjectsByType<PointCloudRenderer>(FindObjectsSortMode.None);
-            for (int i = 0; i < found.Length; i++)
+
+            // Light parameters are constant for every shadow draw this frame, so
+            // push them onto the shared shadow material once instead of stamping
+            // every MPB. Transform overrides take precedence over the Vector3
+            // Inspector values so the user can drag a Light / empty GO around the
+            // Scene view and watch the shadow follow live.
+            Vector3 lightDir = lightTransform != null
+                ? lightTransform.forward
+                : lightDirection;
+            if (lightDir.sqrMagnitude < 1e-8f) lightDir = Vector3.down;
+            lightDir.Normalize();
+            Vector3 lightPos = lightTransform != null
+                ? lightTransform.position
+                : lightPosition;
+            float lightModeFloat = lightMode == ShadowLightMode.OrthographicDown ? 0f
+                                  : lightMode == ShadowLightMode.Directional ? 1f
+                                  : 2f;
+            _shadowMaterial.SetFloat(kLightMode, lightModeFloat);
+            _shadowMaterial.SetVector(kLightDir, new Vector4(lightDir.x, lightDir.y, lightDir.z, 0f));
+            _shadowMaterial.SetVector(kLightPos, new Vector4(lightPos.x, lightPos.y, lightPos.z, 0f));
+
+            int blurSamples = Mathf.Clamp(shadowBlurSamples, 1, s_blurOffsets.Length);
+            // When blur is disabled (radius=0 or samples=1) we still do one tap
+            // at offset (0,0) with full alpha — the loop below handles both.
+            bool doBlur = shadowBlurRadius > 0f && blurSamples > 1;
+            if (!doBlur) blurSamples = 1;
+
+            // 1) Live PointCloudRenderers — typical when devices are connected.
+            var live = FindObjectsByType<PointCloudRenderer>(FindObjectsSortMode.None);
+            for (int i = 0; i < live.Length; i++)
             {
-                var pcr = found[i];
+                var pcr = live[i];
                 if (pcr == null || !pcr.isActiveAndEnabled) continue;
                 var mf = pcr.GetComponent<MeshFilter>();
                 var mesh = mf != null ? mf.sharedMesh : null;
                 if (mesh == null) continue;
 
-                BuildShadowMpb(pcr, floorY);
-                Graphics.DrawMesh(mesh, pcr.transform.localToWorldMatrix, _shadowMaterial,
+                DrawWithBlurTaps(mesh, pcr.transform.localToWorldMatrix, pcr.boundingBox, pcr.decimater,
+                                 pcr.transform, floorY, blurSamples, doBlur);
+            }
+
+            // 2) Playback meshes — `_Playback_<serial>` children of every active
+            // PointCloudRecorder. The recorder owns the bbox / decimater used by
+            // PointCloudShaderFilters on the live cloud, so mirror them here so
+            // the shadow matches what the live mesh actually draws.
+            var recorders = FindObjectsByType<PointCloudRecorder>(FindObjectsSortMode.None);
+            for (int r = 0; r < recorders.Length; r++)
+            {
+                var rec = recorders[r];
+                if (rec == null || !rec.isActiveAndEnabled) continue;
+                var bb = rec.boundingBox;
+                var dec = rec.decimater;
+                int childCount = rec.transform.childCount;
+                for (int c = 0; c < childCount; c++)
+                {
+                    var child = rec.transform.GetChild(c);
+                    if (child == null || !child.gameObject.activeInHierarchy) continue;
+                    if (!child.name.StartsWith("_Playback_")) continue;
+                    var mf = child.GetComponent<MeshFilter>();
+                    var mesh = mf != null ? mf.sharedMesh : null;
+                    if (mesh == null || mesh.vertexCount == 0) continue;
+
+                    DrawWithBlurTaps(mesh, child.localToWorldMatrix, bb, dec, child, floorY,
+                                     blurSamples, doBlur);
+                }
+            }
+
+            // 3) Body-tracking visuals — joint spheres, bone tubes, joint trails,
+            // bone-interp trails. All live as MeshRenderer descendants of every
+            // BodyTrackingMultiLive transform. The BodyTracking asmdef references
+            // PointCloud (not the other way round), so we can't type-reference
+            // BodyTrackingMultiLive here without a cyclic asmdef. Match by full
+            // type name instead — there's only ever one or two MultiLive
+            // instances so the FindObjectsByType<MonoBehaviour> walk is cheap.
+            // The shadow uses the same PointCloudShadow shader with filters
+            // disabled: the shader still collapses every vertex Y to _FloorY,
+            // so triangle meshes (skeleton geometry) flatten to their XZ
+            // footprint on the floor plane.
+            var allMb = FindObjectsByType<MonoBehaviour>(FindObjectsSortMode.None);
+            for (int b = 0; b < allMb.Length; b++)
+            {
+                var mb = allMb[b];
+                if (mb == null || !mb.isActiveAndEnabled) continue;
+                if (mb.GetType().FullName != "BodyTracking.BodyTrackingMultiLive") continue;
+                mb.GetComponentsInChildren(false, s_meshRendererScratch);
+                for (int i = 0; i < s_meshRendererScratch.Count; i++)
+                {
+                    var mr = s_meshRendererScratch[i];
+                    if (mr == null || !mr.enabled) continue;
+                    var mf = mr.GetComponent<MeshFilter>();
+                    var mesh = mf != null ? mf.sharedMesh : null;
+                    if (mesh == null || mesh.vertexCount == 0) continue;
+
+                    DrawWithBlurTaps(mesh, mr.transform.localToWorldMatrix, null, null, mr.transform,
+                                     floorY, blurSamples, doBlur);
+                }
+                s_meshRendererScratch.Clear();
+            }
+        }
+
+        // Draws `mesh` `blurSamples` times via the shadow material, each tap
+        // jittered into a Gauss disc of `shadowBlurRadius` meters in world XZ.
+        // Per-tap alpha is shadowColor.a / blurSamples so the integral over taps
+        // matches a single hard-shadow tap. doBlur=false collapses to one draw
+        // with offset (0,0) and full alpha.
+        private void DrawWithBlurTaps(Mesh mesh, Matrix4x4 modelMatrix,
+                                      PointCloudBoundingBox bb, PointCloudDecimater dec,
+                                      Transform meshTransform, float floorY,
+                                      int blurSamples, bool doBlur)
+        {
+            float perTapAlpha = doBlur ? (shadowColor.a / blurSamples) : shadowColor.a;
+            for (int t = 0; t < blurSamples; t++)
+            {
+                Vector2 offsetUnit = doBlur ? s_blurOffsets[t] : Vector2.zero;
+                Vector4 offsetWorld = new Vector4(offsetUnit.x * shadowBlurRadius, 0f,
+                                                  offsetUnit.y * shadowBlurRadius, 0f);
+                BuildShadowMpb(bb, dec, meshTransform, floorY);
+                _shadowMpb.SetColor(kShadowColor,
+                    new Color(shadowColor.r, shadowColor.g, shadowColor.b, perTapAlpha));
+                _shadowMpb.SetVector(kBlurOffset, offsetWorld);
+                Graphics.DrawMesh(mesh, modelMatrix, _shadowMaterial,
                                   renderLayer, null, 0, _shadowMpb, ShadowCastingMode.Off, false);
             }
         }
 
-        // Mirrors PointCloudShaderFilters.Apply so the shadow sees the same culled points the
-        // live cloud does. Reads filter refs straight from the renderer's public fields.
-        private void BuildShadowMpb(PointCloudRenderer pcr, float floorY)
+        // Mirrors PointCloudShaderFilters.Apply so the shadow sees the same culled
+        // points the live (or playback) cloud does.
+        private void BuildShadowMpb(PointCloudBoundingBox bb, PointCloudDecimater decim,
+                                    Transform meshTransform, float floorY)
         {
             _shadowMpb.Clear();
 
             float obbMode = 0f;
-            var bb = pcr.boundingBox;
             if (bb != null && bb.Mode != PointCloudBoundingBox.FilterMode.Disabled)
             {
                 obbMode = bb.Mode == PointCloudBoundingBox.FilterMode.KeepInside ? 1f : 2f;
-                var m = bb.transform.worldToLocalMatrix * pcr.transform.localToWorldMatrix;
+                var m = bb.transform.worldToLocalMatrix * meshTransform.localToWorldMatrix;
                 _shadowMpb.SetMatrix(kObbObjToBox, m);
             }
             _shadowMpb.SetFloat(kObbMode, obbMode);
 
-            var decim = pcr.decimater;
             float decimKeep = (decim != null && decim.Enabled) ? Mathf.Clamp01(decim.KeepRatio) : 1f;
             _shadowMpb.SetFloat(kDecimKeep, decimKeep);
             _shadowMpb.SetFloat(kDecimFrame, Time.frameCount);

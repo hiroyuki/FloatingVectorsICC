@@ -61,7 +61,12 @@ namespace PointCloud
 
         private void OnValidate()
         {
-            if (isActiveAndEnabled) SyncVisualization();
+            // Defer the actual visualization sync: Unity forbids
+            // DestroyImmediate (and friends) during OnValidate, and toggling
+            // showVisualization off here would call DestroyVisualization
+            // synchronously and log an error every time. Update() runs the
+            // same SyncVisualization() in a context where Destroy is legal,
+            // so just let the next tick pick up the new Inspector value.
         }
 
         private void SyncVisualization()
