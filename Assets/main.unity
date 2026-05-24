@@ -119,6 +119,65 @@ NavMeshSettings:
     debug:
       m_Flags: 0
   m_NavMeshData: {fileID: 0}
+--- !u!1 &7740001
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 7740002}
+  - component: {fileID: 7740003}
+  m_Layer: 0
+  m_Name: Floor
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &7740002
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 7740001}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: -1.25, z: 1.26}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &7740003
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 7740001}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 3f0d4d3013ad4e3d9b89cb0f7da7cc72, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::PointCloud.FloorOrigin
+  boundingBox: {fileID: 1151541767}
+  showGrid: 1
+  gridCells: 20
+  gridSpacing: 0.5
+  gridColor: {r: 0.4, g: 0.4, b: 0.4, a: 1}
+  axisColor: {r: 0.85, g: 0.85, b: 0.85, a: 1}
+  showShadow: 1
+  shadowColor: {r: 0.24528301, g: 0.24528301, b: 0.24528301, a: 0.08627451}
+  shadowBlurRadius: 400
+  shadowBlurSamples: 3
+  lightMode: 0
+  lightDirection: {x: 0.2, y: -1, z: 0.1}
+  lightPosition: {x: 1, y: 3, z: 0}
+  lightTransform: {fileID: 0}
+  renderLayer: 0
 --- !u!1 &18533121
 GameObject:
   m_ObjectHideFlags: 0
@@ -344,7 +403,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 96892899ec43f7246a88f0b3f63d9e67, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::PointCloud.PointCloudCameraManager
-  playbackOnly: 0
+  playbackOnly: 1
   defaultPointMaterial: {fileID: 0}
   depthWidth: 640
   depthHeight: 576
@@ -547,7 +606,7 @@ Camera:
   m_Enabled: 1
   serializedVersion: 2
   m_ClearFlags: 2
-  m_BackGroundColor: {r: 0, g: 0, b: 0, a: 0}
+  m_BackGroundColor: {r: 0.6528301, g: 0.5850836, b: 0.5850836, a: 0}
   m_projectionMatrixMode: 1
   m_GateFitMode: 2
   m_FOVAxisMode: 0
@@ -657,8 +716,8 @@ MonoBehaviour:
     m_Bits: 1
   m_VolumeTrigger: {fileID: 0}
   m_VolumeFrameworkUpdateModeOption: 2
-  m_RenderPostProcessing: 0
-  m_Antialiasing: 0
+  m_RenderPostProcessing: 1
+  m_Antialiasing: 2
   m_AntialiasingQuality: 2
   m_StopNaN: 0
   m_Dithering: 0
@@ -776,13 +835,20 @@ MonoBehaviour:
   jointRadius: 0.005
   skeletonColor: {r: 0.094645746, g: 0.22020026, b: 0.23773581, a: 1}
   showTrails: 1
-  trailColorMode: 0
-  trailFlatColor: {r: 1, g: 1, b: 1, a: 1}
-  trailDuration: 8
-  trailWidth: 0.0082
+  trailColorMode: 3
+  trailFlatColor: {r: 0, g: 0, b: 0, a: 1}
+  frameHueCenter: 0.5
+  frameHueRange: 1
+  frameHueSaturation: 0.85
+  frameHueValue: 1
+  frameHueCyclePeriodFrames: 120
+  trailDuration: 1.5
+  trailWidth: 0.0253
+  boneWidth: 0.023154689
+  boneTrailStep: 0
   accelMin: 0
-  accelMax: 5
-  accelHotColor: {r: 1, g: 0, b: 0, a: 1}
+  accelMax: 20
+  accelHotColor: {r: 0.4943396, g: 0.4943396, b: 0.4943396, a: 1}
   autoAccelMax: 0
   dropLowWhenHigherAvailable: 0
   useOneEuroFilter: 1
@@ -914,59 +980,6 @@ MonoBehaviour:
   processingMode: 4
   smoothing: 0
   autoProcessOnRead: 1
---- !u!1 &7740001
-GameObject:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  serializedVersion: 6
-  m_Component:
-  - component: {fileID: 7740002}
-  - component: {fileID: 7740003}
-  m_Layer: 0
-  m_Name: Floor
-  m_TagString: Untagged
-  m_Icon: {fileID: 0}
-  m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
-  m_IsActive: 1
---- !u!4 &7740002
-Transform:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 7740001}
-  serializedVersion: 2
-  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0, y: 0, z: 0}
-  m_LocalScale: {x: 1, y: 1, z: 1}
-  m_ConstrainProportionsScale: 0
-  m_Children: []
-  m_Father: {fileID: 0}
-  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
---- !u!114 &7740003
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 7740001}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 3f0d4d3013ad4e3d9b89cb0f7da7cc72, type: 3}
-  m_Name:
-  m_EditorClassIdentifier: Assembly-CSharp::PointCloud.FloorOrigin
-  boundingBox: {fileID: 1151541767}
-  showGrid: 1
-  gridCells: 20
-  gridSpacing: 0.5
-  gridColor: {r: 0.4, g: 0.4, b: 0.4, a: 1}
-  axisColor: {r: 0.85, g: 0.85, b: 0.85, a: 1}
-  showShadow: 1
-  shadowColor: {r: 0, g: 0, b: 0, a: 0.5}
-  renderLayer: 0
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0
