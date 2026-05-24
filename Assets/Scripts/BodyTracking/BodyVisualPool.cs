@@ -77,7 +77,7 @@ namespace BodyTracking
         /// has to free a slot to honor MaxBodies — callers use it to clean their
         /// own per-id state (e.g. continuity dictionaries).
         /// </summary>
-        public void Apply(uint id, in k4abt_skeleton_t skel, in BodyVisualConfig cfg, Action<uint> onEvicted = null)
+        public void Apply(uint id, in k4abt_skeleton_t skel, in BodyVisualConfig cfg, double trailNow, Action<uint> onEvicted = null)
         {
             if (!_bodies.TryGetValue(id, out var visual))
             {
@@ -87,7 +87,7 @@ namespace BodyTracking
                     cfg.TrailColorMode, cfg.TrailFlatColor, cfg.FrameHue);
                 _bodies[id] = visual;
             }
-            visual.UpdateFromSkeleton(skel, in cfg);
+            visual.UpdateFromSkeleton(skel, in cfg, trailNow);
             visual.ApplyTrailParams(cfg.ShowTrails, cfg.TrailDuration, cfg.TrailWidth, cfg.TrailColorMode, cfg.TrailFlatColor,
                 cfg.AccelMin, cfg.AccelMax, cfg.AccelHotColor, cfg.FrameHue);
             _lastSeenFrame[id] = Time.frameCount;
@@ -102,7 +102,7 @@ namespace BodyTracking
         /// joints and overrides every JointTrailMesh's accelMax with it so the
         /// AccelHeatmap palette stretches across the actual motion range.
         /// </summary>
-        public void TickTrails(Camera cam, bool autoAccelMax)
+        public void TickTrails(Camera cam, bool autoAccelMax, double trailNow)
         {
             // Feed the rolling window with the latest |a| from every joint.
             _latestAccelsScratch.Clear();
@@ -126,7 +126,7 @@ namespace BodyTracking
                     foreach (var v in _bodies.Values) v.SetTrailAccelMax(p95);
             }
 
-            foreach (var v in _bodies.Values) v.TickTrails(cam);
+            foreach (var v in _bodies.Values) v.TickTrails(cam, trailNow);
         }
 
         /// <summary>
@@ -184,6 +184,16 @@ namespace BodyTracking
             foreach (var v in _bodies.Values) v.Destroy();
             _bodies.Clear();
             _lastSeenFrame.Clear();
+        }
+
+        /// <summary>
+        /// Push <paramref name="cfg"/> into every live visual's geometry / trail
+        /// params without ingesting new samples. Used by the owning MonoBehaviour
+        /// during Editor pause so Inspector tweaks update the visuals live.
+        /// </summary>
+        public void ReapplyConfigToAll(in BodyVisualConfig cfg)
+        {
+            foreach (var v in _bodies.Values) v.ApplyConfigOnly(in cfg);
         }
     }
 }

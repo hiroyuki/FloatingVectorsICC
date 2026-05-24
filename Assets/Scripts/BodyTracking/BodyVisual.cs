@@ -112,10 +112,7 @@ namespace BodyTracking
                 _trails[i] = new JointTrailMesh(_root.transform, $"Trail_{(k4abt_joint_id_t)i}", trailMat);
                 var c = TrailColorFor(i, id, trailColorMode, trailFlatColor, frameHue);
                 _trails[i].Configure(showTrails, trailDuration, trailWidth, c, Color.red,
-                    0f, 56f,
-                    trailColorMode == BodyTrackingShared.TrailColorMode.AccelHeatmap
-                        ? JointTrailMesh.ColorMode.AccelHeatmap
-                        : JointTrailMesh.ColorMode.Base);
+                    0f, 56f, ToJointTrailMode(trailColorMode), frameHue);
             }
 
             _bonesGO = new GameObject("Bones");
@@ -194,7 +191,7 @@ namespace BodyTracking
             return a;
         }
 
-        public void UpdateFromSkeleton(in k4abt_skeleton_t skel, in BodyVisualConfig cfg)
+        public void UpdateFromSkeleton(in k4abt_skeleton_t skel, in BodyVisualConfig cfg, double trailNow)
         {
             // Each pop refreshes the last-known position for every joint with at least
             // LOW confidence. Joints whose confidence flaps below LOW keep their previous
@@ -232,7 +229,7 @@ namespace BodyTracking
                         if (_trails != null && _trails[i] != null)
                         {
                             _trails[i].Clear();
-                            _trails[i].AddSample(Time.timeAsDouble, rawPos);
+                            _trails[i].AddSample(trailNow, rawPos, Time.frameCount);
                         }
                         if (_jointEverValid != null) _jointEverValid[i] = true;
                         _joints[i].localScale = Vector3.one * (jointRadius * 2f);
@@ -249,7 +246,7 @@ namespace BodyTracking
                     if (jump > _maxJumpThisWindow[i]) _maxJumpThisWindow[i] = jump;
                     _jointPositions[i] = newPos;
                     if (_trails != null && _trails[i] != null)
-                        _trails[i].AddSample(Time.timeAsDouble, _jointPositions[i]);
+                        _trails[i].AddSample(trailNow, _jointPositions[i], Time.frameCount);
                 }
                 // else: leave _jointPositions[i] / _jointValid[i] from previous pop.
                 _joints[i].localPosition = _jointPositions[i];
@@ -267,7 +264,7 @@ namespace BodyTracking
             EnsureBoneTrails(cfg.BoneTrailStep);
             if (_boneTrails != null && _currentBoneTrailStep > 0f)
             {
-                double now = Time.timeAsDouble;
+                double now = trailNow;
                 for (int b = 0; b < BodyTrackingShared.Bones.Length; b++)
                 {
                     var (ja, jc) = BodyTrackingShared.Bones[b];
@@ -285,14 +282,15 @@ namespace BodyTracking
                         Vector3 p = Vector3.Lerp(pA, pC, t);
                         var tr = meshList[k];
                         if (tr == null) continue;
+                        int frame = Time.frameCount;
                         if (firstTime)
                         {
                             tr.Clear();
-                            tr.AddSample(now, p);
+                            tr.AddSample(now, p, frame);
                         }
                         else
                         {
-                            tr.AddSample(now, p);
+                            tr.AddSample(now, p, frame);
                         }
                     }
                     if (firstTime && _boneEverValid != null) _boneEverValid[b] = true;
@@ -309,6 +307,45 @@ namespace BodyTracking
             {
                 if (_bonesGO.activeSelf) _bonesGO.SetActive(false);
             }
+        }
+
+        /// <summary>
+        /// Re-apply visual configuration without ingesting a new skeleton sample.
+        /// Used by BodyTrackingMultiLive while the Editor is paused so Inspector
+        /// tweaks (joint radius, bone width, trail step / width / duration / color
+        /// mode, frame-hue params) reflect immediately instead of waiting for
+        /// unpause. Does not touch _jointPositions, _jointValid, or trail sample
+        /// buffers — trail timestamps remain frozen because Time.timeAsDouble is
+        /// frozen during pause, so no samples expire.
+        /// </summary>
+        public void ApplyConfigOnly(in BodyVisualConfig cfg)
+        {
+            float r = Mathf.Max(0f, cfg.JointRadius);
+            for (int i = 0; i < _joints.Length; i++)
+            {
+                if (_joints[i] == null) continue;
+                _joints[i].localScale = Vector3.one * (r * 2f);
+            }
+
+            if (cfg.ShowAnatomicalBones)
+            {
+                RebuildBoneTubes(Mathf.Max(0f, cfg.BoneWidth));
+                SetMaterialColor(_bonesMat, cfg.SkeletonColor);
+                if (!_bonesGO.activeSelf) _bonesGO.SetActive(true);
+            }
+            else if (_bonesGO.activeSelf)
+            {
+                _bonesGO.SetActive(false);
+            }
+
+            // Step change destroys+recreates bone-interp trails; the empty array
+            // is fine — new samples won't arrive until play resumes.
+            EnsureBoneTrails(cfg.BoneTrailStep);
+
+            ApplyTrailParams(cfg.ShowTrails, cfg.TrailDuration, cfg.TrailWidth,
+                             cfg.TrailColorMode, cfg.TrailFlatColor,
+                             cfg.AccelMin, cfg.AccelMax, cfg.AccelHotColor,
+                             cfg.FrameHue);
         }
 
         // Build the bones mesh as a single tube-tri soup: each bone segment gets
@@ -469,9 +506,9 @@ namespace BodyTracking
         // Rebuild every joint's trail mesh against the given camera (for billboard
         // orientation). Called once per frame by the owning MonoBehaviour after the
         // skeleton update so vertex positions / colors are fresh.
-        public void TickTrails(Camera cam)
+        public void TickTrails(Camera cam, double trailNow)
         {
-            double now = Time.timeAsDouble;
+            double now = trailNow;
             if (_trails != null)
             {
                 for (int i = 0; i < _trails.Length; i++)
@@ -589,20 +626,13 @@ namespace BodyTracking
                                             BodyTrackingShared.FrameHueParams frameHue)
         {
             // AccelHeatmap mode treats flat as the cold (base) end; per-vertex
-            // interpolation toward hot is done inside JointTrailMesh.
+            // interpolation toward hot is done inside JointTrailMesh. FrameHue
+            // is also resolved per-vertex inside JointTrailMesh from each
+            // sample's stored frame counter — only flat.a (alpha multiplier)
+            // matters here, the RGB is overwritten in Rebuild.
             if (mode == BodyTrackingShared.TrailColorMode.FlatColor ||
-                mode == BodyTrackingShared.TrailColorMode.AccelHeatmap) return flat;
-            if (mode == BodyTrackingShared.TrailColorMode.FrameHue)
-            {
-                // Hue cycles with Time.frameCount; S/V come from frameHue. flat.a
-                // is preserved as a global trail alpha multiplier so the existing
-                // fade behavior in JointTrailMesh.Rebuild still works. Local is
-                // named distinctly from the per-joint `hue` below: C# CS0136
-                // forbids declaring the same name twice in nested scopes of the
-                // same method, and the per-joint branch already binds `hue`.
-                Color frameHueColor = BodyTrackingShared.FrameHueRGB(in frameHue, Time.frameCount);
-                return new Color(frameHueColor.r, frameHueColor.g, frameHueColor.b, flat.a);
-            }
+                mode == BodyTrackingShared.TrailColorMode.AccelHeatmap ||
+                mode == BodyTrackingShared.TrailColorMode.FrameHue) return flat;
             int idx = mode == BodyTrackingShared.TrailColorMode.PerBody
                 ? (int)(bodyId % 12u)
                 : jointIndex;
@@ -614,15 +644,20 @@ namespace BodyTracking
             return new Color(hue.r * flat.r, hue.g * flat.g, hue.b * flat.b, flat.a);
         }
 
+        private static JointTrailMesh.ColorMode ToJointTrailMode(BodyTrackingShared.TrailColorMode mode)
+        {
+            if (mode == BodyTrackingShared.TrailColorMode.AccelHeatmap) return JointTrailMesh.ColorMode.AccelHeatmap;
+            if (mode == BodyTrackingShared.TrailColorMode.FrameHue) return JointTrailMesh.ColorMode.FrameHue;
+            return JointTrailMesh.ColorMode.Base;
+        }
+
         // Live-tweakable trail params from the Inspector (no need to re-spawn visuals).
         public void ApplyTrailParams(bool show, float duration, float width,
                                       BodyTrackingShared.TrailColorMode mode, Color flat,
                                       float accelMin, float accelMax, Color accelHotColor,
                                       BodyTrackingShared.FrameHueParams frameHue)
         {
-            JointTrailMesh.ColorMode jmMode = mode == BodyTrackingShared.TrailColorMode.AccelHeatmap
-                ? JointTrailMesh.ColorMode.AccelHeatmap
-                : JointTrailMesh.ColorMode.Base;
+            JointTrailMesh.ColorMode jmMode = ToJointTrailMode(mode);
             if (_trails != null)
             {
                 for (int i = 0; i < _trails.Length; i++)
@@ -631,7 +666,7 @@ namespace BodyTracking
                     if (tr == null) continue;
                     var baseColor = TrailColorFor(i, _bodyId, mode, flat, frameHue);
                     tr.Configure(show, duration, width, baseColor, accelHotColor,
-                        accelMin, accelMax, jmMode);
+                        accelMin, accelMax, jmMode, frameHue);
                 }
             }
             if (_boneTrails != null)
@@ -649,7 +684,7 @@ namespace BodyTracking
                         var tr = list[k];
                         if (tr == null) continue;
                         tr.Configure(show, duration, width, baseColor, accelHotColor,
-                            accelMin, accelMax, jmMode);
+                            accelMin, accelMax, jmMode, frameHue);
                     }
                 }
             }

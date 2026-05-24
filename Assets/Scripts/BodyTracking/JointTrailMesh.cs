@@ -17,13 +17,19 @@ namespace BodyTracking
 {
     internal sealed class JointTrailMesh
     {
-        public enum ColorMode { Base, AccelHeatmap }
+        public enum ColorMode { Base, AccelHeatmap, FrameHue }
 
         private struct Sample
         {
             public double Time;
             public Vector3 Pos;
             public float Accel;
+            // Frame counter at the moment AddSample was called. Used by
+            // ColorMode.FrameHue so each ring of the tube paints the hue that
+            // was current when *that* sample was captured — the tube becomes
+            // a gradient from oldest to newest, instead of recoloring as a
+            // single block every frame.
+            public int Frame;
         }
 
         private readonly GameObject _go;
@@ -50,6 +56,7 @@ namespace BodyTracking
         private float _accelMax = 56f;
         private ColorMode _mode = ColorMode.Base;
         private bool _show = true;
+        private BodyTrackingShared.FrameHueParams _frameHue;
 
         // Safety cap: at 30 Hz with trailDuration=20s we expect ~600 samples.
         // 4096 gives generous headroom for longer durations / higher Editor frame
@@ -83,7 +90,8 @@ namespace BodyTracking
 
         public void Configure(bool show, float duration, float width,
                               Color baseColor, Color hotColor,
-                              float accelMin, float accelMax, ColorMode mode)
+                              float accelMin, float accelMax, ColorMode mode,
+                              BodyTrackingShared.FrameHueParams frameHue = default)
         {
             _show = show;
             _duration = Mathf.Max(0.0001f, duration);
@@ -93,6 +101,7 @@ namespace BodyTracking
             _accelMin = accelMin;
             _accelMax = accelMax;
             _mode = mode;
+            _frameHue = frameHue;
             _mr.enabled = show;
         }
 
@@ -110,7 +119,7 @@ namespace BodyTracking
         // expires. Matches Unity TrailRenderer.minVertexDistance (0.005m).
         private const float kMinVertexDistance = 0.005f;
 
-        public void AddSample(double t, Vector3 localPos)
+        public void AddSample(double t, Vector3 localPos, int frame)
         {
             int n = _samples.Count;
             if (n > 0 && (localPos - _samples[n - 1].Pos).sqrMagnitude < kMinVertexDistance * kMinVertexDistance)
@@ -133,7 +142,7 @@ namespace BodyTracking
                     accel = ((vel2 - vel1) / (0.5f * (dt1 + dt2))).magnitude;
                 }
             }
-            _samples.Add(new Sample { Time = t, Pos = localPos, Accel = accel });
+            _samples.Add(new Sample { Time = t, Pos = localPos, Accel = accel, Frame = frame });
             LastAccel = accel;
 
             DropOldSamples(t);
@@ -171,6 +180,20 @@ namespace BodyTracking
             // parity with callers (BodyVisualPool.TickTrails).
             _ = cam;
             if (!_show) { _mesh.Clear(); return; }
+
+            // Clamp "now" to the latest sample's time so the trail's age math
+            // freezes when no fresh samples are arriving (playback paused,
+            // playback stopped, BT pipeline silent). Without this, Time
+            // .timeAsDouble keeps advancing → DropOldSamples eats the front of
+            // the trail and headness fades the alpha toward zero even though
+            // the user explicitly paused. When samples flow normally, latest
+            // is essentially current so this is a no-op.
+            if (_samples.Count > 0)
+            {
+                double latest = _samples[_samples.Count - 1].Time;
+                if (currentTime > latest) currentTime = latest;
+            }
+
             DropOldSamples(currentTime);
 
             int n = _samples.Count;
@@ -268,6 +291,16 @@ namespace BodyTracking
                 {
                     float t = Mathf.Clamp01(Mathf.InverseLerp(_accelMin, _accelMax, _medianAccels[i]));
                     c = Color.Lerp(_baseColor, _hotColor, t);
+                }
+                else if (_mode == ColorMode.FrameHue)
+                {
+                    // Per-ring hue from the frame counter captured when this
+                    // sample was added — so the tube is a gradient over the
+                    // hues that were current along the trail's lifetime. The
+                    // tip (newest sample) shows the current frame's hue; older
+                    // rings retain their original hues.
+                    Color rgb = BodyTrackingShared.FrameHueRGB(in _frameHue, s.Frame);
+                    c = new Color(rgb.r, rgb.g, rgb.b, _baseColor.a);
                 }
                 else
                 {

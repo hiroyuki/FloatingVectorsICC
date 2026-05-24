@@ -354,6 +354,16 @@ namespace BodyTracking
 
         private PointCloudRecorder _subscribedRecorder;
 
+        // Pause-aware trail clock. JointTrailMesh sample timestamps + DropOldSamples
+        // cutoff both flow off _trailNow, which is Time.timeAsDouble minus the time
+        // we've spent inside PointCloudRecorder pauses. While the recorder is paused
+        // _trailNow stays frozen at the moment of pause-entry, so no trail samples
+        // expire while the user tweaks Inspector values to refine the visual.
+        private bool _wasRecorderPaused;
+        private double _pauseStartTime;
+        private double _pausedAccumDuration;
+        private double _trailNow;
+
         private void OnEnable()
         {
             if (!ResolveDependencies()) { _disabledByGuard = true; enabled = false; return; }
@@ -414,6 +424,18 @@ namespace BodyTracking
 
         private void Update()
         {
+            // Pause-aware trail clock. Track entry/exit transitions so the
+            // accumulated paused duration grows only when the recorder is paused.
+            // While paused, _trailNow stays frozen so JointTrailMesh.DropOldSamples
+            // doesn't drop anything (cutoff = frozenNow - duration, sample times
+            // are all <= frozenNow, the in-window subset stays in-window forever).
+            bool nowPaused = _subscribedRecorder != null && _subscribedRecorder.IsPaused;
+            double rawNow = Time.timeAsDouble;
+            if (nowPaused && !_wasRecorderPaused) _pauseStartTime = rawNow;
+            else if (!nowPaused && _wasRecorderPaused) _pausedAccumDuration += rawNow - _pauseStartTime;
+            _wasRecorderPaused = nowPaused;
+            _trailNow = (nowPaused ? _pauseStartTime : rawNow) - _pausedAccumDuration;
+
             // Late-binding for renderers spawned mid-Play by PointCloudCameraManager.
             BindNewRenderers();
 
@@ -430,6 +452,16 @@ namespace BodyTracking
             else if (_perWorkerPools.Count > 0)
             {
                 ClearPerWorkerSkeletons();
+            }
+
+            // While paused, no new merged skeleton arrives → ApplyMergedSkeletons
+            // skipped the per-visual Apply call that would normally push the latest
+            // Inspector values into geometry + trail Configure. Push them now so
+            // jointRadius / boneWidth / boneTrailStep / color tweaks reflect live.
+            if (nowPaused && showSkeleton && _pool != null)
+            {
+                var cfg = BuildVisualConfig();
+                _pool.ReapplyConfigToAll(in cfg);
             }
 
             UpdateCrowdAlert();
@@ -847,13 +879,20 @@ namespace BodyTracking
                 var cluster = _clusterPool[c];
                 if (cluster.MemberIndices.Count < requireMinWorkerCount) continue;
                 BuildMergedSkeleton(cluster, ref _mergedSkel);
-                _pool.Apply(cluster.Id, in _mergedSkel, cfg, OnVisualEvicted);
+                _pool.Apply(cluster.Id, in _mergedSkel, cfg, _trailNow, OnVisualEvicted);
                 _diagPersonsOutput++;
             }
         }
 
         private void GcStaleVisuals()
         {
+            // Skip eviction while playback is paused — Time.frameCount keeps
+            // advancing during pause but no skeleton frames flow, so the
+            // unseen counter would tick past unseenFramesBeforeDestroy and
+            // the BodyVisual (including bones) would be destroyed mid-pause.
+            // The user expects the frame to stay visually frozen for
+            // inspection. Per-worker pools below are gated the same way.
+            if (_subscribedRecorder != null && _subscribedRecorder.IsPaused) return;
             _pool.GcStale(unseenFramesBeforeDestroy, OnVisualEvicted);
         }
 
@@ -893,10 +932,10 @@ namespace BodyTracking
         private void LateUpdate()
         {
             var cam = Camera.main;
-            if (_pool != null) _pool.TickTrails(cam, autoAccelMax);
+            if (_pool != null) _pool.TickTrails(cam, autoAccelMax, _trailNow);
             if (_perWorkerPools != null)
                 foreach (var p in _perWorkerPools.Values)
-                    p.TickTrails(cam, autoAccelMax);
+                    p.TickTrails(cam, autoAccelMax, _trailNow);
         }
 
         /// <summary>
@@ -1373,11 +1412,15 @@ namespace BodyTracking
                 float scale = Mathf.Clamp(perWorkerVisualScale, 0.1f, 1f);
                 cfg.JointRadius = baseCfg.JointRadius * scale;
                 cfg.TrailWidth = baseCfg.TrailWidth * scale;
-                pool.Apply((uint)cand.BodyIndex, in _rawScratchSkel, cfg);
+                pool.Apply((uint)cand.BodyIndex, in _rawScratchSkel, cfg, _trailNow);
             }
             // GC stale per-worker visuals on the same threshold as merged.
-            foreach (var pool in _perWorkerPools.Values)
-                pool.GcStale(unseenFramesBeforeDestroy);
+            // Same pause-gating as merged GcStaleVisuals above.
+            if (_subscribedRecorder == null || !_subscribedRecorder.IsPaused)
+            {
+                foreach (var pool in _perWorkerPools.Values)
+                    pool.GcStale(unseenFramesBeforeDestroy);
+            }
         }
 
         private void ClearPerWorkerSkeletons()
