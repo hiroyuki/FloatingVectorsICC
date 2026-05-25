@@ -169,6 +169,13 @@ namespace PointCloud
                  "source (combine with PointCloudCumulative to fixate the filtered points in space).")]
         public PointCloudCapsuleFilter capsuleFilter;
 
+        [Header("Joint motion field")]
+        [Tooltip("Optional per-joint motion field (typically driven by BodyTracking.BodyJointMotionFeeder). " +
+                 "When assigned and its Mode is not Disabled, every point's nearest joint drives motion " +
+                 "visualization in the vertex shader: distance cull (vertex filter), magnitude/direction " +
+                 "color modulation, and optional velocity-direction vertex displacement. Issue #24.")]
+        public PointCloudJointMotionField jointMotionField;
+
         [Header("Cumulative")]
         [Tooltip("Optional cumulative snapshotter. When assigned and its No Erase toggle is on, " +
                  "snapshots are captured every 'interval' frames and kept visible until cleared.")]
@@ -514,7 +521,7 @@ namespace PointCloud
         private void UpdateShaderFilterProperties()
         {
             if (_mpb == null) _mpb = new MaterialPropertyBlock();
-            PointCloudShaderFilters.Apply(_meshRenderer, _mpb, transform, boundingBox, decimater, capsuleFilter);
+            PointCloudShaderFilters.Apply(_meshRenderer, _mpb, transform, boundingBox, decimater, capsuleFilter, jointMotionField);
         }
 
         private void UpdateFpsDiagnostics()
