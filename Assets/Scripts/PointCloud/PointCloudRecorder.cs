@@ -52,6 +52,11 @@ namespace PointCloud
                  "the first one found in the scene. Set Mode=Disabled to disable culling without unassigning.")]
         public PointCloudCapsuleFilter capsuleFilter;
 
+        [Tooltip("Optional joint motion field applied to playback points (mirrors the live PointCloudRenderer.jointMotionField path). " +
+                 "If null, the first PointCloudJointMotionField referenced by any live PointCloudRenderer is used, then " +
+                 "the first one found in the scene. Set Mode=Disabled to leave playback colors untouched. Issue #24.")]
+        public PointCloudJointMotionField jointMotionField;
+
         [Header("Files")]
         [Tooltip("Root folder for recordings. Relative paths resolve under Application.persistentDataPath. " +
                  "Leave empty to use '<persistentDataPath>/Recordings/recording'.")]
@@ -1129,6 +1134,21 @@ namespace PointCloud
             return capsuleFilter;
         }
 
+        private PointCloudJointMotionField ResolveJointMotionField()
+        {
+            if (jointMotionField != null) return jointMotionField;
+            foreach (var r in CollectSourceRenderers())
+            {
+                if (r != null && r.jointMotionField != null)
+                {
+                    jointMotionField = r.jointMotionField;
+                    return jointMotionField;
+                }
+            }
+            jointMotionField = FindFirstObjectByType<PointCloudJointMotionField>();
+            return jointMotionField;
+        }
+
         private void ApplyBoundingBoxFilter(DeviceTrack track)
         {
             if (track.PlaybackRenderer == null) return;
@@ -1139,7 +1159,7 @@ namespace PointCloud
             if (_filterMpb == null) _filterMpb = new MaterialPropertyBlock();
             PointCloudShaderFilters.Apply(track.PlaybackRenderer, _filterMpb,
                 track.PlaybackObject.transform, ResolveBoundingBox(), ResolveDecimater(),
-                ResolveCapsuleFilter());
+                ResolveCapsuleFilter(), ResolveJointMotionField());
         }
 
         private void EnsurePlaybackObject(DeviceTrack track)

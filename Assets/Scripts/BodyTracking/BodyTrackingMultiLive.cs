@@ -1078,6 +1078,128 @@ namespace BodyTracking
             return written;
         }
 
+        // Per-body finite-difference state for PublishJointMotionsWorld. Holds
+        // each joint's previous world position + smoothed velocity. To avoid
+        // velocity spikes when k4abt loses sight of a joint for N publishes
+        // and the position then jumps back to a real value, we key the
+        // finite-difference dt off BodyVisual's per-joint LastFreshFrame:
+        // velocity is recomputed only when that frame counter actually
+        // advances (= a new BT sample arrived for that joint), using the
+        // realtime delta since the previous fresh sample. Between fresh
+        // arrivals the smoothed value is held (no decay) so visuals stay
+        // stable while BT misses the joint briefly.
+        private sealed class JointMotionState
+        {
+            public Vector3[] PrevWorldPos = new Vector3[K4ABTConsts.K4ABT_JOINT_COUNT];
+            public Vector3[] SmoothedVel = new Vector3[K4ABTConsts.K4ABT_JOINT_COUNT];
+            public int[] LastBtFreshFrame = new int[K4ABTConsts.K4ABT_JOINT_COUNT];
+            public float[] LastBtFreshRealtime = new float[K4ABTConsts.K4ABT_JOINT_COUNT];
+            public bool[] HasPrev = new bool[K4ABTConsts.K4ABT_JOINT_COUNT];
+        }
+        private readonly Dictionary<uint, JointMotionState> _jointMotionStateById = new();
+        private readonly HashSet<uint> _jointMotionSeenIds = new HashSet<uint>();
+        private readonly List<uint> _jointMotionGcScratch = new List<uint>();
+
+        /// <summary>
+        /// Iterate every active body in the merged pool and write each valid
+        /// joint's world-space position + estimated velocity (m/s) into
+        /// <paramref name="field"/>. Existing entries are cleared first.
+        ///
+        /// Velocity is keyed off BodyVisual.LastFreshFrame(j): we only
+        /// recompute the finite difference when that counter advances (= k4abt
+        /// produced a new sample for that joint since our previous publish),
+        /// using the realtime delta between fresh samples. This avoids the
+        /// classic stale-prev-with-tiny-dt spike when BT temporarily loses
+        /// sight of a joint — the joint's reported position is held inside
+        /// BodyVisual during the gap, so naively dividing the eventual jump
+        /// by one publish dt would explode the velocity.
+        /// <paramref name="velocitySmoothing"/> EMA-blends the new raw
+        /// velocity into the held smoothed value (0 = raw, 0.95 = heavily
+        /// smoothed). Stops writing once the field's capacity is reached but
+        /// still finishes state bookkeeping + per-body GC, so the dictionary
+        /// doesn't leak across id flapping. Returns the number of joints
+        /// written.
+        /// </summary>
+        public int PublishJointMotionsWorld(PointCloud.PointCloudJointMotionField field, float velocitySmoothing)
+        {
+            if (field == null) return 0;
+            field.Clear();
+            if (_pool == null) return 0;
+
+            float now = Time.realtimeSinceStartup;
+            float alpha = 1f - Mathf.Clamp(velocitySmoothing, 0f, 0.95f);
+
+            _jointMotionSeenIds.Clear();
+            int written = 0;
+            bool fieldFull = false;
+            foreach (var kv in _pool.Visuals)
+            {
+                uint id = kv.Key;
+                var bv = kv.Value;
+                if (bv == null || !bv.IsActive) continue;
+                _jointMotionSeenIds.Add(id);
+
+                if (!_jointMotionStateById.TryGetValue(id, out var state))
+                {
+                    state = new JointMotionState();
+                    _jointMotionStateById[id] = state;
+                }
+
+                for (int j = 0; j < K4ABTConsts.K4ABT_JOINT_COUNT; j++)
+                {
+                    if (!bv.JointValid(j)) continue;
+                    Vector3 cur = bv.WorldOf(bv.JointPosition(j));
+                    int btFresh = bv.LastFreshFrame(j);
+
+                    if (!state.HasPrev[j])
+                    {
+                        // First time we see this joint for this body: seed
+                        // history with zero velocity so we don't emit a fake
+                        // jump on round one.
+                        state.PrevWorldPos[j] = cur;
+                        state.SmoothedVel[j] = Vector3.zero;
+                        state.LastBtFreshFrame[j] = btFresh;
+                        state.LastBtFreshRealtime[j] = now;
+                        state.HasPrev[j] = true;
+                    }
+                    else if (btFresh != state.LastBtFreshFrame[j])
+                    {
+                        // A new BT sample arrived since our previous publish.
+                        // Use the realtime delta between fresh samples — NOT
+                        // the publish dt — so a multi-frame BT outage divides
+                        // the position delta by the real elapsed time.
+                        float dt = Mathf.Max(1e-4f, now - state.LastBtFreshRealtime[j]);
+                        Vector3 rawVel = (cur - state.PrevWorldPos[j]) / dt;
+                        state.SmoothedVel[j] = Vector3.Lerp(state.SmoothedVel[j], rawVel, alpha);
+                        state.PrevWorldPos[j] = cur;
+                        state.LastBtFreshFrame[j] = btFresh;
+                        state.LastBtFreshRealtime[j] = now;
+                    }
+                    // else: joint position is stale (BT didn't pump a new
+                    // sample for this joint since our last publish). Keep
+                    // SmoothedVel unchanged — decaying it here would cancel
+                    // out the EMA's smoothing benefit during normal BT pop
+                    // cadences slower than the renderer.
+
+                    if (!fieldFull)
+                    {
+                        if (field.TryAdd(cur, state.SmoothedVel[j])) written++;
+                        else fieldFull = true;
+                    }
+                }
+            }
+
+            // GC per-id state for bodies that left the pool since last publish.
+            // Runs unconditionally (even when fieldFull capped writes) so the
+            // dictionary doesn't accumulate stale ids during id flapping.
+            _jointMotionGcScratch.Clear();
+            foreach (var k in _jointMotionStateById.Keys)
+                if (!_jointMotionSeenIds.Contains(k)) _jointMotionGcScratch.Add(k);
+            for (int i = 0; i < _jointMotionGcScratch.Count; i++)
+                _jointMotionStateById.Remove(_jointMotionGcScratch[i]);
+            return written;
+        }
+
         private BodyVisualConfig BuildVisualConfig() => new BodyVisualConfig
         {
             JointRadius = jointRadius,

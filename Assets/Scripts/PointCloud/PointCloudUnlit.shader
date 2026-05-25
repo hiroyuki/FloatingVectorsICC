@@ -19,6 +19,14 @@ Shader "Orbbec/PointCloudUnlit"
         _DecimFrame ("Decimation Frame Counter",   Float) = 0
         _CapsMode   ("Capsule Mode (0=Disabled 1=KeepInside 2=KeepOutside)", Float) = 0
         _CapsCount  ("Capsule Count", Float) = 0
+        _MotionMode         ("Motion Mode (0=Disabled 1=Enabled)", Float) = 0
+        _MotionCount        ("Motion Joint Count",                Float) = 0
+        _MotionColorMode    ("Motion Color (0=None 1=Magnitude 2=Direction)", Float) = 0
+        _MotionMaxDist      ("Motion Max Assign Distance (m, 0=off)", Float) = 0
+        _MotionDisplace     ("Motion Displace Vertices (0=off 1=on)", Float) = 0
+        _MotionDisplaceScale("Motion Displace Scale",             Float) = 0
+        _MotionSpeedMax     ("Motion Speed Max (m/s)",            Float) = 1
+        _MotionHotColor     ("Motion Hot Color",                  Color) = (1, 0.2, 0.05, 1)
     }
     SubShader
     {
@@ -52,6 +60,25 @@ Shader "Orbbec/PointCloudUnlit"
             float    _CapsCount;
             float4   _CapsA[64];
             float4   _CapsB[64];
+            // Joint motion field (issue #24). _MotionMode == 0 -> pass-through
+            // (no nearest-joint loop). When enabled, the vertex shader assigns
+            // each point its nearest joint, then optionally:
+            //   - culls the point if the distance exceeds _MotionMaxDist (>0)
+            //   - displaces the world position by nearestVel * _MotionDisplaceScale
+            //   - tints the color from speed (Magnitude) or direction (Direction)
+            // _MotionPos[i].xyz = world joint position, .w unused.
+            // _MotionVel[i].xyz = world joint velocity (m/s), .w = precomputed speed.
+            // Array length 64 must match PointCloudJointMotionField.MaxJoints.
+            float    _MotionMode;
+            float    _MotionCount;
+            float    _MotionColorMode;
+            float    _MotionMaxDist;
+            float    _MotionDisplace;
+            float    _MotionDisplaceScale;
+            float    _MotionSpeedMax;
+            float4   _MotionHotColor;
+            float4   _MotionPos[64];
+            float4   _MotionVel[64];
 
             struct appdata
             {
@@ -120,16 +147,85 @@ Shader "Orbbec/PointCloudUnlit"
                 return (_CapsMode < 1.5) ? insideAny : !insideAny;
             }
 
+            // Locate the closest joint to `worldPos`. Returns the joint index
+            // (-1 if no joints), its squared distance, and its velocity / speed.
+            // Squared distance avoids a per-iteration sqrt; the caller compares
+            // against maxDist^2 before taking sqrt for display logic.
+            void NearestJoint(float3 worldPos, out int idx, out float distSq, out float3 vel, out float speed)
+            {
+                idx = -1;
+                distSq = 1e30;
+                vel = float3(0.0, 0.0, 0.0);
+                speed = 0.0;
+                int n = (int)_MotionCount;
+                if (n <= 0) return;
+                for (int i = 0; i < n; i++)
+                {
+                    float3 jp = _MotionPos[i].xyz;
+                    float3 d = worldPos - jp;
+                    float dd = dot(d, d);
+                    if (dd < distSq)
+                    {
+                        distSq = dd;
+                        idx = i;
+                        vel = _MotionVel[i].xyz;
+                        speed = _MotionVel[i].w;
+                    }
+                }
+            }
+
             v2f vert(appdata v)
             {
                 v2f o;
                 float3 wp = mul(unity_ObjectToWorld, float4(v.vertex.xyz, 1.0)).xyz;
                 bool keep = PassObb(v.vertex.xyz) && PassDecim(v.vid) && PassCapsules(wp);
+                float3 outColor = v.color;
+                float3 wpOut = wp;
+
+                if (_MotionMode >= 0.5 && _MotionCount >= 0.5)
+                {
+                    int njIdx; float njDistSq; float3 njVel; float njSpeed;
+                    NearestJoint(wp, njIdx, njDistSq, njVel, njSpeed);
+                    if (njIdx >= 0)
+                    {
+                        // Max-assign distance filter (vertex filter from issue
+                        // #24). 0 means disabled. Compares squared values to
+                        // skip the sqrt.
+                        if (_MotionMaxDist > 0.0)
+                        {
+                            float maxSq = _MotionMaxDist * _MotionMaxDist;
+                            if (njDistSq > maxSq) keep = false;
+                        }
+                        if (_MotionDisplace >= 0.5)
+                        {
+                            wpOut = wp + njVel * _MotionDisplaceScale;
+                        }
+                        if (_MotionColorMode >= 0.5 && _MotionColorMode < 1.5)
+                        {
+                            // Magnitude heatmap: lerp v.color -> hotColor by t.
+                            float t = saturate(njSpeed / _MotionSpeedMax);
+                            outColor = lerp(v.color, _MotionHotColor.rgb, t);
+                        }
+                        else if (_MotionColorMode >= 1.5)
+                        {
+                            // Direction encoding: RGB = (normalize(vel)+1)/2.
+                            // Stationary joints render mid-grey.
+                            float3 dir = (njSpeed > 1e-4)
+                                ? (njVel / njSpeed) * 0.5 + 0.5
+                                : float3(0.5, 0.5, 0.5);
+                            outColor = dir;
+                        }
+                    }
+                }
+
                 // x > w => outside clip volume => primitive culled on every GPU.
-                o.vertex = keep
-                    ? UnityObjectToClipPos(v.vertex)
-                    : float4(2.0, 2.0, 2.0, 1.0);
-                o.color = v.color;
+                // Use the (possibly displaced) world position when motion mode
+                // is on so displacement actually moves the vertex on-screen.
+                float4 clipPos = (_MotionMode >= 0.5 && _MotionDisplace >= 0.5)
+                    ? mul(UNITY_MATRIX_VP, float4(wpOut, 1.0))
+                    : UnityObjectToClipPos(v.vertex);
+                o.vertex = keep ? clipPos : float4(2.0, 2.0, 2.0, 1.0);
+                o.color = outColor;
                 return o;
             }
 
