@@ -135,6 +135,17 @@ namespace BodyTracking
                                         int colorW, int colorH)
         {
             if (string.IsNullOrEmpty(serial)) { Debug.LogError("[K4abtWorkerHost] serial is required"); return false; }
+
+            // The worker is a Windows-only k4abt_worker.exe (Azure Kinect Body
+            // Tracking SDK ships Windows binaries only). Skip silently on other
+            // platforms so the project can be opened on macOS / Linux for
+            // playback + post-FX iteration without spawning errors per camera.
+            if (Application.platform != RuntimePlatform.WindowsEditor &&
+                Application.platform != RuntimePlatform.WindowsPlayer)
+            {
+                return false;
+            }
+
             if (_sessions.ContainsKey(serial))
             {
                 Debug.LogWarning($"[K4abtWorkerHost] worker already running for serial '{serial}'");
