@@ -188,6 +188,14 @@ namespace PointCloud
             public string Serial;
 
             // Raw sensor data.
+            //
+            // During the legacy "save at end" path these Lists held actual byte[]
+            // payloads. The new stream-on-record path keeps them present (Step /
+            // Play index them by TimestampNs) but the live capture loop sets
+            // Bytes to null and pushes the bytes directly to disk via the
+            // matching RcsvStreamWriter in PointCloudRecorder._streamWriters.
+            // Read (Load) re-populates with bytes loaded from the just-written
+            // RCSV files, so playback works normally.
             public readonly List<PointCloudRecording.Frame> DepthFrames = new List<PointCloudRecording.Frame>();
             public readonly List<PointCloudRecording.Frame> ColorFrames = new List<PointCloudRecording.Frame>();
             public readonly List<PointCloudRecording.Frame> IRFrames = new List<PointCloudRecording.Frame>();
@@ -248,6 +256,35 @@ namespace PointCloud
         }
         private readonly Dictionary<string, RecordWindowStats> _diagRecordPerSerial = new Dictionary<string, RecordWindowStats>();
         private float _diagWindowStart;
+
+        // --- Stream-on-record state ---
+        //
+        // One StreamWriters per device; each holds up to 3 open RCSV files
+        // (depth/color/IR). Opened lazily on the first frame per sensor so we
+        // get the actual on-the-wire dimensions in the file header, and closed
+        // in StopRecording where Dispose finalizes the trailing index chunk.
+        // Resolved at StartRecording time so HandleRawFrame doesn't have to
+        // hit folderPath / hostname per frame.
+        private string _recordRoot;
+        private string _recordHost;
+        private sealed class StreamWriters
+        {
+            public PointCloudRecording.RcsvStreamWriter Depth;
+            public PointCloudRecording.RcsvStreamWriter Color;
+            public PointCloudRecording.RcsvStreamWriter IR;
+        }
+        private readonly Dictionary<string, StreamWriters> _streamWriters = new Dictionary<string, StreamWriters>();
+
+        // Recorder-level (process-wide) capture diagnostics. The 4-cam gap
+        // analyzer showed all cameras dropping the same timestamps, so the
+        // suspect is host-side (GC pause / main-thread stall / disk I/O blip),
+        // not per-camera USB. Track those signals alongside the per-serial
+        // stats so a noisy second can be correlated with a GC spike or a
+        // stalled Update tick.
+        private int _diagGc0Start, _diagGc1Start, _diagGc2Start;
+        private long _diagMonoMemStart;
+        private float _diagMaxUpdateDtMs;      // longest single Update tick in this window
+        private float _diagMaxUpdateDtAtSec;   // realtimeSinceStartup of the offending tick
 
         // --- Public API (invoked by Inspector buttons or runtime UI) ---
 
@@ -441,162 +478,121 @@ namespace PointCloud
         [ContextMenu("Save")]
         public void Save()
         {
+            // Body data (depth / color / IR RCSV) is now written incrementally
+            // during Rec via RcsvStreamWriter, so Save is metadata-only:
+            // extrinsics.yaml, hostinfo.yaml, dataset_meta.yaml. Call this
+            // again after a Read + re-calibrate cycle to refresh the
+            // extrinsics yaml without re-recording.
             if (_tracks.Count == 0)
             {
-                SetStatus("Save: nothing to save (no recorded frames).", warn: true);
+                SetStatus("Save: nothing to save. Use Read to load a recording first, or Rec to capture a new one.", warn: true);
                 return;
             }
             try
             {
                 string root = ResolveRoot();
                 string host = SafeMachineName();
-                var serials = new List<string>();
-                var calibrations = new List<PointCloudRecording.DeviceCalibration>();
-                int totalDepthFrames = 0;
-                int totalColorFrames = 0;
-                int totalIRFrames = 0;
-
-                // Build the per-serial extrinsics map used for the calibration entries
-                // written below. Priority:
-                //   1. Existing recording-local yaml that already has non-identity
-                //      values (= prior calibration session for THIS recording).
-                //   2. The live PointCloudCameraManager's yaml (= the rig calibration
-                //      Live was using when this recording was made — without this
-                //      fallback, fresh recording folders end up with identity
-                //      extrinsics even when Live was correctly calibrated).
-                //   3. Identity (nothing else available).
-                var existingGlobalBySerial = new Dictionary<string, ObExtrinsic>();
-                try
-                {
-                    string extPath = Path.Combine(PointCloudRecording.CalibrationDir(root), "extrinsics.yaml");
-                    if (File.Exists(extPath))
-                    {
-                        foreach (var cal in PointCloudRecording.ReadExtrinsicsYaml(root))
-                        {
-                            if (cal.GlobalTrColorCamera.HasValue
-                                && !IsIdentityExtrinsic(cal.GlobalTrColorCamera.Value))
-                                existingGlobalBySerial[cal.Serial] = cal.GlobalTrColorCamera.Value;
-                        }
-                    }
-                }
-                catch (Exception preserveEx)
-                {
-                    Debug.LogWarning(
-                        $"[{nameof(PointCloudRecorder)}] could not read existing extrinsics.yaml " +
-                        $"to preserve global_tr_colorCamera: {preserveEx.Message}", this);
-                }
-                // Fallback: pull anything missing from the Live manager's yaml so a
-                // fresh recording folder inherits the rig calibration automatically.
-                if (cameraManager != null)
-                {
-                    try
-                    {
-                        string liveRoot = cameraManager.ResolveExtrinsicsRoot();
-                        string livePath = Path.Combine(PointCloudRecording.CalibrationDir(liveRoot), "extrinsics.yaml");
-                        if (File.Exists(livePath))
-                        {
-                            foreach (var cal in PointCloudRecording.ReadExtrinsicsYaml(liveRoot))
-                            {
-                                if (existingGlobalBySerial.ContainsKey(cal.Serial)) continue;
-                                if (cal.GlobalTrColorCamera.HasValue
-                                    && !IsIdentityExtrinsic(cal.GlobalTrColorCamera.Value))
-                                    existingGlobalBySerial[cal.Serial] = cal.GlobalTrColorCamera.Value;
-                            }
-                        }
-                    }
-                    catch (Exception liveEx)
-                    {
-                        Debug.LogWarning(
-                            $"[{nameof(PointCloudRecorder)}] could not read live manager's extrinsics.yaml: {liveEx.Message}", this);
-                    }
-                }
-
-                // Compute centroid of camera positions so extrinsics.yaml puts world origin at
-                // the centroid for multi-device setups (identity for a single device).
-                var centroid = Vector3.zero;
-                int withParam = 0;
-                foreach (var kv in _tracks)
-                {
-                    if (kv.Value.CameraParam.HasValue)
-                    {
-                        // For single-host single-rig setups we don't have a marker yet, so each
-                        // camera's own color-camera frame is its own origin; centroid across
-                        // cameras stays at zero. Kept as a scaffold for Phase E.
-                        withParam++;
-                    }
-                }
-                _ = centroid; _ = withParam;
-
-                foreach (var kv in _tracks)
-                {
-                    var track = kv.Value;
-                    serials.Add(track.Serial);
-
-                    if (track.DepthFrames.Count > 0)
-                    {
-                        string depthPath = PointCloudRecording.SensorFilePath(
-                            root, host, track.Serial, PointCloudRecording.DepthSensorName);
-                        PointCloudRecording.WriteRcsv(
-                            depthPath,
-                            PointCloudRecording.BuildDepthHeaderYaml(track.Serial, track.DepthWidth, track.DepthHeight),
-                            track.DepthFrames);
-                        totalDepthFrames += track.DepthFrames.Count;
-                    }
-                    if (track.ColorFrames.Count > 0)
-                    {
-                        string colorPath = PointCloudRecording.SensorFilePath(
-                            root, host, track.Serial, PointCloudRecording.ColorSensorName);
-                        PointCloudRecording.WriteRcsv(
-                            colorPath,
-                            PointCloudRecording.BuildColorHeaderYaml(track.Serial, track.ColorWidth, track.ColorHeight),
-                            track.ColorFrames);
-                        totalColorFrames += track.ColorFrames.Count;
-                    }
-                    if (track.IRFrames.Count > 0)
-                    {
-                        string irPath = PointCloudRecording.SensorFilePath(
-                            root, host, track.Serial, PointCloudRecording.IRSensorName);
-                        PointCloudRecording.WriteRcsv(
-                            irPath,
-                            PointCloudRecording.BuildIRHeaderYaml(track.Serial, track.IRWidth, track.IRHeight),
-                            track.IRFrames);
-                        totalIRFrames += track.IRFrames.Count;
-                    }
-
-                    if (track.CameraParam.HasValue)
-                    {
-                        var p = track.CameraParam.Value;
-                        ObExtrinsic? preservedGlobal = null;
-                        if (existingGlobalBySerial.TryGetValue(track.Serial, out var preserved))
-                            preservedGlobal = preserved;
-                        calibrations.Add(new PointCloudRecording.DeviceCalibration
-                        {
-                            Serial           = track.Serial,
-                            ColorIntrinsic   = p.RgbIntrinsic,
-                            DepthIntrinsic   = p.DepthIntrinsic,
-                            ColorDistortion  = p.RgbDistortion,
-                            DepthDistortion  = p.DepthDistortion,
-                            DepthToColor     = p.Transform,
-                            // Pass through whatever the CalibrationWindow wrote earlier;
-                            // null means identity (single-cam or pre-calibration recordings).
-                            GlobalTrColorCamera = preservedGlobal,
-                        });
-                    }
-                }
-
-                string ds = string.IsNullOrWhiteSpace(datasetName) ? Path.GetFileName(root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)) : datasetName;
-                PointCloudRecording.WriteDatasetMetadata(root, host, ds, serials);
-                if (calibrations.Count > 0)
-                    PointCloudRecording.WriteExtrinsicsYaml(root, calibrations);
-
-                SetStatus(
-                    $"Saved {totalDepthFrames} depth / {totalColorFrames} color / {totalIRFrames} IR frame(s) across {_tracks.Count} device(s) to {root}");
+                WriteRecordingMetadata(root, host);
+                SetStatus($"Saved metadata for {_tracks.Count} device(s) to {root}");
             }
             catch (Exception e)
             {
                 SetStatus($"Save failed: {e.Message}", warn: true);
                 Debug.LogException(e, this);
             }
+        }
+
+        // Write the metadata sidecars (extrinsics + hostinfo + dataset_meta)
+        // for whatever is currently in _tracks. Body data is assumed already
+        // present on disk via RcsvStreamWriter (Rec) or pre-existing (Read).
+        // Called from StopRecording immediately after closing writers AND from
+        // Save() so the user can refresh metadata after a Read+recalibrate.
+        private void WriteRecordingMetadata(string root, string host)
+        {
+            var serials = new List<string>();
+            var calibrations = new List<PointCloudRecording.DeviceCalibration>();
+
+            // Build the per-serial extrinsics map used for the calibration
+            // entries below. Priority:
+            //   1. Existing recording-local yaml that already has non-identity
+            //      values (= prior calibration session for THIS recording).
+            //   2. The live PointCloudCameraManager's yaml (= the rig
+            //      calibration Live was using when this recording was made).
+            //   3. Identity (nothing else available).
+            var existingGlobalBySerial = new Dictionary<string, ObExtrinsic>();
+            try
+            {
+                string extPath = Path.Combine(PointCloudRecording.CalibrationDir(root), "extrinsics.yaml");
+                if (File.Exists(extPath))
+                {
+                    foreach (var cal in PointCloudRecording.ReadExtrinsicsYaml(root))
+                    {
+                        if (cal.GlobalTrColorCamera.HasValue
+                            && !IsIdentityExtrinsic(cal.GlobalTrColorCamera.Value))
+                            existingGlobalBySerial[cal.Serial] = cal.GlobalTrColorCamera.Value;
+                    }
+                }
+            }
+            catch (Exception preserveEx)
+            {
+                Debug.LogWarning(
+                    $"[{nameof(PointCloudRecorder)}] could not read existing extrinsics.yaml " +
+                    $"to preserve global_tr_colorCamera: {preserveEx.Message}", this);
+            }
+            if (cameraManager != null)
+            {
+                try
+                {
+                    string liveRoot = cameraManager.ResolveExtrinsicsRoot();
+                    string livePath = Path.Combine(PointCloudRecording.CalibrationDir(liveRoot), "extrinsics.yaml");
+                    if (File.Exists(livePath))
+                    {
+                        foreach (var cal in PointCloudRecording.ReadExtrinsicsYaml(liveRoot))
+                        {
+                            if (existingGlobalBySerial.ContainsKey(cal.Serial)) continue;
+                            if (cal.GlobalTrColorCamera.HasValue
+                                && !IsIdentityExtrinsic(cal.GlobalTrColorCamera.Value))
+                                existingGlobalBySerial[cal.Serial] = cal.GlobalTrColorCamera.Value;
+                        }
+                    }
+                }
+                catch (Exception liveEx)
+                {
+                    Debug.LogWarning(
+                        $"[{nameof(PointCloudRecorder)}] could not read live manager's extrinsics.yaml: {liveEx.Message}", this);
+                }
+            }
+
+            foreach (var kv in _tracks)
+            {
+                var track = kv.Value;
+                serials.Add(track.Serial);
+
+                if (track.CameraParam.HasValue)
+                {
+                    var p = track.CameraParam.Value;
+                    ObExtrinsic? preservedGlobal = null;
+                    if (existingGlobalBySerial.TryGetValue(track.Serial, out var preserved))
+                        preservedGlobal = preserved;
+                    calibrations.Add(new PointCloudRecording.DeviceCalibration
+                    {
+                        Serial           = track.Serial,
+                        ColorIntrinsic   = p.RgbIntrinsic,
+                        DepthIntrinsic   = p.DepthIntrinsic,
+                        ColorDistortion  = p.RgbDistortion,
+                        DepthDistortion  = p.DepthDistortion,
+                        DepthToColor     = p.Transform,
+                        GlobalTrColorCamera = preservedGlobal,
+                    });
+                }
+            }
+
+            string ds = string.IsNullOrWhiteSpace(datasetName)
+                ? Path.GetFileName(root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+                : datasetName;
+            PointCloudRecording.WriteDatasetMetadata(root, host, ds, serials);
+            if (calibrations.Count > 0)
+                PointCloudRecording.WriteExtrinsicsYaml(root, calibrations);
         }
 
         [ContextMenu("Read")]
@@ -824,6 +820,22 @@ namespace PointCloud
                 return;
             }
 
+            // Stream-on-record requires the destination folder to be known at
+            // Rec time so the per-device RcsvStreamWriter can open files. The
+            // legacy "Save later picks the folder" UX is gone — folderPath
+            // must be set in the Inspector before pressing Rec.
+            try
+            {
+                _recordRoot = ResolveRoot();
+                _recordHost = SafeMachineName();
+                Directory.CreateDirectory(_recordRoot);
+            }
+            catch (Exception e)
+            {
+                SetStatus($"Rec: invalid folderPath '{folderPath}' — {e.Message}", warn: true);
+                return;
+            }
+
             foreach (var r in renderers)
             {
                 if (r == null) continue;
@@ -841,14 +853,52 @@ namespace PointCloud
             // compute a huge gap against a stale timestamp from the previous run.
             _diagRecordPerSerial.Clear();
             _diagWindowStart = 0f;
-            SetStatus($"Recording ({_subscribed.Count} device(s))…");
+            // If a prior recording left writers open (e.g. domain reload or a
+            // bug short-circuited StopRecording), finalize them before opening
+            // new files so we don't leak handles or strand half-written RCSVs.
+            FinalizeAnyOpenStreamWriters();
+            SetStatus($"Recording ({_subscribed.Count} device(s)) → {_recordRoot}");
         }
 
         private void StopRecording()
         {
             UnsubscribeAll();
             CurrentState = State.Idle;
-            SetStatus($"Recorded {RecordedFrameCount} frame(s) across {_tracks.Count} device(s).");
+
+            // Close every open RcsvStreamWriter — Dispose finalizes the index
+            // chunk and patches the header. After this the files on disk are
+            // self-describing and Read can load them. Snapshot frame counts
+            // BEFORE dispose since the helper nulls writer refs as it goes,
+            // and call the guarded helper so one stream's IO failure does not
+            // strand the remaining streams (or skip _streamWriters.Clear()).
+            int totalDepth = 0, totalColor = 0, totalIR = 0;
+            foreach (var sw in _streamWriters.Values)
+            {
+                if (sw.Depth != null) totalDepth += sw.Depth.FrameCount;
+                if (sw.Color != null) totalColor += sw.Color.FrameCount;
+                if (sw.IR    != null) totalIR    += sw.IR.FrameCount;
+            }
+            FinalizeAnyOpenStreamWriters();
+
+            // Write the metadata sidecars (extrinsics.yaml, hostinfo.yaml,
+            // dataset metadata, per-device calibration). Body data is already
+            // on disk via the writers above, so this is the "Save" step's
+            // remaining work — wrap it here so the user doesn't have to click
+            // Save separately.
+            try { WriteRecordingMetadata(_recordRoot, _recordHost); }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[{nameof(PointCloudRecorder)}] metadata write after StopRecording failed: {e}", this);
+            }
+
+            // _tracks still has per-track DepthFrames entries with TimestampNs
+            // but Bytes=null (live capture path doesn't copy the buffer into
+            // memory anymore). Playback indexes Bytes, so clear the in-memory
+            // tracks here — the user clicks Read to reload the just-written
+            // files into a Play-able form.
+            int devCount = _tracks.Count;
+            ClearTracks();
+            SetStatus($"Recorded {totalDepth} depth / {totalColor} color / {totalIR} IR frame(s) across {devCount} device(s) to {_recordRoot}. Click Read to load for playback.");
         }
 
         private void HandleRawFrame(PointCloudRenderer src, RawFrameData raw)
@@ -879,30 +929,63 @@ namespace PointCloud
                 rs.LastTsNs = timestampNs;
             }
 
+            // Stream-on-record: hand the SDK's raw buffer straight to the file
+            // writer. No new byte[] is allocated and no reference is retained
+            // after the call, so the Gen2 heap doesn't grow with recording
+            // length and GC pauses don't blow up the device callback timing.
+            // The track lists only get TimestampNs entries (Bytes = null) so
+            // diagnostics / inspector counts remain accurate; the Bytes are
+            // re-populated when the user Loads the just-written files.
+            var sw = GetOrCreateStreamWriters(serial);
             if (raw.DepthByteCount > 0)
             {
-                var depthBuf = new byte[raw.DepthByteCount];
-                Buffer.BlockCopy(raw.DepthBytes, 0, depthBuf, 0, raw.DepthByteCount);
-                track.DepthFrames.Add(new PointCloudRecording.Frame { TimestampNs = timestampNs, Bytes = depthBuf });
+                if (sw.Depth == null)
+                {
+                    string path = PointCloudRecording.SensorFilePath(_recordRoot, _recordHost, serial, PointCloudRecording.DepthSensorName);
+                    string header = PointCloudRecording.BuildDepthHeaderYaml(serial, raw.DepthWidth, raw.DepthHeight);
+                    sw.Depth = new PointCloudRecording.RcsvStreamWriter(path, header);
+                }
+                sw.Depth.WriteFrame(timestampNs, raw.DepthBytes, raw.DepthByteCount);
+                track.DepthFrames.Add(new PointCloudRecording.Frame { TimestampNs = timestampNs });
                 track.DepthWidth = raw.DepthWidth;
                 track.DepthHeight = raw.DepthHeight;
             }
             if (raw.ColorByteCount > 0)
             {
-                var colorBuf = new byte[raw.ColorByteCount];
-                Buffer.BlockCopy(raw.ColorBytes, 0, colorBuf, 0, raw.ColorByteCount);
-                track.ColorFrames.Add(new PointCloudRecording.Frame { TimestampNs = timestampNs, Bytes = colorBuf });
+                if (sw.Color == null)
+                {
+                    string path = PointCloudRecording.SensorFilePath(_recordRoot, _recordHost, serial, PointCloudRecording.ColorSensorName);
+                    string header = PointCloudRecording.BuildColorHeaderYaml(serial, raw.ColorWidth, raw.ColorHeight);
+                    sw.Color = new PointCloudRecording.RcsvStreamWriter(path, header);
+                }
+                sw.Color.WriteFrame(timestampNs, raw.ColorBytes, raw.ColorByteCount);
+                track.ColorFrames.Add(new PointCloudRecording.Frame { TimestampNs = timestampNs });
                 track.ColorWidth = raw.ColorWidth;
                 track.ColorHeight = raw.ColorHeight;
             }
             if (raw.IRByteCount > 0 && raw.IRBytes != null)
             {
-                var irBuf = new byte[raw.IRByteCount];
-                Buffer.BlockCopy(raw.IRBytes, 0, irBuf, 0, raw.IRByteCount);
-                track.IRFrames.Add(new PointCloudRecording.Frame { TimestampNs = timestampNs, Bytes = irBuf });
+                if (sw.IR == null)
+                {
+                    string path = PointCloudRecording.SensorFilePath(_recordRoot, _recordHost, serial, PointCloudRecording.IRSensorName);
+                    string header = PointCloudRecording.BuildIRHeaderYaml(serial, raw.IRWidth, raw.IRHeight);
+                    sw.IR = new PointCloudRecording.RcsvStreamWriter(path, header);
+                }
+                sw.IR.WriteFrame(timestampNs, raw.IRBytes, raw.IRByteCount);
+                track.IRFrames.Add(new PointCloudRecording.Frame { TimestampNs = timestampNs });
                 track.IRWidth = raw.IRWidth;
                 track.IRHeight = raw.IRHeight;
             }
+        }
+
+        private StreamWriters GetOrCreateStreamWriters(string serial)
+        {
+            if (!_streamWriters.TryGetValue(serial, out var sw))
+            {
+                sw = new StreamWriters();
+                _streamWriters[serial] = sw;
+            }
+            return sw;
         }
 
         // --- Playback ---
@@ -1000,8 +1083,28 @@ namespace PointCloud
                 if (track.DepthFrames.Count == 0) continue;
 
                 int cursor = Mathf.Max(track.PlaybackCursor, 0);
+                int cursorBeforeAdvance = track.PlaybackCursor;
                 while (cursor + 1 < track.DepthFrames.Count && track.DepthFrames[cursor + 1].TimestampNs <= playheadNs)
                     cursor++;
+
+                // Playback drop diagnostic: when one Update consumes multiple
+                // frames the operator never sees the intermediate ones — that's
+                // a viewer-side skip (GC stall, mesh upload stall, foreground
+                // window scrolling, etc.). Capture-time drops by contrast are
+                // baked into the RCSV timestamps and surface as gaps in the
+                // analyzer (Window > Diag > Analyze Recording Gaps). Gating on
+                // diagnosticLogging so this stays opt-in.
+                if (diagnosticLogging && cursorBeforeAdvance >= 0)
+                {
+                    int advanced = cursor - cursorBeforeAdvance;
+                    if (advanced > 1)
+                    {
+                        double playheadSec = (playheadNs - _playbackTrackStartNs) / 1e9;
+                        Debug.LogWarning($"[Playback {track.Serial}] viewer skipped {advanced - 1} frame(s) " +
+                                         $"at cursor {cursor + 1}/{track.DepthFrames.Count} " +
+                                         $"(playhead={playheadSec:F2}s, dt={Time.deltaTime * 1000f:F1}ms)");
+                    }
+                }
 
                 if (cursor < track.DepthFrames.Count - 1) anyRemaining = true;
                 if (cursor != track.PlaybackCursor)
@@ -1047,7 +1150,22 @@ namespace PointCloud
         private void PerSecondDiag()
         {
             float now = Time.realtimeSinceStartup;
-            if (_diagWindowStart == 0f) _diagWindowStart = now;
+            // Track the longest Update tick this window — a single 200 ms tick
+            // is enough to drop 6 frames at 30 fps and would explain the gap
+            // patterns we see in the RCSV analyzer. Use unscaledDeltaTime so
+            // Time.timeScale pauses don't masquerade as host stalls.
+            float dtMs = Time.unscaledDeltaTime * 1000f;
+            if (dtMs > _diagMaxUpdateDtMs)
+            {
+                _diagMaxUpdateDtMs = dtMs;
+                _diagMaxUpdateDtAtSec = now;
+            }
+
+            if (_diagWindowStart == 0f)
+            {
+                _diagWindowStart = now;
+                SnapshotProcessDiagBaseline();
+            }
             float elapsed = now - _diagWindowStart;
             if (elapsed < 1f) return;
 
@@ -1060,7 +1178,17 @@ namespace PointCloud
                     double mbps = kv.Value.Bytes / 1048576.0 / elapsed;
                     parts.Add($"{TruncSerial(kv.Key)}={fps:F1}fps,{mbps:F1}MB/s,gap={kv.Value.MaxGapMs:F0}ms");
                 }
-                Debug.Log($"[PointCloudRecorder REC] {string.Join(" | ", parts)}", this);
+
+                int gc0 = System.GC.CollectionCount(0) - _diagGc0Start;
+                int gc1 = System.GC.CollectionCount(1) - _diagGc1Start;
+                int gc2 = System.GC.CollectionCount(2) - _diagGc2Start;
+                long monoNow = UnityEngine.Profiling.Profiler.GetMonoUsedSizeLong();
+                long monoDeltaKB = (monoNow - _diagMonoMemStart) / 1024;
+
+                Debug.Log($"[PointCloudRecorder REC] {string.Join(" | ", parts)} || " +
+                          $"gc=g0:{gc0},g1:{gc1},g2:{gc2} mono+={monoDeltaKB}KB " +
+                          $"maxTick={_diagMaxUpdateDtMs:F0}ms@{_diagMaxUpdateDtAtSec - _diagWindowStart:F2}s", this);
+
                 foreach (var key in new List<string>(_diagRecordPerSerial.Keys))
                 {
                     var rs = _diagRecordPerSerial[key];
@@ -1077,6 +1205,20 @@ namespace PointCloud
             }
 
             _diagWindowStart = now;
+            // Always rebaseline GC/mem at window roll-over so a Play -> Record
+            // transition doesn't report stale-window deltas on the first emit.
+            SnapshotProcessDiagBaseline();
+            _diagMaxUpdateDtMs = 0f;
+        }
+
+        // Snapshot GC counters + mono heap size at the start of every per-second
+        // diag window so the next emit can report the delta.
+        private void SnapshotProcessDiagBaseline()
+        {
+            _diagGc0Start    = System.GC.CollectionCount(0);
+            _diagGc1Start    = System.GC.CollectionCount(1);
+            _diagGc2Start    = System.GC.CollectionCount(2);
+            _diagMonoMemStart = UnityEngine.Profiling.Profiler.GetMonoUsedSizeLong();
         }
 
         private static string TruncSerial(string s)
@@ -1415,14 +1557,40 @@ namespace PointCloud
 
         private void OnDisable()
         {
+            // If we're mid-recording the lifecycle cuts the OnRawFramesReady
+            // pipeline immediately, but the RcsvStreamWriter dispose path is
+            // what flushes the trailing index chunk + patches the header. Skip
+            // it and the just-written files become unreadable. Reuse the
+            // normal StopRecording path so metadata writes also fire.
+            if (CurrentState == State.Recording) StopRecording();
+            else FinalizeAnyOpenStreamWriters();
             UnsubscribeAll();
             if (CurrentState != State.Idle) CurrentState = State.Idle;
         }
 
         private void OnDestroy()
         {
+            if (CurrentState == State.Recording) StopRecording();
+            else FinalizeAnyOpenStreamWriters();
             UnsubscribeAll();
             ClearTracks();
+        }
+
+        // Defensive cleanup for any lingering RcsvStreamWriter (e.g. if
+        // StartRecording opened streams but StopRecording was never called).
+        // No-op when _streamWriters is already empty. Swallows IO exceptions
+        // so we don't mask the original lifecycle event with a write error.
+        private void FinalizeAnyOpenStreamWriters()
+        {
+            if (_streamWriters.Count == 0) return;
+            foreach (var sw in _streamWriters.Values)
+            {
+                try { sw.Depth?.Dispose(); } catch (Exception e) { Debug.LogWarning($"[{nameof(PointCloudRecorder)}] depth writer dispose failed: {e.Message}", this); }
+                try { sw.Color?.Dispose(); } catch (Exception e) { Debug.LogWarning($"[{nameof(PointCloudRecorder)}] color writer dispose failed: {e.Message}", this); }
+                try { sw.IR?.Dispose();    } catch (Exception e) { Debug.LogWarning($"[{nameof(PointCloudRecorder)}] IR writer dispose failed: {e.Message}",    this); }
+                sw.Depth = sw.Color = sw.IR = null;
+            }
+            _streamWriters.Clear();
         }
 
         private void UnsubscribeAll()

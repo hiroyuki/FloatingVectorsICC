@@ -211,6 +211,7 @@ MonoBehaviour:
   interval: 1
   snapshotMaterial: {fileID: 0}
   maxSnapshots: 0
+  capsuleFilter: {fileID: 0}
 --- !u!4 &18533123
 Transform:
   m_ObjectHideFlags: 0
@@ -259,10 +260,12 @@ MonoBehaviour:
   playbackMaterial: {fileID: 0}
   boundingBox: {fileID: 0}
   decimater: {fileID: 0}
-  folderPath: Recordings/recording/_4cam_0519
+  capsuleFilter: {fileID: 0}
+  jointMotionField: {fileID: 0}
+  folderPath: Recordings/recording/_4cam_0526
   datasetName: 
   loop: 1
-  showPointClouds: 0
+  showPointClouds: 1
   playbackRate: 1
   diagnosticLogging: 1
 --- !u!4 &86788059
@@ -403,7 +406,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 96892899ec43f7246a88f0b3f63d9e67, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::PointCloud.PointCloudCameraManager
-  playbackOnly: 1
+  playbackOnly: 0
   defaultPointMaterial: {fileID: 0}
   depthWidth: 640
   depthHeight: 576
@@ -830,8 +833,8 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::BodyTracking.BodyTrackingMultiLive
   cameraManager: {fileID: 925702423}
   workerHost: {fileID: 100997492}
-  showSkeleton: 1
-  showAnatomicalBones: 1
+  showSkeleton: 0
+  showAnatomicalBones: 0
   jointRadius: 0.005
   skeletonColor: {r: 0.094645746, g: 0.22020026, b: 0.23773581, a: 1}
   showTrails: 1

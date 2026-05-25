@@ -96,6 +96,109 @@ namespace PointCloud
             bw.Write(indexChunkOffset);
         }
 
+        /// <summary>
+        /// Streaming RCSV writer. Opens the file at construction (writes magic +
+        /// placeholder index offset + reserved + header), then appends one record
+        /// per <see cref="WriteFrame"/> call. <see cref="Dispose"/> writes the
+        /// trailing index chunk and patches the header's index offset.
+        ///
+        /// Use this from the live capture path so per-frame byte[] allocations
+        /// can be skipped entirely: the SDK's raw buffer is handed straight to
+        /// WriteFrame which copies it into the FileStream. Compared to the
+        /// "buffer everything, WriteRcsv at Save" path, this drops the Gen2
+        /// retained heap to near-zero and lets the OS page cache absorb the
+        /// disk traffic instead of fighting GC.
+        /// </summary>
+        public sealed class RcsvStreamWriter : IDisposable
+        {
+            private readonly string _filePath;
+            private FileStream _fs;
+            private BinaryWriter _bw;
+            private long _indexChunkOffsetPos;
+            // Per-frame file offsets, finalized into the trailing index chunk
+            // on Dispose. ulong is 8 B/entry — 1 hour at 30 fps = ~860 KB total,
+            // a rounding error next to the ~10 GB body data.
+            private readonly List<ulong> _offsets = new List<ulong>();
+            private bool _disposed;
+
+            public string FilePath => _filePath;
+            public int FrameCount => _offsets.Count;
+            public long BytesWritten => _fs?.Position ?? 0;
+
+            public RcsvStreamWriter(string filePath, string headerYaml)
+            {
+                if (string.IsNullOrEmpty(filePath)) throw new ArgumentNullException(nameof(filePath));
+                _filePath = filePath;
+
+                Directory.CreateDirectory(Path.GetDirectoryName(filePath));
+                byte[] headerBytes = Encoding.UTF8.GetBytes(headerYaml ?? string.Empty);
+
+                // Larger write buffer (1 MB) lets several small ts/size headers
+                // batch into one syscall and gives the OS more freedom to
+                // coalesce writes. SequentialScan tells Windows we're appending
+                // only — keeps page-cache eviction policy sensible for the
+                // ~200 MB/s/stream throughput a 4-cam capture pushes.
+                _fs = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.Read,
+                                     bufferSize: 1024 * 1024,
+                                     options: FileOptions.SequentialScan);
+                _bw = new BinaryWriter(_fs, Encoding.UTF8, leaveOpen: false);
+
+                _bw.Write(Encoding.ASCII.GetBytes(Magic));
+                _indexChunkOffsetPos = _fs.Position;
+                _bw.Write((ulong)0);                // placeholder: index chunk offset (patched on Dispose)
+                _bw.Write((ulong)0);                // reserved
+                _bw.Write((uint)headerBytes.Length);
+                _bw.Write(headerBytes);
+            }
+
+            /// <summary>
+            /// Append one record. <paramref name="bytes"/> + <paramref name="byteCount"/>
+            /// follow the byte[]/length pair convention so callers can pass the SDK's
+            /// pre-allocated raw buffer without slicing it. No copy of <paramref name="bytes"/>
+            /// is retained after the call returns; the FileStream takes ownership of the data.
+            /// </summary>
+            public void WriteFrame(ulong timestampNs, byte[] bytes, int byteCount)
+            {
+                if (_disposed) throw new ObjectDisposedException(nameof(RcsvStreamWriter));
+                if (bytes == null || byteCount <= 0) return;
+                _offsets.Add((ulong)_fs.Position);
+                _bw.Write(timestampNs);
+                _bw.Write((uint)byteCount);
+                _bw.Write(bytes, 0, byteCount);
+            }
+
+            public void Dispose()
+            {
+                if (_disposed) return;
+                _disposed = true;
+                if (_bw == null) return;
+                try
+                {
+                    // Trailing index chunk: count + per-record offsets + sentinel
+                    // end-of-data offset. The sentinel equals the position right
+                    // after the last record's bytes (== indexChunkOffset, since
+                    // the index chunk starts immediately after data). This
+                    // matches WriteRcsv's offsets[count] convention so the
+                    // reader's (validRecordCount + 1) -slot offsets array fills
+                    // exactly the same way.
+                    ulong endOfDataPos = (ulong)_fs.Position;
+                    _bw.Write((ulong)_offsets.Count);
+                    for (int i = 0; i < _offsets.Count; i++) _bw.Write(_offsets[i]);
+                    _bw.Write(endOfDataPos);
+                    _bw.Flush();
+
+                    _fs.Position = _indexChunkOffsetPos;
+                    _bw.Write(endOfDataPos);
+                }
+                finally
+                {
+                    _bw.Dispose();
+                    _bw = null;
+                    _fs = null;
+                }
+            }
+        }
+
         /// <summary>Read an RCSV file, returning its records in order.</summary>
         public static List<Frame> ReadRcsv(string filePath)
         {
