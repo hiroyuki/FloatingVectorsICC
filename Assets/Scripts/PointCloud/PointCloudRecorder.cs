@@ -18,8 +18,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
 using Orbbec;
-using Unity.Collections;
-using Unity.Collections.LowLevel.Unsafe;
 using UnityEngine;
 using UnityEngine.Rendering;
 
@@ -75,10 +73,9 @@ namespace PointCloud
         [Header("Playback")]
         public bool loop = true;
 
-        [Tooltip("Render the reconstructed point cloud meshes during playback. " +
-                 "Toggle off to keep merge / BT running without the visual point cloud " +
-                 "(useful when only the body-tracking output is wanted).")]
-        public bool showPointClouds = true;
+        [Tooltip("Where to register playback meshes for visibility toggling. " +
+                 "Auto-found via FindFirstObjectByType if left null.")]
+        public PointCloudView view;
 
         [Min(0.01f)]
         [Tooltip("Playback rate multiplier (1.0 = real time).")]
@@ -220,19 +217,12 @@ namespace PointCloud
             public GameObject PlaybackObject;
             public MeshFilter PlaybackFilter;
             public MeshRenderer PlaybackRenderer;
-            public Mesh PlaybackMesh;
-            public int PlaybackMeshCapacity;
             public int PlaybackCursor;
 
-            // GPU reconstruction buffers (replace CPU NativeArray<ObColorPoint>).
-            // Depth Y16 and color RGB8 are uploaded into raw byte buffers each
-            // frame; the compute shader unprojects into the mesh's vertex buffer
-            // directly. Scratch uint[]s exist because GraphicsBuffer.SetData
-            // requires the element type to match the buffer stride (4).
-            public GraphicsBuffer DepthGpu;
-            public GraphicsBuffer ColorGpu;
-            public uint[] DepthScratchU32;
-            public uint[] ColorScratchU32;
+            // GPU reconstruction (Mesh + GraphicsBuffers + ComputeShader dispatch).
+            // Shared implementation with live capture path; see PointCloudReconstructor.
+            public PointCloudReconstructor Reconstructor;
+            public Mesh PlaybackMesh => Reconstructor?.Mesh;
         }
 
         private readonly Dictionary<string, DeviceTrack> _tracks = new Dictionary<string, DeviceTrack>();
@@ -480,7 +470,8 @@ namespace PointCloud
             Material mat = track.PlaybackRenderer != null
                 ? track.PlaybackRenderer.sharedMaterial
                 : playbackMaterial;
-            cum.OnPlaybackFrame(track.PlaybackMesh, track.PlaybackMeshCapacity,
+            int capacity = track.DepthWidth * track.DepthHeight;
+            cum.OnPlaybackFrame(track.PlaybackMesh, capacity,
                 track.PlaybackObject.transform, mat, ResolveBoundingBox(), ResolveDecimater());
         }
 
@@ -1064,6 +1055,11 @@ namespace PointCloud
             SetStatus("Playback stopped.");
         }
 
+        private void Awake()
+        {
+            if (view == null) view = FindFirstObjectByType<PointCloudView>();
+        }
+
         private void Start()
         {
             // PointCloudCameraManager.playbackOnly means "don't connect to live devices,
@@ -1162,14 +1158,6 @@ namespace PointCloud
                 }
                 ApplyBoundingBoxFilter(track);
             }
-
-            // Honor showPointClouds for accumulated cumulative snapshots as
-            // well — without this, toggling it off hides the live playback
-            // mesh but the frozen snapshots stay visible (separate GO chain).
-            // Property setter is a no-op when the flag matches, so it's safe
-            // to call every tick.
-            var cumForVis = ResolveCumulative();
-            if (cumForVis != null) cumForVis.SnapshotsVisible = showPointClouds;
 
             if (!anyRemaining)
             {
@@ -1349,10 +1337,7 @@ namespace PointCloud
         private void ApplyBoundingBoxFilter(DeviceTrack track)
         {
             if (track.PlaybackRenderer == null) return;
-            // Honor the showPointClouds toggle even while playback keeps reconstructing
-            // and firing BT events — only the visual mesh is hidden.
-            if (track.PlaybackRenderer.enabled != showPointClouds)
-                track.PlaybackRenderer.enabled = showPointClouds;
+            // Visibility is owned by PointCloudView (registered at spawn time).
             if (_filterMpb == null) _filterMpb = new MaterialPropertyBlock();
             PointCloudShaderFilters.Apply(track.PlaybackRenderer, _filterMpb,
                 track.PlaybackObject.transform, ResolveBoundingBox(), ResolveDecimater(),
@@ -1398,8 +1383,8 @@ namespace PointCloud
             track.PlaybackObject = go;
             track.PlaybackFilter = mf;
             track.PlaybackRenderer = mr;
-            track.PlaybackMesh = null;
-            track.PlaybackMeshCapacity = 0;
+            track.Reconstructor = new PointCloudReconstructor(track.Serial);
+            if (view != null) view.Register(mr);
         }
 
         // Wraps the per-frame playback data in a RawFrameData and fires
@@ -1435,177 +1420,47 @@ namespace PointCloud
             }
         }
 
-        // Cached compute shader + property IDs. Loaded from Resources on first
-        // playback frame; failure falls back to CPU reconstruction so playback
-        // never goes silent on a missing shader asset.
-        private static ComputeShader s_reconstructShader;
-        private static int s_reconstructKernel = -1;
-        private static readonly int kId_Depth   = Shader.PropertyToID("_Depth");
-        private static readonly int kId_Color   = Shader.PropertyToID("_Color");
-        private static readonly int kId_Out     = Shader.PropertyToID("_Out");
-        private static readonly int kId_DepthW  = Shader.PropertyToID("_DepthW");
-        private static readonly int kId_DepthH  = Shader.PropertyToID("_DepthH");
-        private static readonly int kId_ColorW  = Shader.PropertyToID("_ColorW");
-        private static readonly int kId_ColorH  = Shader.PropertyToID("_ColorH");
-        private static readonly int kId_HasColor = Shader.PropertyToID("_HasColor");
-        private static readonly int kId_FxD = Shader.PropertyToID("_FxD");
-        private static readonly int kId_FyD = Shader.PropertyToID("_FyD");
-        private static readonly int kId_CxD = Shader.PropertyToID("_CxD");
-        private static readonly int kId_CyD = Shader.PropertyToID("_CyD");
-        private static readonly int kId_FxC = Shader.PropertyToID("_FxC");
-        private static readonly int kId_FyC = Shader.PropertyToID("_FyC");
-        private static readonly int kId_CxC = Shader.PropertyToID("_CxC");
-        private static readonly int kId_CyC = Shader.PropertyToID("_CyC");
-        private static readonly int kId_Rrow0 = Shader.PropertyToID("_Rrow0");
-        private static readonly int kId_Rrow1 = Shader.PropertyToID("_Rrow1");
-        private static readonly int kId_Rrow2 = Shader.PropertyToID("_Rrow2");
-        private static readonly int kId_T     = Shader.PropertyToID("_T");
-
-        private static bool TryLoadReconstructShader()
-        {
-            if (s_reconstructShader != null && s_reconstructKernel >= 0) return true;
-            s_reconstructShader = Resources.Load<ComputeShader>("PointCloudReconstruct");
-            if (s_reconstructShader == null) return false;
-            s_reconstructKernel = s_reconstructShader.FindKernel("CSMain");
-            return s_reconstructKernel >= 0;
-        }
-
+        // Per-track playback reconstruction. Delegates the entire GPU pipeline
+        // (mesh / buffers / shader dispatch) to PointCloudReconstructor, which
+        // is shared with the live capture path (PointCloudRenderer).
         private void ReconstructAndUpload(
             DeviceTrack track,
             PointCloudRecording.Frame depthFrame,
             PointCloudRecording.Frame colorFrame)
         {
-            if (!track.CameraParam.HasValue)
-            {
-                // No intrinsics — nothing to reconstruct. Blank the mesh.
-                if (track.PlaybackMesh != null)
-                {
-                    track.PlaybackMesh.SetSubMesh(0, new SubMeshDescriptor(0, 0, MeshTopology.Points),
-                        MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
-                }
-                return;
-            }
             int dw = track.DepthWidth, dh = track.DepthHeight;
             if (dw <= 0 || dh <= 0) return;
-            if (!TryLoadReconstructShader())
+
+            EnsurePlaybackObject(track);
+
+            if (!track.CameraParam.HasValue)
+            {
+                // No intrinsics — nothing to reconstruct. Blank the mesh so the
+                // last frame's points don't linger on the playback GO.
+                track.Reconstructor.BlankMesh();
+                return;
+            }
+
+            int cw = track.ColorWidth, ch = track.ColorHeight;
+            bool hasColor = colorFrame != null && colorFrame.Bytes != null && cw > 0 && ch > 0;
+            byte[] colorBytes = hasColor ? colorFrame.Bytes : null;
+            int colorByteCount = hasColor ? colorFrame.Bytes.Length : 0;
+
+            if (!track.Reconstructor.Dispatch(
+                    depthFrame.Bytes, depthFrame.Bytes.Length, dw, dh,
+                    colorBytes, colorByteCount, cw, ch,
+                    track.CameraParam.Value))
             {
                 Debug.LogError(
                     $"[{nameof(PointCloudRecorder)}] PointCloudReconstruct compute shader not found in Resources/", this);
                 return;
             }
 
-            int capacity = dw * dh;
-            int cw = track.ColorWidth, ch = track.ColorHeight;
-            bool hasColor = colorFrame != null && colorFrame.Bytes != null && cw > 0 && ch > 0;
-
-            EnsurePlaybackObject(track);
-            EnsurePlaybackMesh(track, capacity);
-            EnsureDepthGpuBuffer(track, depthFrame.Bytes.Length);
-            EnsureColorGpuBuffer(track, hasColor ? colorFrame.Bytes.Length : 4);
-
-            // Upload depth + color into GPU raw buffers. Buffer stride is 4
-            // (uint), so we Blockcopy bytes into the uint[] scratch first.
-            int depthBytes = depthFrame.Bytes.Length;
-            Buffer.BlockCopy(depthFrame.Bytes, 0, track.DepthScratchU32, 0, depthBytes);
-            track.DepthGpu.SetData(track.DepthScratchU32, 0, 0, track.DepthScratchU32.Length);
-            if (hasColor)
-            {
-                int colorBytes = colorFrame.Bytes.Length;
-                Buffer.BlockCopy(colorFrame.Bytes, 0, track.ColorScratchU32, 0, colorBytes);
-                track.ColorGpu.SetData(track.ColorScratchU32, 0, 0, track.ColorScratchU32.Length);
-            }
-
-            var cam = track.CameraParam.Value;
-            var shader = s_reconstructShader;
-            int k = s_reconstructKernel;
-            var vbuf = track.PlaybackMesh.GetVertexBuffer(0);
-
-            shader.SetBuffer(k, kId_Depth, track.DepthGpu);
-            shader.SetBuffer(k, kId_Color, track.ColorGpu);
-            shader.SetBuffer(k, kId_Out,   vbuf);
-            shader.SetInt(kId_DepthW, dw);
-            shader.SetInt(kId_DepthH, dh);
-            shader.SetInt(kId_ColorW, cw);
-            shader.SetInt(kId_ColorH, ch);
-            shader.SetInt(kId_HasColor, hasColor ? 1 : 0);
-            shader.SetFloat(kId_FxD, cam.DepthIntrinsic.Fx);
-            shader.SetFloat(kId_FyD, cam.DepthIntrinsic.Fy);
-            shader.SetFloat(kId_CxD, cam.DepthIntrinsic.Cx);
-            shader.SetFloat(kId_CyD, cam.DepthIntrinsic.Cy);
-            shader.SetFloat(kId_FxC, cam.RgbIntrinsic.Fx);
-            shader.SetFloat(kId_FyC, cam.RgbIntrinsic.Fy);
-            shader.SetFloat(kId_CxC, cam.RgbIntrinsic.Cx);
-            shader.SetFloat(kId_CyC, cam.RgbIntrinsic.Cy);
-            var R = cam.Transform.Rot;
-            shader.SetVector(kId_Rrow0, new Vector4(R[0], R[1], R[2], 0f));
-            shader.SetVector(kId_Rrow1, new Vector4(R[3], R[4], R[5], 0f));
-            shader.SetVector(kId_Rrow2, new Vector4(R[6], R[7], R[8], 0f));
-            var T = cam.Transform.Trans;
-            shader.SetVector(kId_T, new Vector4(T[0], T[1], T[2], 0f));
-
-            int gx = (dw + 7) / 8;
-            int gy = (dh + 7) / 8;
-            shader.Dispatch(k, gx, gy, 1);
-            vbuf.Dispose();
-
-            track.PlaybackMesh.SetSubMesh(0, new SubMeshDescriptor(0, capacity, MeshTopology.Points),
-                MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
-        }
-
-        // Build / resize the mesh so the compute can write into its vertex
-        // buffer directly. vertexBufferTarget = Raw is required for compute
-        // RWByteAddressBuffer access. Capacity is dw*dh (every depth pixel
-        // gets a vertex; invalid pixels are emitted offscreen and clip-culled).
-        private void EnsurePlaybackMesh(DeviceTrack track, int capacity)
-        {
-            if (track.PlaybackMesh != null && track.PlaybackMeshCapacity >= capacity) return;
-
-            if (track.PlaybackMesh != null) Destroy(track.PlaybackMesh);
-            var mesh = new Mesh
-            {
-                name = $"PlaybackMesh_{track.Serial}",
-                indexFormat = IndexFormat.UInt32,
-                bounds = new Bounds(Vector3.zero, Vector3.one * 100f),
-            };
-            mesh.vertexBufferTarget |= GraphicsBuffer.Target.Raw;
-            var attrs = new[]
-            {
-                new VertexAttributeDescriptor(VertexAttribute.Position, VertexAttributeFormat.Float32, 3, stream: 0),
-                new VertexAttributeDescriptor(VertexAttribute.Color,    VertexAttributeFormat.Float32, 3, stream: 0),
-            };
-            mesh.SetVertexBufferParams(capacity, attrs);
-            mesh.SetIndexBufferParams(capacity, IndexFormat.UInt32);
-            var indices = new NativeArray<uint>(capacity, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
-            try
-            {
-                for (int i = 0; i < capacity; i++) indices[i] = (uint)i;
-                mesh.SetIndexBufferData(indices, 0, 0, capacity,
-                    MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
-            }
-            finally { indices.Dispose(); }
-            track.PlaybackMesh = mesh;
-            track.PlaybackMeshCapacity = capacity;
-            track.PlaybackFilter.sharedMesh = mesh;
-        }
-
-        private static void EnsureDepthGpuBuffer(DeviceTrack track, int byteCount)
-        {
-            int uintCount = (byteCount + 3) / 4;
-            if (track.DepthGpu != null && track.DepthScratchU32 != null && track.DepthScratchU32.Length >= uintCount)
-                return;
-            track.DepthGpu?.Dispose();
-            track.DepthGpu = new GraphicsBuffer(GraphicsBuffer.Target.Raw, uintCount, sizeof(uint));
-            track.DepthScratchU32 = new uint[uintCount];
-        }
-
-        private static void EnsureColorGpuBuffer(DeviceTrack track, int byteCount)
-        {
-            int uintCount = Math.Max(1, (byteCount + 3) / 4);
-            if (track.ColorGpu != null && track.ColorScratchU32 != null && track.ColorScratchU32.Length >= uintCount)
-                return;
-            track.ColorGpu?.Dispose();
-            track.ColorGpu = new GraphicsBuffer(GraphicsBuffer.Target.Raw, uintCount, sizeof(uint));
-            track.ColorScratchU32 = new uint[uintCount];
+            // Mesh may have been (re-)allocated by EnsureMesh inside Dispatch on
+            // the very first frame, so keep MeshFilter.sharedMesh in sync. Cheap
+            // no-op after the first frame.
+            if (track.PlaybackFilter.sharedMesh != track.Reconstructor.Mesh)
+                track.PlaybackFilter.sharedMesh = track.Reconstructor.Mesh;
         }
 
         // --- Lifecycle / helpers ---
@@ -1665,15 +1520,13 @@ namespace PointCloud
             foreach (var kv in _tracks)
             {
                 var track = kv.Value;
-                track.DepthGpu?.Dispose(); track.DepthGpu = null;
-                track.ColorGpu?.Dispose(); track.ColorGpu = null;
-                track.DepthScratchU32 = null;
-                track.ColorScratchU32 = null;
-                if (track.PlaybackMesh != null)
-                {
-                    if (Application.isPlaying) Destroy(track.PlaybackMesh);
-                    else DestroyImmediate(track.PlaybackMesh);
-                }
+                // Reconstructor disposes its own GraphicsBuffers, scratch arrays,
+                // and (importantly) the Mesh it owns — caller MUST NOT manually
+                // Destroy track.PlaybackMesh.
+                if (view != null && track.PlaybackRenderer != null)
+                    view.Unregister(track.PlaybackRenderer);
+                track.Reconstructor?.Dispose();
+                track.Reconstructor = null;
                 if (track.PlaybackObject != null)
                 {
                     if (Application.isPlaying) Destroy(track.PlaybackObject);
