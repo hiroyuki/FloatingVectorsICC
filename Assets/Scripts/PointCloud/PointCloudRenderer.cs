@@ -449,7 +449,7 @@ namespace PointCloud
                         n = Math.Min(slot.PointCount, maxPoints);
 
                         _stageSw.Restart();
-                        cumulative?.OnFrame(slot.Buffer, n, transform, pointMaterial);
+                        cumulative?.OnFrame(slot.Buffer, n, transform, pointMaterial, boundingBox, decimater);
                         _stageSw.Stop();
                         if (logFps) _cumulTicks += _stageSw.ElapsedTicks;
 

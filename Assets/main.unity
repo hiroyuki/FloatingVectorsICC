@@ -210,8 +210,9 @@ MonoBehaviour:
   noErase: 0
   interval: 1
   snapshotMaterial: {fileID: 0}
-  maxSnapshots: 0
+  maxSnapshots: 30
   capsuleFilter: {fileID: 0}
+  diagnosticLogging: 1
 --- !u!4 &18533123
 Transform:
   m_ObjectHideFlags: 0
@@ -262,6 +263,7 @@ MonoBehaviour:
   decimater: {fileID: 0}
   capsuleFilter: {fileID: 0}
   jointMotionField: {fileID: 0}
+  cumulative: {fileID: 0}
   folderPath: Recordings/recording/_4cam_0526
   datasetName: 
   loop: 1
@@ -406,7 +408,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 96892899ec43f7246a88f0b3f63d9e67, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::PointCloud.PointCloudCameraManager
-  playbackOnly: 0
+  playbackOnly: 1
   defaultPointMaterial: {fileID: 0}
   depthWidth: 640
   depthHeight: 576
@@ -839,19 +841,19 @@ MonoBehaviour:
   skeletonColor: {r: 0.094645746, g: 0.22020026, b: 0.23773581, a: 1}
   showTrails: 1
   trailColorMode: 3
-  trailFlatColor: {r: 0, g: 0, b: 0, a: 1}
+  trailFlatColor: {r: 0.97735846, g: 0.15305795, b: 0.15305795, a: 1}
   frameHueCenter: 0.5
   frameHueRange: 1
   frameHueSaturation: 0.85
   frameHueValue: 1
   frameHueCyclePeriodFrames: 120
-  trailDuration: 1.5
+  trailDuration: 20
   trailWidth: 0.0253
   boneWidth: 0.023154689
-  boneTrailStep: 0
+  boneTrailStep: 0.092
   accelMin: 0
   accelMax: 20
-  accelHotColor: {r: 0.4943396, g: 0.4943396, b: 0.4943396, a: 1}
+  accelHotColor: {r: 1, g: 1, b: 1, a: 1}
   autoAccelMax: 0
   dropLowWhenHigherAvailable: 0
   useOneEuroFilter: 1

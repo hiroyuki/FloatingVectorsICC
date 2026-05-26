@@ -1,0 +1,115 @@
+// GPU filter + stream-compaction for cumulative snapshots. Replaces
+// PointCloudCumulative.FilterForCapture (CPU loop) which was ~45 ms per
+// capture at dw*dh=370k inputs. The compute reads the source vertex buffer
+// (24 bytes/vertex: float3 pos + float3 color, layout matches ObColorPoint),
+// tests each point against sanity range, decim, OBB, and capsule filters,
+// and atomic-appends survivors to the destination vertex buffer. The host
+// reads back _Counter[0] (4 bytes) to size the snapshot mesh's SubMesh.
+//
+// All filter logic mirrors the shader-side equivalents in
+// PointCloudUnlit.shader (PassObb / PassDecim / PassCapsules) so the
+// snapshot's frozen subset is exactly what the live view would show.
+
+#pragma kernel CSMain
+
+ByteAddressBuffer _Src;            // input vertices, raw bytes (24 per vert)
+RWByteAddressBuffer _Dst;          // output vertices, raw bytes (24 per vert)
+RWStructuredBuffer<uint> _Counter; // one uint, atomic append index
+
+uint  _Count;          // input vertex count
+float _SanityRange;    // |x|,|y|,|z| above this => discard (drops 1e10 dummies)
+
+float _KeepRatio;      // [0,1]: probability a point is kept
+uint  _DecimEnabled;   // 0 = skip decim (KeepRatio==1 fast path)
+uint  _FrameSeed;      // hash salt so successive snapshots get distinct subsets
+
+float4x4 _ObjToWorld;  // renderer/playback transform's localToWorld
+
+uint  _BboxMode;       // 0=Disabled, 1=KeepInside, 2=KeepOutside
+float4x4 _WorldToBbox; // bbox transform's worldToLocal (only used when mode != 0)
+
+uint  _CapsMode;       // 0=Disabled, 1=KeepInside, 2=KeepOutside
+uint  _CapsCount;
+float4 _CapsA[64];     // xyz = endpoint A, w = capsule radius
+float4 _CapsB[64];     // xyz = endpoint B (w unused; radius lives in A.w)
+
+// Same xorshift as PointCloudUnlit's PassDecim — stable per (vid, frameSeed).
+bool PassDecim(uint vid)
+{
+    if (_DecimEnabled == 0u) return true;
+    uint h = vid * 2654435761u + _FrameSeed;
+    h ^= h << 13;
+    h ^= h >> 17;
+    h ^= h << 5;
+    float u = (h & 0x00FFFFFFu) * (1.0 / 16777216.0);
+    return u < _KeepRatio;
+}
+
+bool PassBbox(float3 wp)
+{
+    if (_BboxMode == 0u) return true;
+    float3 lp = mul(_WorldToBbox, float4(wp, 1.0)).xyz;
+    bool inside = abs(lp.x) <= 0.5 && abs(lp.y) <= 0.5 && abs(lp.z) <= 0.5;
+    return (_BboxMode == 1u) ? inside : !inside;
+}
+
+// Union-of-capsules test, mirrors PointCloudUnlit.PassCapsules. _CapsCount
+// is bounded by the shared MaxCapsules constant (64) on the C# side.
+bool PassCapsules(float3 wp)
+{
+    if (_CapsMode == 0u) return true;
+    bool insideAny = false;
+    for (uint i = 0; i < _CapsCount; i++)
+    {
+        float3 a = _CapsA[i].xyz;
+        float3 b = _CapsB[i].xyz;
+        float  r = _CapsA[i].w;
+        float3 ab = b - a;
+        float  ab2 = dot(ab, ab);
+        float3 closest;
+        if (ab2 < 1e-12)
+        {
+            closest = a;
+        }
+        else
+        {
+            float t = saturate(dot(wp - a, ab) / ab2);
+            closest = a + t * ab;
+        }
+        float3 d = wp - closest;
+        if (dot(d, d) <= r * r) { insideAny = true; break; }
+    }
+    return (_CapsMode == 1u) ? insideAny : !insideAny;
+}
+
+[numthreads(64, 1, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _Count) return;
+
+    uint inOff = id.x * 24u;
+    float3 p = asfloat(_Src.Load3(inOff));
+
+    // Sanity range — kills playback's invalid-depth dummies at (1e10,1e10,1e10).
+    if (abs(p.x) > _SanityRange) return;
+    if (abs(p.y) > _SanityRange) return;
+    if (abs(p.z) > _SanityRange) return;
+
+    if (!PassDecim(id.x)) return;
+
+    float3 wp = mul(_ObjToWorld, float4(p, 1.0)).xyz;
+    if (!PassBbox(wp)) return;
+    if (!PassCapsules(wp)) return;
+
+    // Read color only after the keep tests pass (saves bandwidth for
+    // the ~70% of input points that fail sanity in the playback case).
+    float3 col = asfloat(_Src.Load3(inOff + 12u));
+
+    // Atomic stream compaction. Order-non-deterministic but that's fine
+    // for point cloud visualisation — the snapshot is a frozen subset.
+    uint outIdx;
+    InterlockedAdd(_Counter[0], 1u, outIdx);
+    uint outOff = outIdx * 24u;
+    _Dst.Store3(outOff,        asuint(p));
+    _Dst.Store3(outOff + 12u,  asuint(col));
+}

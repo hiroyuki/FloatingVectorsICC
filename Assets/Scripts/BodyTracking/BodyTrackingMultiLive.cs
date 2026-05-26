@@ -53,8 +53,8 @@ namespace BodyTracking
         [Tooltip("Show the bone lines between joints.")]
         public bool showAnatomicalBones = true;
 
-        [Tooltip("Joint marker radius (m).")]
-        [Range(0.005f, 0.2f)] public float jointRadius = 0.05f;
+        [Tooltip("Joint marker radius (m). Set to 0 to hide joint spheres entirely (bones stay visible if showAnatomicalBones is on).")]
+        [Range(0f, 0.2f)] public float jointRadius = 0.05f;
 
         [Tooltip("Skeleton color. Bones inherit this; joints are slightly brighter.")]
         public Color skeletonColor = new Color(0.2f, 0.9f, 1f, 1f);

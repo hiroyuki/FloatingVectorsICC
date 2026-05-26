@@ -57,6 +57,13 @@ namespace PointCloud
                  "the first one found in the scene. Set Mode=Disabled to leave playback colors untouched. Issue #24.")]
         public PointCloudJointMotionField jointMotionField;
 
+        [Tooltip("Optional cumulative snapshotter for playback. When assigned and its No Erase toggle is on, the playback " +
+                 "mesh's vertex buffer is read back from GPU and snapshotted every 'interval' advanced playback frames. " +
+                 "If null, the first PointCloudCumulative in the scene is used. Snapshots include all reconstructed " +
+                 "vertices (invalid depth pixels are written far off-screen by the reconstruct shader and clip-culled " +
+                 "at draw time, same as the live playback mesh).")]
+        public PointCloudCumulative cumulative;
+
         [Header("Files")]
         [Tooltip("Root folder for recordings. Relative paths resolve under Application.persistentDataPath. " +
                  "Leave empty to use '<persistentDataPath>/Recordings/recording'.")]
@@ -452,7 +459,29 @@ namespace PointCloud
             }
             ReconstructAndUpload(track, depthFrame, colorFrame);
             FirePlaybackEvent(track, depthFrame, colorFrame, irFrame);
+            FeedCumulative(track);
             ApplyBoundingBoxFilter(track);
+        }
+
+        // Forward the just-reconstructed playback mesh into the cumulative
+        // snapshotter (if any). Shared between Update's natural-playback path
+        // and SetCursorAndEmit's frame-stepping path so both honor the same
+        // interval-based snapshot pacing.
+        //
+        // The bbox is resolved from this recorder's own filter chain (same one
+        // that ApplyBoundingBoxFilter pushes to the shader) and passed to the
+        // cumulative as a parameter — cumulative does not hold its own bbox
+        // reference, so a single scene-wide bbox flows through both the live
+        // shader filter and the cumulative pre-filter.
+        private void FeedCumulative(DeviceTrack track)
+        {
+            var cum = ResolveCumulative();
+            if (cum == null || track.PlaybackMesh == null || track.PlaybackObject == null) return;
+            Material mat = track.PlaybackRenderer != null
+                ? track.PlaybackRenderer.sharedMaterial
+                : playbackMaterial;
+            cum.OnPlaybackFrame(track.PlaybackMesh, track.PlaybackMeshCapacity,
+                track.PlaybackObject.transform, mat, ResolveBoundingBox(), ResolveDecimater());
         }
 
         /// <summary>
@@ -1127,9 +1156,20 @@ namespace PointCloud
                     }
                     ReconstructAndUpload(track, depthFrame, colorFrame);
                     FirePlaybackEvent(track, depthFrame, colorFrame, irFrame);
+                    // Only emit on real cursor advances so a paused playhead doesn't
+                    // re-snapshot the same frame every Update tick.
+                    FeedCumulative(track);
                 }
                 ApplyBoundingBoxFilter(track);
             }
+
+            // Honor showPointClouds for accumulated cumulative snapshots as
+            // well — without this, toggling it off hides the live playback
+            // mesh but the frozen snapshots stay visible (separate GO chain).
+            // Property setter is a no-op when the flag matches, so it's safe
+            // to call every tick.
+            var cumForVis = ResolveCumulative();
+            if (cumForVis != null) cumForVis.SnapshotsVisible = showPointClouds;
 
             if (!anyRemaining)
             {
@@ -1289,6 +1329,21 @@ namespace PointCloud
             }
             jointMotionField = FindFirstObjectByType<PointCloudJointMotionField>();
             return jointMotionField;
+        }
+
+        private PointCloudCumulative ResolveCumulative()
+        {
+            if (cumulative != null) return cumulative;
+            foreach (var r in CollectSourceRenderers())
+            {
+                if (r != null && r.cumulative != null)
+                {
+                    cumulative = r.cumulative;
+                    return cumulative;
+                }
+            }
+            cumulative = FindFirstObjectByType<PointCloudCumulative>();
+            return cumulative;
         }
 
         private void ApplyBoundingBoxFilter(DeviceTrack track)
