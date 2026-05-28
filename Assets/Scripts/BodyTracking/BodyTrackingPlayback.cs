@@ -31,8 +31,12 @@ namespace BodyTracking
         [Tooltip("Temporal smoothing applied during the offline pass.")]
         [Range(0f, 1f)] public float smoothing = 0.0f;
 
-        [Tooltip("Auto-process depth tracks immediately after Read fires OnTracksLoaded.")]
-        public bool autoProcessOnRead = true;
+        [Tooltip("Auto-process depth tracks immediately after Read fires OnTracksLoaded. " +
+                 "Off by default: in-process k4abt_tracker_create has been seen to crash the " +
+                 "Editor inside depthengine.dll on first load, and auto-firing it on Read " +
+                 "turns a benign Read into an Editor kill. Trigger Process manually via the " +
+                 "ContextMenu once playback is ready.")]
+        public bool autoProcessOnRead = false;
 
         // --- output ---
 

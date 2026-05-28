@@ -1030,7 +1030,7 @@ MonoBehaviour:
   deviceSerialFilter: 
   processingMode: 4
   smoothing: 0
-  autoProcessOnRead: 1
+  autoProcessOnRead: 0
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0

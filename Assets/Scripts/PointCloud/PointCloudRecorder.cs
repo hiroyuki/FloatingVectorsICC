@@ -119,8 +119,8 @@ namespace PointCloud
                 {
                     var track = kv.Value;
                     if (track.DepthFrames.Count < 2) continue;
-                    ulong first = track.DepthFrames[0].TimestampNs;
-                    ulong last = track.DepthFrames[track.DepthFrames.Count - 1].TimestampNs;
+                    ulong first = TimestampNsAt(track.DepthFrames, 0);
+                    ulong last = TimestampNsAt(track.DepthFrames, track.DepthFrames.Count - 1);
                     ulong span = last - first;
                     if (span > maxSpan) maxSpan = span;
                 }
@@ -187,22 +187,34 @@ namespace PointCloud
 
         // --- Internals ---
 
-        private sealed class DeviceTrack
+        private sealed class DeviceTrack : IDisposable
         {
             public string Serial;
 
-            // Raw sensor data.
-            //
-            // During the legacy "save at end" path these Lists held actual byte[]
-            // payloads. The new stream-on-record path keeps them present (Step /
-            // Play index them by TimestampNs) but the live capture loop sets
-            // Bytes to null and pushes the bytes directly to disk via the
-            // matching RcsvStreamWriter in PointCloudRecorder._streamWriters.
-            // Read (Load) re-populates with bytes loaded from the just-written
-            // RCSV files, so playback works normally.
-            public readonly List<PointCloudRecording.Frame> DepthFrames = new List<PointCloudRecording.Frame>();
-            public readonly List<PointCloudRecording.Frame> ColorFrames = new List<PointCloudRecording.Frame>();
-            public readonly List<PointCloudRecording.Frame> IRFrames = new List<PointCloudRecording.Frame>();
+            // Raw sensor data exposed as read-only views so the same fields
+            // can hold either:
+            //   * Rec mode: List<Frame> filled by HandleRawFrame as Frame
+            //               sentinels (Bytes = null; the actual bytes were
+            //               streamed straight to disk via RcsvStreamWriter).
+            //   * Read mode: RcsvFrameStream that lazy-reads bytes on demand.
+            // Consumers (PlaybackCursor advance, BodyTrackingPlayback, gap
+            // diagnostics) only need Count, indexer, and TimestampNs, so they
+            // are mode-agnostic. Internal _xxxList / _xxxStream pointers exist
+            // for the mode-specific mutate (Add) and dispose paths.
+            public IReadOnlyList<PointCloudRecording.Frame> DepthFrames { get; private set; }
+                = Array.Empty<PointCloudRecording.Frame>();
+            public IReadOnlyList<PointCloudRecording.Frame> ColorFrames { get; private set; }
+                = Array.Empty<PointCloudRecording.Frame>();
+            public IReadOnlyList<PointCloudRecording.Frame> IRFrames { get; private set; }
+                = Array.Empty<PointCloudRecording.Frame>();
+
+            private List<PointCloudRecording.Frame> _depthList;
+            private List<PointCloudRecording.Frame> _colorList;
+            private List<PointCloudRecording.Frame> _irList;
+            private PointCloudRecording.RcsvFrameStream _depthStream;
+            private PointCloudRecording.RcsvFrameStream _colorStream;
+            private PointCloudRecording.RcsvFrameStream _irStream;
+
             public int DepthWidth, DepthHeight;
             public int ColorWidth, ColorHeight;
             public int IRWidth, IRHeight;
@@ -223,6 +235,65 @@ namespace PointCloud
             // Shared implementation with live capture path; see PointCloudReconstructor.
             public PointCloudReconstructor Reconstructor;
             public Mesh PlaybackMesh => Reconstructor?.Mesh;
+
+            // Switch into Rec mode lazily on the first frame add. Safe to call
+            // repeatedly. If the track is currently in Read mode (streams
+            // open), they are disposed first — the user kicked off a fresh
+            // recording over a loaded track.
+            public void AddRecordedDepthFrame(PointCloudRecording.Frame f)
+            { EnsureRecordingMode(); _depthList.Add(f); }
+            public void AddRecordedColorFrame(PointCloudRecording.Frame f)
+            { EnsureRecordingMode(); _colorList.Add(f); }
+            public void AddRecordedIRFrame(PointCloudRecording.Frame f)
+            { EnsureRecordingMode(); _irList.Add(f); }
+
+            private void EnsureRecordingMode()
+            {
+                if (_depthStream != null || _colorStream != null || _irStream != null)
+                    Dispose();
+                if (_depthList == null) _depthList = new List<PointCloudRecording.Frame>();
+                if (_colorList == null) _colorList = new List<PointCloudRecording.Frame>();
+                if (_irList == null) _irList = new List<PointCloudRecording.Frame>();
+                DepthFrames = _depthList;
+                ColorFrames = _colorList;
+                IRFrames = _irList;
+            }
+
+            /// <summary>
+            /// Adopt freshly opened RCSV streams as the backing storage for
+            /// this track's depth/color/IR frames. Any previously held
+            /// streams or recording lists are released. Pass <c>null</c> for
+            /// a sensor that has no recording on disk.
+            /// </summary>
+            public void AdoptStreams(
+                PointCloudRecording.RcsvFrameStream depth,
+                PointCloudRecording.RcsvFrameStream color,
+                PointCloudRecording.RcsvFrameStream ir)
+            {
+                Dispose();
+                _depthStream = depth;
+                _colorStream = color;
+                _irStream = ir;
+                DepthFrames = (IReadOnlyList<PointCloudRecording.Frame>)depth
+                              ?? Array.Empty<PointCloudRecording.Frame>();
+                ColorFrames = (IReadOnlyList<PointCloudRecording.Frame>)color
+                              ?? Array.Empty<PointCloudRecording.Frame>();
+                IRFrames = (IReadOnlyList<PointCloudRecording.Frame>)ir
+                           ?? Array.Empty<PointCloudRecording.Frame>();
+            }
+
+            public void Dispose()
+            {
+                _depthStream?.Dispose(); _depthStream = null;
+                _colorStream?.Dispose(); _colorStream = null;
+                _irStream?.Dispose(); _irStream = null;
+                _depthList = null;
+                _colorList = null;
+                _irList = null;
+                DepthFrames = Array.Empty<PointCloudRecording.Frame>();
+                ColorFrames = Array.Empty<PointCloudRecording.Frame>();
+                IRFrames = Array.Empty<PointCloudRecording.Frame>();
+            }
         }
 
         private readonly Dictionary<string, DeviceTrack> _tracks = new Dictionary<string, DeviceTrack>();
@@ -394,12 +465,12 @@ namespace PointCloud
                 if (track.DepthFrames.Count == 0) continue;
                 int newCursor = track.PlaybackCursor + delta;
                 SetCursorAndEmit(track, newCursor);
-                ulong ts = track.DepthFrames[newCursor].TimestampNs;
+                ulong ts = TimestampNsAt(track.DepthFrames, newCursor);
                 if (ts > maxSteppedTs) maxSteppedTs = ts;
                 int next = newCursor + 1;
                 if (next < track.DepthFrames.Count)
                 {
-                    ulong nextTs = track.DepthFrames[next].TimestampNs;
+                    ulong nextTs = TimestampNsAt(track.DepthFrames, next);
                     if (nextTs < minNextTs) minNextTs = nextTs;
                 }
             }
@@ -644,25 +715,49 @@ namespace PointCloud
                     bool hasIR = File.Exists(irPath);
                     if (!hasDepth && !hasColor && !hasIR) continue;
 
-                    var track = GetOrCreateTrack(serial);
-                    if (hasDepth)
+                    // Open RCSV files as lazy streams instead of loading every
+                    // record's bytes into managed memory. Each stream eagerly
+                    // reads the trailing index chunk + per-frame timestamps
+                    // (~16 B per frame total) so .Count and timestamp scans are
+                    // free; record bytes are pulled on demand by indexer access
+                    // in playback / BodyTracking. Failure on one sensor disposes
+                    // any partial streams to avoid leaking file handles before
+                    // the exception propagates.
+                    PointCloudRecording.RcsvFrameStream depthStream = null;
+                    PointCloudRecording.RcsvFrameStream colorStream = null;
+                    PointCloudRecording.RcsvFrameStream irStream = null;
+                    try
                     {
-                        track.DepthFrames.AddRange(PointCloudRecording.ReadRcsv(depthPath));
-                        totalDepth += track.DepthFrames.Count;
+                        if (hasDepth) depthStream = new PointCloudRecording.RcsvFrameStream(depthPath);
+                        if (hasColor) colorStream = new PointCloudRecording.RcsvFrameStream(colorPath);
+                        if (hasIR) irStream = new PointCloudRecording.RcsvFrameStream(irPath);
+                    }
+                    catch
+                    {
+                        depthStream?.Dispose();
+                        colorStream?.Dispose();
+                        irStream?.Dispose();
+                        throw;
+                    }
+
+                    var track = GetOrCreateTrack(serial);
+                    track.AdoptStreams(depthStream, colorStream, irStream);
+
+                    if (depthStream != null)
+                    {
+                        totalDepth += depthStream.Count;
                         var (dw, dh) = PointCloudRecording.ReadRcsvHeaderDimensions(depthPath);
                         if (dw > 0 && dh > 0) { track.DepthWidth = dw; track.DepthHeight = dh; }
                     }
-                    if (hasColor)
+                    if (colorStream != null)
                     {
-                        track.ColorFrames.AddRange(PointCloudRecording.ReadRcsv(colorPath));
-                        totalColor += track.ColorFrames.Count;
+                        totalColor += colorStream.Count;
                         var (cw, ch) = PointCloudRecording.ReadRcsvHeaderDimensions(colorPath);
                         if (cw > 0 && ch > 0) { track.ColorWidth = cw; track.ColorHeight = ch; }
                     }
-                    if (hasIR)
+                    if (irStream != null)
                     {
-                        track.IRFrames.AddRange(PointCloudRecording.ReadRcsv(irPath));
-                        totalIR += track.IRFrames.Count;
+                        totalIR += irStream.Count;
                         var (iw, ih) = PointCloudRecording.ReadRcsvHeaderDimensions(irPath);
                         if (iw > 0 && ih > 0) { track.IRWidth = iw; track.IRHeight = ih; }
                     }
@@ -966,7 +1061,7 @@ namespace PointCloud
                     sw.Depth = new PointCloudRecording.RcsvStreamWriter(path, header);
                 }
                 sw.Depth.WriteFrame(timestampNs, raw.DepthBytes, raw.DepthByteCount);
-                track.DepthFrames.Add(new PointCloudRecording.Frame { TimestampNs = timestampNs });
+                track.AddRecordedDepthFrame(new PointCloudRecording.Frame { TimestampNs = timestampNs });
                 track.DepthWidth = raw.DepthWidth;
                 track.DepthHeight = raw.DepthHeight;
             }
@@ -979,7 +1074,7 @@ namespace PointCloud
                     sw.Color = new PointCloudRecording.RcsvStreamWriter(path, header);
                 }
                 sw.Color.WriteFrame(timestampNs, raw.ColorBytes, raw.ColorByteCount);
-                track.ColorFrames.Add(new PointCloudRecording.Frame { TimestampNs = timestampNs });
+                track.AddRecordedColorFrame(new PointCloudRecording.Frame { TimestampNs = timestampNs });
                 track.ColorWidth = raw.ColorWidth;
                 track.ColorHeight = raw.ColorHeight;
             }
@@ -992,7 +1087,7 @@ namespace PointCloud
                     sw.IR = new PointCloudRecording.RcsvStreamWriter(path, header);
                 }
                 sw.IR.WriteFrame(timestampNs, raw.IRBytes, raw.IRByteCount);
-                track.IRFrames.Add(new PointCloudRecording.Frame { TimestampNs = timestampNs });
+                track.AddRecordedIRFrame(new PointCloudRecording.Frame { TimestampNs = timestampNs });
                 track.IRWidth = raw.IRWidth;
                 track.IRHeight = raw.IRHeight;
             }
@@ -1032,7 +1127,8 @@ namespace PointCloud
                 var track = kv.Value;
                 if (track.DepthFrames.Count == 0) continue;
                 anyFrames = true;
-                if (track.DepthFrames[0].TimestampNs < firstTs) firstTs = track.DepthFrames[0].TimestampNs;
+                ulong firstFrameTs = TimestampNsAt(track.DepthFrames, 0);
+                if (firstFrameTs < firstTs) firstTs = firstFrameTs;
                 track.PlaybackCursor = -1;
                 EnsurePlaybackObject(track);
             }
@@ -1109,7 +1205,8 @@ namespace PointCloud
 
                 int cursor = Mathf.Max(track.PlaybackCursor, 0);
                 int cursorBeforeAdvance = track.PlaybackCursor;
-                while (cursor + 1 < track.DepthFrames.Count && track.DepthFrames[cursor + 1].TimestampNs <= playheadNs)
+                while (cursor + 1 < track.DepthFrames.Count
+                       && TimestampNsAt(track.DepthFrames, cursor + 1) <= playheadNs)
                     cursor++;
 
                 // Playback drop diagnostic: when one Update consumes multiple
@@ -1532,6 +1629,11 @@ namespace PointCloud
                     if (Application.isPlaying) Destroy(track.PlaybackObject);
                     else DestroyImmediate(track.PlaybackObject);
                 }
+                // Close any open RcsvFrameStream handles. Skipping this would
+                // leak FileStreams (12 handles per Read in a 4-cam setup) and
+                // keep Windows from reopening the file for append on a
+                // subsequent recording session.
+                track.Dispose();
             }
             _tracks.Clear();
         }
@@ -1544,6 +1646,20 @@ namespace PointCloud
                 _tracks[serial] = track;
             }
             return track;
+        }
+
+        /// <summary>
+        /// Cheap timestamp lookup that avoids materializing a frame's bytes
+        /// when the backing is an <see cref="PointCloudRecording.RcsvFrameStream"/>.
+        /// The playback Update loop and gap diagnostics peek at next-frame
+        /// timestamps every tick; routing those through the indexer would
+        /// allocate a fresh byte[] per peek (~700 KB for depth) and read the
+        /// full record off disk just to discard everything except 8 bytes.
+        /// </summary>
+        private static ulong TimestampNsAt(IReadOnlyList<PointCloudRecording.Frame> frames, int idx)
+        {
+            if (frames is PointCloudRecording.RcsvFrameStream s) return s.TimestampNsAt(idx);
+            return frames[idx].TimestampNs;
         }
 
         private void FillDimensionsFromRenderer(DeviceTrack track)
