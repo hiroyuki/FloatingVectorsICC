@@ -1,6 +1,6 @@
 {
   "dependencies": {
-    "com.unity.ai.assistant": "2.6.0-pre.1",
+    "com.coplaydev.unity-mcp": "https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity",
     "com.unity.multiplayer.center": "1.0.1",
     "com.unity.render-pipelines.universal": "17.4.0",
     "com.unity.modules.accessibility": "1.0.0",
