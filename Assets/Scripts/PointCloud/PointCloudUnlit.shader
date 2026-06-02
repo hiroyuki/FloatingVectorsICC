@@ -91,6 +91,10 @@ Shader "Orbbec/PointCloudUnlit"
             {
                 float4 vertex : SV_POSITION;
                 float3 color  : TEXCOORD0;
+                // Metal requires VS to write point size or it's undefined
+                // (renders as huge squares). D3D ignores PSIZE for Points
+                // topology and uses 1px regardless, so this is safe on both.
+                float  psize  : PSIZE;
             };
 
             bool PassObb(float3 objPos)
@@ -226,6 +230,7 @@ Shader "Orbbec/PointCloudUnlit"
                     : UnityObjectToClipPos(v.vertex);
                 o.vertex = keep ? clipPos : float4(2.0, 2.0, 2.0, 1.0);
                 o.color = outColor;
+                o.psize = 1.0;
                 return o;
             }
 

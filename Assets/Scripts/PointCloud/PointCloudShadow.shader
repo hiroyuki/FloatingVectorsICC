@@ -73,6 +73,10 @@ Shader "Orbbec/PointCloudShadow"
             struct v2f
             {
                 float4 vertex : SV_POSITION;
+                // Metal requires VS to write point size or it's undefined
+                // (renders as huge squares for Points topology). D3D ignores
+                // PSIZE when the topology is non-Points.
+                float  psize  : PSIZE;
             };
 
             bool PassObb(float3 objPos)
@@ -135,6 +139,7 @@ Shader "Orbbec/PointCloudShadow"
                 o.vertex = (keep > 0.5)
                     ? mul(UNITY_MATRIX_VP, float4(floored, 1.0))
                     : float4(2.0, 2.0, 2.0, 1.0);
+                o.psize = 1.0;
                 return o;
             }
 
