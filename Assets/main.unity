@@ -265,6 +265,7 @@ MonoBehaviour:
   jointMotionField: {fileID: 0}
   cumulative: {fileID: 0}
   folderPath: D:/Dropbox/projects/ICC/Recordings/_4cam_btrec
+  folderPathMacOverride: /Users/horihiroyuki/Dropbox/projects/ICC/Recordings/_4cam_btrec
   datasetName: 
   loop: 1
   view: {fileID: 1168113566}

@@ -67,6 +67,11 @@ namespace PointCloud
                  "Leave empty to use '<persistentDataPath>/Recordings/recording'.")]
         public string folderPath = "";
 
+        [Tooltip("Optional override used only when running on macOS — Windows absolute paths like " +
+                 "'D:/Dropbox/...' obviously do not exist here, so a dev opening the project on a Mac " +
+                 "can point at the local Dropbox mount without touching the canonical folderPath.")]
+        public string folderPathMacOverride = "";
+
         [Tooltip("Dataset name written into dataset.yaml. Defaults to the recording folder name.")]
         public string datasetName = "";
 
@@ -1858,6 +1863,10 @@ namespace PointCloud
         private string ResolveRoot()
         {
             string p = folderPath;
+#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+            if (!string.IsNullOrWhiteSpace(folderPathMacOverride))
+                p = folderPathMacOverride;
+#endif
             if (string.IsNullOrWhiteSpace(p))
                 p = Path.Combine(Application.persistentDataPath, "Recordings", "recording");
             else if (!Path.IsPathRooted(p))
