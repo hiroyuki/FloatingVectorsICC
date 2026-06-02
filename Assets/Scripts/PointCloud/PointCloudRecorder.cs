@@ -1452,7 +1452,14 @@ namespace PointCloud
             {
                 var parts = new List<string>(_diagFiresPerSerial.Count);
                 foreach (var kv in _diagFiresPerSerial) parts.Add($"{kv.Key}={kv.Value}/s");
-                Debug.Log($"[PointCloudRecorder PLAY] playback_fires {string.Join(" ", parts)}", this);
+                int gc0 = System.GC.CollectionCount(0) - _diagGc0Start;
+                int gc1 = System.GC.CollectionCount(1) - _diagGc1Start;
+                int gc2 = System.GC.CollectionCount(2) - _diagGc2Start;
+                long monoNow = UnityEngine.Profiling.Profiler.GetMonoUsedSizeLong();
+                long monoDeltaKB = (monoNow - _diagMonoMemStart) / 1024;
+                Debug.Log($"[PointCloudRecorder PLAY] playback_fires {string.Join(" ", parts)} || " +
+                          $"gc=g0:{gc0},g1:{gc1},g2:{gc2} mono+={monoDeltaKB}KB " +
+                          $"maxTick={_diagMaxUpdateDtMs:F0}ms@{_diagMaxUpdateDtAtSec - _diagWindowStart:F2}s", this);
                 foreach (var key in new List<string>(_diagFiresPerSerial.Keys)) _diagFiresPerSerial[key] = 0;
             }
 

@@ -202,12 +202,26 @@ namespace BodyTracking
             int vertsPerRing = kTubeSides;
             int totalVerts = n * vertsPerRing;
             int totalTris = (n - 1) * kTubeSides * 6;
-            if (_verts == null || _verts.Length != totalVerts)
+            // Grow-only, power-of-two capacity. The trail sample count fluctuates
+            // every frame as DropOldSamples / AddSample run, and the previous
+            // `Length != totalVerts` test reallocated four arrays per Rebuild —
+            // ~200 MB/s of GC churn across all trails at 30 fps. Allocating to
+            // the next power of two and only growing keeps the steady-state
+            // alloc rate effectively zero. The Mesh upload below passes the
+            // actual filled length so unused tail slots are not uploaded.
+            if (_verts == null || _verts.Length < totalVerts)
             {
-                _verts = new Vector3[totalVerts];
-                _normals = new Vector3[totalVerts];
-                _colors = new Color[totalVerts];
-                _tris = new int[totalTris];
+                int cap = _verts == null ? 64 : _verts.Length;
+                while (cap < totalVerts) cap <<= 1;
+                _verts = new Vector3[cap];
+                _normals = new Vector3[cap];
+                _colors = new Color[cap];
+            }
+            if (_tris == null || _tris.Length < totalTris)
+            {
+                int cap = _tris == null ? 64 : _tris.Length;
+                while (cap < totalTris) cap <<= 1;
+                _tris = new int[cap];
             }
             if (_medianAccels == null || _medianAccels.Length < n)
                 _medianAccels = new float[Mathf.Max(n, 64)];
@@ -346,11 +360,15 @@ namespace BodyTracking
                 }
             }
 
+            // Upload only the filled prefix [0, totalVerts) / [0, totalTris) of
+            // our grow-only capacity buffers; the SetXxx(arr, start, length)
+            // overloads do not allocate the way the legacy `mesh.vertices = arr`
+            // property setters did.
             _mesh.Clear();
-            _mesh.vertices = _verts;
-            _mesh.normals = _normals;
-            _mesh.colors = _colors;
-            _mesh.triangles = _tris;
+            _mesh.SetVertices(_verts, 0, totalVerts);
+            _mesh.SetNormals(_normals, 0, totalVerts);
+            _mesh.SetColors(_colors, 0, totalVerts);
+            _mesh.SetTriangles(_tris, 0, totalTris, submesh: 0, calculateBounds: true);
 
             // Replace LastAccel with the medianed value at the head so the pool's
             // rolling p95 window reads the same value the vertex colors use.
