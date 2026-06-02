@@ -56,6 +56,8 @@ namespace TSDF
         private ComputeBuffer _args;       // IndirectArguments: [vertCount, 1, 0, 0]
         private int _frameCounter;
         private Bounds _drawBounds;
+        // True iff this component owns _material and should destroy it on disable.
+        private bool _ownsMaterial;
 
         // Diagnostics — read back the vertex count once per second via
         // ComputeBuffer.CopyCount → small CPU-visible buffer to avoid the
@@ -110,6 +112,7 @@ namespace TSDF
                 return;
             }
             material = new Material(shader) { name = "TSDFMesh (auto)", hideFlags = HideFlags.DontSave };
+            _ownsMaterial = true;
         }
 
         private void EnsureBuffers()
@@ -137,16 +140,27 @@ namespace TSDF
             _vertices?.Release(); _vertices = null;
             _args?.Release(); _args = null;
             _diagCountBuf?.Release(); _diagCountBuf = null;
+            if (_ownsMaterial && material != null)
+            {
+                if (Application.isPlaying) Destroy(material); else DestroyImmediate(material);
+                material = null;
+                _ownsMaterial = false;
+            }
         }
 
         private void Update()
         {
             if (volume == null || volume.VoxelBuffer == null) return;
-            _frameCounter++;
-            if (_frameCounter % mcEveryNFrames != 0) return;
-
             EnsureBuffers();
-            DispatchMarchCubes();
+
+            // Only re-extract every Nth frame, but still queue the draw every
+            // frame so the previously-extracted mesh stays visible during skip
+            // ticks. _args.SetData below has been called at least once by the
+            // time we hit the draw, so the indirect args buffer is well-defined.
+            _frameCounter++;
+            if (_frameCounter % mcEveryNFrames == 0)
+                DispatchMarchCubes();
+
             QueueDraw();
 
             if (diagnosticLogging) PerSecondDiag();

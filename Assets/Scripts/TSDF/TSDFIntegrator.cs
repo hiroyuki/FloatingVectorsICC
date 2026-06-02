@@ -53,6 +53,7 @@ namespace TSDF
             public ObCameraParam CamParam;
             public bool HasCamParam;
             public ComputeBuffer DepthBuf;      // ComputeBufferType.Raw, byte/4 uints
+            public uint[] DepthScratchU32;      // BlockCopy target for the SetData upload
             public int DepthByteCount;
             public int DepthWidth;
             public int DepthHeight;
@@ -182,14 +183,21 @@ namespace TSDF
             st.DepthWidth = raw.DepthWidth;
             st.DepthHeight = raw.DepthHeight;
 
-            // Upload depth bytes to a raw ComputeBuffer (4-byte uints).
+            // Upload depth bytes to a raw ComputeBuffer (4-byte uints). The
+            // backing buffer stride is 4 (uint), so SetData's `count` argument
+            // is the number of UINT ELEMENTS — not bytes. Match the working
+            // pattern from PointCloudReconstructor: BlockCopy the raw bytes
+            // into a scratch uint[] first, then upload by element count.
             int uintCount = (raw.DepthByteCount + 3) / 4;
             if (st.DepthBuf == null || st.DepthBuf.count != uintCount)
             {
                 st.DepthBuf?.Release();
                 st.DepthBuf = new ComputeBuffer(uintCount, 4, ComputeBufferType.Raw);
             }
-            st.DepthBuf.SetData(raw.DepthBytes, 0, 0, raw.DepthByteCount);
+            if (st.DepthScratchU32 == null || st.DepthScratchU32.Length != uintCount)
+                st.DepthScratchU32 = new uint[uintCount];
+            System.Buffer.BlockCopy(raw.DepthBytes, 0, st.DepthScratchU32, 0, raw.DepthByteCount);
+            st.DepthBuf.SetData(st.DepthScratchU32, 0, 0, uintCount);
 
             // Build per-camera world->depth-mm matrix.
             Matrix4x4 depthFromWorld = ComputeDepthFromWorld(sourceTransform, st.CamParam);
