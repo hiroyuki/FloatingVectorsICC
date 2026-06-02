@@ -145,7 +145,7 @@ Transform:
   m_GameObject: {fileID: 7740001}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0, y: -1.25, z: 1.26}
+  m_LocalPosition: {x: -0.2, y: -1.25, z: 1.26}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -264,7 +264,7 @@ MonoBehaviour:
   capsuleFilter: {fileID: 0}
   jointMotionField: {fileID: 0}
   cumulative: {fileID: 0}
-  folderPath: Recordings/recording/_4cam_0526
+  folderPath: D:/Dropbox/projects/ICC/Recordings/_4cam_btrec
   datasetName: 
   loop: 1
   view: {fileID: 1168113566}
@@ -363,7 +363,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 4e1c8b0a6d2f4a91b7e35c2d094f8b3c, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::PointCloud.PointCloudDecimater
-  reductionPercent: 41.1
+  reductionPercent: 7.9
 --- !u!4 &173474410
 Transform:
   m_ObjectHideFlags: 0
@@ -611,7 +611,7 @@ Camera:
   m_Enabled: 1
   serializedVersion: 2
   m_ClearFlags: 2
-  m_BackGroundColor: {r: 0.6528301, g: 0.5850836, b: 0.5850836, a: 0}
+  m_BackGroundColor: {r: 0, g: 0, b: 0, a: 0}
   m_projectionMatrixMode: 1
   m_GateFitMode: 2
   m_FOVAxisMode: 0
@@ -783,8 +783,8 @@ Transform:
   m_GameObject: {fileID: 1151541766}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0.34070775, z: 0, w: 0.94016933}
-  m_LocalPosition: {x: 0, y: -0.3, z: 1.26}
-  m_LocalScale: {x: 2, y: 1.9, z: 2}
+  m_LocalPosition: {x: -0.2, y: -0.3, z: 1.26}
+  m_LocalScale: {x: 1.8, y: 1.9, z: 2}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 0}
@@ -881,22 +881,22 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::BodyTracking.BodyTrackingMultiLive
   cameraManager: {fileID: 925702423}
   workerHost: {fileID: 100997492}
-  showSkeleton: 0
+  showSkeleton: 1
   showAnatomicalBones: 0
   jointRadius: 0.005
   skeletonColor: {r: 0.094645746, g: 0.22020026, b: 0.23773581, a: 1}
   showTrails: 1
   trailColorMode: 3
-  trailFlatColor: {r: 0.97735846, g: 0.15305795, b: 0.15305795, a: 1}
+  trailFlatColor: {r: 0, g: 0, b: 0, a: 1}
   frameHueCenter: 0.5
   frameHueRange: 1
   frameHueSaturation: 0.85
   frameHueValue: 1
-  frameHueCyclePeriodFrames: 120
-  trailDuration: 20
-  trailWidth: 0.0253
-  boneWidth: 0.023154689
-  boneTrailStep: 0.092
+  frameHueCyclePeriodFrames: 119.4
+  trailDuration: 2
+  trailWidth: 0.0115
+  boneWidth: 0.001
+  boneTrailStep: 0.089
   accelMin: 0
   accelMax: 20
   accelHotColor: {r: 1, g: 1, b: 1, a: 1}
@@ -1028,8 +1028,6 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::BodyTracking.BodyTrackingPlayback
   recorder: {fileID: 86788058}
   deviceSerialFilter: 
-  processingMode: 4
-  smoothing: 0
   autoProcessOnRead: 0
 --- !u!1660057539 &9223372036854775807
 SceneRoots:

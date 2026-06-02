@@ -1,11 +1,13 @@
-// Replays a recorded depth track through the body tracker and accumulates per-joint
-// trajectories so MotionLineRenderer can draw them as static lines once Read finishes.
+// Builds per-joint trajectories from a PointCloudRecorder's loaded body track
+// (bodies_main RCSV). MotionLineRenderer consumes these to draw the static line
+// meshes after Read finishes.
 //
-// Per the issue spec ("ボーンのレコードはせず、ポイントクラウド再生で再計算"), no bone
-// data is stored on disk — Phase C/D recordings contain raw Y16 depth + RGB8 color +
-// per-device calibration, and we recompute the skeleton offline by feeding those depth
-// frames straight back into k4abt. The processing runs as a coroutine that yields each
-// frame so the Editor stays responsive on multi-thousand-frame recordings.
+// Spec change (issue: Mac-playback): BT results are now recorded alongside the
+// raw sensor streams (bodies_main), so playback no longer needs k4abt at all —
+// this script just decodes the saved BodySnapshot bytes and folds them into
+// JointTrajectory lists. The previous k4abt-recompute path (Phase C/D offline
+// pass) was Windows-only and broke the moment the user moved their dataset to a
+// Mac for review.
 
 using System;
 using System.Collections;
@@ -18,25 +20,16 @@ namespace BodyTracking
     public class BodyTrackingPlayback : MonoBehaviour
     {
         [Header("Source")]
-        [Tooltip("Recorder providing raw depth tracks. Auto-found if left blank.")]
+        [Tooltip("Recorder providing recorded body tracks. Auto-found if left blank.")]
         public PointCloudRecorder recorder;
 
-        [Tooltip("Limit BT to one device's recording. Empty = use first track found.")]
+        [Tooltip("Limit trajectories to one device's recording. Empty = include every loaded track that has bodies.")]
         public string deviceSerialFilter = "";
 
-        [Header("Tracker")]
-        public k4abt_tracker_processing_mode_t processingMode =
-            k4abt_tracker_processing_mode_t.K4ABT_TRACKER_PROCESSING_MODE_GPU_DIRECTML;
-
-        [Tooltip("Temporal smoothing applied during the offline pass.")]
-        [Range(0f, 1f)] public float smoothing = 0.0f;
-
-        [Tooltip("Auto-process depth tracks immediately after Read fires OnTracksLoaded. " +
-                 "Off by default: in-process k4abt_tracker_create has been seen to crash the " +
-                 "Editor inside depthengine.dll on first load, and auto-firing it on Read " +
-                 "turns a benign Read into an Editor kill. Trigger Process manually via the " +
-                 "ContextMenu once playback is ready.")]
-        public bool autoProcessOnRead = false;
+        [Tooltip("Run the trajectory build immediately after Read fires OnTracksLoaded. " +
+                 "Safe to leave on now that the build path no longer touches k4abt — it's " +
+                 "a pure decode of bodies_main into managed lists, no native calls.")]
+        public bool autoProcessOnRead = true;
 
         // --- output ---
 
@@ -71,10 +64,9 @@ namespace BodyTracking
             new Dictionary<(uint, k4abt_joint_id_t), JointTrajectory>();
         private Coroutine _processing;
 
-        private void Awake()
-        {
-            BodyTrackingBootstrap.Initialize();
-        }
+        // Reused decode buffer — MaxBodies snapshots, all joint arrays pre-allocated.
+        // Sized once at first use so the decode loop never re-allocates.
+        private BodySnapshot[] _decodeBuffer;
 
         private void OnEnable()
         {
@@ -93,7 +85,7 @@ namespace BodyTracking
             if (autoProcessOnRead) Process();
         }
 
-        [ContextMenu("Process recorded depth")]
+        [ContextMenu("Build trajectories from recorded bodies")]
         public void Process()
         {
             if (_processing != null)
@@ -113,168 +105,92 @@ namespace BodyTracking
         {
             ClearTrajectories();
 
+            if (_decodeBuffer == null)
+            {
+                _decodeBuffer = new BodySnapshot[Shared.K4abtWorkerSharedLayout.MaxBodies];
+                for (int i = 0; i < _decodeBuffer.Length; i++) _decodeBuffer[i] = new BodySnapshot();
+            }
+
+            int tracksProcessed = 0;
+            int framesProcessed = 0;
+            int samplesAppended = 0;
+
             var tracks = recorder.GetRecordedDepthTracks();
-            PointCloudRecorder.RecordedDepthTrack pick = null;
+            // Choose origin for the relative TimeSec axis: earliest body-frame ts
+            // across the picked tracks. This keeps TimeSec close to 0 at the start
+            // of the recording regardless of the absolute device timer.
+            ulong t0 = ulong.MaxValue;
             foreach (var t in tracks)
             {
-                if (t.DepthFrames == null || t.DepthFrames.Count == 0) continue;
-                if (string.IsNullOrEmpty(deviceSerialFilter) || t.Serial == deviceSerialFilter)
-                {
-                    pick = t; break;
-                }
+                if (t.BodyFrames == null || t.BodyFrames.Count == 0) continue;
+                if (!string.IsNullOrEmpty(deviceSerialFilter) && t.Serial != deviceSerialFilter) continue;
+                ulong first = TimestampNsAt(t.BodyFrames, 0);
+                if (first < t0) t0 = first;
             }
-            if (pick == null)
+            if (t0 == ulong.MaxValue)
             {
-                ProcessingStatus = "no recorded depth track to process";
+                ProcessingStatus = "no recorded body frames to process " +
+                                   "(record while BodyTrackingMultiLive is feeding K4abtWorkerHost, then Read).";
                 Debug.LogWarning("[BodyTrackingPlayback] " + ProcessingStatus, this);
                 _processing = null;
                 yield break;
             }
-            if (!pick.CameraParam.HasValue)
+
+            foreach (var t in tracks)
             {
-                ProcessingStatus = $"track {pick.Serial} has no calibration; cannot build k4a_calibration_t";
-                Debug.LogWarning("[BodyTrackingPlayback] " + ProcessingStatus, this);
-                _processing = null;
-                yield break;
-            }
-            // Inputs validated — proceed with the recompute pass silently.
+                if (t.BodyFrames == null || t.BodyFrames.Count == 0) continue;
+                if (!string.IsNullOrEmpty(deviceSerialFilter) && t.Serial != deviceSerialFilter) continue;
+                tracksProcessed++;
 
-            int dW = pick.DepthWidth > 0 ? pick.DepthWidth : 640;
-            int dH = pick.DepthHeight > 0 ? pick.DepthHeight : 576;
-            int cW = pick.ColorWidth > 0 ? pick.ColorWidth : 1280;
-            int cH = pick.ColorHeight > 0 ? pick.ColorHeight : 720;
-
-            IntPtr calibration = K4ACalibration.Build(pick.CameraParam.Value, dW, dH, cW, cH);
-            IntPtr tracker = IntPtr.Zero;
-            try
-            {
-                var cfg = new k4abt_tracker_configuration_t
-                {
-                    SensorOrientation = k4abt_sensor_orientation_t.K4ABT_SENSOR_ORIENTATION_DEFAULT,
-                    ProcessingMode = processingMode,
-                    GpuDeviceId = 0,
-                    ModelPath = null,
-                };
-                if (K4ABTNative.k4abt_tracker_create(calibration, cfg, out tracker)
-                    != k4a_result_t.K4A_RESULT_SUCCEEDED)
-                {
-                    ProcessingStatus = "k4abt_tracker_create failed";
-                    Debug.LogError("[BodyTrackingPlayback] " + ProcessingStatus, this);
-                    _processing = null;
-                    yield break;
-                }
-                K4ABTNative.k4abt_tracker_set_temporal_smoothing(tracker, smoothing);
-
-                int total = pick.DepthFrames.Count;
-                ulong t0 = total > 0 ? pick.DepthFrames[0].TimestampNs : 0UL;
-                int processed = 0;
-
-                // Bounded waits so the coroutine can never block Unity's main thread
-                // forever if the tracker stalls. 200 ms is generous (DirectML pop is
-                // typically <40 ms) and a single dropped frame is not visually critical
-                // for the offline trajectory pass.
-                const int kEnqueueTimeoutMs = 200;
-                const int kPopTimeoutMs = 500;
-                int enqueueTimeouts = 0, popTimeouts = 0, popFailures = 0;
-
-                bool hasRealIR = pick.IRFrames != null && pick.IRFrames.Count == total;
-                int irW = hasRealIR && pick.IRWidth > 0 ? pick.IRWidth : dW;
-                int irH = hasRealIR && pick.IRHeight > 0 ? pick.IRHeight : dH;
-                if (!hasRealIR)
-                {
-                    Debug.LogWarning("[BodyTrackingPlayback] no IR in recording — k4abt may detect 0 bodies", this);
-                }
-
+                int total = t.BodyFrames.Count;
                 for (int i = 0; i < total; i++)
                 {
-                    var f = pick.DepthFrames[i];
-                    if (f == null || f.Bytes == null || f.Bytes.Length == 0) continue;
+                    var f = t.BodyFrames[i];
+                    if (f == null || f.Bytes == null || f.ByteCount == 0) continue;
 
-                    ulong tsUsec = f.TimestampNs / 1000UL;
-                    IntPtr capture;
-                    if (hasRealIR)
-                    {
-                        var irF = pick.IRFrames[i];
-                        capture = K4ACaptureBridge.CreateCaptureFromDepthAndIR(
-                            f.Bytes, f.Bytes.Length, dW, dH,
-                            irF != null ? irF.Bytes : null,
-                            irF != null && irF.Bytes != null ? irF.Bytes.Length : 0,
-                            irW, irH,
-                            tsUsec);
-                    }
-                    else
-                    {
-                        capture = K4ACaptureBridge.CreateCaptureFromDepthY16(
-                            f.Bytes, f.Bytes.Length, dW, dH, tsUsec);
-                    }
-                    if (capture == IntPtr.Zero) continue;
+                    int bodyCount = RecordedBodySerializer.Decode(f.Bytes, f.ByteCount, _decodeBuffer);
+                    double tSec = (f.TimestampNs - t0) * 1e-9;
 
-                    var enqRc = K4ABTNative.k4abt_tracker_enqueue_capture(tracker, capture, kEnqueueTimeoutMs);
-                    K4ANative.k4a_capture_release(capture);
-                    if (enqRc != k4a_wait_result_t.K4A_WAIT_RESULT_SUCCEEDED)
+                    for (int b = 0; b < bodyCount; b++)
                     {
-                        enqueueTimeouts++;
-                        continue;
-                    }
-
-                    var popRc = K4ABTNative.k4abt_tracker_pop_result(tracker, out IntPtr bodyFrame, kPopTimeoutMs);
-                    if (popRc == k4a_wait_result_t.K4A_WAIT_RESULT_TIMEOUT) popTimeouts++;
-                    else if (popRc == k4a_wait_result_t.K4A_WAIT_RESULT_FAILED) popFailures++;
-
-                    if (popRc == k4a_wait_result_t.K4A_WAIT_RESULT_SUCCEEDED)
-                    {
-                        try
+                        var body = _decodeBuffer[b];
+                        if (body.Id == K4ABTConsts.K4ABT_INVALID_BODY_ID) continue;
+                        for (int j = 0; j < K4ABTConsts.K4ABT_JOINT_COUNT; j++)
                         {
-                            double tSec = (f.TimestampNs - t0) * 1e-9;
-                            uint nBodies = K4ABTNative.k4abt_frame_get_num_bodies(bodyFrame);
-                            for (uint b = 0; b < nBodies; b++)
-                            {
-                                uint id = K4ABTNative.k4abt_frame_get_body_id(bodyFrame, b);
-                                if (id == K4ABTConsts.K4ABT_INVALID_BODY_ID) continue;
-                                if (K4ABTNative.k4abt_frame_get_body_skeleton(bodyFrame, b, out var skel)
-                                    != k4a_result_t.K4A_RESULT_SUCCEEDED) continue;
-
-                                for (int j = 0; j < K4ABTConsts.K4ABT_JOINT_COUNT; j++)
-                                {
-                                    var joint = skel.Joints[j];
-                                    if (joint.ConfidenceLevel < k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW) continue;
-                                    var pos = BodyTrackingShared.K4AmmToUnity(joint.Position);
-                                    AppendSample(id, (k4abt_joint_id_t)j, tSec, pos, joint.ConfidenceLevel);
-                                }
-                            }
-                        }
-                        finally
-                        {
-                            K4ABTNative.k4abt_frame_release(bodyFrame);
+                            var joint = body.Joints[j];
+                            if (joint.ConfidenceLevel < k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW)
+                                continue;
+                            // K4AmmToUnity: (x, y, z) mm in k4a-camera-local → (x*0.001, -y*0.001, z*0.001) m.
+                            Vector3 pos = BodyTrackingShared.K4AmmToUnity(joint.Position);
+                            AppendSample(body.Id, (k4abt_joint_id_t)j, tSec, pos, joint.ConfidenceLevel);
+                            samplesAppended++;
                         }
                     }
-                    processed++;
+                    framesProcessed++;
 
-                    // Yield every few frames so the Editor stays responsive and progress
-                    // text updates without dragging frame rate down to 0.
-                    if ((processed & 7) == 0)
+                    // Yield occasionally so the Editor stays responsive on very long recordings.
+                    if ((framesProcessed & 31) == 0)
                     {
-                        ProcessingStatus = $"BT recompute: {processed} / {total}";
+                        ProcessingStatus = $"BT decode: {framesProcessed} frame(s), {_trajectories.Count} trajectories so far";
                         yield return null;
                     }
                 }
+            }
 
-                ProcessingStatus = $"done: {_trajectories.Count} trajectories from {processed} frames " +
-                                   $"(enqueueTimeouts={enqueueTimeouts} popTimeouts={popTimeouts} popFails={popFailures})";
-            }
-            finally
-            {
-                if (tracker != IntPtr.Zero)
-                {
-                    K4ABTNative.k4abt_tracker_shutdown(tracker);
-                    K4ABTNative.k4abt_tracker_destroy(tracker);
-                }
-                K4ACalibration.Free(calibration);
-                _processing = null;
-            }
+            ProcessingStatus = tracksProcessed == 0
+                ? "no body tracks matched the device filter"
+                : $"done: {_trajectories.Count} trajectories from {framesProcessed} frame(s) " +
+                  $"across {tracksProcessed} device(s) ({samplesAppended} samples)";
+            _processing = null;
 
             try { OnTrajectoriesReady?.Invoke(); }
             catch (Exception e) { Debug.LogException(e, this); }
+        }
+
+        private static ulong TimestampNsAt(IReadOnlyList<PointCloudRecording.Frame> frames, int idx)
+        {
+            if (frames is PointCloudRecording.RcsvFrameStream s) return s.TimestampNsAt(idx);
+            return frames[idx].TimestampNs;
         }
 
         private void AppendSample(uint bodyId, k4abt_joint_id_t jointId, double tSec, Vector3 pos,

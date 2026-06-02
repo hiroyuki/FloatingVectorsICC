@@ -37,6 +37,7 @@ namespace PointCloud
         public const string DepthSensorName      = "depth_main";
         public const string ColorSensorName      = "color_main";
         public const string IRSensorName         = "ir_main";
+        public const string BodiesSensorName     = "bodies_main";
         public const string PointcloudSensorName = "pointcloud_main"; // legacy
 
         public const int PointCloudVertexStride = 24; // sizeof(ObColorPoint)
@@ -47,8 +48,19 @@ namespace PointCloud
             public ulong TimestampNs;
             public byte[] Bytes;
 
+            /// <summary>
+            /// Number of valid bytes in <see cref="Bytes"/>. Always prefer this over
+            /// <c>Bytes.Length</c>: Frames returned by <see cref="RcsvFrameStream"/>'s
+            /// indexer share a reusable scratch buffer whose <c>Length</c> grows to fit
+            /// the largest record seen so far, so <c>Bytes.Length</c> ≥ <see cref="ByteCount"/>
+            /// in general. For Frames produced by <see cref="ReadRcsv"/> (legacy
+            /// fully-materialized path) and recording-time timestamp sentinels,
+            /// <see cref="ByteCount"/> equals <c>Bytes?.Length ?? 0</c>.
+            /// </summary>
+            public int ByteCount;
+
             /// <summary>Convenience: legacy pointcloud_main byte count expressed as point count.</summary>
-            public int PointCount => Bytes == null ? 0 : Bytes.Length / PointCloudVertexStride;
+            public int PointCount => ByteCount / PointCloudVertexStride;
         }
 
         // ------------------------------------------------------------------
@@ -78,11 +90,11 @@ namespace PointCloud
             for (int i = 0; i < frames.Count; i++)
             {
                 var f = frames[i];
-                if (f == null || f.Bytes == null) continue;
+                if (f == null || f.Bytes == null || f.ByteCount <= 0) continue;
                 offsets.Add((ulong)fs.Position);
                 bw.Write(f.TimestampNs);
-                bw.Write((uint)f.Bytes.Length);
-                bw.Write(f.Bytes);
+                bw.Write((uint)f.ByteCount);
+                bw.Write(f.Bytes, 0, f.ByteCount);
             }
             offsets.Add((ulong)fs.Position);
 
@@ -243,6 +255,16 @@ namespace PointCloud
             // anyway — pre-loading just front-loads that cost into Play startup.
             private readonly ulong[] _timestamps;
             private readonly bool[] _tsLoaded;
+            // Reusable payload buffer shared by every indexer access. Grows
+            // on demand (next-pow-2) to fit the largest record so far, never
+            // shrinks. The indexer hands this buffer back wrapped in a Frame
+            // whose ByteCount marks the valid prefix; callers MUST treat the
+            // tail bytes (ByteCount..Length) as undefined and MUST consume
+            // the Frame before the next indexer call on this stream.
+            // Playback paths (PointCloudRecorder.Update, BodyTrackingPlayback.
+            // ProcessCoroutine) read each Frame synchronously within one tick,
+            // so the reuse is safe; the contract is documented on Frame.ByteCount.
+            private byte[] _scratch = Array.Empty<byte>();
             private bool _disposed;
 
             public string FilePath => _filePath;
@@ -307,14 +329,36 @@ namespace PointCloud
                     _fs.Seek((long)_offsets[index], SeekOrigin.Begin);
                     ulong ts = _br.ReadUInt64();
                     uint size = _br.ReadUInt32();
-                    byte[] bytes = _br.ReadBytes((int)size);
-                    if (bytes.Length != (int)size)
+                    // Grow scratch on the first record that exceeds current
+                    // capacity. Round up to the next power of two so a noisy
+                    // mix of slightly-larger records doesn't trigger a fresh
+                    // alloc on every other access.
+                    if (_scratch.Length < (int)size)
+                    {
+                        int cap = _scratch.Length == 0 ? 1024 : _scratch.Length;
+                        while (cap < (int)size) cap <<= 1;
+                        _scratch = new byte[cap];
+                    }
+                    // Loop until the requested count is fully read — FileStream.Read
+                    // is allowed to return fewer bytes than asked (especially on
+                    // platforms where the underlying handle is non-blocking or the
+                    // OS chooses to chunk a large read), and BinaryReader.ReadBytes
+                    // does this loop internally. Replicating it here keeps the
+                    // short-read path well-defined (throw on real EOF, retry otherwise).
+                    int total = 0;
+                    while (total < (int)size)
+                    {
+                        int n = _fs.Read(_scratch, total, (int)size - total);
+                        if (n == 0) break;
+                        total += n;
+                    }
+                    if (total != (int)size)
                         throw new EndOfStreamException($"Truncated record {index} in {_filePath}");
                     // Backfill the ts cache as a free side effect — a subsequent
                     // TimestampNsAt(index) call returns without a disk hit.
                     _timestamps[index] = ts;
                     _tsLoaded[index] = true;
-                    return new Frame { TimestampNs = ts, Bytes = bytes };
+                    return new Frame { TimestampNs = ts, Bytes = _scratch, ByteCount = (int)size };
                 }
             }
 
@@ -396,7 +440,7 @@ namespace PointCloud
                 byte[] bytes = br.ReadBytes((int)size);
                 if (bytes.Length != (int)size)
                     throw new EndOfStreamException($"Truncated record {i} in {filePath}");
-                frames.Add(new Frame { TimestampNs = ts, Bytes = bytes });
+                frames.Add(new Frame { TimestampNs = ts, Bytes = bytes, ByteCount = (int)size });
             }
             return frames;
         }
@@ -557,6 +601,34 @@ namespace PointCloud
             sb.Append("    format: y16\n");
             sb.Append($"    width: {width}\n");
             sb.Append($"    height: {height}\n");
+            sb.Append($"  device_serial: \"{EscapeYaml(serial)}\"\n");
+            sb.Append("  timestamp_basis: device_synced_unix_like_ns\n");
+            sb.Append("  producer: FloatingVectorsICC\n");
+            return sb.ToString();
+        }
+
+        public static string BuildBodiesHeaderYaml(string serial)
+        {
+            // bodies_main keeps the same k4abt body record layout the worker MMF uses, so
+            // the in-memory BodySnapshot[] can be blit-encoded record-by-record without
+            // touching managed structs per joint. Layout is documented here for human
+            // readers; decoders rely on BodyTracking.RecordedBodySerializer.
+            var sb = new StringBuilder();
+            sb.Append("record_format:\n");
+            sb.Append("  - name: timestamp_ns\n");
+            sb.Append("    type: u64\n");
+            sb.Append("    comment: depth-frame timestamp the bodies were tracked from\n");
+            sb.Append("  - name: payload\n");
+            sb.Append("    type: bytes\n");
+            sb.Append("    comment: u32 body_count + body_count * (u32 id + u32 reserved + 32 joints × {f32 posX, f32 posY, f32 posZ (mm), f32 quatW, f32 quatX, f32 quatY, f32 quatZ, u32 confidence})\n");
+            sb.Append("custom:\n");
+            sb.Append("  sensor:\n");
+            sb.Append("    sensor_type: bodies\n");
+            sb.Append("    format: k4abt_bodies_v1\n");
+            sb.Append("    joint_count: 32\n");
+            sb.Append("    joint_record_bytes: 32\n");
+            sb.Append("    body_record_bytes: 1032\n");
+            sb.Append("    max_bodies_per_frame: 6\n");
             sb.Append($"  device_serial: \"{EscapeYaml(serial)}\"\n");
             sb.Append("  timestamp_basis: device_synced_unix_like_ns\n");
             sb.Append("  producer: FloatingVectorsICC\n");
