@@ -1,0 +1,20 @@
+// Clear kernel for the TSDF voxel volume owned by TSDFVolume.cs.
+// One thread per voxel; writes (tsdf = +tau, weight = 0) — i.e. "free space
+// with no observation yet". Voxels never observed by any camera will retain
+// this initial value and Marching Cubes will skip them (weight == 0 gate).
+
+#pragma kernel Clear
+
+RWStructuredBuffer<float2> _Voxels;   // x = tsdf, y = weight
+int3 _Dim;                            // grid dimensions
+float _InitTsdf;                      // = tau (+ truncation), set per-dispatch
+
+[numthreads(64, 1, 1)]
+void Clear(uint3 id : SV_DispatchThreadID)
+{
+    uint linearIdx = id.x;
+    uint total = (uint)(_Dim.x * _Dim.y * _Dim.z);
+    if (linearIdx >= total) return;
+
+    _Voxels[linearIdx] = float2(_InitTsdf, 0.0);
+}
