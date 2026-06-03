@@ -38,6 +38,32 @@ namespace TSDF
                  "feed.")]
         public bool subscribePlayback = true;
 
+        [Tooltip("Live-follow mode: wipe the TSDF volume once every batch of " +
+                 "<expectedCamCount> unique cameras has integrated, then start " +
+                 "accumulating the next batch. The mesh therefore reflects only " +
+                 "the most recent complete multi-cam observation and tracks the " +
+                 "current point cloud over time.")]
+        public bool clearVolumeOnNewBatch = true;
+
+        [Tooltip("Number of unique serials per batch. Default 4 = one Femto Bolt " +
+                 "set; lower it if you are debugging with fewer cams attached.")]
+        [Min(1)] public int expectedCamCount = 4;
+
+        // Set of serials that have integrated since the last clear. Once it
+        // reaches expectedCamCount, the next IntegrateRawFrame call wipes the
+        // volume and resets the set — i.e. the just-finished batch is the one
+        // MC sees (TSDFView only re-dispatches when CompletedBatchCount moves).
+        private readonly System.Collections.Generic.HashSet<string> _batchSerials
+            = new System.Collections.Generic.HashSet<string>();
+
+        /// <summary>
+        /// Monotonically increasing per-batch counter. Bumped each time a batch
+        /// reaches <see cref="expectedCamCount"/> unique serials. TSDFView reads
+        /// this to decide when to re-run Marching Cubes — the mesh therefore
+        /// only updates on batch completion, never on partial batches.
+        /// </summary>
+        public int CompletedBatchCount { get; private set; }
+
         [Tooltip("Log a per-second summary of integrated frames per serial.")]
         public bool diagnosticLogging = false;
 
@@ -162,6 +188,16 @@ namespace TSDF
             DispatchIntegrate(serial, camParam, sourceTransform, raw);
         }
 
+        /// <summary>
+        /// Integrate ONE depth frame from one camera into <see cref="volume"/>.
+        /// Exposed so debug / sub-frame interpolation paths can feed synthetic or
+        /// snapshotted frames without going through the OnRawFramesReady /
+        /// OnPlaybackRawFrame events.
+        /// </summary>
+        public void IntegrateRawFrame(string serial, ObCameraParam? camParam,
+                                      Transform sourceTransform, RawFrameData raw)
+            => DispatchIntegrate(serial, camParam, sourceTransform, raw);
+
         private unsafe void DispatchIntegrate(string serial, ObCameraParam? camParam,
                                               Transform sourceTransform, RawFrameData raw)
         {
@@ -170,6 +206,17 @@ namespace TSDF
             if (raw.DepthBytes == null || raw.DepthByteCount <= 0) return;
             if (!camParam.HasValue) return; // need intrinsics
             if (sourceTransform == null) return;
+
+            // Live-follow: when a complete batch finished last time, wipe the
+            // volume here at the START of the next batch's first integration.
+            // TSDFView only re-runs MC on CompletedBatchCount changes, so the
+            // mesh on screen stays bound to the LAST complete batch all the way
+            // until the new batch finishes — no flicker on partial batches.
+            if (clearVolumeOnNewBatch && _batchSerials.Count >= expectedCamCount)
+            {
+                volume.Clear();
+                _batchSerials.Clear();
+            }
 
             if (!_states.TryGetValue(serial, out var st))
             {
@@ -224,7 +271,27 @@ namespace TSDF
             _shader.Dispatch(_kernel, groups, 1, 1);
 
             st.FramesIntegrated++;
+            TotalIntegrationCount++;
+
+            // Tally this serial into the in-flight batch. The check is below
+            // (not above) the dispatch so this frame's contribution lands in
+            // the volume BEFORE we declare the batch complete.
+            if (clearVolumeOnNewBatch)
+            {
+                _batchSerials.Add(serial);
+                if (_batchSerials.Count == expectedCamCount)
+                    CompletedBatchCount++;
+            }
         }
+
+        /// <summary>
+        /// Monotonically increasing counter, +1 per successful IntegrateRawFrame.
+        /// TSDFView reads this to decide "did the integrator do work this Unity
+        /// frame?" — if yes, re-run MC + clear in LateUpdate; if no, hold the
+        /// previous mesh on screen so it does not flicker on Unity frames where
+        /// the recorder did not emit (Unity 60+ fps vs recorder 30 fps).
+        /// </summary>
+        public int TotalIntegrationCount { get; private set; }
 
         /// <summary>
         /// Composes the matrix world(metres) -> depth-camera(millimetres) used

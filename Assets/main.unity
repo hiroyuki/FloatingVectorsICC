@@ -380,6 +380,93 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!1 &639959843
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 639959845}
+  - component: {fileID: 639959844}
+  - component: {fileID: 639959846}
+  - component: {fileID: 639959847}
+  m_Layer: 0
+  m_Name: TSDFVolume
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!114 &639959844
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 639959843}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: ff26e56642f74450baf9005d5ccf0713, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: TSDF::TSDF.TSDFVolume
+  boundingBox: {fileID: 1151541767}
+  voxelSize: 0.05
+  tauMultiplier: 4
+  accumulationMode: 0
+  verboseLogging: 1
+--- !u!4 &639959845
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 639959843}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &639959846
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 639959843}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: bcbb172f5530a408281650dc596846b2, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: TSDF::TSDF.TSDFIntegrator
+  volume: {fileID: 639959844}
+  observationWeight: 1
+  subscribeLive: 1
+  subscribePlayback: 1
+  diagnosticLogging: 1
+--- !u!114 &639959847
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 639959843}
+  m_Enabled: 0
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 3574cd3c464e14ce08fea556c718e353, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: TSDF::TSDF.TSDFMeshRenderer
+  volume: {fileID: 639959844}
+  material: {fileID: 0}
+  maxVertices: 1000000
+  isoLevel: 0
+  minWeight: 0.5
+  mcEveryNFrames: 1
+  diagnosticLogging: 1
 --- !u!1 &925702422
 GameObject:
   m_ObjectHideFlags: 0
@@ -882,7 +969,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::BodyTracking.BodyTrackingMultiLive
   cameraManager: {fileID: 925702423}
   workerHost: {fileID: 100997492}
-  showSkeleton: 1
+  showSkeleton: 0
   showAnatomicalBones: 0
   jointRadius: 0.005
   skeletonColor: {r: 0.094645746, g: 0.22020026, b: 0.23773581, a: 1}
@@ -959,6 +1046,78 @@ Transform:
   - {fileID: 1180694594}
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!1 &2040096809
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 2040096811}
+  - component: {fileID: 2040096810}
+  - component: {fileID: 2040096812}
+  m_Layer: 0
+  m_Name: '[TSDF Debug]'
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!114 &2040096810
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2040096809}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 2cc728ae40f8649e2b5e0356905fb12a, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: TSDF::TSDF.DebugTools.TSDFDebugSession
+  volume: {fileID: 639959844}
+  integrator: {fileID: 639959846}
+  recorder: {fileID: 86788058}
+  targetSerial: 
+  captureRequested: 0
+  pauseRecorderOnCapture: 1
+  lastCapturedSerial: (none)
+  lastTimestampUs: 0
+  lastDepthW: 0
+  lastDepthH: 0
+  captureCount: 0
+--- !u!4 &2040096811
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2040096809}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &2040096812
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2040096809}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 3b32f5168b4ae468aa9b1e24eb9f435a, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: TSDF::TSDF.DebugTools.TSDFDebugVoxelViz
+  volume: {fileID: 639959844}
+  material: {fileID: 0}
+  sphereScale: 0.3
+  drawEveryNFrames: 1
 --- !u!1 &2103759209
 GameObject:
   m_ObjectHideFlags: 0
@@ -1044,3 +1203,5 @@ SceneRoots:
   - {fileID: 1238217650}
   - {fileID: 7740002}
   - {fileID: 1168113567}
+  - {fileID: 639959845}
+  - {fileID: 2040096811}

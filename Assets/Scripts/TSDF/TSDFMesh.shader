@@ -28,8 +28,11 @@ Shader "TSDF/TSDFMesh"
             #pragma fragment frag
             #include "UnityCG.cginc"
 
-            struct VertexIn { float3 pos; };
-            StructuredBuffer<VertexIn> _Vertices;
+            // Matches the Tri struct emitted by TSDFMarchingCubes.compute.
+            // 3 float3 per triangle (36 bytes); SV_VertexID indexes vertices
+            // across all triangles, decompose into (triIdx, cornerIdx).
+            struct Tri { float3 v0; float3 v1; float3 v2; };
+            StructuredBuffer<Tri> _Triangles;
 
             float4 _Color;
             float4 _RimColor;
@@ -45,7 +48,12 @@ Shader "TSDF/TSDFMesh"
             V2F vert(uint vid : SV_VertexID)
             {
                 V2F o;
-                float3 wp = _Vertices[vid].pos;
+                uint triIdx = vid / 3u;
+                uint cornerIdx = vid - triIdx * 3u; // = vid % 3
+                Tri t = _Triangles[triIdx];
+                float3 wp = (cornerIdx == 0u) ? t.v0
+                          : (cornerIdx == 1u) ? t.v1
+                                              : t.v2;
                 o.pos = mul(UNITY_MATRIX_VP, float4(wp, 1.0));
                 o.worldPos = wp;
                 o.viewDir = normalize(_WorldSpaceCameraPos.xyz - wp);

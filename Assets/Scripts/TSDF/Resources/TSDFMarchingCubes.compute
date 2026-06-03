@@ -1,13 +1,17 @@
 // Marching Cubes extraction from the TSDF voxel volume. One thread per
-// CELL (a cube of 8 voxels) over dim-1 cells per axis. Emits one vertex per
-// Append into _Vertices — three appends per triangle so the args buffer
-// (set up via ComputeBuffer.CopyCount) can be fed straight to
-// DrawProceduralIndirect without a separate "*3" pass.
+// CELL (a cube of 8 voxels) over dim-1 cells per axis. Emits ONE Tri
+// struct (= 3 vertices) per Append so concurrent cells cannot interleave
+// the three vertices of a single triangle into bogus cross-cell triangles
+// (the bug that produced wedge-shaped artifacts spanning many cells).
+// A trailing ScaleArgs kernel multiplies the Append counter by 3 so the
+// indirect-args buffer ends up holding the vertex count expected by
+// DrawProceduralIndirect.
 //
 // Spec §5: standard 256-pattern Marching Cubes, iso = 0, voxels with weight
 // == 0 are invalid and skip the cell entirely (gate on every corner).
 
 #pragma kernel MarchCubes
+#pragma kernel ScaleArgs
 #include "MarchingCubesTables.hlsl"
 
 StructuredBuffer<float2> _Voxels;   // x = sdf (m), y = weight
@@ -16,8 +20,18 @@ float4x4 _WorldFromVoxel;
 float _IsoLevel;                     // = 0
 float _MinWeight;                    // skip cell if any corner weight < this
 
-struct VertexOut { float3 pos; };
-AppendStructuredBuffer<VertexOut> _Vertices;
+struct Tri { float3 v0; float3 v1; float3 v2; };
+AppendStructuredBuffer<Tri> _Triangles;
+
+// Multiplies args[0] from "triangle count" (set by ComputeBuffer.CopyCount
+// off the AppendBuffer<Tri> counter) into "vertex count" for the
+// DrawProceduralIndirect args buffer layout [vertCount, 1, 0, 0].
+RWStructuredBuffer<uint> _Args;
+[numthreads(1, 1, 1)]
+void ScaleArgs(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x == 0u) _Args[0] = _Args[0] * 3u;
+}
 
 int LinIdx(int3 c) { return c.x + _Dim.x * (c.y + _Dim.y * c.z); }
 
@@ -116,8 +130,11 @@ void MarchCubes(uint3 id : SV_DispatchThreadID)
     if (eMask & 1024) e[10] = InterpZero(p2, p6, d2.x, d6.x);
     if (eMask & 2048) e[11] = InterpZero(p3, p7, d3.x, d7.x);
 
-    // Walk triTable[cubeIdx] in groups of three; emit one vertex per Append
-    // so the AppendStructuredBuffer counter == final vertex count.
+    // Walk triTable[cubeIdx] in groups of three; emit ONE Tri per Append so
+    // the three vertices of one triangle live in adjacent slots even when
+    // many cells are emitting in parallel. Without this, each cell's three
+    // Vertex appends would race against the neighbour cells' appends and the
+    // rasteriser would group strangers into wedge-shaped fake triangles.
     [loop]
     for (int ti = 0; ti < 16; ti += 3)
     {
@@ -125,10 +142,8 @@ void MarchCubes(uint3 id : SV_DispatchThreadID)
         if (a == -1) break;
         int b = triTable[cubeIdx][ti + 1];
         int c = triTable[cubeIdx][ti + 2];
-        VertexOut va, vb, vc;
-        va.pos = e[a]; vb.pos = e[b]; vc.pos = e[c];
-        _Vertices.Append(va);
-        _Vertices.Append(vb);
-        _Vertices.Append(vc);
+        Tri tri;
+        tri.v0 = e[a]; tri.v1 = e[b]; tri.v2 = e[c];
+        _Triangles.Append(tri);
     }
 }
