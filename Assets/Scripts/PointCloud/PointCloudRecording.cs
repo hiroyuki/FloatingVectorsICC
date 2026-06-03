@@ -37,6 +37,7 @@ namespace PointCloud
         public const string DepthSensorName      = "depth_main";
         public const string ColorSensorName      = "color_main";
         public const string IRSensorName         = "ir_main";
+        public const string BodiesSensorName     = "bodies_main";
         public const string PointcloudSensorName = "pointcloud_main"; // legacy
 
         public const int PointCloudVertexStride = 24; // sizeof(ObColorPoint)
@@ -47,8 +48,19 @@ namespace PointCloud
             public ulong TimestampNs;
             public byte[] Bytes;
 
+            /// <summary>
+            /// Number of valid bytes in <see cref="Bytes"/>. Always prefer this over
+            /// <c>Bytes.Length</c>: Frames returned by <see cref="RcsvFrameStream"/>'s
+            /// indexer share a reusable scratch buffer whose <c>Length</c> grows to fit
+            /// the largest record seen so far, so <c>Bytes.Length</c> ≥ <see cref="ByteCount"/>
+            /// in general. For Frames produced by <see cref="ReadRcsv"/> (legacy
+            /// fully-materialized path) and recording-time timestamp sentinels,
+            /// <see cref="ByteCount"/> equals <c>Bytes?.Length ?? 0</c>.
+            /// </summary>
+            public int ByteCount;
+
             /// <summary>Convenience: legacy pointcloud_main byte count expressed as point count.</summary>
-            public int PointCount => Bytes == null ? 0 : Bytes.Length / PointCloudVertexStride;
+            public int PointCount => ByteCount / PointCloudVertexStride;
         }
 
         // ------------------------------------------------------------------
@@ -78,11 +90,11 @@ namespace PointCloud
             for (int i = 0; i < frames.Count; i++)
             {
                 var f = frames[i];
-                if (f == null || f.Bytes == null) continue;
+                if (f == null || f.Bytes == null || f.ByteCount <= 0) continue;
                 offsets.Add((ulong)fs.Position);
                 bw.Write(f.TimestampNs);
-                bw.Write((uint)f.Bytes.Length);
-                bw.Write(f.Bytes);
+                bw.Write((uint)f.ByteCount);
+                bw.Write(f.Bytes, 0, f.ByteCount);
             }
             offsets.Add((ulong)fs.Position);
 
@@ -199,7 +211,204 @@ namespace PointCloud
             }
         }
 
-        /// <summary>Read an RCSV file, returning its records in order.</summary>
+        /// <summary>
+        /// Lazy, file-backed view over an RCSV's records. Open the file once via
+        /// <see cref="RcsvFrameStream"/>, then index into it as if it were a
+        /// <c>List&lt;Frame&gt;</c>: only the requested frame's bytes are read from
+        /// disk (timestamps + offsets are loaded eagerly into small arrays so
+        /// <see cref="Count"/>, timestamp scans, and seek planning are O(1)).
+        ///
+        /// Compared to <see cref="ReadRcsv"/> which fully materializes every
+        /// frame's payload into managed byte[] upfront, this keeps multi-GB
+        /// recordings out of the managed heap. Each indexer call allocates a
+        /// fresh byte[] for the record — callers should not assume payload
+        /// identity across repeated accesses.
+        ///
+        /// Thread-safety: the indexer mutates the underlying FileStream's
+        /// position, so concurrent reads are unsafe. Single-threaded sequential
+        /// or random access is fine.
+        /// </summary>
+        public sealed class RcsvFrameStream : IReadOnlyList<Frame>, IDisposable
+        {
+            private readonly string _filePath;
+            // _fs / _br: 1 MB-buffered handle used by the indexer to pull full
+            // record payloads (the playback path reads records contiguously, so
+            // a large buffer + SequentialScan amortizes the disk hit).
+            private FileStream _fs;
+            private BinaryReader _br;
+            // _tsFs / _tsBr: 1 B-buffered handle dedicated to scattered 8-B
+            // timestamp reads. Sharing the main handle's 1 MB buffer would
+            // force a 1 MB refill per ts peek (records are typically 700 KB+
+            // apart, so consecutive ts offsets land in different buffer pages),
+            // turning a few-MB ts walk into a few-GB read.
+            private FileStream _tsFs;
+            private BinaryReader _tsBr;
+            // offsets[i] is the absolute file position of record i's first byte
+            // (the u64 timestamp). offsets[Count] is the end-of-data sentinel
+            // (== index chunk start). Loaded once on construction.
+            private readonly ulong[] _offsets;
+            // Lazy timestamp cache. Populated on first TimestampNsAt(i) call.
+            // Eager pre-load is tempting (only 8 B × N total) but the N
+            // scattered syscalls add up to seconds on multi-cam recordings.
+            // The playback Update loop reads ts monotonically (cursor+1 each
+            // tick) so every ts is fetched exactly once across the session
+            // anyway — pre-loading just front-loads that cost into Play startup.
+            private readonly ulong[] _timestamps;
+            private readonly bool[] _tsLoaded;
+            // Reusable payload buffer shared by every indexer access. Grows
+            // on demand (next-pow-2) to fit the largest record so far, never
+            // shrinks. The indexer hands this buffer back wrapped in a Frame
+            // whose ByteCount marks the valid prefix; callers MUST treat the
+            // tail bytes (ByteCount..Length) as undefined and MUST consume
+            // the Frame before the next indexer call on this stream.
+            // Playback paths (PointCloudRecorder.Update, BodyTrackingPlayback.
+            // ProcessCoroutine) read each Frame synchronously within one tick,
+            // so the reuse is safe; the contract is documented on Frame.ByteCount.
+            private byte[] _scratch = Array.Empty<byte>();
+            private bool _disposed;
+
+            public string FilePath => _filePath;
+            public int Count => _timestamps.Length;
+
+            public RcsvFrameStream(string filePath)
+            {
+                if (filePath == null) throw new ArgumentNullException(nameof(filePath));
+                _filePath = filePath;
+
+                // SequentialScan is a slight lie (we may seek backwards on
+                // random access from the Editor), but the common cases
+                // (BodyTrackingPlayback's i++ loop, recorder Update's
+                // PlaybackCursor advance) ARE sequential, and the hint nudges
+                // Windows to read ahead which is what we want.
+                _fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read,
+                                     bufferSize: 1024 * 1024,
+                                     options: FileOptions.SequentialScan);
+                _br = new BinaryReader(_fs, Encoding.UTF8, leaveOpen: false);
+
+                var magic = Encoding.ASCII.GetString(_br.ReadBytes(4));
+                if (magic != Magic)
+                {
+                    Dispose();
+                    throw new InvalidDataException($"Not an RCSV file: magic '{magic}' at {filePath}");
+                }
+                ulong indexChunkOffset = _br.ReadUInt64();
+                _br.ReadUInt64(); // reserved
+                uint headerTextSize = _br.ReadUInt32();
+                _fs.Seek(headerTextSize, SeekOrigin.Current); // skip header text
+
+                if (indexChunkOffset == 0 || indexChunkOffset >= (ulong)_fs.Length)
+                {
+                    Dispose();
+                    throw new InvalidDataException($"Invalid index chunk offset in {filePath}");
+                }
+                _fs.Seek((long)indexChunkOffset, SeekOrigin.Begin);
+                ulong validRecordCount = _br.ReadUInt64();
+                _offsets = new ulong[validRecordCount + 1];
+                for (ulong i = 0; i <= validRecordCount; i++) _offsets[i] = _br.ReadUInt64();
+
+                _timestamps = new ulong[validRecordCount];
+                _tsLoaded = new bool[validRecordCount];
+
+                // Long-lived small-buffer + RandomAccess handle for ts peeks.
+                // bufferSize:1 disables read-ahead so each ReadUInt64 transfers
+                // ~8 B (rounded to one disk sector by the OS page cache layer)
+                // instead of refilling the main stream's 1 MB buffer.
+                _tsFs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read,
+                                       bufferSize: 1,
+                                       options: FileOptions.RandomAccess);
+                _tsBr = new BinaryReader(_tsFs, Encoding.UTF8, leaveOpen: false);
+            }
+
+            public Frame this[int index]
+            {
+                get
+                {
+                    if (_disposed) throw new ObjectDisposedException(nameof(RcsvFrameStream));
+                    if ((uint)index >= (uint)_timestamps.Length)
+                        throw new ArgumentOutOfRangeException(nameof(index));
+                    _fs.Seek((long)_offsets[index], SeekOrigin.Begin);
+                    ulong ts = _br.ReadUInt64();
+                    uint size = _br.ReadUInt32();
+                    // Grow scratch on the first record that exceeds current
+                    // capacity. Round up to the next power of two so a noisy
+                    // mix of slightly-larger records doesn't trigger a fresh
+                    // alloc on every other access.
+                    if (_scratch.Length < (int)size)
+                    {
+                        int cap = _scratch.Length == 0 ? 1024 : _scratch.Length;
+                        while (cap < (int)size) cap <<= 1;
+                        _scratch = new byte[cap];
+                    }
+                    // Loop until the requested count is fully read — FileStream.Read
+                    // is allowed to return fewer bytes than asked (especially on
+                    // platforms where the underlying handle is non-blocking or the
+                    // OS chooses to chunk a large read), and BinaryReader.ReadBytes
+                    // does this loop internally. Replicating it here keeps the
+                    // short-read path well-defined (throw on real EOF, retry otherwise).
+                    int total = 0;
+                    while (total < (int)size)
+                    {
+                        int n = _fs.Read(_scratch, total, (int)size - total);
+                        if (n == 0) break;
+                        total += n;
+                    }
+                    if (total != (int)size)
+                        throw new EndOfStreamException($"Truncated record {index} in {_filePath}");
+                    // Backfill the ts cache as a free side effect — a subsequent
+                    // TimestampNsAt(index) call returns without a disk hit.
+                    _timestamps[index] = ts;
+                    _tsLoaded[index] = true;
+                    return new Frame { TimestampNs = ts, Bytes = _scratch, ByteCount = (int)size };
+                }
+            }
+
+            /// <summary>
+            /// Cheap timestamp lookup. First call per index reads 8 B from the
+            /// dedicated small-buffer FileStream; subsequent calls return the
+            /// cached value. The playback Update loop and BodyTracking pass
+            /// both walk timestamps monotonically, so the total disk traffic
+            /// across a playback session equals the eager-preload cost but
+            /// is amortized over playback time instead of blocking Play startup.
+            /// </summary>
+            public ulong TimestampNsAt(int index)
+            {
+                if (_disposed) throw new ObjectDisposedException(nameof(RcsvFrameStream));
+                if ((uint)index >= (uint)_timestamps.Length)
+                    throw new ArgumentOutOfRangeException(nameof(index));
+                if (!_tsLoaded[index])
+                {
+                    _tsFs.Seek((long)_offsets[index], SeekOrigin.Begin);
+                    _timestamps[index] = _tsBr.ReadUInt64();
+                    _tsLoaded[index] = true;
+                }
+                return _timestamps[index];
+            }
+
+            public IEnumerator<Frame> GetEnumerator()
+            {
+                for (int i = 0; i < _timestamps.Length; i++) yield return this[i];
+            }
+
+            System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+
+            public void Dispose()
+            {
+                if (_disposed) return;
+                _disposed = true;
+                _br?.Dispose();
+                _br = null;
+                _fs = null;
+                _tsBr?.Dispose();
+                _tsBr = null;
+                _tsFs = null;
+            }
+        }
+
+        /// <summary>
+        /// Read an RCSV file, returning its records in order. Loads the entire
+        /// payload into memory; for large recordings prefer <see cref="RcsvFrameStream"/>
+        /// which keeps the bytes on disk until indexed.
+        /// </summary>
         public static List<Frame> ReadRcsv(string filePath)
         {
             if (filePath == null) throw new ArgumentNullException(nameof(filePath));
@@ -231,7 +440,7 @@ namespace PointCloud
                 byte[] bytes = br.ReadBytes((int)size);
                 if (bytes.Length != (int)size)
                     throw new EndOfStreamException($"Truncated record {i} in {filePath}");
-                frames.Add(new Frame { TimestampNs = ts, Bytes = bytes });
+                frames.Add(new Frame { TimestampNs = ts, Bytes = bytes, ByteCount = (int)size });
             }
             return frames;
         }
@@ -392,6 +601,34 @@ namespace PointCloud
             sb.Append("    format: y16\n");
             sb.Append($"    width: {width}\n");
             sb.Append($"    height: {height}\n");
+            sb.Append($"  device_serial: \"{EscapeYaml(serial)}\"\n");
+            sb.Append("  timestamp_basis: device_synced_unix_like_ns\n");
+            sb.Append("  producer: FloatingVectorsICC\n");
+            return sb.ToString();
+        }
+
+        public static string BuildBodiesHeaderYaml(string serial)
+        {
+            // bodies_main keeps the same k4abt body record layout the worker MMF uses, so
+            // the in-memory BodySnapshot[] can be blit-encoded record-by-record without
+            // touching managed structs per joint. Layout is documented here for human
+            // readers; decoders rely on BodyTracking.RecordedBodySerializer.
+            var sb = new StringBuilder();
+            sb.Append("record_format:\n");
+            sb.Append("  - name: timestamp_ns\n");
+            sb.Append("    type: u64\n");
+            sb.Append("    comment: depth-frame timestamp the bodies were tracked from\n");
+            sb.Append("  - name: payload\n");
+            sb.Append("    type: bytes\n");
+            sb.Append("    comment: u32 body_count + body_count * (u32 id + u32 reserved + 32 joints × {f32 posX, f32 posY, f32 posZ (mm), f32 quatW, f32 quatX, f32 quatY, f32 quatZ, u32 confidence})\n");
+            sb.Append("custom:\n");
+            sb.Append("  sensor:\n");
+            sb.Append("    sensor_type: bodies\n");
+            sb.Append("    format: k4abt_bodies_v1\n");
+            sb.Append("    joint_count: 32\n");
+            sb.Append("    joint_record_bytes: 32\n");
+            sb.Append("    body_record_bytes: 1032\n");
+            sb.Append("    max_bodies_per_frame: 6\n");
             sb.Append($"  device_serial: \"{EscapeYaml(serial)}\"\n");
             sb.Append("  timestamp_basis: device_synced_unix_like_ns\n");
             sb.Append("  producer: FloatingVectorsICC\n");

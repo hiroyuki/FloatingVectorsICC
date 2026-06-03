@@ -1,0 +1,125 @@
+// Per-camera TSDF integration kernel. One thread per voxel; one dispatch per
+// camera per frame. The voxel buffer accumulates across cameras and across
+// frames — clearing is the responsibility of TSDFVolume.
+//
+// Coordinate-system contract (matches PointCloudReconstruct.compute):
+//   - The voxel index (i,j,k) maps to world space via _WorldFromVoxel, with
+//     voxel CENTER at (i+0.5, j+0.5, k+0.5). World units = metres.
+//   - _DepthFromWorld converts a world-metres point to the source camera's
+//     DEPTH frame in MILLIMETRES (the unit the depth sensor uses).
+//     Composition on the C# side:
+//        worldToColorCameraMetres (= renderer.transform.worldToLocalMatrix)
+//        scale x1000 (m -> mm)
+//        invert(ObCameraParam.Transform)  (color mm -> depth mm)
+//   - Depth sample is uint16 millimetres (Orbbec / k4a convention). 0 = invalid.
+//
+// SDF convention: sdf = depthSample - p_depth.z, taken along the depth-camera
+// Z-axis (KinectFusion-style). The spec writes "sdf = d - length(p_cam)" but
+// the Z-axis approximation is what every reference TSDF impl uses; the error
+// is bounded by the obliquity of the ray and is absorbed by the truncation
+// margin tau.
+
+#pragma kernel Integrate
+
+// --- voxel volume (shared with TSDFClear / TSDFMarchingCubes) ---
+RWStructuredBuffer<float2> _Voxels;   // x = tsdf (metres), y = weight
+int3 _Dim;
+float4x4 _WorldFromVoxel;             // voxel index centre -> world metres
+float _Tau;                           // truncation (metres)
+
+// 0 = standard weighted-average; 1 = retain-ghost (abs(sdf)-min wins).
+// Step 1a smoke test stays on 0; step 1c flips to 1 (spec §9.2).
+int _AccumulationMode;
+
+// --- per-camera (rebound every dispatch) ---
+ByteAddressBuffer _Depth;             // Y16, length = _DepthW * _DepthH * 2 bytes
+int _DepthW;
+int _DepthH;
+float _FxD;
+float _FyD;
+float _CxD;
+float _CyD;
+float4x4 _DepthFromWorld;             // world metres -> depth camera millimetres
+
+// Optional weight modulators. _WObs is the base observation weight.
+float _WObs;
+
+uint LoadDepthU16(int u, int v)
+{
+    uint result = 0u;
+    if (u >= 0 && v >= 0 && u < _DepthW && v < _DepthH)
+    {
+        uint byteOffset = ((uint)v * (uint)_DepthW + (uint)u) * 2u;
+        uint word = _Depth.Load(byteOffset & ~3u);
+        uint shift = (byteOffset & 2u) * 8u;
+        result = (word >> shift) & 0xFFFFu;
+    }
+    return result;
+}
+
+[numthreads(64, 1, 1)]
+void Integrate(uint3 id : SV_DispatchThreadID)
+{
+    uint lin = id.x;
+    uint total = (uint)(_Dim.x * _Dim.y * _Dim.z);
+    if (lin >= total) return;
+
+    // Unflatten linear index -> (i,j,k). Order matches the C# linear index:
+    //   linear = x + dimX * (y + dimY * z).
+    uint dx = (uint)_Dim.x;
+    uint dy = (uint)_Dim.y;
+    uint i = lin % dx;
+    uint j = (lin / dx) % dy;
+    uint k = lin / (dx * dy);
+
+    // Voxel centre in world metres.
+    float3 voxelIdxCentre = float3((float)i + 0.5, (float)j + 0.5, (float)k + 0.5);
+    float3 pWorld = mul(_WorldFromVoxel, float4(voxelIdxCentre, 1.0)).xyz;
+
+    // World -> depth-camera mm.
+    float3 pDepthMm = mul(_DepthFromWorld, float4(pWorld, 1.0)).xyz;
+    if (pDepthMm.z <= 0.0) return; // behind the camera
+
+    // Project to depth pixel.
+    float u = _FxD * pDepthMm.x / pDepthMm.z + _CxD;
+    float v = _FyD * pDepthMm.y / pDepthMm.z + _CyD;
+    int iu = (int)floor(u);
+    int iv = (int)floor(v);
+    if (iu < 0 || iv < 0 || iu >= _DepthW || iv >= _DepthH) return;
+
+    uint dRaw = LoadDepthU16(iu, iv);
+    if (dRaw == 0u) return; // invalid depth pixel
+
+    // sdf along the depth Z axis. Both terms in metres.
+    float dM = (float)dRaw * 0.001;
+    float pZm = pDepthMm.z * 0.001;
+    float sdf = dM - pZm;
+
+    // Asymmetric truncation: behind the surface beyond -tau is a hard miss
+    // for this camera; in front beyond +tau is clamped to +tau (records
+    // "empty space here" without dominating the running average).
+    if (sdf < -_Tau) return;
+    sdf = clamp(sdf, -_Tau, _Tau);
+
+    float wObs = _WObs;
+    float2 prev = _Voxels[lin];
+
+    if (_AccumulationMode == 0)
+    {
+        // Standard TSDF — running weighted average. Used for step 1a static-
+        // smoke verification; spec §9.2 swaps this for retain-ghost as soon as
+        // moving subjects enter the volume.
+        float w0 = prev.y;
+        float t0 = prev.x;
+        float w1 = w0 + wObs;
+        float t1 = (w1 > 0.0) ? (t0 * w0 + sdf * wObs) / w1 : sdf;
+        _Voxels[lin] = float2(t1, w1);
+    }
+    else
+    {
+        // Retain ghost — the observation closest to the surface (|sdf| min)
+        // wins, so a hand passing through a voxel leaves a permanent shell.
+        if (prev.y <= 0.0 || abs(sdf) < abs(prev.x))
+            _Voxels[lin] = float2(sdf, max(prev.y, wObs));
+    }
+}

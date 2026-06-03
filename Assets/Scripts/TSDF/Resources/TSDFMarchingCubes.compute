@@ -1,0 +1,149 @@
+// Marching Cubes extraction from the TSDF voxel volume. One thread per
+// CELL (a cube of 8 voxels) over dim-1 cells per axis. Emits ONE Tri
+// struct (= 3 vertices) per Append so concurrent cells cannot interleave
+// the three vertices of a single triangle into bogus cross-cell triangles
+// (the bug that produced wedge-shaped artifacts spanning many cells).
+// A trailing ScaleArgs kernel multiplies the Append counter by 3 so the
+// indirect-args buffer ends up holding the vertex count expected by
+// DrawProceduralIndirect.
+//
+// Spec §5: standard 256-pattern Marching Cubes, iso = 0, voxels with weight
+// == 0 are invalid and skip the cell entirely (gate on every corner).
+
+#pragma kernel MarchCubes
+#pragma kernel ScaleArgs
+#include "MarchingCubesTables.hlsl"
+
+StructuredBuffer<float2> _Voxels;   // x = sdf (m), y = weight
+int3 _Dim;
+float4x4 _WorldFromVoxel;
+float _IsoLevel;                     // = 0
+float _MinWeight;                    // skip cell if any corner weight < this
+
+struct Tri { float3 v0; float3 v1; float3 v2; };
+AppendStructuredBuffer<Tri> _Triangles;
+
+// Multiplies args[0] from "triangle count" (set by ComputeBuffer.CopyCount
+// off the AppendBuffer<Tri> counter) into "vertex count" for the
+// DrawProceduralIndirect args buffer layout [vertCount, 1, 0, 0].
+RWStructuredBuffer<uint> _Args;
+[numthreads(1, 1, 1)]
+void ScaleArgs(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x == 0u) _Args[0] = _Args[0] * 3u;
+}
+
+int LinIdx(int3 c) { return c.x + _Dim.x * (c.y + _Dim.y * c.z); }
+
+float3 VoxelCenterWorld(int3 c)
+{
+    float3 idxC = float3(c) + 0.5;
+    return mul(_WorldFromVoxel, float4(idxC, 1.0)).xyz;
+}
+
+float3 InterpZero(float3 p0, float3 p1, float v0, float v1)
+{
+    float denom = v1 - v0;
+    float t = saturate((_IsoLevel - v0) / (abs(denom) < 1e-6 ? sign(denom + 1e-12) * 1e-6 : denom));
+    return lerp(p0, p1, t);
+}
+
+[numthreads(4, 4, 4)]
+void MarchCubes(uint3 id : SV_DispatchThreadID)
+{
+    int cx = (int)id.x;
+    int cy = (int)id.y;
+    int cz = (int)id.z;
+    if (cx >= _Dim.x - 1 || cy >= _Dim.y - 1 || cz >= _Dim.z - 1) return;
+
+    // Standard Marching Cubes corner numbering. Must match edgeIdx /
+    // edgeTable / triTable in MarchingCubesTables.hlsl.
+    int3 c0 = int3(cx,     cy,     cz);
+    int3 c1 = int3(cx + 1, cy,     cz);
+    int3 c2 = int3(cx + 1, cy + 1, cz);
+    int3 c3 = int3(cx,     cy + 1, cz);
+    int3 c4 = int3(cx,     cy,     cz + 1);
+    int3 c5 = int3(cx + 1, cy,     cz + 1);
+    int3 c6 = int3(cx + 1, cy + 1, cz + 1);
+    int3 c7 = int3(cx,     cy + 1, cz + 1);
+
+    float2 d0 = _Voxels[LinIdx(c0)];
+    float2 d1 = _Voxels[LinIdx(c1)];
+    float2 d2 = _Voxels[LinIdx(c2)];
+    float2 d3 = _Voxels[LinIdx(c3)];
+    float2 d4 = _Voxels[LinIdx(c4)];
+    float2 d5 = _Voxels[LinIdx(c5)];
+    float2 d6 = _Voxels[LinIdx(c6)];
+    float2 d7 = _Voxels[LinIdx(c7)];
+
+    // All eight corners must have been observed by at least one camera, or
+    // the cell sits on the boundary of the carved volume and we'd be doing
+    // MC against the uninitialised +tau seed value (which produces phantom
+    // surfaces at the integration boundary).
+    if (d0.y < _MinWeight || d1.y < _MinWeight || d2.y < _MinWeight || d3.y < _MinWeight ||
+        d4.y < _MinWeight || d5.y < _MinWeight || d6.y < _MinWeight || d7.y < _MinWeight)
+        return;
+
+    int cubeIdx = 0;
+    if (d0.x < _IsoLevel) cubeIdx |= 1;
+    if (d1.x < _IsoLevel) cubeIdx |= 2;
+    if (d2.x < _IsoLevel) cubeIdx |= 4;
+    if (d3.x < _IsoLevel) cubeIdx |= 8;
+    if (d4.x < _IsoLevel) cubeIdx |= 16;
+    if (d5.x < _IsoLevel) cubeIdx |= 32;
+    if (d6.x < _IsoLevel) cubeIdx |= 64;
+    if (d7.x < _IsoLevel) cubeIdx |= 128;
+
+    int eMask = edgeTable[cubeIdx];
+    if (eMask == 0) return;
+
+    // World positions for the eight corners.
+    float3 p0 = VoxelCenterWorld(c0);
+    float3 p1 = VoxelCenterWorld(c1);
+    float3 p2 = VoxelCenterWorld(c2);
+    float3 p3 = VoxelCenterWorld(c3);
+    float3 p4 = VoxelCenterWorld(c4);
+    float3 p5 = VoxelCenterWorld(c5);
+    float3 p6 = VoxelCenterWorld(c6);
+    float3 p7 = VoxelCenterWorld(c7);
+
+    // 12 edge midpoints (only computed when the edge is crossed). The Metal
+    // shader compiler can't prove that triTable only references edges with
+    // their corresponding eMask bit set, so initialise to 0 to silence the
+    // "potentially uninitialised" warning — the runtime path still uses the
+    // valid values written below.
+    float3 e[12] = {
+        float3(0,0,0), float3(0,0,0), float3(0,0,0), float3(0,0,0),
+        float3(0,0,0), float3(0,0,0), float3(0,0,0), float3(0,0,0),
+        float3(0,0,0), float3(0,0,0), float3(0,0,0), float3(0,0,0)
+    };
+    if (eMask & 1)    e[0]  = InterpZero(p0, p1, d0.x, d1.x);
+    if (eMask & 2)    e[1]  = InterpZero(p1, p2, d1.x, d2.x);
+    if (eMask & 4)    e[2]  = InterpZero(p2, p3, d2.x, d3.x);
+    if (eMask & 8)    e[3]  = InterpZero(p3, p0, d3.x, d0.x);
+    if (eMask & 16)   e[4]  = InterpZero(p4, p5, d4.x, d5.x);
+    if (eMask & 32)   e[5]  = InterpZero(p5, p6, d5.x, d6.x);
+    if (eMask & 64)   e[6]  = InterpZero(p6, p7, d6.x, d7.x);
+    if (eMask & 128)  e[7]  = InterpZero(p7, p4, d7.x, d4.x);
+    if (eMask & 256)  e[8]  = InterpZero(p0, p4, d0.x, d4.x);
+    if (eMask & 512)  e[9]  = InterpZero(p1, p5, d1.x, d5.x);
+    if (eMask & 1024) e[10] = InterpZero(p2, p6, d2.x, d6.x);
+    if (eMask & 2048) e[11] = InterpZero(p3, p7, d3.x, d7.x);
+
+    // Walk triTable[cubeIdx] in groups of three; emit ONE Tri per Append so
+    // the three vertices of one triangle live in adjacent slots even when
+    // many cells are emitting in parallel. Without this, each cell's three
+    // Vertex appends would race against the neighbour cells' appends and the
+    // rasteriser would group strangers into wedge-shaped fake triangles.
+    [loop]
+    for (int ti = 0; ti < 16; ti += 3)
+    {
+        int a = triTable[cubeIdx][ti];
+        if (a == -1) break;
+        int b = triTable[cubeIdx][ti + 1];
+        int c = triTable[cubeIdx][ti + 2];
+        Tri tri;
+        tri.v0 = e[a]; tri.v1 = e[b]; tri.v2 = e[c];
+        _Triangles.Append(tri);
+    }
+}

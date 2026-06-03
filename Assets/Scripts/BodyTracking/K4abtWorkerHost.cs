@@ -58,9 +58,11 @@ namespace BodyTracking
         /// Fires synchronously on the main thread inside Update when a worker has produced
         /// new skeletons. The (snapshots, count) pair points at a host-owned reusable
         /// buffer — copy anything you need to persist; do not retain references past the
-        /// handler return.
+        /// handler return. <c>tsNs</c> is the depth-frame timestamp the bodies were
+        /// tracked from (forwarded from the worker MMF output slot), which subscribers
+        /// can persist alongside the bodies for offline analysis or recording.
         /// </summary>
-        public event Action<string, BodySnapshot[], int> OnSkeletonsReady;
+        public event Action<string, ulong, BodySnapshot[], int> OnSkeletonsReady;
 
         // --- per-camera session state ---
 
@@ -529,7 +531,7 @@ namespace BodyTracking
             s.LastSeenOutputFrameId = frameId;
             s.DiagSkeletonsRecv += (int)bodyCount;
 
-            try { OnSkeletonsReady?.Invoke(s.Serial, s.BodyBuffer, (int)bodyCount); }
+            try { OnSkeletonsReady?.Invoke(s.Serial, tsNs, s.BodyBuffer, (int)bodyCount); }
             catch (Exception ex) { Debug.LogError($"[K4abtWorkerHost] OnSkeletonsReady handler threw: {ex}"); }
         }
 

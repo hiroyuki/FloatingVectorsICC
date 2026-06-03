@@ -88,10 +88,9 @@ namespace PointCloud
         public string depthWorkMode = string.Empty;
 
         [Header("Display")]
-        [Tooltip("Hide / show all point cloud renderers. Toggling at runtime disables the " +
-                 "MeshRenderer on each spawned PointCloudRenderer GO without stopping capture, " +
-                 "so re-enabling resumes immediately with no pipeline restart.")]
-        public bool showPointClouds = true;
+        [Tooltip("Where to register spawned Live renderers for visibility toggling. " +
+                 "Auto-found via FindFirstObjectByType if left null.")]
+        public PointCloudView view;
 
         [Header("Extrinsics (issue #9)")]
         [Tooltip("Apply per-device global_tr_colorCamera read from <extrinsicsRoot>/calibration/" +
@@ -108,7 +107,11 @@ namespace PointCloud
         public IReadOnlyList<PointCloudRenderer> Renderers => _renderers;
 
         private readonly List<PointCloudRenderer> _renderers = new List<PointCloudRenderer>();
-        private bool _lastAppliedShowPointClouds = true;
+
+        private void Awake()
+        {
+            if (view == null) view = FindFirstObjectByType<PointCloudView>();
+        }
 
         private void Start()
         {
@@ -129,25 +132,16 @@ namespace PointCloud
                 var d = devices[i];
                 if (verboseLogging)
                     Debug.Log($"  [{i}] {d}");
-                _renderers.Add(SpawnRenderer(d, i));
+                var r = SpawnRenderer(d, i);
+                _renderers.Add(r);
+                if (view != null && r != null)
+                {
+                    var mr = r.GetComponent<MeshRenderer>();
+                    if (mr != null) view.Register(mr);
+                }
             }
 
             if (applyExtrinsics) ApplyExtrinsicsToLive();
-        }
-
-        private void Update()
-        {
-            // Live-toggle the MeshRenderer on each spawned point cloud GO without stopping
-            // capture. Capture thread keeps producing frames so re-enabling is instant.
-            if (showPointClouds == _lastAppliedShowPointClouds) return;
-            for (int i = 0; i < _renderers.Count; i++)
-            {
-                var r = _renderers[i];
-                if (r == null) continue;
-                var mr = r.GetComponent<MeshRenderer>();
-                if (mr != null && mr.enabled != showPointClouds) mr.enabled = showPointClouds;
-            }
-            _lastAppliedShowPointClouds = showPointClouds;
         }
 
         private void OnDestroy()

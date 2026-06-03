@@ -420,10 +420,13 @@ namespace BodyTracking
             // Clear first so the vertex count / triangle count swap atomically —
             // otherwise Unity warns when you assign vertices smaller than the
             // current triangle index range.
+            // Use the array-with-range overloads so Unity reads directly out of
+            // our pre-allocated buffers instead of copying via the legacy
+            // property setters (which alloc transient garbage per frame).
             _bonesMesh.Clear();
-            _bonesMesh.vertices = _boneVerts;
-            _bonesMesh.normals = _boneNormals;
-            _bonesMesh.colors = _boneColors;
+            _bonesMesh.SetVertices(_boneVerts, 0, _boneVerts.Length);
+            _bonesMesh.SetNormals(_boneNormals, 0, _boneNormals.Length);
+            _bonesMesh.SetColors(_boneColors, 0, _boneColors.Length);
             _bonesMesh.SetTriangles(_boneTris, 0, true);
         }
 

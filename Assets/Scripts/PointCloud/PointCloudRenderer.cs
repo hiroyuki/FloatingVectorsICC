@@ -234,126 +234,26 @@ namespace PointCloud
         private MeshRenderer _meshRenderer;
         private Mesh _mesh;
 
-        // --- GPU reconstruction (mirrors PointCloudRecorder's playback path so
-        // live and playback share the same compute kernel and vertex layout). ---
-        private GraphicsBuffer _depthGpu;
-        private GraphicsBuffer _colorGpu;
-        private uint[] _depthScratchU32;
-        private uint[] _colorScratchU32;
-        private static ComputeShader s_reconstructShader;
-        private static int s_reconstructKernel = -1;
-        private static readonly int kId_Depth   = Shader.PropertyToID("_Depth");
-        private static readonly int kId_Color   = Shader.PropertyToID("_Color");
-        private static readonly int kId_Out     = Shader.PropertyToID("_Out");
-        private static readonly int kId_DepthW  = Shader.PropertyToID("_DepthW");
-        private static readonly int kId_DepthH  = Shader.PropertyToID("_DepthH");
-        private static readonly int kId_ColorW  = Shader.PropertyToID("_ColorW");
-        private static readonly int kId_ColorH  = Shader.PropertyToID("_ColorH");
-        private static readonly int kId_HasColor = Shader.PropertyToID("_HasColor");
-        private static readonly int kId_FxD = Shader.PropertyToID("_FxD");
-        private static readonly int kId_FyD = Shader.PropertyToID("_FyD");
-        private static readonly int kId_CxD = Shader.PropertyToID("_CxD");
-        private static readonly int kId_CyD = Shader.PropertyToID("_CyD");
-        private static readonly int kId_FxC = Shader.PropertyToID("_FxC");
-        private static readonly int kId_FyC = Shader.PropertyToID("_FyC");
-        private static readonly int kId_CxC = Shader.PropertyToID("_CxC");
-        private static readonly int kId_CyC = Shader.PropertyToID("_CyC");
-        private static readonly int kId_Rrow0 = Shader.PropertyToID("_Rrow0");
-        private static readonly int kId_Rrow1 = Shader.PropertyToID("_Rrow1");
-        private static readonly int kId_Rrow2 = Shader.PropertyToID("_Rrow2");
-        private static readonly int kId_T     = Shader.PropertyToID("_T");
+        // GPU reconstruction: shared with PointCloudRecorder via PointCloudReconstructor.
+        // Owns the reconstructed Mesh, GPU buffers, and ComputeShader dispatch.
+        private PointCloudReconstructor _reconstructor;
 
-        private static bool TryLoadReconstructShader()
-        {
-            if (s_reconstructShader != null && s_reconstructKernel >= 0) return true;
-            s_reconstructShader = Resources.Load<ComputeShader>("PointCloudReconstruct");
-            if (s_reconstructShader == null) return false;
-            s_reconstructKernel = s_reconstructShader.FindKernel("CSMain");
-            return s_reconstructKernel >= 0;
-        }
-
-        // GPU live reconstruction. Mirrors PointCloudRecorder.ReconstructAndUpload
-        // but reads from the live capture slot instead of a recorded Frame.
         private int DispatchGpuReconstruction(SlotPool.Slot slot)
         {
             if (!CameraParam.HasValue) return 0;
-            if (!TryLoadReconstructShader())
-            {
-                Debug.LogError($"[{nameof(PointCloudRenderer)}] PointCloudReconstruct compute shader not found in Resources/", this);
-                return 0;
-            }
             int dw = slot.DepthWidth > 0 ? slot.DepthWidth : (int)depthWidth;
             int dh = slot.DepthHeight > 0 ? slot.DepthHeight : (int)depthHeight;
             int cw = slot.ColorWidth;
             int ch = slot.ColorHeight;
-            bool hasColor = slot.ColorByteCount > 0 && cw > 0 && ch > 0;
-            int capacity = dw * dh;
-
-            EnsureDepthGpuBuffer(slot.DepthByteCount);
-            EnsureColorGpuBuffer(hasColor ? slot.ColorByteCount : 4);
-
-            // Upload depth + color into GPU raw buffers. Buffer stride is 4 (uint),
-            // so we BlockCopy bytes into a uint[] scratch first.
-            Buffer.BlockCopy(slot.DepthBytes, 0, _depthScratchU32, 0, slot.DepthByteCount);
-            _depthGpu.SetData(_depthScratchU32, 0, 0, _depthScratchU32.Length);
-            if (hasColor)
+            if (!_reconstructor.Dispatch(
+                    slot.DepthBytes, slot.DepthByteCount, dw, dh,
+                    slot.ColorBytes, slot.ColorByteCount, cw, ch,
+                    CameraParam.Value))
             {
-                Buffer.BlockCopy(slot.ColorBytes, 0, _colorScratchU32, 0, slot.ColorByteCount);
-                _colorGpu.SetData(_colorScratchU32, 0, 0, _colorScratchU32.Length);
+                Debug.LogError($"[{nameof(PointCloudRenderer)}] PointCloudReconstruct compute shader not found in Resources/", this);
+                return 0;
             }
-
-            var cam = CameraParam.Value;
-            var shader = s_reconstructShader;
-            int k = s_reconstructKernel;
-            var vbuf = _mesh.GetVertexBuffer(0);
-
-            shader.SetBuffer(k, kId_Depth, _depthGpu);
-            shader.SetBuffer(k, kId_Color, _colorGpu);
-            shader.SetBuffer(k, kId_Out,   vbuf);
-            shader.SetInt(kId_DepthW, dw);
-            shader.SetInt(kId_DepthH, dh);
-            shader.SetInt(kId_ColorW, cw);
-            shader.SetInt(kId_ColorH, ch);
-            shader.SetInt(kId_HasColor, hasColor ? 1 : 0);
-            shader.SetFloat(kId_FxD, cam.DepthIntrinsic.Fx);
-            shader.SetFloat(kId_FyD, cam.DepthIntrinsic.Fy);
-            shader.SetFloat(kId_CxD, cam.DepthIntrinsic.Cx);
-            shader.SetFloat(kId_CyD, cam.DepthIntrinsic.Cy);
-            shader.SetFloat(kId_FxC, cam.RgbIntrinsic.Fx);
-            shader.SetFloat(kId_FyC, cam.RgbIntrinsic.Fy);
-            shader.SetFloat(kId_CxC, cam.RgbIntrinsic.Cx);
-            shader.SetFloat(kId_CyC, cam.RgbIntrinsic.Cy);
-            var R = cam.Transform.Rot;
-            shader.SetVector(kId_Rrow0, new Vector4(R[0], R[1], R[2], 0f));
-            shader.SetVector(kId_Rrow1, new Vector4(R[3], R[4], R[5], 0f));
-            shader.SetVector(kId_Rrow2, new Vector4(R[6], R[7], R[8], 0f));
-            var T = cam.Transform.Trans;
-            shader.SetVector(kId_T, new Vector4(T[0], T[1], T[2], 0f));
-
-            int gx = (dw + 7) / 8;
-            int gy = (dh + 7) / 8;
-            shader.Dispatch(k, gx, gy, 1);
-            vbuf.Dispose();
-
-            return capacity;
-        }
-
-        private void EnsureDepthGpuBuffer(int byteCount)
-        {
-            int u32Count = (byteCount + 3) / 4;
-            if (_depthGpu != null && _depthGpu.count >= u32Count) { return; }
-            _depthGpu?.Dispose();
-            _depthGpu = new GraphicsBuffer(GraphicsBuffer.Target.Raw, u32Count, 4);
-            _depthScratchU32 = new uint[u32Count];
-        }
-
-        private void EnsureColorGpuBuffer(int byteCount)
-        {
-            int u32Count = (byteCount + 3) / 4;
-            if (_colorGpu != null && _colorGpu.count >= u32Count) { return; }
-            _colorGpu?.Dispose();
-            _colorGpu = new GraphicsBuffer(GraphicsBuffer.Target.Raw, u32Count, 4);
-            _colorScratchU32 = new uint[u32Count];
+            return dw * dh;
         }
 
         // --- Public state ---
@@ -584,13 +484,18 @@ namespace PointCloud
         private void OnDestroy()
         {
             ShutdownCapture();
-            if (_mesh != null)
+            // GPU mode: Reconstructor owns the Mesh. CPU mode: we own it.
+            if (useGpuReconstruction)
+            {
+                _reconstructor?.Dispose();
+                _reconstructor = null;
+                _mesh = null; // Reconstructor.Dispose destroyed it.
+            }
+            else if (_mesh != null)
             {
                 Destroy(_mesh);
                 _mesh = null;
             }
-            _depthGpu?.Dispose(); _depthGpu = null;
-            _colorGpu?.Dispose(); _colorGpu = null;
             _slots?.Dispose();
             _slots = null;
         }
@@ -709,52 +614,54 @@ namespace PointCloud
 
         private void BuildMesh()
         {
-            // GPU recon mode emits exactly depthW*depthH vertices per frame (one per
-            // depth pixel; invalid pixels are pushed offscreen by the compute shader).
-            // CPU mode sizes the vertex buffer at color resolution because the
-            // PointCloudFilter outputs one vertex per color pixel.
-            int capacity = useGpuReconstruction
-                ? checked((int)(depthWidth * depthHeight))
-                : maxPoints;
-
-            _mesh = new Mesh
+            // GPU recon mode: delegate Mesh + vertex buffer ownership to
+            // PointCloudReconstructor (shared with PointCloudRecorder's playback
+            // path). We just plug the reconstructor's Mesh into MeshFilter.
+            //
+            // CPU mode: PointCloudFilter outputs one vertex per *color* pixel up
+            // to maxPoints, so the Mesh layout differs (no Raw target, smaller
+            // capacity). Inline the Mesh creation for that case.
+            if (useGpuReconstruction)
             {
-                name = $"PointCloud_{deviceSerial}",
-                indexFormat = IndexFormat.UInt32,
-                bounds = new Bounds(Vector3.zero, Vector3.one * 100f),
-            };
-            // RWByteAddressBuffer access from the compute kernel needs Raw target.
-            if (useGpuReconstruction) _mesh.vertexBufferTarget |= GraphicsBuffer.Target.Raw;
-
-            // Vertex layout = OBColorPoint (position float3 + color float3, 24 bytes).
-            var attrs = new[]
+                int capacity = checked((int)(depthWidth * depthHeight));
+                _reconstructor = new PointCloudReconstructor(deviceSerial);
+                _reconstructor.EnsureMesh(capacity);
+                _mesh = _reconstructor.Mesh;
+                _mesh.name = $"PointCloud_{deviceSerial}";
+            }
+            else
             {
-                new VertexAttributeDescriptor(VertexAttribute.Position, VertexAttributeFormat.Float32, 3, stream: 0),
-                new VertexAttributeDescriptor(VertexAttribute.Color,    VertexAttributeFormat.Float32, 3, stream: 0),
-            };
-            _mesh.SetVertexBufferParams(capacity, attrs);
+                int capacity = maxPoints;
+                _mesh = new Mesh
+                {
+                    name = $"PointCloud_{deviceSerial}",
+                    indexFormat = IndexFormat.UInt32,
+                    bounds = new Bounds(Vector3.zero, Vector3.one * 100f),
+                };
+                // Vertex layout = OBColorPoint (position float3 + color float3, 24 bytes).
+                var attrs = new[]
+                {
+                    new VertexAttributeDescriptor(VertexAttribute.Position, VertexAttributeFormat.Float32, 3, stream: 0),
+                    new VertexAttributeDescriptor(VertexAttribute.Color,    VertexAttributeFormat.Float32, 3, stream: 0),
+                };
+                _mesh.SetVertexBufferParams(capacity, attrs);
 
-            // Identity index buffer for MeshTopology.Points.
-            // (try/finally instead of `using` because `using` makes the variable
-            //  readonly, which blocks NativeArray's indexer set on a struct.)
-            _mesh.SetIndexBufferParams(capacity, IndexFormat.UInt32);
-            var indices = new NativeArray<uint>(capacity, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
-            try
-            {
-                for (int i = 0; i < capacity; i++) indices[i] = (uint)i;
-                _mesh.SetIndexBufferData(indices, 0, 0, capacity,
+                // Identity index buffer for MeshTopology.Points.
+                // (try/finally instead of `using` because `using` makes the variable
+                //  readonly, which blocks NativeArray's indexer set on a struct.)
+                _mesh.SetIndexBufferParams(capacity, IndexFormat.UInt32);
+                var indices = new NativeArray<uint>(capacity, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
+                try
+                {
+                    for (int i = 0; i < capacity; i++) indices[i] = (uint)i;
+                    _mesh.SetIndexBufferData(indices, 0, 0, capacity,
+                        MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
+                }
+                finally { indices.Dispose(); }
+                // CPU mode starts empty and is sized per-frame by the upload path.
+                _mesh.SetSubMesh(0, new SubMeshDescriptor(0, 0, MeshTopology.Points),
                     MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
             }
-            finally
-            {
-                indices.Dispose();
-            }
-            // GPU mode keeps the full submesh exposed (kernel writes every vertex
-            // every frame; invalid pixels self-cull). CPU mode starts empty and
-            // is sized per-frame by the upload path.
-            int initialCount = useGpuReconstruction ? capacity : 0;
-            _mesh.SetSubMesh(0, new SubMeshDescriptor(0, initialCount, MeshTopology.Points),
-                MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
 
             _meshFilter.sharedMesh = _mesh;
             if (pointMaterial == null)

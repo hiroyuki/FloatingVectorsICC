@@ -378,14 +378,47 @@ namespace BodyTracking
             // Wire recorded-playback source if a PointCloudRecorder is present in the
             // scene. Live and playback can coexist: HandleRawFrame and the
             // OnPlaybackRawFrame handler both funnel into DispatchRawFrame.
+            // OnPlaybackBodies feeds the per-serial slot directly when the recording
+            // includes saved BT (bodies_main); the worker spawn is skipped in that
+            // case so playback works on platforms without k4abt (Mac).
             _subscribedRecorder = FindFirstObjectByType<PointCloudRecorder>();
             if (_subscribedRecorder != null)
+            {
                 _subscribedRecorder.OnPlaybackRawFrame += OnPlaybackRawFrame;
+                _subscribedRecorder.OnPlaybackBodies += OnPlaybackBodies;
+            }
         }
 
         private void OnPlaybackRawFrame(string serial, ObCameraParam? camParam, Transform sourceTransform, RawFrameData frame)
         {
             HandlePlaybackRawFrame(serial, camParam, sourceTransform, frame);
+        }
+
+        // Recorded-body playback path. Decodes the bodies_main payload into a per-
+        // serial slot directly — no k4abt worker, so this works on platforms
+        // without the BT SDK (Mac). Mirrors OnWorkerSkeletons but takes its
+        // BodySnapshot inputs from disk instead of the worker MMF.
+        private void OnPlaybackBodies(string serial, ulong tsNs, byte[] bytes, int byteCount, Transform sourceTransform)
+        {
+            if (!showSkeleton) return;
+            if (string.IsNullOrEmpty(serial)) return;
+            if (!_latestBySerial.TryGetValue(serial, out var slot))
+            {
+                slot = new WorkerLatest { Serial = serial, SourceTransform = sourceTransform };
+                _latestBySerial[serial] = slot;
+            }
+            else
+            {
+                // Recorder can rebuild the _Playback_<serial> GO between sessions;
+                // refresh on every frame to track the latest transform.
+                slot.SourceTransform = sourceTransform;
+            }
+
+            int count = RecordedBodySerializer.Decode(bytes, byteCount, slot.Bodies);
+            slot.BodyCount = count;
+            slot.CapturedTsNs = tsNs;
+            slot.CapturedAtRealtime = Time.realtimeSinceStartup;
+            _diagSnapshotsRecv += count;
         }
 
         private void OnDisable()
@@ -399,6 +432,7 @@ namespace BodyTracking
             if (_subscribedRecorder != null)
             {
                 _subscribedRecorder.OnPlaybackRawFrame -= OnPlaybackRawFrame;
+                _subscribedRecorder.OnPlaybackBodies -= OnPlaybackBodies;
                 _subscribedRecorder = null;
             }
 
@@ -669,6 +703,25 @@ namespace BodyTracking
         private void DispatchRawFrame(string serial, ObCameraParam? cameraParam, Transform sourceTransform, in RawFrameData frame)
         {
             if (!showSkeleton) return;
+
+            // Recorded BT short-circuit: when the recorder is in Playing state AND
+            // has a bodies_main track for this serial, skeletons flow in through
+            // OnPlaybackBodies instead. Skip the k4abt spawn / enqueue path so
+            // playback works on platforms without the BT SDK (Mac). Slot creation +
+            // SourceTransform refresh happen in OnPlaybackBodies.
+            //
+            // Gated specifically on State.Playing because during State.Recording
+            // the SAME serial's BodyFrames.Count grows from 0 → 1 → 2 … as
+            // OnWorkerSkeletons writes — without this gate, the very first frame
+            // we record would flip HasRecordedBodies to true and self-terminate
+            // the live enqueue path, capping every recording at 1 body frame per
+            // serial. State.Idle similarly must not skip (live capture w/o
+            // recorder running is the default).
+            if (_subscribedRecorder != null
+                && _subscribedRecorder.CurrentState == PointCloudRecorder.State.Playing
+                && _subscribedRecorder.HasRecordedBodies(serial))
+                return;
+
             if (workerHost == null) return;
 
             bool slotExisted = _latestBySerial.ContainsKey(serial);
@@ -731,8 +784,10 @@ namespace BodyTracking
 
         // Fired synchronously from K4abtWorkerHost.Update (DefaultExecutionOrder(-100))
         // before this script's Update runs. The host buffer is reused per frame, so
-        // we copy the relevant state out into our per-serial slot.
-        private void OnWorkerSkeletons(string serial, BodySnapshot[] bodies, int count)
+        // we copy the relevant state out into our per-serial slot. <c>tsNs</c> is the
+        // depth-frame timestamp the bodies were tracked from (forwarded by the worker
+        // from its input slot).
+        private void OnWorkerSkeletons(string serial, ulong tsNs, BodySnapshot[] bodies, int count)
         {
             if (!showSkeleton) return;
             if (!_latestBySerial.TryGetValue(serial, out var slot)) return;
@@ -744,12 +799,26 @@ namespace BodyTracking
             }
             slot.BodyCount = n;
             slot.CapturedAtRealtime = Time.realtimeSinceStartup;
-            // CapturedTsNs is filled when Phase 3 wires the per-snapshot tsNs through
-            // the host's BodySnapshot DTO. v1 falls back to Time.realtimeSinceStartup
-            // for staleness gating until BodySnapshot carries tsNs.
-            slot.CapturedTsNs = (ulong)(Time.realtimeSinceStartupAsDouble * 1e9);
+            slot.CapturedTsNs = tsNs;
             _diagSnapshotsRecv += n;
+
+            // While recording, persist this worker's output to bodies_main so playback
+            // can skip k4abt entirely (and run on Mac). Encode here so the byte buffer
+            // crossing into PointCloud asmdef carries no BodyTracking-namespace types.
+            if (_subscribedRecorder != null
+                && _subscribedRecorder.CurrentState == PointCloudRecorder.State.Recording)
+            {
+                int needed = RecordedBodySerializer.FrameSize(n);
+                if (_bodyEncodeScratch == null || _bodyEncodeScratch.Length < needed)
+                    _bodyEncodeScratch = new byte[Mathf.Max(needed, 4096)];
+                int byteCount = RecordedBodySerializer.Encode(slot.Bodies, n, _bodyEncodeScratch);
+                _subscribedRecorder.RecordBodies(serial, tsNs, _bodyEncodeScratch, byteCount);
+            }
         }
+
+        // Reused per-frame encode scratch for the recording-side body sink. Grown
+        // on demand to fit the largest body count seen this session; never shrinks.
+        private byte[] _bodyEncodeScratch;
 
         private void PerSecondDiag()
         {

@@ -18,8 +18,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
 using Orbbec;
-using Unity.Collections;
-using Unity.Collections.LowLevel.Unsafe;
 using UnityEngine;
 using UnityEngine.Rendering;
 
@@ -69,16 +67,20 @@ namespace PointCloud
                  "Leave empty to use '<persistentDataPath>/Recordings/recording'.")]
         public string folderPath = "";
 
+        [Tooltip("Optional override used only when running on macOS — Windows absolute paths like " +
+                 "'D:/Dropbox/...' obviously do not exist here, so a dev opening the project on a Mac " +
+                 "can point at the local Dropbox mount without touching the canonical folderPath.")]
+        public string folderPathMacOverride = "";
+
         [Tooltip("Dataset name written into dataset.yaml. Defaults to the recording folder name.")]
         public string datasetName = "";
 
         [Header("Playback")]
         public bool loop = true;
 
-        [Tooltip("Render the reconstructed point cloud meshes during playback. " +
-                 "Toggle off to keep merge / BT running without the visual point cloud " +
-                 "(useful when only the body-tracking output is wanted).")]
-        public bool showPointClouds = true;
+        [Tooltip("Where to register playback meshes for visibility toggling. " +
+                 "Auto-found via FindFirstObjectByType if left null.")]
+        public PointCloudView view;
 
         [Min(0.01f)]
         [Tooltip("Playback rate multiplier (1.0 = real time).")]
@@ -93,6 +95,18 @@ namespace PointCloud
         /// <see cref="Time.timeAsDouble"/>.
         /// </summary>
         public event System.Action<string, ObCameraParam?, Transform, RawFrameData> OnPlaybackRawFrame;
+
+        /// <summary>
+        /// Fires once per advanced playback body frame per device. <c>tsNs</c> is the
+        /// recorded body-frame timestamp (matches the depth-frame ts the bodies were
+        /// tracked from). <c>bytes</c> + <c>byteCount</c> are the bodies_main RCSV
+        /// payload — subscribers decode with <c>BodyTracking.RecordedBodySerializer</c>.
+        /// The byte buffer is owned by an RcsvFrameStream's reusable scratch; do not
+        /// retain a reference past the synchronous handler. <c>sourceTransform</c> is
+        /// the per-device <c>_Playback_&lt;serial&gt;</c> transform so subscribers can
+        /// re-project skeletons into world space the same way live frames do.
+        /// </summary>
+        public event System.Action<string, ulong, byte[], int, Transform> OnPlaybackBodies;
 
         // --- Runtime state ---
         public State CurrentState { get; private set; } = State.Idle;
@@ -122,8 +136,8 @@ namespace PointCloud
                 {
                     var track = kv.Value;
                     if (track.DepthFrames.Count < 2) continue;
-                    ulong first = track.DepthFrames[0].TimestampNs;
-                    ulong last = track.DepthFrames[track.DepthFrames.Count - 1].TimestampNs;
+                    ulong first = TimestampNsAt(track.DepthFrames, 0);
+                    ulong last = TimestampNsAt(track.DepthFrames, track.DepthFrames.Count - 1);
                     ulong span = last - first;
                     if (span > maxSpan) maxSpan = span;
                 }
@@ -157,9 +171,14 @@ namespace PointCloud
             public ObExtrinsic? GlobalTrColorCamera;
             public IReadOnlyList<PointCloudRecording.Frame> DepthFrames;
             // IR frames recorded alongside depth (Y16, depth-aligned dimensions). May be empty
-            // when IR streaming was off at record time, in which case Playback BT falls back
-            // to using depth bytes as a stand-in IR (and the BT model rejects all detections).
+            // when IR streaming was off at record time.
             public IReadOnlyList<PointCloudRecording.Frame> IRFrames;
+            // Body-tracker results recorded alongside the sensor frames (one frame per
+            // worker output). Empty when bodies_main was absent at record time (older
+            // recordings) or when no PointCloudRecorder.bodyWorkerHost was bound. Each
+            // Frame's Bytes payload is the bodies_main RCSV payload — decode with
+            // BodyTracking.RecordedBodySerializer.
+            public IReadOnlyList<PointCloudRecording.Frame> BodyFrames;
         }
 
         /// <summary>Snapshot of all loaded depth tracks (post-Read or post-Rec). Frames list is
@@ -183,29 +202,66 @@ namespace PointCloud
                     GlobalTrColorCamera = t.GlobalTrColorCamera,
                     DepthFrames = t.DepthFrames,
                     IRFrames = t.IRFrames,
+                    BodyFrames = t.BodyFrames,
                 });
             }
             return list;
         }
 
+        /// <summary>
+        /// True when a body track is loaded on disk for <paramref name="serial"/>
+        /// (recorded BT data exists). Used by BodyTrackingMultiLive to skip the
+        /// k4abt worker spawn during playback — the live merge pipeline picks up
+        /// bodies via <see cref="OnPlaybackBodies"/> instead, which also works on
+        /// platforms without k4abt (Mac).
+        /// </summary>
+        public bool HasRecordedBodies(string serial)
+        {
+            if (string.IsNullOrEmpty(serial)) return false;
+            return _tracks.TryGetValue(serial, out var t)
+                   && t.BodyFrames != null
+                   && t.BodyFrames.Count > 0;
+        }
+
         // --- Internals ---
 
-        private sealed class DeviceTrack
+        private sealed class DeviceTrack : IDisposable
         {
             public string Serial;
 
-            // Raw sensor data.
-            //
-            // During the legacy "save at end" path these Lists held actual byte[]
-            // payloads. The new stream-on-record path keeps them present (Step /
-            // Play index them by TimestampNs) but the live capture loop sets
-            // Bytes to null and pushes the bytes directly to disk via the
-            // matching RcsvStreamWriter in PointCloudRecorder._streamWriters.
-            // Read (Load) re-populates with bytes loaded from the just-written
-            // RCSV files, so playback works normally.
-            public readonly List<PointCloudRecording.Frame> DepthFrames = new List<PointCloudRecording.Frame>();
-            public readonly List<PointCloudRecording.Frame> ColorFrames = new List<PointCloudRecording.Frame>();
-            public readonly List<PointCloudRecording.Frame> IRFrames = new List<PointCloudRecording.Frame>();
+            // Raw sensor data exposed as read-only views so the same fields
+            // can hold either:
+            //   * Rec mode: List<Frame> filled by HandleRawFrame as Frame
+            //               sentinels (Bytes = null; the actual bytes were
+            //               streamed straight to disk via RcsvStreamWriter).
+            //   * Read mode: RcsvFrameStream that lazy-reads bytes on demand.
+            // Consumers (PlaybackCursor advance, BodyTrackingPlayback, gap
+            // diagnostics) only need Count, indexer, and TimestampNs, so they
+            // are mode-agnostic. Internal _xxxList / _xxxStream pointers exist
+            // for the mode-specific mutate (Add) and dispose paths.
+            public IReadOnlyList<PointCloudRecording.Frame> DepthFrames { get; private set; }
+                = Array.Empty<PointCloudRecording.Frame>();
+            public IReadOnlyList<PointCloudRecording.Frame> ColorFrames { get; private set; }
+                = Array.Empty<PointCloudRecording.Frame>();
+            public IReadOnlyList<PointCloudRecording.Frame> IRFrames { get; private set; }
+                = Array.Empty<PointCloudRecording.Frame>();
+            public IReadOnlyList<PointCloudRecording.Frame> BodyFrames { get; private set; }
+                = Array.Empty<PointCloudRecording.Frame>();
+
+            private List<PointCloudRecording.Frame> _depthList;
+            private List<PointCloudRecording.Frame> _colorList;
+            private List<PointCloudRecording.Frame> _irList;
+            private List<PointCloudRecording.Frame> _bodyList;
+            private PointCloudRecording.RcsvFrameStream _depthStream;
+            private PointCloudRecording.RcsvFrameStream _colorStream;
+            private PointCloudRecording.RcsvFrameStream _irStream;
+            private PointCloudRecording.RcsvFrameStream _bodyStream;
+
+            // Cursor into BodyFrames (independent of depth cursor: worker output rate
+            // can lag the depth stream and may skip frames). Playback Update advances
+            // it monotonically and fires OnPlaybackBodies for each crossed frame.
+            public int BodyPlaybackCursor;
+
             public int DepthWidth, DepthHeight;
             public int ColorWidth, ColorHeight;
             public int IRWidth, IRHeight;
@@ -220,19 +276,83 @@ namespace PointCloud
             public GameObject PlaybackObject;
             public MeshFilter PlaybackFilter;
             public MeshRenderer PlaybackRenderer;
-            public Mesh PlaybackMesh;
-            public int PlaybackMeshCapacity;
             public int PlaybackCursor;
 
-            // GPU reconstruction buffers (replace CPU NativeArray<ObColorPoint>).
-            // Depth Y16 and color RGB8 are uploaded into raw byte buffers each
-            // frame; the compute shader unprojects into the mesh's vertex buffer
-            // directly. Scratch uint[]s exist because GraphicsBuffer.SetData
-            // requires the element type to match the buffer stride (4).
-            public GraphicsBuffer DepthGpu;
-            public GraphicsBuffer ColorGpu;
-            public uint[] DepthScratchU32;
-            public uint[] ColorScratchU32;
+            // GPU reconstruction (Mesh + GraphicsBuffers + ComputeShader dispatch).
+            // Shared implementation with live capture path; see PointCloudReconstructor.
+            public PointCloudReconstructor Reconstructor;
+            public Mesh PlaybackMesh => Reconstructor?.Mesh;
+
+            // Switch into Rec mode lazily on the first frame add. Safe to call
+            // repeatedly. If the track is currently in Read mode (streams
+            // open), they are disposed first — the user kicked off a fresh
+            // recording over a loaded track.
+            public void AddRecordedDepthFrame(PointCloudRecording.Frame f)
+            { EnsureRecordingMode(); _depthList.Add(f); }
+            public void AddRecordedColorFrame(PointCloudRecording.Frame f)
+            { EnsureRecordingMode(); _colorList.Add(f); }
+            public void AddRecordedIRFrame(PointCloudRecording.Frame f)
+            { EnsureRecordingMode(); _irList.Add(f); }
+            public void AddRecordedBodyFrame(PointCloudRecording.Frame f)
+            { EnsureRecordingMode(); _bodyList.Add(f); }
+
+            private void EnsureRecordingMode()
+            {
+                if (_depthStream != null || _colorStream != null
+                    || _irStream != null || _bodyStream != null)
+                    Dispose();
+                if (_depthList == null) _depthList = new List<PointCloudRecording.Frame>();
+                if (_colorList == null) _colorList = new List<PointCloudRecording.Frame>();
+                if (_irList == null) _irList = new List<PointCloudRecording.Frame>();
+                if (_bodyList == null) _bodyList = new List<PointCloudRecording.Frame>();
+                DepthFrames = _depthList;
+                ColorFrames = _colorList;
+                IRFrames = _irList;
+                BodyFrames = _bodyList;
+            }
+
+            /// <summary>
+            /// Adopt freshly opened RCSV streams as the backing storage for
+            /// this track's depth/color/IR frames. Any previously held
+            /// streams or recording lists are released. Pass <c>null</c> for
+            /// a sensor that has no recording on disk.
+            /// </summary>
+            public void AdoptStreams(
+                PointCloudRecording.RcsvFrameStream depth,
+                PointCloudRecording.RcsvFrameStream color,
+                PointCloudRecording.RcsvFrameStream ir,
+                PointCloudRecording.RcsvFrameStream bodies)
+            {
+                Dispose();
+                _depthStream = depth;
+                _colorStream = color;
+                _irStream = ir;
+                _bodyStream = bodies;
+                DepthFrames = (IReadOnlyList<PointCloudRecording.Frame>)depth
+                              ?? Array.Empty<PointCloudRecording.Frame>();
+                ColorFrames = (IReadOnlyList<PointCloudRecording.Frame>)color
+                              ?? Array.Empty<PointCloudRecording.Frame>();
+                IRFrames = (IReadOnlyList<PointCloudRecording.Frame>)ir
+                           ?? Array.Empty<PointCloudRecording.Frame>();
+                BodyFrames = (IReadOnlyList<PointCloudRecording.Frame>)bodies
+                             ?? Array.Empty<PointCloudRecording.Frame>();
+            }
+
+            public void Dispose()
+            {
+                _depthStream?.Dispose(); _depthStream = null;
+                _colorStream?.Dispose(); _colorStream = null;
+                _irStream?.Dispose(); _irStream = null;
+                _bodyStream?.Dispose(); _bodyStream = null;
+                _depthList = null;
+                _colorList = null;
+                _irList = null;
+                _bodyList = null;
+                DepthFrames = Array.Empty<PointCloudRecording.Frame>();
+                ColorFrames = Array.Empty<PointCloudRecording.Frame>();
+                IRFrames = Array.Empty<PointCloudRecording.Frame>();
+                BodyFrames = Array.Empty<PointCloudRecording.Frame>();
+            }
         }
 
         private readonly Dictionary<string, DeviceTrack> _tracks = new Dictionary<string, DeviceTrack>();
@@ -279,6 +399,7 @@ namespace PointCloud
             public PointCloudRecording.RcsvStreamWriter Depth;
             public PointCloudRecording.RcsvStreamWriter Color;
             public PointCloudRecording.RcsvStreamWriter IR;
+            public PointCloudRecording.RcsvStreamWriter Bodies;
         }
         private readonly Dictionary<string, StreamWriters> _streamWriters = new Dictionary<string, StreamWriters>();
 
@@ -404,12 +525,12 @@ namespace PointCloud
                 if (track.DepthFrames.Count == 0) continue;
                 int newCursor = track.PlaybackCursor + delta;
                 SetCursorAndEmit(track, newCursor);
-                ulong ts = track.DepthFrames[newCursor].TimestampNs;
+                ulong ts = TimestampNsAt(track.DepthFrames, newCursor);
                 if (ts > maxSteppedTs) maxSteppedTs = ts;
                 int next = newCursor + 1;
                 if (next < track.DepthFrames.Count)
                 {
-                    ulong nextTs = track.DepthFrames[next].TimestampNs;
+                    ulong nextTs = TimestampNsAt(track.DepthFrames, next);
                     if (nextTs < minNextTs) minNextTs = nextTs;
                 }
             }
@@ -460,7 +581,32 @@ namespace PointCloud
             ReconstructAndUpload(track, depthFrame, colorFrame);
             FirePlaybackEvent(track, depthFrame, colorFrame, irFrame);
             FeedCumulative(track);
+            // Step forward / backward should also land on the BT frame whose
+            // timestamp matches this depth frame (or the closest preceding one),
+            // so the skeleton overlay stays in sync with the rendered mesh while
+            // the user inspects frame-by-frame.
+            SyncBodyCursorToDepth(track);
             ApplyBoundingBoxFilter(track);
+        }
+
+        private void SyncBodyCursorToDepth(DeviceTrack track)
+        {
+            int bodyCount = track.BodyFrames.Count;
+            if (bodyCount == 0) { track.BodyPlaybackCursor = -1; return; }
+            ulong depthTs = TimestampNsAt(track.DepthFrames, track.PlaybackCursor);
+
+            // Pick the latest body frame whose ts ≤ depthTs. Falls back to -1 if
+            // every body frame is in the future (e.g. user stepped to the very
+            // first depth frame and bodies started a few frames later).
+            int target = -1;
+            for (int i = 0; i < bodyCount; i++)
+            {
+                ulong bts = TimestampNsAt(track.BodyFrames, i);
+                if (bts <= depthTs) target = i; else break;
+            }
+            if (target == track.BodyPlaybackCursor) return;
+            track.BodyPlaybackCursor = target;
+            if (target >= 0) FireBodyEvent(track, target);
         }
 
         // Forward the just-reconstructed playback mesh into the cumulative
@@ -480,7 +626,8 @@ namespace PointCloud
             Material mat = track.PlaybackRenderer != null
                 ? track.PlaybackRenderer.sharedMaterial
                 : playbackMaterial;
-            cum.OnPlaybackFrame(track.PlaybackMesh, track.PlaybackMeshCapacity,
+            int capacity = track.DepthWidth * track.DepthHeight;
+            cum.OnPlaybackFrame(track.PlaybackMesh, capacity,
                 track.PlaybackObject.transform, mat, ResolveBoundingBox(), ResolveDecimater());
         }
 
@@ -642,39 +789,69 @@ namespace PointCloud
                 }
 
                 ClearTracks();
-                int totalDepth = 0, totalColor = 0, totalIR = 0;
+                int totalDepth = 0, totalColor = 0, totalIR = 0, totalBodies = 0;
                 foreach (var (serial, deviceDir) in PointCloudRecording.EnumerateDevices(root))
                 {
                     string depthPath = Path.Combine(deviceDir, PointCloudRecording.DepthSensorName);
                     string colorPath = Path.Combine(deviceDir, PointCloudRecording.ColorSensorName);
                     string irPath = Path.Combine(deviceDir, PointCloudRecording.IRSensorName);
+                    string bodiesPath = Path.Combine(deviceDir, PointCloudRecording.BodiesSensorName);
                     bool hasDepth = File.Exists(depthPath);
                     bool hasColor = File.Exists(colorPath);
                     bool hasIR = File.Exists(irPath);
-                    if (!hasDepth && !hasColor && !hasIR) continue;
+                    bool hasBodies = File.Exists(bodiesPath);
+                    if (!hasDepth && !hasColor && !hasIR && !hasBodies) continue;
+
+                    // Open RCSV files as lazy streams instead of loading every
+                    // record's bytes into managed memory. Each stream eagerly
+                    // reads the trailing index chunk + per-frame timestamps
+                    // (~16 B per frame total) so .Count and timestamp scans are
+                    // free; record bytes are pulled on demand by indexer access
+                    // in playback / BodyTracking. Failure on one sensor disposes
+                    // any partial streams to avoid leaking file handles before
+                    // the exception propagates.
+                    PointCloudRecording.RcsvFrameStream depthStream = null;
+                    PointCloudRecording.RcsvFrameStream colorStream = null;
+                    PointCloudRecording.RcsvFrameStream irStream = null;
+                    PointCloudRecording.RcsvFrameStream bodiesStream = null;
+                    try
+                    {
+                        if (hasDepth) depthStream = new PointCloudRecording.RcsvFrameStream(depthPath);
+                        if (hasColor) colorStream = new PointCloudRecording.RcsvFrameStream(colorPath);
+                        if (hasIR) irStream = new PointCloudRecording.RcsvFrameStream(irPath);
+                        if (hasBodies) bodiesStream = new PointCloudRecording.RcsvFrameStream(bodiesPath);
+                    }
+                    catch
+                    {
+                        depthStream?.Dispose();
+                        colorStream?.Dispose();
+                        irStream?.Dispose();
+                        bodiesStream?.Dispose();
+                        throw;
+                    }
 
                     var track = GetOrCreateTrack(serial);
-                    if (hasDepth)
+                    track.AdoptStreams(depthStream, colorStream, irStream, bodiesStream);
+
+                    if (depthStream != null)
                     {
-                        track.DepthFrames.AddRange(PointCloudRecording.ReadRcsv(depthPath));
-                        totalDepth += track.DepthFrames.Count;
+                        totalDepth += depthStream.Count;
                         var (dw, dh) = PointCloudRecording.ReadRcsvHeaderDimensions(depthPath);
                         if (dw > 0 && dh > 0) { track.DepthWidth = dw; track.DepthHeight = dh; }
                     }
-                    if (hasColor)
+                    if (colorStream != null)
                     {
-                        track.ColorFrames.AddRange(PointCloudRecording.ReadRcsv(colorPath));
-                        totalColor += track.ColorFrames.Count;
+                        totalColor += colorStream.Count;
                         var (cw, ch) = PointCloudRecording.ReadRcsvHeaderDimensions(colorPath);
                         if (cw > 0 && ch > 0) { track.ColorWidth = cw; track.ColorHeight = ch; }
                     }
-                    if (hasIR)
+                    if (irStream != null)
                     {
-                        track.IRFrames.AddRange(PointCloudRecording.ReadRcsv(irPath));
-                        totalIR += track.IRFrames.Count;
+                        totalIR += irStream.Count;
                         var (iw, ih) = PointCloudRecording.ReadRcsvHeaderDimensions(irPath);
                         if (iw > 0 && ih > 0) { track.IRWidth = iw; track.IRHeight = ih; }
                     }
+                    if (bodiesStream != null) totalBodies += bodiesStream.Count;
 
                     // Fall back to live renderer dimensions if the RCSV header was
                     // missing values (older recordings). Harmless when the header
@@ -682,7 +859,7 @@ namespace PointCloud
                     FillDimensionsFromRenderer(track);
                 }
 
-                if (totalDepth == 0 && totalColor == 0)
+                if (totalDepth == 0 && totalColor == 0 && totalBodies == 0)
                 {
                     SetStatus($"Read: no raw sensor frames found under {root}", warn: true);
                     return;
@@ -706,7 +883,7 @@ namespace PointCloud
                 }
 
                 SetStatus(
-                    $"Loaded {totalDepth} depth / {totalColor} color / {totalIR} IR frame(s) across {_tracks.Count} device(s)"
+                    $"Loaded {totalDepth} depth / {totalColor} color / {totalIR} IR / {totalBodies} bodies frame(s) across {_tracks.Count} device(s)"
                     + (extrinsicsApplied > 0 ? $", extrinsics applied to {extrinsicsApplied} device(s)" : "")
                     + (liveDestroyed > 0 ? $", disconnected {liveDestroyed} live camera(s)" : "")
                     + $" from {root}");
@@ -900,12 +1077,13 @@ namespace PointCloud
             // BEFORE dispose since the helper nulls writer refs as it goes,
             // and call the guarded helper so one stream's IO failure does not
             // strand the remaining streams (or skip _streamWriters.Clear()).
-            int totalDepth = 0, totalColor = 0, totalIR = 0;
+            int totalDepth = 0, totalColor = 0, totalIR = 0, totalBodies = 0;
             foreach (var sw in _streamWriters.Values)
             {
-                if (sw.Depth != null) totalDepth += sw.Depth.FrameCount;
-                if (sw.Color != null) totalColor += sw.Color.FrameCount;
-                if (sw.IR    != null) totalIR    += sw.IR.FrameCount;
+                if (sw.Depth != null)  totalDepth  += sw.Depth.FrameCount;
+                if (sw.Color != null)  totalColor  += sw.Color.FrameCount;
+                if (sw.IR    != null)  totalIR     += sw.IR.FrameCount;
+                if (sw.Bodies != null) totalBodies += sw.Bodies.FrameCount;
             }
             FinalizeAnyOpenStreamWriters();
 
@@ -927,7 +1105,7 @@ namespace PointCloud
             // files into a Play-able form.
             int devCount = _tracks.Count;
             ClearTracks();
-            SetStatus($"Recorded {totalDepth} depth / {totalColor} color / {totalIR} IR frame(s) across {devCount} device(s) to {_recordRoot}. Click Read to load for playback.");
+            SetStatus($"Recorded {totalDepth} depth / {totalColor} color / {totalIR} IR / {totalBodies} bodies frame(s) across {devCount} device(s) to {_recordRoot}. Click Read to load for playback.");
         }
 
         private void HandleRawFrame(PointCloudRenderer src, RawFrameData raw)
@@ -975,7 +1153,7 @@ namespace PointCloud
                     sw.Depth = new PointCloudRecording.RcsvStreamWriter(path, header);
                 }
                 sw.Depth.WriteFrame(timestampNs, raw.DepthBytes, raw.DepthByteCount);
-                track.DepthFrames.Add(new PointCloudRecording.Frame { TimestampNs = timestampNs });
+                track.AddRecordedDepthFrame(new PointCloudRecording.Frame { TimestampNs = timestampNs });
                 track.DepthWidth = raw.DepthWidth;
                 track.DepthHeight = raw.DepthHeight;
             }
@@ -988,7 +1166,7 @@ namespace PointCloud
                     sw.Color = new PointCloudRecording.RcsvStreamWriter(path, header);
                 }
                 sw.Color.WriteFrame(timestampNs, raw.ColorBytes, raw.ColorByteCount);
-                track.ColorFrames.Add(new PointCloudRecording.Frame { TimestampNs = timestampNs });
+                track.AddRecordedColorFrame(new PointCloudRecording.Frame { TimestampNs = timestampNs });
                 track.ColorWidth = raw.ColorWidth;
                 track.ColorHeight = raw.ColorHeight;
             }
@@ -1001,7 +1179,7 @@ namespace PointCloud
                     sw.IR = new PointCloudRecording.RcsvStreamWriter(path, header);
                 }
                 sw.IR.WriteFrame(timestampNs, raw.IRBytes, raw.IRByteCount);
-                track.IRFrames.Add(new PointCloudRecording.Frame { TimestampNs = timestampNs });
+                track.AddRecordedIRFrame(new PointCloudRecording.Frame { TimestampNs = timestampNs });
                 track.IRWidth = raw.IRWidth;
                 track.IRHeight = raw.IRHeight;
             }
@@ -1015,6 +1193,35 @@ namespace PointCloud
                 _streamWriters[serial] = sw;
             }
             return sw;
+        }
+
+        /// <summary>
+        /// Append one body-tracker frame to <c>bodies_main</c> for the given
+        /// device. Called by BodyTrackingMultiLive on every K4abtWorkerHost output
+        /// while the recorder is in <see cref="State.Recording"/>; no-op otherwise.
+        /// <paramref name="bytes"/> + <paramref name="byteCount"/> follow the
+        /// usual SDK-buffer convention — no reference is retained after this
+        /// call. The bodies_main RCSV file is opened lazily on the first frame
+        /// per serial so its header records the actual k4abt body record format
+        /// (consistent with depth_main / color_main / ir_main lazy opening).
+        /// </summary>
+        public void RecordBodies(string serial, ulong tsNs, byte[] bytes, int byteCount)
+        {
+            if (CurrentState != State.Recording) return;
+            if (string.IsNullOrEmpty(serial)) return;
+            if (bytes == null || byteCount <= 0) return;
+
+            var track = GetOrCreateTrack(serial);
+            var sw = GetOrCreateStreamWriters(serial);
+            if (sw.Bodies == null)
+            {
+                string path = PointCloudRecording.SensorFilePath(
+                    _recordRoot, _recordHost, serial, PointCloudRecording.BodiesSensorName);
+                string header = PointCloudRecording.BuildBodiesHeaderYaml(serial);
+                sw.Bodies = new PointCloudRecording.RcsvStreamWriter(path, header);
+            }
+            sw.Bodies.WriteFrame(tsNs, bytes, byteCount);
+            track.AddRecordedBodyFrame(new PointCloudRecording.Frame { TimestampNs = tsNs });
         }
 
         // --- Playback ---
@@ -1041,8 +1248,10 @@ namespace PointCloud
                 var track = kv.Value;
                 if (track.DepthFrames.Count == 0) continue;
                 anyFrames = true;
-                if (track.DepthFrames[0].TimestampNs < firstTs) firstTs = track.DepthFrames[0].TimestampNs;
+                ulong firstFrameTs = TimestampNsAt(track.DepthFrames, 0);
+                if (firstFrameTs < firstTs) firstTs = firstFrameTs;
                 track.PlaybackCursor = -1;
+                track.BodyPlaybackCursor = -1;
                 EnsurePlaybackObject(track);
             }
             if (!anyFrames)
@@ -1062,6 +1271,11 @@ namespace PointCloud
             CurrentState = State.Idle;
             IsPaused = false;
             SetStatus("Playback stopped.");
+        }
+
+        private void Awake()
+        {
+            if (view == null) view = FindFirstObjectByType<PointCloudView>();
         }
 
         private void Start()
@@ -1113,7 +1327,8 @@ namespace PointCloud
 
                 int cursor = Mathf.Max(track.PlaybackCursor, 0);
                 int cursorBeforeAdvance = track.PlaybackCursor;
-                while (cursor + 1 < track.DepthFrames.Count && track.DepthFrames[cursor + 1].TimestampNs <= playheadNs)
+                while (cursor + 1 < track.DepthFrames.Count
+                       && TimestampNsAt(track.DepthFrames, cursor + 1) <= playheadNs)
                     cursor++;
 
                 // Playback drop diagnostic: when one Update consumes multiple
@@ -1160,23 +1375,20 @@ namespace PointCloud
                     // re-snapshot the same frame every Update tick.
                     FeedCumulative(track);
                 }
+                AdvanceBodyCursor(track, playheadNs);
                 ApplyBoundingBoxFilter(track);
             }
-
-            // Honor showPointClouds for accumulated cumulative snapshots as
-            // well — without this, toggling it off hides the live playback
-            // mesh but the frozen snapshots stay visible (separate GO chain).
-            // Property setter is a no-op when the flag matches, so it's safe
-            // to call every tick.
-            var cumForVis = ResolveCumulative();
-            if (cumForVis != null) cumForVis.SnapshotsVisible = showPointClouds;
 
             if (!anyRemaining)
             {
                 if (loop)
                 {
                     _playbackWallStart = Time.timeAsDouble;
-                    foreach (var kv in _tracks) kv.Value.PlaybackCursor = -1;
+                    foreach (var kv in _tracks)
+                    {
+                        kv.Value.PlaybackCursor = -1;
+                        kv.Value.BodyPlaybackCursor = -1;
+                    }
                 }
                 else
                 {
@@ -1240,7 +1452,14 @@ namespace PointCloud
             {
                 var parts = new List<string>(_diagFiresPerSerial.Count);
                 foreach (var kv in _diagFiresPerSerial) parts.Add($"{kv.Key}={kv.Value}/s");
-                Debug.Log($"[PointCloudRecorder PLAY] playback_fires {string.Join(" ", parts)}", this);
+                int gc0 = System.GC.CollectionCount(0) - _diagGc0Start;
+                int gc1 = System.GC.CollectionCount(1) - _diagGc1Start;
+                int gc2 = System.GC.CollectionCount(2) - _diagGc2Start;
+                long monoNow = UnityEngine.Profiling.Profiler.GetMonoUsedSizeLong();
+                long monoDeltaKB = (monoNow - _diagMonoMemStart) / 1024;
+                Debug.Log($"[PointCloudRecorder PLAY] playback_fires {string.Join(" ", parts)} || " +
+                          $"gc=g0:{gc0},g1:{gc1},g2:{gc2} mono+={monoDeltaKB}KB " +
+                          $"maxTick={_diagMaxUpdateDtMs:F0}ms@{_diagMaxUpdateDtAtSec - _diagWindowStart:F2}s", this);
                 foreach (var key in new List<string>(_diagFiresPerSerial.Keys)) _diagFiresPerSerial[key] = 0;
             }
 
@@ -1349,10 +1568,7 @@ namespace PointCloud
         private void ApplyBoundingBoxFilter(DeviceTrack track)
         {
             if (track.PlaybackRenderer == null) return;
-            // Honor the showPointClouds toggle even while playback keeps reconstructing
-            // and firing BT events — only the visual mesh is hidden.
-            if (track.PlaybackRenderer.enabled != showPointClouds)
-                track.PlaybackRenderer.enabled = showPointClouds;
+            // Visibility is owned by PointCloudView (registered at spawn time).
             if (_filterMpb == null) _filterMpb = new MaterialPropertyBlock();
             PointCloudShaderFilters.Apply(track.PlaybackRenderer, _filterMpb,
                 track.PlaybackObject.transform, ResolveBoundingBox(), ResolveDecimater(),
@@ -1398,8 +1614,46 @@ namespace PointCloud
             track.PlaybackObject = go;
             track.PlaybackFilter = mf;
             track.PlaybackRenderer = mr;
-            track.PlaybackMesh = null;
-            track.PlaybackMeshCapacity = 0;
+            track.Reconstructor = new PointCloudReconstructor(track.Serial);
+            if (view != null) view.Register(mr);
+        }
+
+        // Advance the body cursor to the latest body frame whose timestamp does
+        // not exceed playheadNs, firing OnPlaybackBodies for each crossed frame.
+        // The body cursor is independent of the depth cursor because worker
+        // output can lag (and skip) depth frames; matching by ts keeps bodies in
+        // step with the rendered point cloud even when the two streams are not 1:1.
+        private void AdvanceBodyCursor(DeviceTrack track, ulong playheadNs)
+        {
+            int count = track.BodyFrames.Count;
+            if (count == 0) return;
+
+            int cursor = Mathf.Max(track.BodyPlaybackCursor, -1);
+            while (cursor + 1 < count
+                   && TimestampNsAt(track.BodyFrames, cursor + 1) <= playheadNs)
+                cursor++;
+
+            if (cursor == track.BodyPlaybackCursor) return;
+            // Emit only the latest frame in the crossed run — listeners (BT merge
+            // pipeline) care about the freshest skeleton, not stale ones.
+            // Intermediate frames are skipped on purpose; same logic as the depth
+            // cursor advance above which uploads only the most recent depth+color.
+            track.BodyPlaybackCursor = cursor;
+            if (cursor < 0) return;
+            FireBodyEvent(track, cursor);
+        }
+
+        private void FireBodyEvent(DeviceTrack track, int cursor)
+        {
+            if (OnPlaybackBodies == null) return;
+            // Indexer materializes the bytes into the stream's reusable scratch.
+            // The handler must consume the buffer synchronously — callers downstream
+            // either decode into their own buffers or fire-and-forget per-frame.
+            var bodyFrame = track.BodyFrames[cursor];
+            if (bodyFrame == null || bodyFrame.Bytes == null || bodyFrame.ByteCount <= 0) return;
+            Transform t = track.PlaybackObject != null ? track.PlaybackObject.transform : null;
+            OnPlaybackBodies.Invoke(track.Serial, bodyFrame.TimestampNs,
+                bodyFrame.Bytes, bodyFrame.ByteCount, t);
         }
 
         // Wraps the per-frame playback data in a RawFrameData and fires
@@ -1415,11 +1669,11 @@ namespace PointCloud
             if (depthFrame?.Bytes == null) return;
             ulong tsUs = depthFrame.TimestampNs / 1000UL;
             byte[] colorBytes = colorFrame?.Bytes;
-            int colorCount = colorBytes?.Length ?? 0;
+            int colorCount = colorFrame?.ByteCount ?? 0;
             byte[] irBytes = irFrame?.Bytes;
-            int irCount = irBytes?.Length ?? 0;
+            int irCount = irFrame?.ByteCount ?? 0;
             var raw = new RawFrameData(
-                depthBytes: depthFrame.Bytes, depthByteCount: depthFrame.Bytes.Length,
+                depthBytes: depthFrame.Bytes, depthByteCount: depthFrame.ByteCount,
                 depthWidth: track.DepthWidth, depthHeight: track.DepthHeight,
                 colorBytes: colorBytes, colorByteCount: colorCount,
                 colorWidth: track.ColorWidth, colorHeight: track.ColorHeight,
@@ -1435,177 +1689,47 @@ namespace PointCloud
             }
         }
 
-        // Cached compute shader + property IDs. Loaded from Resources on first
-        // playback frame; failure falls back to CPU reconstruction so playback
-        // never goes silent on a missing shader asset.
-        private static ComputeShader s_reconstructShader;
-        private static int s_reconstructKernel = -1;
-        private static readonly int kId_Depth   = Shader.PropertyToID("_Depth");
-        private static readonly int kId_Color   = Shader.PropertyToID("_Color");
-        private static readonly int kId_Out     = Shader.PropertyToID("_Out");
-        private static readonly int kId_DepthW  = Shader.PropertyToID("_DepthW");
-        private static readonly int kId_DepthH  = Shader.PropertyToID("_DepthH");
-        private static readonly int kId_ColorW  = Shader.PropertyToID("_ColorW");
-        private static readonly int kId_ColorH  = Shader.PropertyToID("_ColorH");
-        private static readonly int kId_HasColor = Shader.PropertyToID("_HasColor");
-        private static readonly int kId_FxD = Shader.PropertyToID("_FxD");
-        private static readonly int kId_FyD = Shader.PropertyToID("_FyD");
-        private static readonly int kId_CxD = Shader.PropertyToID("_CxD");
-        private static readonly int kId_CyD = Shader.PropertyToID("_CyD");
-        private static readonly int kId_FxC = Shader.PropertyToID("_FxC");
-        private static readonly int kId_FyC = Shader.PropertyToID("_FyC");
-        private static readonly int kId_CxC = Shader.PropertyToID("_CxC");
-        private static readonly int kId_CyC = Shader.PropertyToID("_CyC");
-        private static readonly int kId_Rrow0 = Shader.PropertyToID("_Rrow0");
-        private static readonly int kId_Rrow1 = Shader.PropertyToID("_Rrow1");
-        private static readonly int kId_Rrow2 = Shader.PropertyToID("_Rrow2");
-        private static readonly int kId_T     = Shader.PropertyToID("_T");
-
-        private static bool TryLoadReconstructShader()
-        {
-            if (s_reconstructShader != null && s_reconstructKernel >= 0) return true;
-            s_reconstructShader = Resources.Load<ComputeShader>("PointCloudReconstruct");
-            if (s_reconstructShader == null) return false;
-            s_reconstructKernel = s_reconstructShader.FindKernel("CSMain");
-            return s_reconstructKernel >= 0;
-        }
-
+        // Per-track playback reconstruction. Delegates the entire GPU pipeline
+        // (mesh / buffers / shader dispatch) to PointCloudReconstructor, which
+        // is shared with the live capture path (PointCloudRenderer).
         private void ReconstructAndUpload(
             DeviceTrack track,
             PointCloudRecording.Frame depthFrame,
             PointCloudRecording.Frame colorFrame)
         {
-            if (!track.CameraParam.HasValue)
-            {
-                // No intrinsics — nothing to reconstruct. Blank the mesh.
-                if (track.PlaybackMesh != null)
-                {
-                    track.PlaybackMesh.SetSubMesh(0, new SubMeshDescriptor(0, 0, MeshTopology.Points),
-                        MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
-                }
-                return;
-            }
             int dw = track.DepthWidth, dh = track.DepthHeight;
             if (dw <= 0 || dh <= 0) return;
-            if (!TryLoadReconstructShader())
+
+            EnsurePlaybackObject(track);
+
+            if (!track.CameraParam.HasValue)
+            {
+                // No intrinsics — nothing to reconstruct. Blank the mesh so the
+                // last frame's points don't linger on the playback GO.
+                track.Reconstructor.BlankMesh();
+                return;
+            }
+
+            int cw = track.ColorWidth, ch = track.ColorHeight;
+            bool hasColor = colorFrame != null && colorFrame.Bytes != null && cw > 0 && ch > 0;
+            byte[] colorBytes = hasColor ? colorFrame.Bytes : null;
+            int colorByteCount = hasColor ? colorFrame.ByteCount : 0;
+
+            if (!track.Reconstructor.Dispatch(
+                    depthFrame.Bytes, depthFrame.ByteCount, dw, dh,
+                    colorBytes, colorByteCount, cw, ch,
+                    track.CameraParam.Value))
             {
                 Debug.LogError(
                     $"[{nameof(PointCloudRecorder)}] PointCloudReconstruct compute shader not found in Resources/", this);
                 return;
             }
 
-            int capacity = dw * dh;
-            int cw = track.ColorWidth, ch = track.ColorHeight;
-            bool hasColor = colorFrame != null && colorFrame.Bytes != null && cw > 0 && ch > 0;
-
-            EnsurePlaybackObject(track);
-            EnsurePlaybackMesh(track, capacity);
-            EnsureDepthGpuBuffer(track, depthFrame.Bytes.Length);
-            EnsureColorGpuBuffer(track, hasColor ? colorFrame.Bytes.Length : 4);
-
-            // Upload depth + color into GPU raw buffers. Buffer stride is 4
-            // (uint), so we Blockcopy bytes into the uint[] scratch first.
-            int depthBytes = depthFrame.Bytes.Length;
-            Buffer.BlockCopy(depthFrame.Bytes, 0, track.DepthScratchU32, 0, depthBytes);
-            track.DepthGpu.SetData(track.DepthScratchU32, 0, 0, track.DepthScratchU32.Length);
-            if (hasColor)
-            {
-                int colorBytes = colorFrame.Bytes.Length;
-                Buffer.BlockCopy(colorFrame.Bytes, 0, track.ColorScratchU32, 0, colorBytes);
-                track.ColorGpu.SetData(track.ColorScratchU32, 0, 0, track.ColorScratchU32.Length);
-            }
-
-            var cam = track.CameraParam.Value;
-            var shader = s_reconstructShader;
-            int k = s_reconstructKernel;
-            var vbuf = track.PlaybackMesh.GetVertexBuffer(0);
-
-            shader.SetBuffer(k, kId_Depth, track.DepthGpu);
-            shader.SetBuffer(k, kId_Color, track.ColorGpu);
-            shader.SetBuffer(k, kId_Out,   vbuf);
-            shader.SetInt(kId_DepthW, dw);
-            shader.SetInt(kId_DepthH, dh);
-            shader.SetInt(kId_ColorW, cw);
-            shader.SetInt(kId_ColorH, ch);
-            shader.SetInt(kId_HasColor, hasColor ? 1 : 0);
-            shader.SetFloat(kId_FxD, cam.DepthIntrinsic.Fx);
-            shader.SetFloat(kId_FyD, cam.DepthIntrinsic.Fy);
-            shader.SetFloat(kId_CxD, cam.DepthIntrinsic.Cx);
-            shader.SetFloat(kId_CyD, cam.DepthIntrinsic.Cy);
-            shader.SetFloat(kId_FxC, cam.RgbIntrinsic.Fx);
-            shader.SetFloat(kId_FyC, cam.RgbIntrinsic.Fy);
-            shader.SetFloat(kId_CxC, cam.RgbIntrinsic.Cx);
-            shader.SetFloat(kId_CyC, cam.RgbIntrinsic.Cy);
-            var R = cam.Transform.Rot;
-            shader.SetVector(kId_Rrow0, new Vector4(R[0], R[1], R[2], 0f));
-            shader.SetVector(kId_Rrow1, new Vector4(R[3], R[4], R[5], 0f));
-            shader.SetVector(kId_Rrow2, new Vector4(R[6], R[7], R[8], 0f));
-            var T = cam.Transform.Trans;
-            shader.SetVector(kId_T, new Vector4(T[0], T[1], T[2], 0f));
-
-            int gx = (dw + 7) / 8;
-            int gy = (dh + 7) / 8;
-            shader.Dispatch(k, gx, gy, 1);
-            vbuf.Dispose();
-
-            track.PlaybackMesh.SetSubMesh(0, new SubMeshDescriptor(0, capacity, MeshTopology.Points),
-                MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
-        }
-
-        // Build / resize the mesh so the compute can write into its vertex
-        // buffer directly. vertexBufferTarget = Raw is required for compute
-        // RWByteAddressBuffer access. Capacity is dw*dh (every depth pixel
-        // gets a vertex; invalid pixels are emitted offscreen and clip-culled).
-        private void EnsurePlaybackMesh(DeviceTrack track, int capacity)
-        {
-            if (track.PlaybackMesh != null && track.PlaybackMeshCapacity >= capacity) return;
-
-            if (track.PlaybackMesh != null) Destroy(track.PlaybackMesh);
-            var mesh = new Mesh
-            {
-                name = $"PlaybackMesh_{track.Serial}",
-                indexFormat = IndexFormat.UInt32,
-                bounds = new Bounds(Vector3.zero, Vector3.one * 100f),
-            };
-            mesh.vertexBufferTarget |= GraphicsBuffer.Target.Raw;
-            var attrs = new[]
-            {
-                new VertexAttributeDescriptor(VertexAttribute.Position, VertexAttributeFormat.Float32, 3, stream: 0),
-                new VertexAttributeDescriptor(VertexAttribute.Color,    VertexAttributeFormat.Float32, 3, stream: 0),
-            };
-            mesh.SetVertexBufferParams(capacity, attrs);
-            mesh.SetIndexBufferParams(capacity, IndexFormat.UInt32);
-            var indices = new NativeArray<uint>(capacity, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
-            try
-            {
-                for (int i = 0; i < capacity; i++) indices[i] = (uint)i;
-                mesh.SetIndexBufferData(indices, 0, 0, capacity,
-                    MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
-            }
-            finally { indices.Dispose(); }
-            track.PlaybackMesh = mesh;
-            track.PlaybackMeshCapacity = capacity;
-            track.PlaybackFilter.sharedMesh = mesh;
-        }
-
-        private static void EnsureDepthGpuBuffer(DeviceTrack track, int byteCount)
-        {
-            int uintCount = (byteCount + 3) / 4;
-            if (track.DepthGpu != null && track.DepthScratchU32 != null && track.DepthScratchU32.Length >= uintCount)
-                return;
-            track.DepthGpu?.Dispose();
-            track.DepthGpu = new GraphicsBuffer(GraphicsBuffer.Target.Raw, uintCount, sizeof(uint));
-            track.DepthScratchU32 = new uint[uintCount];
-        }
-
-        private static void EnsureColorGpuBuffer(DeviceTrack track, int byteCount)
-        {
-            int uintCount = Math.Max(1, (byteCount + 3) / 4);
-            if (track.ColorGpu != null && track.ColorScratchU32 != null && track.ColorScratchU32.Length >= uintCount)
-                return;
-            track.ColorGpu?.Dispose();
-            track.ColorGpu = new GraphicsBuffer(GraphicsBuffer.Target.Raw, uintCount, sizeof(uint));
-            track.ColorScratchU32 = new uint[uintCount];
+            // Mesh may have been (re-)allocated by EnsureMesh inside Dispatch on
+            // the very first frame, so keep MeshFilter.sharedMesh in sync. Cheap
+            // no-op after the first frame.
+            if (track.PlaybackFilter.sharedMesh != track.Reconstructor.Mesh)
+                track.PlaybackFilter.sharedMesh = track.Reconstructor.Mesh;
         }
 
         // --- Lifecycle / helpers ---
@@ -1640,10 +1764,11 @@ namespace PointCloud
             if (_streamWriters.Count == 0) return;
             foreach (var sw in _streamWriters.Values)
             {
-                try { sw.Depth?.Dispose(); } catch (Exception e) { Debug.LogWarning($"[{nameof(PointCloudRecorder)}] depth writer dispose failed: {e.Message}", this); }
-                try { sw.Color?.Dispose(); } catch (Exception e) { Debug.LogWarning($"[{nameof(PointCloudRecorder)}] color writer dispose failed: {e.Message}", this); }
-                try { sw.IR?.Dispose();    } catch (Exception e) { Debug.LogWarning($"[{nameof(PointCloudRecorder)}] IR writer dispose failed: {e.Message}",    this); }
-                sw.Depth = sw.Color = sw.IR = null;
+                try { sw.Depth?.Dispose();  } catch (Exception e) { Debug.LogWarning($"[{nameof(PointCloudRecorder)}] depth writer dispose failed: {e.Message}",  this); }
+                try { sw.Color?.Dispose();  } catch (Exception e) { Debug.LogWarning($"[{nameof(PointCloudRecorder)}] color writer dispose failed: {e.Message}",  this); }
+                try { sw.IR?.Dispose();     } catch (Exception e) { Debug.LogWarning($"[{nameof(PointCloudRecorder)}] IR writer dispose failed: {e.Message}",     this); }
+                try { sw.Bodies?.Dispose(); } catch (Exception e) { Debug.LogWarning($"[{nameof(PointCloudRecorder)}] bodies writer dispose failed: {e.Message}", this); }
+                sw.Depth = sw.Color = sw.IR = sw.Bodies = null;
             }
             _streamWriters.Clear();
         }
@@ -1665,20 +1790,23 @@ namespace PointCloud
             foreach (var kv in _tracks)
             {
                 var track = kv.Value;
-                track.DepthGpu?.Dispose(); track.DepthGpu = null;
-                track.ColorGpu?.Dispose(); track.ColorGpu = null;
-                track.DepthScratchU32 = null;
-                track.ColorScratchU32 = null;
-                if (track.PlaybackMesh != null)
-                {
-                    if (Application.isPlaying) Destroy(track.PlaybackMesh);
-                    else DestroyImmediate(track.PlaybackMesh);
-                }
+                // Reconstructor disposes its own GraphicsBuffers, scratch arrays,
+                // and (importantly) the Mesh it owns — caller MUST NOT manually
+                // Destroy track.PlaybackMesh.
+                if (view != null && track.PlaybackRenderer != null)
+                    view.Unregister(track.PlaybackRenderer);
+                track.Reconstructor?.Dispose();
+                track.Reconstructor = null;
                 if (track.PlaybackObject != null)
                 {
                     if (Application.isPlaying) Destroy(track.PlaybackObject);
                     else DestroyImmediate(track.PlaybackObject);
                 }
+                // Close any open RcsvFrameStream handles. Skipping this would
+                // leak FileStreams (12 handles per Read in a 4-cam setup) and
+                // keep Windows from reopening the file for append on a
+                // subsequent recording session.
+                track.Dispose();
             }
             _tracks.Clear();
         }
@@ -1691,6 +1819,20 @@ namespace PointCloud
                 _tracks[serial] = track;
             }
             return track;
+        }
+
+        /// <summary>
+        /// Cheap timestamp lookup that avoids materializing a frame's bytes
+        /// when the backing is an <see cref="PointCloudRecording.RcsvFrameStream"/>.
+        /// The playback Update loop and gap diagnostics peek at next-frame
+        /// timestamps every tick; routing those through the indexer would
+        /// allocate a fresh byte[] per peek (~700 KB for depth) and read the
+        /// full record off disk just to discard everything except 8 bytes.
+        /// </summary>
+        private static ulong TimestampNsAt(IReadOnlyList<PointCloudRecording.Frame> frames, int idx)
+        {
+            if (frames is PointCloudRecording.RcsvFrameStream s) return s.TimestampNsAt(idx);
+            return frames[idx].TimestampNs;
         }
 
         private void FillDimensionsFromRenderer(DeviceTrack track)
@@ -1728,6 +1870,10 @@ namespace PointCloud
         private string ResolveRoot()
         {
             string p = folderPath;
+#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+            if (!string.IsNullOrWhiteSpace(folderPathMacOverride))
+                p = folderPathMacOverride;
+#endif
             if (string.IsNullOrWhiteSpace(p))
                 p = Path.Combine(Application.persistentDataPath, "Recordings", "recording");
             else if (!Path.IsPathRooted(p))
