@@ -483,6 +483,64 @@ namespace PointCloud
         }
 
         /// <summary>
+        /// Read this serial's current depth playback cursor (0-based). Returns
+        /// -1 if the serial is unknown. Used by debug tooling to show which
+        /// frame of the recording each camera is currently emitting.
+        /// </summary>
+        public int GetPlaybackCursor(string serial)
+        {
+            if (_tracks == null || string.IsNullOrEmpty(serial)) return -1;
+            return _tracks.TryGetValue(serial, out var t) ? t.PlaybackCursor : -1;
+        }
+
+        /// <summary>
+        /// Total recorded depth frames on this serial's track (or -1 if the
+        /// serial is unknown). Pair with <see cref="GetPlaybackCursor"/> to
+        /// display "frame N / total" in debug HUDs.
+        /// </summary>
+        public int GetTrackFrameCount(string serial)
+        {
+            if (_tracks == null || string.IsNullOrEmpty(serial)) return -1;
+            if (!_tracks.TryGetValue(serial, out var t)) return -1;
+            return t.DepthFrames != null ? t.DepthFrames.Count : 0;
+        }
+
+        /// <summary>
+        /// Seek every track to <paramref name="targetCursor"/> (clamped to each
+        /// track's [0, Count-1]) and re-emit the frame so the rest of the
+        /// pipeline catches up. Auto-pauses playback like the Step* APIs so the
+        /// natural auto-advance doesn't immediately stomp on the manual seek.
+        /// Returns true if any track moved.
+        /// </summary>
+        [ContextMenu("Seek All Tracks (debug)")]
+        public bool SeekAllTracksTo(int targetCursor)
+        {
+            if (CurrentState != State.Playing) return false;
+            if (_tracks.Count == 0) return false;
+            if (!IsPaused) PausePlayback();
+            bool moved = false;
+            ulong maxSteppedTs = 0;
+            foreach (var kv in _tracks)
+            {
+                var track = kv.Value;
+                if (track.DepthFrames.Count == 0) continue;
+                int clamped = Mathf.Clamp(targetCursor, 0, track.DepthFrames.Count - 1);
+                if (clamped == track.PlaybackCursor) continue;
+                SetCursorAndEmit(track, clamped);
+                moved = true;
+                ulong ts = TimestampNsAt(track.DepthFrames, clamped);
+                if (ts > maxSteppedTs) maxSteppedTs = ts;
+            }
+            if (moved && maxSteppedTs > 0)
+            {
+                // Mirror the StepCursor logic so a subsequent Resume continues
+                // from the stepped playhead instead of jumping back.
+                SyncWallClockTo(maxSteppedTs);
+            }
+            return moved;
+        }
+
+        /// <summary>
         /// All-or-nothing cursor shift by <paramref name="delta"/> (±1 for
         /// arrow-key stepping). If EVERY non-empty track can shift its cursor
         /// by delta (within [0, Count-1]), every track moves and re-fires its
