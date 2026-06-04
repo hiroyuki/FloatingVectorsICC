@@ -392,6 +392,7 @@ GameObject:
   - component: {fileID: 639959844}
   - component: {fileID: 639959846}
   - component: {fileID: 639959848}
+  - component: {fileID: 639959849}
   m_Layer: 0
   m_Name: TSDFVolume
   m_TagString: Untagged
@@ -415,6 +416,7 @@ MonoBehaviour:
   voxelSize: 0.05
   tauMultiplier: 4
   accumulationMode: 0
+  doubleBuffered: 1
   verboseLogging: 1
 --- !u!4 &639959845
 Transform:
@@ -449,6 +451,7 @@ MonoBehaviour:
   subscribePlayback: 1
   clearVolumeOnNewBatch: 1
   expectedCamCount: 4
+  integrationEnabled: 1
   diagnosticLogging: 1
 --- !u!114 &639959848
 MonoBehaviour:
@@ -466,16 +469,37 @@ MonoBehaviour:
   mode: 0
   voxelMaterial: {fileID: 0}
   voxelSphereScale: 0.5
-  voxelHideAboveSdf: 0.2
+  voxelHideAboveSdfFraction: 1
   cellMaterial: {fileID: 0}
   cellCubeScale: 0.3
-  cellColor: {r: 0.2, g: 1, b: 0.5, a: 1}
+  cellColor: {r: 1, g: 1, b: 1, a: 1}
   meshMaterial: {fileID: 0}
-  meshMaxTriangles: 333333
+  meshMaxTriangles: 2000000
   meshIsoLevel: 0
   meshMinWeight: 0.5
   mcEveryNFrames: 1
   diagnosticLogging: 0
+--- !u!114 &639959849
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 639959843}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: f7dfe7f5e6064cb44af00b6d326cf2ce, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: TSDF::TSDF.TSDFCaptureSession
+  volume: {fileID: 0}
+  integrator: {fileID: 0}
+  captureDuration: 10
+  clearOnStart: 1
+  forceRetainGhost: 1
+  autoStartOnEnable: 0
+  loop: 0
+  startKey: 99
+  stopKey: 118
 --- !u!1 &925702422
 GameObject:
   m_ObjectHideFlags: 0
@@ -505,7 +529,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 96892899ec43f7246a88f0b3f63d9e67, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::PointCloud.PointCloudCameraManager
-  playbackOnly: 0
+  playbackOnly: 1
   defaultPointMaterial: {fileID: 0}
   depthWidth: 640
   depthHeight: 576
