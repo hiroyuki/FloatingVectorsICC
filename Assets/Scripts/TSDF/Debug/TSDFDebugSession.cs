@@ -225,8 +225,9 @@ namespace TSDF.DebugTools
                 return;
             }
             if (volume == null || integrator == null) return;
-            volume.Clear();
+            volume.ClearWrite();
             IntegrateSnapshot(snap);
+            volume.Publish();
             lastReplayKind = $"single ({serial.Substring(System.Math.Max(0, serial.Length - 6))})";
             lastReplayTimestampUs = snap.TimestampUs;
             Debug.Log($"[TSDFDebugSession] Replayed single cam '{serial}' @ {snap.TimestampUs}us", this);
@@ -240,7 +241,7 @@ namespace TSDF.DebugTools
                 return;
             }
             if (volume == null || integrator == null) return;
-            volume.Clear();
+            volume.ClearWrite();
             ulong minTs = ulong.MaxValue, maxTs = 0;
             foreach (var snap in _cache.Values)
             {
@@ -248,6 +249,7 @@ namespace TSDF.DebugTools
                 if (snap.TimestampUs < minTs) minTs = snap.TimestampUs;
                 if (snap.TimestampUs > maxTs) maxTs = snap.TimestampUs;
             }
+            volume.Publish();
             lastReplayKind = $"all ({_cache.Count})";
             lastReplayTimestampUs = maxTs;
             ulong spreadUs = maxTs > minTs ? (maxTs - minTs) : 0;

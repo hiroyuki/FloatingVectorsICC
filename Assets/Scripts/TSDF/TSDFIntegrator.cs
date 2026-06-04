@@ -50,17 +50,15 @@ namespace TSDF
         [Min(1)] public int expectedCamCount = 4;
 
         // Set of serials that have integrated since the last clear. Once it
-        // reaches expectedCamCount, the next IntegrateRawFrame call wipes the
-        // volume and resets the set — i.e. the just-finished batch is the one
-        // MC sees (TSDFView only re-dispatches when CompletedBatchCount moves).
+        // reaches expectedCamCount, the batch is published to the front buffer
+        // and the next integrate clears the back buffer to start a fresh batch.
         private readonly System.Collections.Generic.HashSet<string> _batchSerials
             = new System.Collections.Generic.HashSet<string>();
 
         /// <summary>
         /// Monotonically increasing per-batch counter. Bumped each time a batch
-        /// reaches <see cref="expectedCamCount"/> unique serials. TSDFView reads
-        /// this to decide when to re-run Marching Cubes — the mesh therefore
-        /// only updates on batch completion, never on partial batches.
+        /// reaches <see cref="expectedCamCount"/> unique serials (= one Publish).
+        /// Kept as a diagnostic; view refresh is driven by TSDFVolume.PublishVersion.
         /// </summary>
         public int CompletedBatchCount { get; private set; }
 
@@ -110,6 +108,11 @@ namespace TSDF
                 return;
             }
             EnsureShader();
+            // Live-follow (clear-per-batch) wants double buffering so views never
+            // see a mid-clear / partial-fill front. Accumulate (no clear) is a
+            // read-modify-write that needs ONE persistent buffer. Drive the volume
+            // to match our mode so the two stay consistent.
+            volume.doubleBuffered = clearVolumeOnNewBatch;
             BindAllSources();
         }
 
@@ -196,27 +199,65 @@ namespace TSDF
         /// </summary>
         public void IntegrateRawFrame(string serial, ObCameraParam? camParam,
                                       Transform sourceTransform, RawFrameData raw)
-            => DispatchIntegrate(serial, camParam, sourceTransform, raw);
+            => IntegrateOne(serial, camParam, sourceTransform, raw);
 
-        private unsafe void DispatchIntegrate(string serial, ObCameraParam? camParam,
-                                              Transform sourceTransform, RawFrameData raw)
+        /// <summary>
+        /// Event-path entry: integrate one cam frame AND drive the live-follow
+        /// batch state machine (clear the back buffer at batch start, publish it
+        /// to the front once <see cref="expectedCamCount"/> unique cams have
+        /// landed). The raw integrate itself is in <see cref="IntegrateOne"/> so
+        /// debug replay can drive clear/publish on its own schedule.
+        /// </summary>
+        private void DispatchIntegrate(string serial, ObCameraParam? camParam,
+                                       Transform sourceTransform, RawFrameData raw)
         {
-            if (string.IsNullOrEmpty(serial)) return;
-            if (volume == null || volume.VoxelBuffer == null) return;
-            if (raw.DepthBytes == null || raw.DepthByteCount <= 0) return;
-            if (!camParam.HasValue) return; // need intrinsics
-            if (sourceTransform == null) return;
+            if (volume == null) return;
 
             // Live-follow: when a complete batch finished last time, wipe the
-            // volume here at the START of the next batch's first integration.
-            // TSDFView only re-runs MC on CompletedBatchCount changes, so the
-            // mesh on screen stays bound to the LAST complete batch all the way
-            // until the new batch finishes — no flicker on partial batches.
+            // hidden BACK buffer here at the START of the next batch's first
+            // integration. The displayed front keeps showing the last complete
+            // batch until this one finishes and publishes — no flicker.
             if (clearVolumeOnNewBatch && _batchSerials.Count >= expectedCamCount)
             {
-                volume.Clear();
+                volume.ClearWrite();
                 _batchSerials.Clear();
             }
+
+            if (!IntegrateOne(serial, camParam, sourceTransform, raw)) return;
+
+            if (clearVolumeOnNewBatch)
+            {
+                // Tally this serial into the in-flight batch. Once full, bump the
+                // batch counter and publish the back buffer to the front so all
+                // three views pick up the same complete snapshot this frame.
+                _batchSerials.Add(serial);
+                if (_batchSerials.Count == expectedCamCount)
+                {
+                    CompletedBatchCount++;
+                    volume.Publish();
+                }
+            }
+            else
+            {
+                // Accumulate (single buffer): content is already in the visible
+                // buffer; just bump the publish version so the mesh re-extracts.
+                volume.Publish();
+            }
+        }
+
+        /// <summary>
+        /// Integrate ONE depth frame into <see cref="TSDFVolume.WriteBuffer"/>. No
+        /// batch / clear / publish side effects — pure GPU integrate + counters.
+        /// Returns false if the frame was rejected (missing intrinsics, no depth…).
+        /// </summary>
+        private unsafe bool IntegrateOne(string serial, ObCameraParam? camParam,
+                                         Transform sourceTransform, RawFrameData raw)
+        {
+            if (string.IsNullOrEmpty(serial)) return false;
+            if (volume == null || volume.WriteBuffer == null) return false;
+            if (raw.DepthBytes == null || raw.DepthByteCount <= 0) return false;
+            if (!camParam.HasValue) return false; // need intrinsics
+            if (sourceTransform == null) return false;
 
             if (!_states.TryGetValue(serial, out var st))
             {
@@ -250,7 +291,7 @@ namespace TSDF
             Matrix4x4 depthFromWorld = ComputeDepthFromWorld(sourceTransform, st.CamParam);
             var intr = st.CamParam.DepthIntrinsic;
 
-            _shader.SetBuffer(_kernel, "_Voxels", volume.VoxelBuffer);
+            _shader.SetBuffer(_kernel, "_Voxels", volume.WriteBuffer);
             _shader.SetInts("_Dim", volume.Dim.x, volume.Dim.y, volume.Dim.z);
             _shader.SetMatrix("_WorldFromVoxel", volume.WorldFromVoxel);
             _shader.SetFloat("_Tau", volume.Tau);
@@ -272,24 +313,13 @@ namespace TSDF
 
             st.FramesIntegrated++;
             TotalIntegrationCount++;
-
-            // Tally this serial into the in-flight batch. The check is below
-            // (not above) the dispatch so this frame's contribution lands in
-            // the volume BEFORE we declare the batch complete.
-            if (clearVolumeOnNewBatch)
-            {
-                _batchSerials.Add(serial);
-                if (_batchSerials.Count == expectedCamCount)
-                    CompletedBatchCount++;
-            }
+            return true;
         }
 
         /// <summary>
-        /// Monotonically increasing counter, +1 per successful IntegrateRawFrame.
-        /// TSDFView reads this to decide "did the integrator do work this Unity
-        /// frame?" — if yes, re-run MC + clear in LateUpdate; if no, hold the
-        /// previous mesh on screen so it does not flicker on Unity frames where
-        /// the recorder did not emit (Unity 60+ fps vs recorder 30 fps).
+        /// Monotonically increasing counter, +1 per successful integrate. Kept as a
+        /// diagnostic / external progress signal; flicker-free view updates are now
+        /// driven by <see cref="TSDFVolume.PublishVersion"/>, not this.
         /// </summary>
         public int TotalIntegrationCount { get; private set; }
 
@@ -325,6 +355,10 @@ namespace TSDF
             // bind anything new. Existing entries are short-circuited by the
             // Dictionary.ContainsKey guards.
             BindAllSources();
+
+            // Keep the volume's buffering mode tracking ours if the user toggles
+            // clearVolumeOnNewBatch at runtime (volume rebuilds on the change).
+            if (volume != null) volume.doubleBuffered = clearVolumeOnNewBatch;
 
             if (!diagnosticLogging) return;
             float now = Time.realtimeSinceStartup;
