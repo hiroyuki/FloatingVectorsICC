@@ -49,6 +49,13 @@ namespace TSDF
                  "set; lower it if you are debugging with fewer cams attached.")]
         [Min(1)] public int expectedCamCount = 4;
 
+        [Tooltip("Gate for the live/playback integration path. When false, incoming " +
+                 "frames are ignored so the volume (and thus the mesh) freezes on its " +
+                 "last state. TSDFCaptureSession flips this to hold the final mesh after " +
+                 "a capture window ends (spec §7). Debug replay via IntegrateRawFrame " +
+                 "bypasses this gate.")]
+        public bool integrationEnabled = true;
+
         // Set of serials that have integrated since the last clear. Once it
         // reaches expectedCamCount, the batch is published to the front buffer
         // and the next integrate clears the back buffer to start a fresh batch.
@@ -212,6 +219,7 @@ namespace TSDF
                                        Transform sourceTransform, RawFrameData raw)
         {
             if (volume == null) return;
+            if (!integrationEnabled) return; // frozen — hold the last accumulated state
 
             // Live-follow: when a complete batch finished last time, wipe the
             // hidden BACK buffer here at the START of the next batch's first
