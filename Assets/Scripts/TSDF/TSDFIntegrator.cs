@@ -88,6 +88,11 @@ namespace TSDF
             public int DepthByteCount;
             public int DepthWidth;
             public int DepthHeight;
+            public ComputeBuffer ColorBuf;      // ComputeBufferType.Raw, RGB8 bytes / 4 uints
+            public uint[] ColorScratchU32;
+            public int ColorByteCount;
+            public int ColorWidth;
+            public int ColorHeight;
             public int FramesIntegrated;        // diag counter, reset per second
         }
         private readonly Dictionary<string, CamState> _states = new Dictionary<string, CamState>();
@@ -127,7 +132,10 @@ namespace TSDF
         {
             UnbindAll();
             foreach (var kv in _states)
+            {
                 kv.Value.DepthBuf?.Release();
+                kv.Value.ColorBuf?.Release();
+            }
             _states.Clear();
         }
 
@@ -295,6 +303,33 @@ namespace TSDF
             System.Buffer.BlockCopy(raw.DepthBytes, 0, st.DepthScratchU32, 0, raw.DepthByteCount);
             st.DepthBuf.SetData(st.DepthScratchU32, 0, 0, uintCount);
 
+            // Upload the colour frame (RGB8) the same way, so the integrate kernel
+            // can sample the camera colour per voxel. When the frame has no colour
+            // (depth-only), keep a 1-uint dummy bound and flag _HasColor=0 — the
+            // kernel's binding must still exist even though it short-circuits.
+            bool hasColor = raw.ColorBytes != null && raw.ColorByteCount > 0
+                            && raw.ColorWidth > 0 && raw.ColorHeight > 0;
+            if (hasColor)
+            {
+                st.ColorByteCount = raw.ColorByteCount;
+                st.ColorWidth = raw.ColorWidth;
+                st.ColorHeight = raw.ColorHeight;
+                int cUintCount = (raw.ColorByteCount + 3) / 4;
+                if (st.ColorBuf == null || st.ColorBuf.count != cUintCount)
+                {
+                    st.ColorBuf?.Release();
+                    st.ColorBuf = new ComputeBuffer(cUintCount, 4, ComputeBufferType.Raw);
+                }
+                if (st.ColorScratchU32 == null || st.ColorScratchU32.Length != cUintCount)
+                    st.ColorScratchU32 = new uint[cUintCount];
+                System.Buffer.BlockCopy(raw.ColorBytes, 0, st.ColorScratchU32, 0, raw.ColorByteCount);
+                st.ColorBuf.SetData(st.ColorScratchU32, 0, 0, cUintCount);
+            }
+            else if (st.ColorBuf == null)
+            {
+                st.ColorBuf = new ComputeBuffer(1, 4, ComputeBufferType.Raw);
+            }
+
             // Build per-camera world->depth-mm matrix.
             Matrix4x4 depthFromWorld = ComputeDepthFromWorld(sourceTransform, st.CamParam);
             var intr = st.CamParam.DepthIntrinsic;
@@ -315,9 +350,33 @@ namespace TSDF
             _shader.SetMatrix("_DepthFromWorld", depthFromWorld);
             _shader.SetFloat("_WObs", observationWeight);
 
+            // Colour buffer + colour-camera projection. world->colour-mm is the
+            // renderer-transform half of depthFromWorld (the source GO transform
+            // is already in colour-camera metres), scaled to mm — without the
+            // colour->depth extrinsic inverse that depthFromWorld applies.
+            Matrix4x4 colorFromWorld = Matrix4x4.Scale(new Vector3(1000f, 1000f, 1000f))
+                                       * sourceTransform.worldToLocalMatrix;
+            var cintr = st.CamParam.RgbIntrinsic;
+            _shader.SetBuffer(_kernel, "_Colors", volume.WriteColorBuffer);
+            _shader.SetBuffer(_kernel, "_ColorImg", st.ColorBuf);
+            _shader.SetInt("_ColorW", st.ColorWidth);
+            _shader.SetInt("_ColorH", st.ColorHeight);
+            _shader.SetFloat("_FxC", cintr.Fx);
+            _shader.SetFloat("_FyC", cintr.Fy);
+            _shader.SetFloat("_CxC", cintr.Cx);
+            _shader.SetFloat("_CyC", cintr.Cy);
+            _shader.SetMatrix("_ColorFromWorld", colorFromWorld);
+            _shader.SetInt("_HasColor", hasColor ? 1 : 0);
+
             int total = volume.Dim.x * volume.Dim.y * volume.Dim.z;
             int groups = Mathf.CeilToInt(total / 64f);
-            _shader.Dispatch(_kernel, groups, 1, 1);
+            // 2D group grid so fine volumes (voxelSize 0.01 → >100k groups) stay
+            // under the 65535 threadgroup-per-axis limit. The kernel linearises
+            // via _DispatchWidth = groupsX * 64.
+            int gx = Mathf.Min(groups, 65535);
+            int gy = Mathf.CeilToInt(groups / (float)gx);
+            _shader.SetInt("_DispatchWidth", gx * 64);
+            _shader.Dispatch(_kernel, Mathf.Max(1, gx), Mathf.Max(1, gy), 1);
 
             st.FramesIntegrated++;
             TotalIntegrationCount++;

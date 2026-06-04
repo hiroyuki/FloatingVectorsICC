@@ -8,9 +8,12 @@ Shader "TSDF/TSDFMesh"
 {
     Properties
     {
-        _Color    ("Base Color", Color)  = (0.85, 0.88, 0.95, 1)
-        _RimColor ("Rim Color",  Color)  = (1, 1, 1, 1)
-        _RimPower ("Rim Power",  Float)  = 2.5
+        _Color      ("Base Color (tint)", Color)  = (1, 1, 1, 1)
+        _RimColor   ("Rim Color",  Color)  = (1, 1, 1, 1)
+        _RimPower   ("Rim Power",  Float)  = 2.5
+        _Saturation ("Saturation", Range(0, 3))   = 1.0
+        _Brightness ("Brightness", Range(0, 3))   = 1.0
+        _Gamma      ("Gamma",      Range(0.2, 3)) = 1.0
     }
     SubShader
     {
@@ -29,20 +32,25 @@ Shader "TSDF/TSDFMesh"
             #include "UnityCG.cginc"
 
             // Matches the Tri struct emitted by TSDFMarchingCubes.compute.
-            // 3 float3 per triangle (36 bytes); SV_VertexID indexes vertices
-            // across all triangles, decompose into (triIdx, cornerIdx).
-            struct Tri { float3 v0; float3 v1; float3 v2; };
+            // Per vertex: position + colour. 6 float3 per triangle (72 bytes);
+            // SV_VertexID indexes vertices across all triangles, decompose into
+            // (triIdx, cornerIdx).
+            struct Tri { float3 p0; float3 c0; float3 p1; float3 c1; float3 p2; float3 c2; };
             StructuredBuffer<Tri> _Triangles;
 
             float4 _Color;
             float4 _RimColor;
             float  _RimPower;
+            float  _Saturation;
+            float  _Brightness;
+            float  _Gamma;
 
             struct V2F
             {
                 float4 pos      : SV_POSITION;
                 float3 worldPos : TEXCOORD0;
                 float3 viewDir  : TEXCOORD1;
+                float3 vcol     : TEXCOORD2;
             };
 
             V2F vert(uint vid : SV_VertexID)
@@ -51,12 +59,12 @@ Shader "TSDF/TSDFMesh"
                 uint triIdx = vid / 3u;
                 uint cornerIdx = vid - triIdx * 3u; // = vid % 3
                 Tri t = _Triangles[triIdx];
-                float3 wp = (cornerIdx == 0u) ? t.v0
-                          : (cornerIdx == 1u) ? t.v1
-                                              : t.v2;
+                float3 wp  = (cornerIdx == 0u) ? t.p0 : (cornerIdx == 1u) ? t.p1 : t.p2;
+                float3 col = (cornerIdx == 0u) ? t.c0 : (cornerIdx == 1u) ? t.c1 : t.c2;
                 o.pos = mul(UNITY_MATRIX_VP, float4(wp, 1.0));
                 o.worldPos = wp;
                 o.viewDir = normalize(_WorldSpaceCameraPos.xyz - wp);
+                o.vcol = col;
                 return o;
             }
 
@@ -74,7 +82,16 @@ Shader "TSDF/TSDFMesh"
                 float diffuse = saturate(dot(N, L)) * 0.7 + 0.3;
                 float rim = pow(1.0 - saturate(dot(N, i.viewDir)), _RimPower);
 
-                float3 rgb = _Color.rgb * diffuse + _RimColor.rgb * rim * 0.35;
+                // Per-vertex camera colour (baked at integration), colour-graded
+                // then shaded by the flat normal. Grading order: gamma (fix
+                // sRGB/linear darkness) -> saturation (luma-preserving boost) ->
+                // tint -> brightness, then lighting.
+                float3 albedo = saturate(i.vcol);
+                albedo = pow(albedo, _Gamma);
+                float luma = dot(albedo, float3(0.2126, 0.7152, 0.0722));
+                albedo = max(0.0, lerp(float3(luma, luma, luma), albedo, _Saturation));
+                albedo *= _Color.rgb;
+                float3 rgb = albedo * diffuse * _Brightness + _RimColor.rgb * rim * 0.35;
                 return fixed4(rgb, 1.0);
             }
             ENDCG

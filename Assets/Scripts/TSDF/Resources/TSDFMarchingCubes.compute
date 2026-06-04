@@ -15,12 +15,15 @@
 #include "MarchingCubesTables.hlsl"
 
 StructuredBuffer<float2> _Voxels;   // x = sdf (m), y = weight
+StructuredBuffer<float4> _Colors;   // rgb (0..1) + colour weight; parallel to _Voxels
 int3 _Dim;
 float4x4 _WorldFromVoxel;
 float _IsoLevel;                     // = 0
 float _MinWeight;                    // skip cell if any corner weight < this
 
-struct Tri { float3 v0; float3 v1; float3 v2; };
+// Per-vertex position + colour. 6 float3 = 72 bytes per triangle. Matches the
+// stride TSDFView allocates and the layout TSDFMesh.shader reads.
+struct Tri { float3 p0; float3 c0; float3 p1; float3 c1; float3 p2; float3 c2; };
 AppendStructuredBuffer<Tri> _Triangles;
 
 // Multiplies args[0] from "triangle count" (set by ComputeBuffer.CopyCount
@@ -41,11 +44,12 @@ float3 VoxelCenterWorld(int3 c)
     return mul(_WorldFromVoxel, float4(idxC, 1.0)).xyz;
 }
 
-float3 InterpZero(float3 p0, float3 p1, float v0, float v1)
+// Parametric position of the iso crossing along an edge (shared by the vertex
+// position and its interpolated colour).
+float InterpT(float v0, float v1)
 {
     float denom = v1 - v0;
-    float t = saturate((_IsoLevel - v0) / (abs(denom) < 1e-6 ? sign(denom + 1e-12) * 1e-6 : denom));
-    return lerp(p0, p1, t);
+    return saturate((_IsoLevel - v0) / (abs(denom) < 1e-6 ? sign(denom + 1e-12) * 1e-6 : denom));
 }
 
 [numthreads(4, 4, 4)]
@@ -107,28 +111,42 @@ void MarchCubes(uint3 id : SV_DispatchThreadID)
     float3 p6 = VoxelCenterWorld(c6);
     float3 p7 = VoxelCenterWorld(c7);
 
-    // 12 edge midpoints (only computed when the edge is crossed). The Metal
-    // shader compiler can't prove that triTable only references edges with
-    // their corresponding eMask bit set, so initialise to 0 to silence the
-    // "potentially uninitialised" warning — the runtime path still uses the
-    // valid values written below.
-    float3 e[12] = {
+    // Corner colours, same numbering as the sdf corners.
+    float3 q0 = _Colors[LinIdx(c0)].rgb;
+    float3 q1 = _Colors[LinIdx(c1)].rgb;
+    float3 q2 = _Colors[LinIdx(c2)].rgb;
+    float3 q3 = _Colors[LinIdx(c3)].rgb;
+    float3 q4 = _Colors[LinIdx(c4)].rgb;
+    float3 q5 = _Colors[LinIdx(c5)].rgb;
+    float3 q6 = _Colors[LinIdx(c6)].rgb;
+    float3 q7 = _Colors[LinIdx(c7)].rgb;
+
+    // 12 edge crossings: position (ep) + interpolated colour (ec). Only filled
+    // when the edge is crossed; zero-init to silence the Metal "potentially
+    // uninitialised" warning (triTable only references set-bit edges).
+    float3 ep[12] = {
         float3(0,0,0), float3(0,0,0), float3(0,0,0), float3(0,0,0),
         float3(0,0,0), float3(0,0,0), float3(0,0,0), float3(0,0,0),
         float3(0,0,0), float3(0,0,0), float3(0,0,0), float3(0,0,0)
     };
-    if (eMask & 1)    e[0]  = InterpZero(p0, p1, d0.x, d1.x);
-    if (eMask & 2)    e[1]  = InterpZero(p1, p2, d1.x, d2.x);
-    if (eMask & 4)    e[2]  = InterpZero(p2, p3, d2.x, d3.x);
-    if (eMask & 8)    e[3]  = InterpZero(p3, p0, d3.x, d0.x);
-    if (eMask & 16)   e[4]  = InterpZero(p4, p5, d4.x, d5.x);
-    if (eMask & 32)   e[5]  = InterpZero(p5, p6, d5.x, d6.x);
-    if (eMask & 64)   e[6]  = InterpZero(p6, p7, d6.x, d7.x);
-    if (eMask & 128)  e[7]  = InterpZero(p7, p4, d7.x, d4.x);
-    if (eMask & 256)  e[8]  = InterpZero(p0, p4, d0.x, d4.x);
-    if (eMask & 512)  e[9]  = InterpZero(p1, p5, d1.x, d5.x);
-    if (eMask & 1024) e[10] = InterpZero(p2, p6, d2.x, d6.x);
-    if (eMask & 2048) e[11] = InterpZero(p3, p7, d3.x, d7.x);
+    float3 ec[12] = {
+        float3(0,0,0), float3(0,0,0), float3(0,0,0), float3(0,0,0),
+        float3(0,0,0), float3(0,0,0), float3(0,0,0), float3(0,0,0),
+        float3(0,0,0), float3(0,0,0), float3(0,0,0), float3(0,0,0)
+    };
+    float et;
+    if (eMask & 1)    { et = InterpT(d0.x, d1.x); ep[0]  = lerp(p0,p1,et); ec[0]  = lerp(q0,q1,et); }
+    if (eMask & 2)    { et = InterpT(d1.x, d2.x); ep[1]  = lerp(p1,p2,et); ec[1]  = lerp(q1,q2,et); }
+    if (eMask & 4)    { et = InterpT(d2.x, d3.x); ep[2]  = lerp(p2,p3,et); ec[2]  = lerp(q2,q3,et); }
+    if (eMask & 8)    { et = InterpT(d3.x, d0.x); ep[3]  = lerp(p3,p0,et); ec[3]  = lerp(q3,q0,et); }
+    if (eMask & 16)   { et = InterpT(d4.x, d5.x); ep[4]  = lerp(p4,p5,et); ec[4]  = lerp(q4,q5,et); }
+    if (eMask & 32)   { et = InterpT(d5.x, d6.x); ep[5]  = lerp(p5,p6,et); ec[5]  = lerp(q5,q6,et); }
+    if (eMask & 64)   { et = InterpT(d6.x, d7.x); ep[6]  = lerp(p6,p7,et); ec[6]  = lerp(q6,q7,et); }
+    if (eMask & 128)  { et = InterpT(d7.x, d4.x); ep[7]  = lerp(p7,p4,et); ec[7]  = lerp(q7,q4,et); }
+    if (eMask & 256)  { et = InterpT(d0.x, d4.x); ep[8]  = lerp(p0,p4,et); ec[8]  = lerp(q0,q4,et); }
+    if (eMask & 512)  { et = InterpT(d1.x, d5.x); ep[9]  = lerp(p1,p5,et); ec[9]  = lerp(q1,q5,et); }
+    if (eMask & 1024) { et = InterpT(d2.x, d6.x); ep[10] = lerp(p2,p6,et); ec[10] = lerp(q2,q6,et); }
+    if (eMask & 2048) { et = InterpT(d3.x, d7.x); ep[11] = lerp(p3,p7,et); ec[11] = lerp(q3,q7,et); }
 
     // Walk triTable[cubeIdx] in groups of three; emit ONE Tri per Append so
     // the three vertices of one triangle live in adjacent slots even when
@@ -143,7 +161,9 @@ void MarchCubes(uint3 id : SV_DispatchThreadID)
         int b = triTable[cubeIdx][ti + 1];
         int c = triTable[cubeIdx][ti + 2];
         Tri tri;
-        tri.v0 = e[a]; tri.v1 = e[b]; tri.v2 = e[c];
+        tri.p0 = ep[a]; tri.c0 = ec[a];
+        tri.p1 = ep[b]; tri.c1 = ec[b];
+        tri.p2 = ep[c]; tri.c2 = ec[c];
         _Triangles.Append(tri);
     }
 }
