@@ -45,10 +45,16 @@ namespace TSDF
         [Range(0.05f, 1f)]
         [Tooltip("Sphere diameter as a fraction of voxelSize.")]
         public float voxelSphereScale = 0.15f;
-        [Tooltip("Voxels with sdf above this threshold (in metres) are hidden. " +
-                 "Set to 0.05 (= one voxelSize) to hide the free-space white shell; " +
-                 "set to volume.Tau to show everything.")]
-        public float voxelHideAboveSdf = 0.05f;
+        [Range(0f, 1f)]
+        [Tooltip("Hide voxels whose sdf exceeds this FRACTION of tau (the truncation " +
+                 "distance). Free space in front of a surface is clamped to +tau, so this " +
+                 "culls the white free-space fill. It scales WITH tau (= tauMultiplier × " +
+                 "voxelSize), so the cull stays consistent as you change voxelSize — an " +
+                 "absolute-metres threshold instead stops working once tau shrinks below " +
+                 "it, which fills the whole volume with white spheres at fine resolutions. " +
+                 "1 = hide only the saturated +tau free space (show the rest); lower = " +
+                 "tighten onto the surface; 0 = hide everything from the surface outward.")]
+        public float voxelHideAboveSdfFraction = 1f;
 
         // ---------- Cell mode ----------
         [Header("Cell view")]
@@ -261,7 +267,8 @@ namespace TSDF
             voxelMaterial.SetFloat("_VoxelSize", volume.voxelSize);
             voxelMaterial.SetFloat("_Tau", volume.Tau);
             voxelMaterial.SetFloat("_Scale", voxelSphereScale);
-            voxelMaterial.SetFloat("_HideAboveSdf", voxelHideAboveSdf);
+            // Scale the hide threshold by tau so the free-space cull tracks voxelSize.
+            voxelMaterial.SetFloat("_HideAboveSdf", voxelHideAboveSdfFraction * volume.Tau);
 
             Graphics.DrawMeshInstancedIndirect(
                 _sphereMesh, 0, voxelMaterial, BuildBounds(voxelSphereScale),
