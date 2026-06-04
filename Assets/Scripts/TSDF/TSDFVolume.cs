@@ -38,12 +38,14 @@ namespace TSDF
         public PointCloudBoundingBox boundingBox;
 
         [Header("Grid resolution")]
-        [Tooltip("Edge length of one (cubic) voxel in metres. Spec target is 0.01 m; " +
-                 "start at 0.05 m while smoke-testing the pipeline — at 0.01 m a 3x2x4 m " +
-                 "volume is ~24M voxels (~192 MB) which is fine on a 4090 but slow to " +
-                 "validate on a Mac MPS dev box. Lower this AFTER the integrator + MC " +
-                 "round-trip is visibly working.")]
-        [Min(0.001f)]
+        [Tooltip("Edge length of one (cubic) voxel in metres — drag to tune the mesh " +
+                 "granularity live (the grid rebuilds next frame). Finer = more detail " +
+                 "but voxel count grows as 1/size^3 (VRAM ×2 for double buffering) and " +
+                 "more triangles — if the mesh starts clipping, raise TSDFView." +
+                 "meshMaxTriangles. The Femto Bolt depth footprint (~few mm at 1-2 m) " +
+                 "is the real floor, so ~0.01-0.02 m is the practical sweet spot; below " +
+                 "that you mostly add holes/noise. Slider 1-10 cm.")]
+        [Range(0.01f, 0.1f)]
         public float voxelSize = 0.05f;
 
         [Tooltip("Truncation distance = tauMultiplier * voxelSize. Spec recommends 4x.")]

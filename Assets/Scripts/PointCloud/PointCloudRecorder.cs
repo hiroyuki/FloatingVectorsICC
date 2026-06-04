@@ -743,7 +743,9 @@ namespace PointCloud
             {
                 string root = ResolveRoot();
                 string host = SafeMachineName();
-                WriteRecordingMetadata(root, host);
+                // Save = refresh sidecars for an already-loaded recording; keep its
+                // own calibration rather than clobbering it with the live rig.
+                WriteRecordingMetadata(root, host, liveCalibrationWins: false);
                 SetStatus($"Saved metadata for {_tracks.Count} device(s) to {root}");
             }
             catch (Exception e)
@@ -758,18 +760,34 @@ namespace PointCloud
         // present on disk via RcsvStreamWriter (Rec) or pre-existing (Read).
         // Called from StopRecording immediately after closing writers AND from
         // Save() so the user can refresh metadata after a Read+recalibrate.
-        private void WriteRecordingMetadata(string root, string host)
+        //
+        // liveCalibrationWins controls whose global_tr_colorCamera is baked in
+        // when both a recording-local yaml AND the live manager have a value:
+        //   - true  (StopRecording): the LIVE calibration wins. A fresh recording
+        //     must faithfully capture the calibration that was active at record
+        //     time, even when the destination folder still holds a stale
+        //     extrinsics.yaml from a previous take into the same root. Without
+        //     this, the first calibration ever written to a reused folder sticks
+        //     forever and playback uses the wrong extrinsics.
+        //   - false (Save): the EXISTING recording-local yaml wins. Re-saving
+        //     metadata after a Read must not clobber the recording's own
+        //     calibration with whatever the live rig currently happens to be.
+        private void WriteRecordingMetadata(string root, string host, bool liveCalibrationWins)
         {
             var serials = new List<string>();
             var calibrations = new List<PointCloudRecording.DeviceCalibration>();
 
             // Build the per-serial extrinsics map used for the calibration
-            // entries below. Priority:
-            //   1. Existing recording-local yaml that already has non-identity
-            //      values (= prior calibration session for THIS recording).
-            //   2. The live PointCloudCameraManager's yaml (= the rig
-            //      calibration Live was using when this recording was made).
-            //   3. Identity (nothing else available).
+            // entries below. Sources, with precedence decided by liveCalibrationWins:
+            //   - Existing recording-local yaml with non-identity values
+            //     (= prior calibration session for THIS recording).
+            //   - The live PointCloudCameraManager's yaml (= the rig calibration
+            //     Live is using right now; at record time this IS the record-time
+            //     calibration).
+            //   - Identity (nothing else available).
+            // When liveCalibrationWins the live yaml overrides the recording-local
+            // one; otherwise the recording-local one is preserved and live only
+            // fills serials that have no recording-local value.
             var existingGlobalBySerial = new Dictionary<string, ObExtrinsic>();
             try
             {
@@ -800,10 +818,26 @@ namespace PointCloud
                     {
                         foreach (var cal in PointCloudRecording.ReadExtrinsicsYaml(liveRoot))
                         {
-                            if (existingGlobalBySerial.ContainsKey(cal.Serial)) continue;
-                            if (cal.GlobalTrColorCamera.HasValue
-                                && !IsIdentityExtrinsic(cal.GlobalTrColorCamera.Value))
-                                existingGlobalBySerial[cal.Serial] = cal.GlobalTrColorCamera.Value;
+                            bool liveIsUsable = cal.GlobalTrColorCamera.HasValue
+                                && !IsIdentityExtrinsic(cal.GlobalTrColorCamera.Value);
+                            if (liveCalibrationWins)
+                            {
+                                // Live is authoritative for any serial it reports. A
+                                // usable (non-identity) value replaces a stale
+                                // recording-local one; an identity value means "no
+                                // transform" and must DROP any stale non-identity value
+                                // so it isn't written back (otherwise a reset/uncalibrated
+                                // camera would silently keep the folder's old transform).
+                                if (liveIsUsable) existingGlobalBySerial[cal.Serial] = cal.GlobalTrColorCamera.Value;
+                                else existingGlobalBySerial.Remove(cal.Serial);
+                            }
+                            else
+                            {
+                                // Preserve the recording-local value; live only fills
+                                // serials that have no recording-local value.
+                                if (existingGlobalBySerial.ContainsKey(cal.Serial)) continue;
+                                if (liveIsUsable) existingGlobalBySerial[cal.Serial] = cal.GlobalTrColorCamera.Value;
+                            }
                         }
                     }
                 }
@@ -1167,7 +1201,10 @@ namespace PointCloud
             // on disk via the writers above, so this is the "Save" step's
             // remaining work — wrap it here so the user doesn't have to click
             // Save separately.
-            try { WriteRecordingMetadata(_recordRoot, _recordHost); }
+            // Fresh recording: snapshot the live (= record-time) calibration so
+            // playback uses the extrinsics that were active when this was captured,
+            // even if the destination folder still holds a stale yaml.
+            try { WriteRecordingMetadata(_recordRoot, _recordHost, liveCalibrationWins: true); }
             catch (Exception e)
             {
                 Debug.LogWarning($"[{nameof(PointCloudRecorder)}] metadata write after StopRecording failed: {e}", this);
