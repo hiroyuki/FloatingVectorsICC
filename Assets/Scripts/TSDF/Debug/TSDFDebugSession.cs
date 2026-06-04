@@ -35,10 +35,22 @@ namespace TSDF.DebugTools
         [Tooltip("Toggle the existing point-cloud display.")]
         public KeyCode pointCloudToggleKey = KeyCode.P;
 
+        [Header("Frame seek (hardcoded for now)")]
+        [Tooltip("If >= 0 and seekRequested is ticked, jumps every cam's " +
+                 "PlaybackCursor to this index and pauses. Use to lock the " +
+                 "scene at a known-bad frame for cell-by-cell verification.")]
+        public int seekToCursor = -1;
+        [Tooltip("Tick true (or hit \"Seek Now\" in the context menu) to apply " +
+                 "seekToCursor. Auto-resets after the seek runs.")]
+        public bool seekRequested = false;
+
         [Header("Cache status (read-only)")]
         [SerializeField] private int cachedCount = 0;
         [SerializeField] private string lastReplayKind = "(none)";
         [SerializeField] private ulong lastReplayTimestampUs = 0;
+        [Tooltip("Live cursor readout per camera (frame index / total). " +
+                 "Use the numbers shown to fill in seekToCursor.")]
+        [SerializeField] private string[] currentCursors = new string[0];
 
         // Per-serial snapshot of the most recently observed depth frame. The
         // recorder's RcsvFrameStream re-uses its scratch byte[], so we copy
@@ -113,6 +125,37 @@ namespace TSDF.DebugTools
         private void Update()
         {
             HandleKeyboard();
+            UpdateCursorReadout();
+            if (seekRequested) PerformSeek();
+        }
+
+        private void UpdateCursorReadout()
+        {
+            if (recorder == null) { currentCursors = System.Array.Empty<string>(); return; }
+            if (cameraKeys == null || cameraKeys.Length == 0) AutoPopulateCameraKeys();
+            if (cameraKeys == null) return;
+            if (currentCursors == null || currentCursors.Length != cameraKeys.Length)
+                currentCursors = new string[cameraKeys.Length];
+            for (int i = 0; i < cameraKeys.Length; i++)
+            {
+                string s = cameraKeys[i];
+                if (string.IsNullOrEmpty(s)) { currentCursors[i] = "(empty)"; continue; }
+                int cur = recorder.GetPlaybackCursor(s);
+                int tot = recorder.GetTrackFrameCount(s);
+                string tail = s.Length > 6 ? s.Substring(s.Length - 6) : s;
+                currentCursors[i] = (cur < 0 || tot < 0) ? $"{tail}: unknown" : $"{tail}: {cur} / {tot}";
+            }
+        }
+
+        [ContextMenu("Seek Now")]
+        public void TriggerSeek() { seekRequested = true; }
+
+        private void PerformSeek()
+        {
+            seekRequested = false;
+            if (recorder == null || seekToCursor < 0) return;
+            bool moved = recorder.SeekAllTracksTo(seekToCursor);
+            Debug.Log($"[TSDFDebugSession] SeekAllTracksTo({seekToCursor}) moved={moved}", this);
         }
 
         private void HandleKeyboard()
@@ -182,8 +225,9 @@ namespace TSDF.DebugTools
                 return;
             }
             if (volume == null || integrator == null) return;
-            volume.Clear();
+            volume.ClearWrite();
             IntegrateSnapshot(snap);
+            volume.Publish();
             lastReplayKind = $"single ({serial.Substring(System.Math.Max(0, serial.Length - 6))})";
             lastReplayTimestampUs = snap.TimestampUs;
             Debug.Log($"[TSDFDebugSession] Replayed single cam '{serial}' @ {snap.TimestampUs}us", this);
@@ -197,7 +241,7 @@ namespace TSDF.DebugTools
                 return;
             }
             if (volume == null || integrator == null) return;
-            volume.Clear();
+            volume.ClearWrite();
             ulong minTs = ulong.MaxValue, maxTs = 0;
             foreach (var snap in _cache.Values)
             {
@@ -205,6 +249,7 @@ namespace TSDF.DebugTools
                 if (snap.TimestampUs < minTs) minTs = snap.TimestampUs;
                 if (snap.TimestampUs > maxTs) maxTs = snap.TimestampUs;
             }
+            volume.Publish();
             lastReplayKind = $"all ({_cache.Count})";
             lastReplayTimestampUs = maxTs;
             ulong spreadUs = maxTs > minTs ? (maxTs - minTs) : 0;

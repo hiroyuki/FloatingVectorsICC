@@ -87,12 +87,12 @@ namespace TSDF
         private ComputeShader _mcShader;
         private int _mcKernel;
         private int _scaleArgsKernel;
-        private TSDFIntegrator _integrator;
-        // Last batch index for which we dispatched MC. The mesh on screen
-        // therefore corresponds to a COMPLETE multi-cam observation cycle,
-        // not a half-finished one — which is what produced the flicker /
-        // partial-body artifacts in the earlier interval-based clear scheme.
-        private int _lastDispatchedBatch = -1;
+        // Last volume PublishVersion for which we dispatched MC. The mesh on
+        // screen therefore corresponds to the last PUBLISHED front buffer — the
+        // same complete-batch snapshot the Voxel/Cell views read this frame. All
+        // three modes update in lockstep off the same publish, so they can be
+        // compared apples-to-apples while debugging.
+        private int _lastPublishVersion = -1;
 
         private ComputeBuffer _voxelArgsBuffer;
         private ComputeBuffer _cellArgsBuffer;
@@ -121,7 +121,6 @@ namespace TSDF
             EnsureMaterials();
             EnsureBuffers();
             EnsureMcShader();
-            _integrator = FindAnyObjectByType<TSDFIntegrator>(FindObjectsInactive.Include);
         }
 
         private void OnDisable()
@@ -231,7 +230,7 @@ namespace TSDF
         // ---------------------------------------------------------------
         private void Update()
         {
-            if (volume == null || volume.VoxelBuffer == null) return;
+            if (volume == null || volume.FrontBuffer == null) return;
             EnsureBuffers();
             switch (mode)
             {
@@ -256,7 +255,7 @@ namespace TSDF
             };
             _voxelArgsBuffer.SetData(args);
 
-            voxelMaterial.SetBuffer("_Voxels", volume.VoxelBuffer);
+            voxelMaterial.SetBuffer("_Voxels", volume.FrontBuffer);
             voxelMaterial.SetMatrix("_WorldFromVoxel", volume.WorldFromVoxel);
             voxelMaterial.SetVector("_Dim", new Vector4(volume.Dim.x, volume.Dim.y, volume.Dim.z, 0));
             voxelMaterial.SetFloat("_VoxelSize", volume.voxelSize);
@@ -286,7 +285,7 @@ namespace TSDF
             };
             _cellArgsBuffer.SetData(args);
 
-            cellMaterial.SetBuffer("_Voxels", volume.VoxelBuffer);
+            cellMaterial.SetBuffer("_Voxels", volume.FrontBuffer);
             cellMaterial.SetMatrix("_WorldFromVoxel", volume.WorldFromVoxel);
             cellMaterial.SetVector("_Dim", new Vector4(volume.Dim.x, volume.Dim.y, volume.Dim.z, 0));
             cellMaterial.SetFloat("_VoxelSize", volume.voxelSize);
@@ -305,16 +304,15 @@ namespace TSDF
         {
             _frameCounter++;
 
-            // Re-extract MC only when the integrator finished a new multi-cam
-            // batch. Between batches the previous triangles buffer keeps
-            // drawing — that gives a stable mesh that updates ~once per
-            // recorder frame (30 fps) instead of every Unity tick over a
-            // half-accumulated volume.
-            int batch = _integrator != null ? _integrator.CompletedBatchCount : 0;
-            if (batch != _lastDispatchedBatch && (_frameCounter % mcEveryNFrames == 0))
+            // Re-extract MC only when the volume published a new front buffer.
+            // Between publishes the previous triangles buffer keeps drawing — a
+            // stable mesh that updates exactly when the Voxel/Cell views' front
+            // buffer changes, never over a half-accumulated back buffer.
+            int published = volume.PublishVersion;
+            if (published != _lastPublishVersion && (_frameCounter % mcEveryNFrames == 0))
             {
                 DispatchMarchCubes();
-                _lastDispatchedBatch = batch;
+                _lastPublishVersion = published;
             }
 
             meshMaterial.SetBuffer("_Triangles", _meshTrianglesBuffer);
@@ -329,7 +327,7 @@ namespace TSDF
         {
             _meshTrianglesBuffer.SetCounterValue(0);
 
-            _mcShader.SetBuffer(_mcKernel, "_Voxels", volume.VoxelBuffer);
+            _mcShader.SetBuffer(_mcKernel, "_Voxels", volume.FrontBuffer);
             _mcShader.SetInts("_Dim", volume.Dim.x, volume.Dim.y, volume.Dim.z);
             _mcShader.SetMatrix("_WorldFromVoxel", volume.WorldFromVoxel);
             _mcShader.SetFloat("_IsoLevel", meshIsoLevel);

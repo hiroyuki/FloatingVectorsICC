@@ -500,7 +500,39 @@ namespace Calibration.EditorTools
                 string root = ResolveRoot();
                 PointCloudRecording.WriteExtrinsicsYaml(root, calibrations);
                 string outPath = Path.Combine(PointCloudRecording.CalibrationDir(root), "extrinsics.yaml");
-                SetStatus($"Wrote {calibrations.Count} entries to {outPath}.");
+
+                // Auto-apply to the live scene. PointCloudCameraManager.ApplyExtrinsicsToLive
+                // only runs once at Start, so without this the renderers keep showing the
+                // PREVIOUS calibration until the user re-enters Play. We only apply when the
+                // manager reads from the same root we just wrote to — otherwise we'd push a
+                // different (stale) yaml onto the cameras. We also honor the manager's
+                // applyExtrinsics flag: when it is off the renderers are intentionally kept
+                // at the local origin, so auto-applying here would be a regression.
+                string applyNote;
+                if (_manager == null)
+                {
+                    applyNote = " Manager not found — re-Play to load.";
+                }
+                else if (!_manager.applyExtrinsics)
+                {
+                    applyNote = " NOT auto-applied: manager.applyExtrinsics is off (renderers stay at local origin).";
+                }
+                else
+                {
+                    string mgrRoot = _manager.ResolveExtrinsicsRoot();
+                    bool sameRoot = string.Equals(
+                        Path.GetFullPath(root), Path.GetFullPath(mgrRoot), StringComparison.OrdinalIgnoreCase);
+                    if (sameRoot)
+                    {
+                        _manager.ApplyExtrinsicsToLive();
+                        applyNote = " Applied to live renderers.";
+                    }
+                    else
+                    {
+                        applyNote = $" NOT auto-applied: manager reads a different root ({mgrRoot}); re-Play or align the roots.";
+                    }
+                }
+                SetStatus($"Wrote {calibrations.Count} entries to {outPath}.{applyNote}");
             }
             catch (Exception e)
             {

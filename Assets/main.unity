@@ -264,7 +264,7 @@ MonoBehaviour:
   capsuleFilter: {fileID: 0}
   jointMotionField: {fileID: 0}
   cumulative: {fileID: 0}
-  folderPath: D:/Dropbox/projects/ICC/Recordings/_4cam_btrec
+  folderPath: D:\FloatingVectorsICC\Recordings
   folderPathMacOverride: /Users/horihiroyuki/Dropbox/projects/ICC/Recordings/_4cam_btrec
   datasetName: 
   loop: 1
@@ -391,7 +391,7 @@ GameObject:
   - component: {fileID: 639959845}
   - component: {fileID: 639959844}
   - component: {fileID: 639959846}
-  - component: {fileID: 639959847}
+  - component: {fileID: 639959848}
   m_Layer: 0
   m_Name: TSDFVolume
   m_TagString: Untagged
@@ -447,26 +447,35 @@ MonoBehaviour:
   observationWeight: 1
   subscribeLive: 1
   subscribePlayback: 1
+  clearVolumeOnNewBatch: 1
+  expectedCamCount: 4
   diagnosticLogging: 1
---- !u!114 &639959847
+--- !u!114 &639959848
 MonoBehaviour:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 639959843}
-  m_Enabled: 0
+  m_Enabled: 1
   m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 3574cd3c464e14ce08fea556c718e353, type: 3}
+  m_Script: {fileID: 11500000, guid: 2ede792e525694cd289fc3303bfa284f, type: 3}
   m_Name: 
-  m_EditorClassIdentifier: TSDF::TSDF.TSDFMeshRenderer
+  m_EditorClassIdentifier: TSDF::TSDF.TSDFView
   volume: {fileID: 639959844}
-  material: {fileID: 0}
-  maxVertices: 1000000
-  isoLevel: 0
-  minWeight: 0.5
+  mode: 0
+  voxelMaterial: {fileID: 0}
+  voxelSphereScale: 0.5
+  voxelHideAboveSdf: 0.2
+  cellMaterial: {fileID: 0}
+  cellCubeScale: 0.3
+  cellColor: {r: 0.2, g: 1, b: 0.5, a: 1}
+  meshMaterial: {fileID: 0}
+  meshMaxTriangles: 333333
+  meshIsoLevel: 0
+  meshMinWeight: 0.5
   mcEveryNFrames: 1
-  diagnosticLogging: 1
+  diagnosticLogging: 0
 --- !u!1 &925702422
 GameObject:
   m_ObjectHideFlags: 0
@@ -496,7 +505,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 96892899ec43f7246a88f0b3f63d9e67, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::PointCloud.PointCloudCameraManager
-  playbackOnly: 1
+  playbackOnly: 0
   defaultPointMaterial: {fileID: 0}
   depthWidth: 640
   depthHeight: 576
@@ -1056,7 +1065,6 @@ GameObject:
   m_Component:
   - component: {fileID: 2040096811}
   - component: {fileID: 2040096810}
-  - component: {fileID: 2040096812}
   m_Layer: 0
   m_Name: '[TSDF Debug]'
   m_TagString: Untagged
@@ -1079,14 +1087,15 @@ MonoBehaviour:
   volume: {fileID: 639959844}
   integrator: {fileID: 639959846}
   recorder: {fileID: 86788058}
-  targetSerial: 
-  captureRequested: 0
-  pauseRecorderOnCapture: 1
-  lastCapturedSerial: (none)
-  lastTimestampUs: 0
-  lastDepthW: 0
-  lastDepthH: 0
-  captureCount: 0
+  cameraKeys: []
+  allCamsKey: 48
+  pointCloudToggleKey: 112
+  seekToCursor: -1
+  seekRequested: 0
+  cachedCount: 0
+  lastReplayKind: (none)
+  lastReplayTimestampUs: 0
+  currentCursors: []
 --- !u!4 &2040096811
 Transform:
   m_ObjectHideFlags: 0
@@ -1102,22 +1111,6 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
---- !u!114 &2040096812
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 2040096809}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 3b32f5168b4ae468aa9b1e24eb9f435a, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: TSDF::TSDF.DebugTools.TSDFDebugVoxelViz
-  volume: {fileID: 639959844}
-  material: {fileID: 0}
-  sphereScale: 0.3
-  drawEveryNFrames: 1
 --- !u!1 &2103759209
 GameObject:
   m_ObjectHideFlags: 0

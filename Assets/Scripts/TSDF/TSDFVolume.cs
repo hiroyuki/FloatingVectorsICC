@@ -16,7 +16,8 @@ namespace TSDF
     /// <summary>
     /// Voxel volume backed by a ComputeBuffer of float2 (tsdf, weight). One
     /// instance per scene; the integrator + marching cubes stages bind to this
-    /// component's <see cref="VoxelBuffer"/> instead of allocating their own.
+    /// component's <see cref="FrontBuffer"/>/<see cref="WriteBuffer"/> instead of
+    /// allocating their own.
     /// </summary>
     [DefaultExecutionOrder(-10)]
     public sealed class TSDFVolume : MonoBehaviour
@@ -54,13 +55,32 @@ namespace TSDF
                  "Switch to RetainGhost once the static pipeline is verified (spec §9.2).")]
         public AccumulationMode accumulationMode = AccumulationMode.StandardWeightedAvg;
 
+        [Header("Double buffering")]
+        [Tooltip("Ping-pong the voxel buffer so the views (Voxel/Cell/Mesh) only ever " +
+                 "read a COMPLETE batch while the integrator fills the next one into a " +
+                 "hidden back buffer. Eliminates the mid-clear / partial-fill flicker. " +
+                 "Driven by TSDFIntegrator to match its mode: ON for live-follow " +
+                 "(clearVolumeOnNewBatch), OFF for accumulate (read-modify-write needs " +
+                 "a single persistent buffer). Costs 2x VRAM when on.")]
+        public bool doubleBuffered = true;
+
         [Header("Diagnostics")]
         [Tooltip("Log allocation + clear info on enable. Off by default.")]
         public bool verboseLogging = false;
 
         // GPU state — exposed so the integrator/MC stages can bind without
-        // re-allocating. Backed by ONE ComputeBuffer for the whole volume.
-        public ComputeBuffer VoxelBuffer { get; private set; }
+        // re-allocating. Two physical buffers (_bufA/_bufB) ping-pong: views read
+        // FrontBuffer (last published, complete batch), the integrator + Clear write
+        // WriteBuffer (the hidden back buffer). Publish() swaps them. When
+        // doubleBuffered is off, FrontBuffer == WriteBuffer == _bufA (single buffer).
+        public ComputeBuffer FrontBuffer { get; private set; }
+        public ComputeBuffer WriteBuffer { get; private set; }
+
+        /// <summary>Bumped every Publish() (and on full Clear / rebuild). TSDFView reads
+        /// this to re-extract Marching Cubes only when new content was published, so all
+        /// three view modes update in lockstep with the same cadence.</summary>
+        public int PublishVersion { get; private set; }
+
         public Vector3Int Dim { get; private set; }
         public float Tau => tauMultiplier * voxelSize;
 
@@ -78,6 +98,11 @@ namespace TSDF
         private ComputeShader _clearShader;
         private int _clearKernel;
         private bool _dimsDirty = true;
+
+        // Physical backing buffers. _bufB is null in single-buffer mode.
+        private ComputeBuffer _bufA;
+        private ComputeBuffer _bufB;
+        private bool _lastDoubleBuffered;
 
         // Track the bbox transform values we last built the grid from so we
         // can rebuild lazily when the user edits the bbox or voxel size.
@@ -113,32 +138,72 @@ namespace TSDF
                 || _lastBboxPos != t.position
                 || _lastBboxRot != t.rotation
                 || _lastBboxScale != t.localScale
+                || _lastDoubleBuffered != doubleBuffered
                 || !Mathf.Approximately(_lastVoxelSize, voxelSize);
         }
 
         /// <summary>
-        /// Force a re-clear of the volume to (tsdf=+tau, weight=0). Called on
-        /// enable, on grid change, and exposed for the capture-start trigger
-        /// from §7 of the spec.
+        /// Clear ONLY the hidden write (back) buffer to (tsdf=+tau, weight=0).
+        /// Used by the integrator at the start of a new batch and by debug replay —
+        /// the displayed FrontBuffer is left untouched, so nothing flickers while the
+        /// next batch is built up. In single-buffer mode this is the displayed buffer.
+        /// </summary>
+        public void ClearWrite()
+        {
+            ClearBuffer(WriteBuffer);
+        }
+
+        /// <summary>
+        /// Full wipe: clears BOTH buffers and publishes, so the displayed volume
+        /// empties immediately. Called on enable, on grid change, and exposed for the
+        /// capture-start trigger from §7 of the spec.
         /// </summary>
         [ContextMenu("Clear Volume")]
         public void Clear()
         {
-            if (VoxelBuffer == null) return;
+            ClearBuffer(_bufA);
+            if (_bufB != null) ClearBuffer(_bufB);
+            PublishVersion++;
+
+            if (verboseLogging)
+            {
+                int total = Dim.x * Dim.y * Dim.z;
+                Debug.Log($"[TSDFVolume] cleared {total} voxels (dim={Dim}, voxelSize={voxelSize} m, tau={Tau:F4} m)", this);
+            }
+        }
+
+        private void ClearBuffer(ComputeBuffer buf)
+        {
+            if (buf == null) return;
             if (_clearShader == null) EnsureClearShader();
             if (_clearShader == null) return;
 
-            _clearShader.SetBuffer(_clearKernel, "_Voxels", VoxelBuffer);
+            _clearShader.SetBuffer(_clearKernel, "_Voxels", buf);
             _clearShader.SetInts("_Dim", Dim.x, Dim.y, Dim.z);
             _clearShader.SetFloat("_InitTsdf", Tau);
 
             // 64-thread groups; voxel count rounded up.
             int total = Dim.x * Dim.y * Dim.z;
             int groups = Mathf.CeilToInt(total / 64f);
-            _clearShader.Dispatch(_clearKernel, groups, 1, 1);
+            _clearShader.Dispatch(_clearKernel, Mathf.Max(1, groups), 1, 1);
+        }
 
-            if (verboseLogging)
-                Debug.Log($"[TSDFVolume] cleared {total} voxels (dim={Dim}, voxelSize={voxelSize} m, tau={Tau:F4} m)", this);
+        /// <summary>
+        /// Publish the write (back) buffer to the front so views pick it up. In
+        /// double-buffer mode this swaps Front/Write (the just-filled back becomes the
+        /// displayed front; the old front becomes the next batch's scratch). In single-
+        /// buffer mode it only bumps the version (content is already visible). Always
+        /// bumps PublishVersion so TSDFView re-extracts Marching Cubes on new content.
+        /// </summary>
+        public void Publish()
+        {
+            if (doubleBuffered && _bufB != null)
+            {
+                var tmp = FrontBuffer;
+                FrontBuffer = WriteBuffer;
+                WriteBuffer = tmp;
+            }
+            PublishVersion++;
         }
 
         private void EnsureClearShader()
@@ -180,22 +245,28 @@ namespace TSDF
             VoxelFromWorld = WorldFromVoxel.inverse;
 
             int total = dx * dy * dz;
-            if (VoxelBuffer == null || VoxelBuffer.count != total)
+            bool realloc = _bufA == null || _bufA.count != total || _lastDoubleBuffered != doubleBuffered;
+            if (realloc)
             {
                 ReleaseBuffer();
                 // float2 = 8 bytes per voxel. At 0.01 m on a 3x2x4 m volume this
-                // is ~192 MB — fine on GPUs with >=2 GB VRAM. Step 1 smoke test
-                // uses 0.05 m which is ~1.5 MB.
-                VoxelBuffer = new ComputeBuffer(total, sizeof(float) * 2);
+                // is ~192 MB per buffer — fine on GPUs with >=2 GB VRAM. Step 1
+                // smoke test uses 0.05 m which is ~1.5 MB. doubleBuffered doubles it.
+                _bufA = new ComputeBuffer(total, sizeof(float) * 2);
+                _bufB = doubleBuffered ? new ComputeBuffer(total, sizeof(float) * 2) : null;
+                FrontBuffer = _bufA;
+                WriteBuffer = doubleBuffered ? _bufB : _bufA;
                 if (verboseLogging)
-                    Debug.Log($"[TSDFVolume] allocated {total} voxels = {total * 8 / (1024 * 1024)} MB " +
-                              $"(dim={dx}x{dy}x{dz}, voxelSize={voxelSize} m)", this);
+                    Debug.Log($"[TSDFVolume] allocated {(doubleBuffered ? 2 : 1)}x {total} voxels = " +
+                              $"{total * 8 / (1024 * 1024) * (doubleBuffered ? 2 : 1)} MB " +
+                              $"(dim={dx}x{dy}x{dz}, voxelSize={voxelSize} m, doubleBuffered={doubleBuffered})", this);
             }
 
             _lastBboxPos = t.position;
             _lastBboxRot = t.rotation;
             _lastBboxScale = t.localScale;
             _lastVoxelSize = voxelSize;
+            _lastDoubleBuffered = doubleBuffered;
             _dimsDirty = false;
 
             if (forceClear) Clear();
@@ -203,11 +274,12 @@ namespace TSDF
 
         private void ReleaseBuffer()
         {
-            if (VoxelBuffer != null)
-            {
-                VoxelBuffer.Release();
-                VoxelBuffer = null;
-            }
+            _bufA?.Release();
+            _bufB?.Release();
+            _bufA = null;
+            _bufB = null;
+            FrontBuffer = null;
+            WriteBuffer = null;
         }
 
         private void OnValidate()

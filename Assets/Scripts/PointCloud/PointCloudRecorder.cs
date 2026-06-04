@@ -380,6 +380,23 @@ namespace PointCloud
             public long Bytes;       // depth+color+IR bytes enqueued this second
             public double MaxGapMs;  // largest inter-frame gap this second
             public ulong LastTsNs;   // previous frame's timestamp for gap calc
+
+            // --- per-stream WriteFrame() timing (Stopwatch ticks) ---
+            // Sum + max + count for depth / color / IR writes during this window.
+            // Avg = ticks / count, max = single worst call. Lets us tell whether
+            // disk I/O is the source of host-side stalls or whether something
+            // else on the main-thread callback (BT enqueue, allocations,
+            // diagnostics) is the culprit.
+            public long DepthWriteTicks, ColorWriteTicks, IRWriteTicks;
+            public long DepthWriteMaxTicks, ColorWriteMaxTicks, IRWriteMaxTicks;
+            public int DepthWriteCount, ColorWriteCount, IRWriteCount;
+
+            // Total callback wall-clock (ticks) and mono heap delta over the
+            // window — the mono delta isolates allocation activity attributable
+            // to the record callback itself (separate from BT / renderer paths).
+            public long CallbackTicks;
+            public long CallbackMaxTicks;
+            public long CallbackMonoDeltaBytes;
         }
         private readonly Dictionary<string, RecordWindowStats> _diagRecordPerSerial = new Dictionary<string, RecordWindowStats>();
         private float _diagWindowStart;
@@ -480,6 +497,64 @@ namespace PointCloud
             if (CurrentState != State.Playing) return;
             if (!IsPaused) PausePlayback();
             StepCursor(-1);
+        }
+
+        /// <summary>
+        /// Read this serial's current depth playback cursor (0-based). Returns
+        /// -1 if the serial is unknown. Used by debug tooling to show which
+        /// frame of the recording each camera is currently emitting.
+        /// </summary>
+        public int GetPlaybackCursor(string serial)
+        {
+            if (_tracks == null || string.IsNullOrEmpty(serial)) return -1;
+            return _tracks.TryGetValue(serial, out var t) ? t.PlaybackCursor : -1;
+        }
+
+        /// <summary>
+        /// Total recorded depth frames on this serial's track (or -1 if the
+        /// serial is unknown). Pair with <see cref="GetPlaybackCursor"/> to
+        /// display "frame N / total" in debug HUDs.
+        /// </summary>
+        public int GetTrackFrameCount(string serial)
+        {
+            if (_tracks == null || string.IsNullOrEmpty(serial)) return -1;
+            if (!_tracks.TryGetValue(serial, out var t)) return -1;
+            return t.DepthFrames != null ? t.DepthFrames.Count : 0;
+        }
+
+        /// <summary>
+        /// Seek every track to <paramref name="targetCursor"/> (clamped to each
+        /// track's [0, Count-1]) and re-emit the frame so the rest of the
+        /// pipeline catches up. Auto-pauses playback like the Step* APIs so the
+        /// natural auto-advance doesn't immediately stomp on the manual seek.
+        /// Returns true if any track moved.
+        /// </summary>
+        [ContextMenu("Seek All Tracks (debug)")]
+        public bool SeekAllTracksTo(int targetCursor)
+        {
+            if (CurrentState != State.Playing) return false;
+            if (_tracks.Count == 0) return false;
+            if (!IsPaused) PausePlayback();
+            bool moved = false;
+            ulong maxSteppedTs = 0;
+            foreach (var kv in _tracks)
+            {
+                var track = kv.Value;
+                if (track.DepthFrames.Count == 0) continue;
+                int clamped = Mathf.Clamp(targetCursor, 0, track.DepthFrames.Count - 1);
+                if (clamped == track.PlaybackCursor) continue;
+                SetCursorAndEmit(track, clamped);
+                moved = true;
+                ulong ts = TimestampNsAt(track.DepthFrames, clamped);
+                if (ts > maxSteppedTs) maxSteppedTs = ts;
+            }
+            if (moved && maxSteppedTs > 0)
+            {
+                // Mirror the StepCursor logic so a subsequent Resume continues
+                // from the stepped playhead instead of jumping back.
+                SyncWallClockTo(maxSteppedTs);
+            }
+            return moved;
         }
 
         /// <summary>
@@ -651,7 +726,7 @@ namespace PointCloud
             if (IsPaused) _pauseWallStart = Time.timeAsDouble;
         }
 
-        [ContextMenu("Save")]
+        [ContextMenu("Rewrite metadata (yaml)")]
         public void Save()
         {
             // Body data (depth / color / IR RCSV) is now written incrementally
@@ -1119,9 +1194,16 @@ namespace PointCloud
 
             ulong timestampNs = raw.TimestampUs * 1000UL;
 
+            // Diag scaffolding: callback wall-clock + mono heap delta, plus
+            // per-WriteFrame timing below. Stopwatch.GetTimestamp() avoids the
+            // ~40 B alloc that `new Stopwatch()` causes; mono delta tells us
+            // whether allocations are happening in this callback specifically.
+            RecordWindowStats rs = null;
+            long callbackStartTicks = 0;
+            long monoStartBytes = 0;
             if (diagnosticLogging)
             {
-                if (!_diagRecordPerSerial.TryGetValue(serial, out var rs))
+                if (!_diagRecordPerSerial.TryGetValue(serial, out rs))
                 {
                     rs = new RecordWindowStats();
                     _diagRecordPerSerial[serial] = rs;
@@ -1134,6 +1216,8 @@ namespace PointCloud
                     if (gapMs > rs.MaxGapMs) rs.MaxGapMs = gapMs;
                 }
                 rs.LastTsNs = timestampNs;
+                callbackStartTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+                monoStartBytes = UnityEngine.Profiling.Profiler.GetMonoUsedSizeLong();
             }
 
             // Stream-on-record: hand the SDK's raw buffer straight to the file
@@ -1152,7 +1236,15 @@ namespace PointCloud
                     string header = PointCloudRecording.BuildDepthHeaderYaml(serial, raw.DepthWidth, raw.DepthHeight);
                     sw.Depth = new PointCloudRecording.RcsvStreamWriter(path, header);
                 }
+                long wStart = rs != null ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
                 sw.Depth.WriteFrame(timestampNs, raw.DepthBytes, raw.DepthByteCount);
+                if (rs != null)
+                {
+                    long d = System.Diagnostics.Stopwatch.GetTimestamp() - wStart;
+                    rs.DepthWriteTicks += d;
+                    rs.DepthWriteCount++;
+                    if (d > rs.DepthWriteMaxTicks) rs.DepthWriteMaxTicks = d;
+                }
                 track.AddRecordedDepthFrame(new PointCloudRecording.Frame { TimestampNs = timestampNs });
                 track.DepthWidth = raw.DepthWidth;
                 track.DepthHeight = raw.DepthHeight;
@@ -1165,7 +1257,15 @@ namespace PointCloud
                     string header = PointCloudRecording.BuildColorHeaderYaml(serial, raw.ColorWidth, raw.ColorHeight);
                     sw.Color = new PointCloudRecording.RcsvStreamWriter(path, header);
                 }
+                long wStart = rs != null ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
                 sw.Color.WriteFrame(timestampNs, raw.ColorBytes, raw.ColorByteCount);
+                if (rs != null)
+                {
+                    long d = System.Diagnostics.Stopwatch.GetTimestamp() - wStart;
+                    rs.ColorWriteTicks += d;
+                    rs.ColorWriteCount++;
+                    if (d > rs.ColorWriteMaxTicks) rs.ColorWriteMaxTicks = d;
+                }
                 track.AddRecordedColorFrame(new PointCloudRecording.Frame { TimestampNs = timestampNs });
                 track.ColorWidth = raw.ColorWidth;
                 track.ColorHeight = raw.ColorHeight;
@@ -1178,10 +1278,31 @@ namespace PointCloud
                     string header = PointCloudRecording.BuildIRHeaderYaml(serial, raw.IRWidth, raw.IRHeight);
                     sw.IR = new PointCloudRecording.RcsvStreamWriter(path, header);
                 }
+                long wStart = rs != null ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
                 sw.IR.WriteFrame(timestampNs, raw.IRBytes, raw.IRByteCount);
+                if (rs != null)
+                {
+                    long d = System.Diagnostics.Stopwatch.GetTimestamp() - wStart;
+                    rs.IRWriteTicks += d;
+                    rs.IRWriteCount++;
+                    if (d > rs.IRWriteMaxTicks) rs.IRWriteMaxTicks = d;
+                }
                 track.AddRecordedIRFrame(new PointCloudRecording.Frame { TimestampNs = timestampNs });
                 track.IRWidth = raw.IRWidth;
                 track.IRHeight = raw.IRHeight;
+            }
+
+            if (rs != null)
+            {
+                long cbTotal = System.Diagnostics.Stopwatch.GetTimestamp() - callbackStartTicks;
+                rs.CallbackTicks += cbTotal;
+                if (cbTotal > rs.CallbackMaxTicks) rs.CallbackMaxTicks = cbTotal;
+                long monoEndBytes = UnityEngine.Profiling.Profiler.GetMonoUsedSizeLong();
+                // GC during the callback can make the delta negative; clamp to
+                // 0 so the window total still reflects "alloc attributable to
+                // this callback" without subtracting freed bytes.
+                long delta = monoEndBytes - monoStartBytes;
+                if (delta > 0) rs.CallbackMonoDeltaBytes += delta;
             }
         }
 
@@ -1275,6 +1396,10 @@ namespace PointCloud
 
         private void Awake()
         {
+            // Editor がフォーカス外でも playback の wall-clock を回し続けたい。
+            // false のままだと Update が ~3 fps (dt≈333ms) に落ち、playhead
+            // だけ進んで一度に 4〜5 frame の cursor advance = drop になる。
+            Application.runInBackground = true;
             if (view == null) view = FindFirstObjectByType<PointCloudView>();
         }
 
@@ -1423,12 +1548,33 @@ namespace PointCloud
 
             if (CurrentState == State.Recording && _diagRecordPerSerial.Count > 0)
             {
+                double tickToMs = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
                 var parts = new List<string>(_diagRecordPerSerial.Count);
+                var writeParts = new List<string>(_diagRecordPerSerial.Count);
                 foreach (var kv in _diagRecordPerSerial)
                 {
-                    double fps = kv.Value.Frames / elapsed;
-                    double mbps = kv.Value.Bytes / 1048576.0 / elapsed;
-                    parts.Add($"{TruncSerial(kv.Key)}={fps:F1}fps,{mbps:F1}MB/s,gap={kv.Value.MaxGapMs:F0}ms");
+                    var rs = kv.Value;
+                    double fps = rs.Frames / elapsed;
+                    double mbps = rs.Bytes / 1048576.0 / elapsed;
+                    parts.Add($"{TruncSerial(kv.Key)}={fps:F1}fps,{mbps:F1}MB/s,gap={rs.MaxGapMs:F0}ms");
+
+                    // Per-stream WriteFrame timing (avg + max ms). Skip a
+                    // stream's segment if it didn't fire this window so the
+                    // line stays scannable for the common case (e.g. IR off).
+                    var seg = new System.Text.StringBuilder();
+                    seg.Append(TruncSerial(kv.Key)).Append(' ');
+                    if (rs.DepthWriteCount > 0)
+                        seg.Append($"D[avg={rs.DepthWriteTicks * tickToMs / rs.DepthWriteCount:F2}ms,max={rs.DepthWriteMaxTicks * tickToMs:F1}ms] ");
+                    if (rs.ColorWriteCount > 0)
+                        seg.Append($"C[avg={rs.ColorWriteTicks * tickToMs / rs.ColorWriteCount:F2}ms,max={rs.ColorWriteMaxTicks * tickToMs:F1}ms] ");
+                    if (rs.IRWriteCount > 0)
+                        seg.Append($"I[avg={rs.IRWriteTicks * tickToMs / rs.IRWriteCount:F2}ms,max={rs.IRWriteMaxTicks * tickToMs:F1}ms] ");
+                    int cbCount = Mathf.Max(rs.DepthWriteCount, Mathf.Max(rs.ColorWriteCount, rs.IRWriteCount));
+                    if (cbCount > 0)
+                    {
+                        seg.Append($"cb[avg={rs.CallbackTicks * tickToMs / cbCount:F2}ms,max={rs.CallbackMaxTicks * tickToMs:F1}ms,alloc={rs.CallbackMonoDeltaBytes / 1024}KB]");
+                    }
+                    writeParts.Add(seg.ToString().TrimEnd());
                 }
 
                 int gc0 = System.GC.CollectionCount(0) - _diagGc0Start;
@@ -1440,11 +1586,18 @@ namespace PointCloud
                 Debug.Log($"[PointCloudRecorder REC] {string.Join(" | ", parts)} || " +
                           $"gc=g0:{gc0},g1:{gc1},g2:{gc2} mono+={monoDeltaKB}KB " +
                           $"maxTick={_diagMaxUpdateDtMs:F0}ms@{_diagMaxUpdateDtAtSec - _diagWindowStart:F2}s", this);
+                Debug.Log($"[PointCloudRecorder REC writes] {string.Join(" || ", writeParts)}", this);
 
                 foreach (var key in new List<string>(_diagRecordPerSerial.Keys))
                 {
                     var rs = _diagRecordPerSerial[key];
                     rs.Frames = 0; rs.Bytes = 0; rs.MaxGapMs = 0;
+                    rs.DepthWriteTicks = rs.ColorWriteTicks = rs.IRWriteTicks = 0;
+                    rs.DepthWriteMaxTicks = rs.ColorWriteMaxTicks = rs.IRWriteMaxTicks = 0;
+                    rs.DepthWriteCount = rs.ColorWriteCount = rs.IRWriteCount = 0;
+                    rs.CallbackTicks = 0;
+                    rs.CallbackMaxTicks = 0;
+                    rs.CallbackMonoDeltaBytes = 0;
                 }
             }
 
