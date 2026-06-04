@@ -466,7 +466,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: TSDF::TSDF.TSDFView
   volume: {fileID: 639959844}
-  mode: 0
+  mode: 2
   voxelMaterial: {fileID: 0}
   voxelSphereScale: 0.5
   voxelHideAboveSdfFraction: 1
@@ -474,7 +474,10 @@ MonoBehaviour:
   cellCubeScale: 0.3
   cellColor: {r: 1, g: 1, b: 1, a: 1}
   meshMaterial: {fileID: 0}
-  meshMaxTriangles: 2000000
+  meshSaturation: 1.4
+  meshBrightness: 1
+  meshGamma: 1
+  meshMaxTriangles: 3000000
   meshIsoLevel: 0
   meshMinWeight: 0.5
   mcEveryNFrames: 1

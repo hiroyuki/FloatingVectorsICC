@@ -23,6 +23,7 @@
 
 // --- voxel volume (shared with TSDFClear / TSDFMarchingCubes) ---
 RWStructuredBuffer<float2> _Voxels;   // x = tsdf (metres), y = weight
+RWStructuredBuffer<float4> _Colors;   // rgb (0..1) + colour weight; parallel to _Voxels
 int3 _Dim;
 float4x4 _WorldFromVoxel;             // voxel index centre -> world metres
 float _Tau;                           // truncation (metres)
@@ -44,6 +45,38 @@ float4x4 _DepthFromWorld;             // world metres -> depth camera millimetre
 // Optional weight modulators. _WObs is the base observation weight.
 float _WObs;
 
+// --- per-camera colour image (RGB8, row-major) + colour-camera projection ---
+ByteAddressBuffer _ColorImg;          // 3 bytes per pixel, R,G,B
+int _ColorW;
+int _ColorH;
+float _FxC, _FyC, _CxC, _CyC;         // colour-camera intrinsics
+float4x4 _ColorFromWorld;             // world metres -> colour camera millimetres
+int _HasColor;                        // 0 = no colour frame this dispatch
+
+uint LoadByte(uint byteOffset)
+{
+    uint word = _ColorImg.Load(byteOffset & ~3u);
+    uint shift = (byteOffset & 3u) * 8u;
+    return (word >> shift) & 0xFFu;
+}
+
+// Project the voxel into the colour camera and fetch RGB (0..1). Returns a
+// neutral grey when there is no colour frame or the voxel falls outside it, so
+// the colour buffer never holds uninitialised garbage on a voxel's first write.
+float3 SampleColor(float3 pWorld)
+{
+    if (_HasColor == 0) return float3(0.5, 0.5, 0.5);
+    float3 pc = mul(_ColorFromWorld, float4(pWorld, 1.0)).xyz;
+    if (pc.z <= 0.0) return float3(0.5, 0.5, 0.5);
+    float uu = _FxC * pc.x / pc.z + _CxC;
+    float vv = _FyC * pc.y / pc.z + _CyC;
+    int iu = (int)floor(uu);
+    int iv = (int)floor(vv);
+    if (iu < 0 || iv < 0 || iu >= _ColorW || iv >= _ColorH) return float3(0.5, 0.5, 0.5);
+    uint o = ((uint)iv * (uint)_ColorW + (uint)iu) * 3u;
+    return float3(LoadByte(o), LoadByte(o + 1u), LoadByte(o + 2u)) / 255.0;
+}
+
 uint LoadDepthU16(int u, int v)
 {
     uint result = 0u;
@@ -57,10 +90,15 @@ uint LoadDepthU16(int u, int v)
     return result;
 }
 
+// = groupsX * 64; linearises the 2D dispatch grid so large volumes don't blow
+// past the 65535 threadgroup-per-axis D3D limit (e.g. voxelSize 0.01 → >6 M
+// voxels → >100k groups in 1D).
+int _DispatchWidth;
+
 [numthreads(64, 1, 1)]
 void Integrate(uint3 id : SV_DispatchThreadID)
 {
-    uint lin = id.x;
+    uint lin = id.y * (uint)_DispatchWidth + id.x;
     uint total = (uint)(_Dim.x * _Dim.y * _Dim.z);
     if (lin >= total) return;
 
@@ -103,6 +141,7 @@ void Integrate(uint3 id : SV_DispatchThreadID)
 
     float wObs = _WObs;
     float2 prev = _Voxels[lin];
+    float3 rgb = SampleColor(pWorld);
 
     if (_AccumulationMode == 0)
     {
@@ -114,12 +153,25 @@ void Integrate(uint3 id : SV_DispatchThreadID)
         float w1 = w0 + wObs;
         float t1 = (w1 > 0.0) ? (t0 * w0 + sdf * wObs) / w1 : sdf;
         _Voxels[lin] = float2(t1, w1);
+
+        // Blend colour with the SAME weight as the sdf (w0/w1), NOT a separate
+        // colour weight: the colour buffer is never cleared, so its stored .w can
+        // be stale (live-follow ClearWrite resets sdf weight but not colour) or
+        // undefined (first allocation). w0 is the cleared sdf weight, so w0 == 0
+        // correctly means "first colour this batch -> take rgb fresh".
+        float3 pcolRgb = _Colors[lin].rgb;
+        float3 c1 = (w0 > 0.0) ? (pcolRgb * w0 + rgb * wObs) / w1 : rgb;
+        _Colors[lin] = float4(c1, w1);
     }
     else
     {
         // Retain ghost — the observation closest to the surface (|sdf| min)
         // wins, so a hand passing through a voxel leaves a permanent shell.
+        // The colour follows the same retained observation.
         if (prev.y <= 0.0 || abs(sdf) < abs(prev.x))
+        {
             _Voxels[lin] = float2(sdf, max(prev.y, wObs));
+            _Colors[lin] = float4(rgb, max(prev.y, wObs));
+        }
     }
 }

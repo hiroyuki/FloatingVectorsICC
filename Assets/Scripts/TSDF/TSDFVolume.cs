@@ -44,8 +44,10 @@ namespace TSDF
                  "more triangles — if the mesh starts clipping, raise TSDFView." +
                  "meshMaxTriangles. The Femto Bolt depth footprint (~few mm at 1-2 m) " +
                  "is the real floor, so ~0.01-0.02 m is the practical sweet spot; below " +
-                 "that you mostly add holes/noise. Slider 1-10 cm.")]
-        [Range(0.01f, 0.1f)]
+                 "that you mostly add holes/noise. Slider 1 mm - 10 cm — but voxel count " +
+                 "grows as 1/size^3, so very small sizes are only viable on a small " +
+                 "bounding box (a guard caps total voxels and logs an error otherwise).")]
+        [Range(0.001f, 0.1f)]
         public float voxelSize = 0.05f;
 
         [Tooltip("Truncation distance = tauMultiplier * voxelSize. Spec recommends 4x.")]
@@ -78,6 +80,14 @@ namespace TSDF
         public ComputeBuffer FrontBuffer { get; private set; }
         public ComputeBuffer WriteBuffer { get; private set; }
 
+        /// <summary>Per-voxel colour (float4 rgb + colour-weight), parallel to the sdf
+        /// buffer and swapped together. The integrator writes the camera RGB of the
+        /// retained observation; Marching Cubes interpolates it per vertex. Never
+        /// cleared — MC only reads colours of voxels whose weight passed the gate, and
+        /// the integrator overwrites colour on a voxel's first observation.</summary>
+        public ComputeBuffer FrontColorBuffer { get; private set; }
+        public ComputeBuffer WriteColorBuffer { get; private set; }
+
         /// <summary>Bumped every Publish() (and on full Clear / rebuild). TSDFView reads
         /// this to re-extract Marching Cubes only when new content was published, so all
         /// three view modes update in lockstep with the same cadence.</summary>
@@ -104,6 +114,9 @@ namespace TSDF
         // Physical backing buffers. _bufB is null in single-buffer mode.
         private ComputeBuffer _bufA;
         private ComputeBuffer _bufB;
+        // Parallel colour backing buffers (float4 rgb+w), swapped with the sdf pair.
+        private ComputeBuffer _colA;
+        private ComputeBuffer _colB;
         private bool _lastDoubleBuffered;
 
         // Track the bbox transform values we last built the grid from so we
@@ -184,10 +197,15 @@ namespace TSDF
             _clearShader.SetInts("_Dim", Dim.x, Dim.y, Dim.z);
             _clearShader.SetFloat("_InitTsdf", Tau);
 
-            // 64-thread groups; voxel count rounded up.
+            // 64-thread groups, laid out as a 2D grid so the per-axis 65535
+            // threadgroup limit is never exceeded (a 1x1m@1cm volume already
+            // needs >100k groups).
             int total = Dim.x * Dim.y * Dim.z;
             int groups = Mathf.CeilToInt(total / 64f);
-            _clearShader.Dispatch(_clearKernel, Mathf.Max(1, groups), 1, 1);
+            int gx = Mathf.Min(groups, 65535);
+            int gy = Mathf.CeilToInt(groups / (float)gx);
+            _clearShader.SetInt("_DispatchWidth", gx * 64);
+            _clearShader.Dispatch(_clearKernel, Mathf.Max(1, gx), Mathf.Max(1, gy), 1);
         }
 
         /// <summary>
@@ -204,6 +222,9 @@ namespace TSDF
                 var tmp = FrontBuffer;
                 FrontBuffer = WriteBuffer;
                 WriteBuffer = tmp;
+                var tmpC = FrontColorBuffer;
+                FrontColorBuffer = WriteColorBuffer;
+                WriteColorBuffer = tmpC;
             }
             PublishVersion++;
         }
@@ -231,9 +252,37 @@ namespace TSDF
 
             var t = boundingBox.transform;
             Vector3 size = t.localScale;
-            int dx = Mathf.Max(1, Mathf.CeilToInt(size.x / voxelSize));
-            int dy = Mathf.Max(1, Mathf.CeilToInt(size.y / voxelSize));
-            int dz = Mathf.Max(1, Mathf.CeilToInt(size.z / voxelSize));
+
+            // Guard against an absurd voxel count (voxelSize grows it as 1/size^3,
+            // which would exceed VRAM and overflow ComputeBuffer's int element
+            // count). Rather than reject the rebuild — which would leave the
+            // public doubleBuffered flag out of sync with the physical buffers —
+            // CLAMP voxelSize UP until the ACTUAL ceiled dimensions fit the cap,
+            // then rebuild normally. Flag and topology therefore stay consistent.
+            const long MaxVoxels = 150_000_000; // ~7 GB with colour + double buffer
+            float boxVolume = Mathf.Max(1e-9f, size.x * size.y * size.z);
+            // Seed from the isotropic estimate, then verify against the real
+            // per-axis ceil (an anisotropic/thin box can still overflow the
+            // volume estimate), raising voxelSize until dx*dy*dz <= cap.
+            float v = Mathf.Max(voxelSize, Mathf.Pow(boxVolume / MaxVoxels, 1f / 3f));
+            int dx, dy, dz;
+            long totalL;
+            for (int guard = 0; ; guard++)
+            {
+                dx = Mathf.Max(1, Mathf.CeilToInt(size.x / v));
+                dy = Mathf.Max(1, Mathf.CeilToInt(size.y / v));
+                dz = Mathf.Max(1, Mathf.CeilToInt(size.z / v));
+                totalL = (long)dx * dy * dz;
+                if (totalL <= MaxVoxels || guard >= 64) break;
+                v *= 1.26f; // ~cbrt(2): roughly halves the voxel count per step
+            }
+            if (v > voxelSize)
+            {
+                Debug.LogWarning($"[TSDFVolume] voxelSize {voxelSize} m on bbox {size} exceeds the " +
+                                 $"{MaxVoxels:N0}-voxel cap; clamping to {v:F4} m ({totalL:N0} voxels). " +
+                                 "Shrink the bounding box to go finer.", this);
+                voxelSize = v;
+            }
             Dim = new Vector3Int(dx, dy, dz);
 
             // World-from-voxel: place voxel index (i+0.5, j+0.5, k+0.5) at the
@@ -258,6 +307,11 @@ namespace TSDF
                 _bufB = doubleBuffered ? new ComputeBuffer(total, sizeof(float) * 2) : null;
                 FrontBuffer = _bufA;
                 WriteBuffer = doubleBuffered ? _bufB : _bufA;
+                // Parallel colour buffers (float4 rgb + colour-weight = 16 bytes).
+                _colA = new ComputeBuffer(total, sizeof(float) * 4);
+                _colB = doubleBuffered ? new ComputeBuffer(total, sizeof(float) * 4) : null;
+                FrontColorBuffer = _colA;
+                WriteColorBuffer = doubleBuffered ? _colB : _colA;
                 if (verboseLogging)
                     Debug.Log($"[TSDFVolume] allocated {(doubleBuffered ? 2 : 1)}x {total} voxels = " +
                               $"{total * 8 / (1024 * 1024) * (doubleBuffered ? 2 : 1)} MB " +
@@ -278,10 +332,16 @@ namespace TSDF
         {
             _bufA?.Release();
             _bufB?.Release();
+            _colA?.Release();
+            _colB?.Release();
             _bufA = null;
             _bufB = null;
+            _colA = null;
+            _colB = null;
             FrontBuffer = null;
             WriteBuffer = null;
+            FrontColorBuffer = null;
+            WriteColorBuffer = null;
         }
 
         private void OnValidate()

@@ -71,6 +71,19 @@ namespace TSDF
         [Header("Mesh view")]
         [Tooltip("Material that uses the TSDF/Mesh shader. Auto-created if null.")]
         public Material meshMaterial;
+
+        [Header("Mesh colour grading")]
+        [Range(0f, 3f)]
+        [Tooltip("Saturation of the baked camera colour. 1 = as captured; >1 boosts " +
+                 "(the camera RGB tends to read desaturated under the flat lighting).")]
+        public float meshSaturation = 1.4f;
+        [Range(0f, 3f)]
+        [Tooltip("Overall brightness multiplier on the lit mesh colour.")]
+        public float meshBrightness = 1f;
+        [Range(0.2f, 3f)]
+        [Tooltip("Gamma applied to the baked colour. <1 brightens / lifts shadows " +
+                 "(use ~0.45 if colours look dark from sRGB-as-linear sampling).")]
+        public float meshGamma = 1f;
         [Tooltip("Max triangles the MC output buffer can hold. 333k tris = 1 M " +
                  "vertices, ~12 MB at 36 bytes per triangle (= 3 × float3).")]
         [Min(1024)] public int meshMaxTriangles = 333_333;
@@ -196,8 +209,10 @@ namespace TSDF
             if (_cellArgsBuffer == null)
                 _cellArgsBuffer = new ComputeBuffer(5, sizeof(uint), ComputeBufferType.IndirectArguments);
 
-            // Mesh-view AppendBuffer of Tri = 3 × float3 = 36 bytes per slot.
-            const int triStride = 36;
+            // Mesh-view AppendBuffer of Tri = per vertex (float3 pos + float3
+            // colour) × 3 = 6 float3 = 72 bytes per slot. Must match the Tri
+            // struct in TSDFMarchingCubes.compute and TSDFMesh.shader.
+            const int triStride = 72;
             if (_meshTrianglesBuffer == null || _meshTrianglesBuffer.count != meshMaxTriangles)
             {
                 _meshTrianglesBuffer?.Release();
@@ -323,6 +338,9 @@ namespace TSDF
             }
 
             meshMaterial.SetBuffer("_Triangles", _meshTrianglesBuffer);
+            meshMaterial.SetFloat("_Saturation", meshSaturation);
+            meshMaterial.SetFloat("_Brightness", meshBrightness);
+            meshMaterial.SetFloat("_Gamma", meshGamma);
             Graphics.DrawProceduralIndirect(meshMaterial, BuildBounds(1.0f),
                 MeshTopology.Triangles, _meshArgsBuffer, 0,
                 camera: null, properties: null,
@@ -335,6 +353,7 @@ namespace TSDF
             _meshTrianglesBuffer.SetCounterValue(0);
 
             _mcShader.SetBuffer(_mcKernel, "_Voxels", volume.FrontBuffer);
+            _mcShader.SetBuffer(_mcKernel, "_Colors", volume.FrontColorBuffer);
             _mcShader.SetInts("_Dim", volume.Dim.x, volume.Dim.y, volume.Dim.z);
             _mcShader.SetMatrix("_WorldFromVoxel", volume.WorldFromVoxel);
             _mcShader.SetFloat("_IsoLevel", meshIsoLevel);

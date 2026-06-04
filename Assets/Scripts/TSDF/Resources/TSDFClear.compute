@@ -8,11 +8,14 @@
 RWStructuredBuffer<float2> _Voxels;   // x = tsdf, y = weight
 int3 _Dim;                            // grid dimensions
 float _InitTsdf;                      // = tau (+ truncation), set per-dispatch
+int _DispatchWidth;                   // = groupsX * 64; linearises the 2D dispatch
+                                      // grid used so large volumes don't blow past
+                                      // the 65535 threadgroup-per-axis D3D limit.
 
 [numthreads(64, 1, 1)]
 void Clear(uint3 id : SV_DispatchThreadID)
 {
-    uint linearIdx = id.x;
+    uint linearIdx = id.y * (uint)_DispatchWidth + id.x;
     uint total = (uint)(_Dim.x * _Dim.y * _Dim.z);
     if (linearIdx >= total) return;
 
