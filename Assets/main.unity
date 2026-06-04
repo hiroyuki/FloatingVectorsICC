@@ -264,7 +264,7 @@ MonoBehaviour:
   capsuleFilter: {fileID: 0}
   jointMotionField: {fileID: 0}
   cumulative: {fileID: 0}
-  folderPath: D:/Dropbox/projects/ICC/Recordings/_4cam_btrec
+  folderPath: D:\FloatingVectorsICC\Recordings
   folderPathMacOverride: /Users/horihiroyuki/Dropbox/projects/ICC/Recordings/_4cam_btrec
   datasetName: 
   loop: 1
@@ -505,7 +505,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 96892899ec43f7246a88f0b3f63d9e67, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::PointCloud.PointCloudCameraManager
-  playbackOnly: 1
+  playbackOnly: 0
   defaultPointMaterial: {fileID: 0}
   depthWidth: 640
   depthHeight: 576
@@ -1090,9 +1090,12 @@ MonoBehaviour:
   cameraKeys: []
   allCamsKey: 48
   pointCloudToggleKey: 112
+  seekToCursor: -1
+  seekRequested: 0
   cachedCount: 0
   lastReplayKind: (none)
   lastReplayTimestampUs: 0
+  currentCursors: []
 --- !u!4 &2040096811
 Transform:
   m_ObjectHideFlags: 0
