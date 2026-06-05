@@ -22,7 +22,7 @@ namespace Calibration.EditorTools
         public static void Open()
         {
             var w = GetWindow<CalibrationWindow>("Calibration");
-            w.minSize = new Vector2(420, 360);
+            w.minSize = new Vector2(520, 520);
             w.Show();
         }
 
@@ -51,6 +51,39 @@ namespace Calibration.EditorTools
 
         private Vector2 _samplesScroll;
         private int _samplesShownCount = -1;
+
+        // -------- Oversized GUI styles (built lazily inside OnGUI; GUI.skin is null in OnEnable) --------
+        private GUIStyle _bigButton;
+        private GUIStyle _bigHeader;
+        private GUIStyle _bigSampleHeader;
+        private GUIStyle _bigSampleLine;
+
+        private void EnsureStyles()
+        {
+            if (_bigButton != null) return;
+            _bigButton = new GUIStyle(GUI.skin.button)
+            {
+                fontSize = 22,
+                fontStyle = FontStyle.Bold,
+                fixedHeight = 56,
+                wordWrap = true,
+            };
+            _bigHeader = new GUIStyle(EditorStyles.boldLabel)
+            {
+                fontSize = 24,
+                fontStyle = FontStyle.Bold,
+            };
+            _bigSampleHeader = new GUIStyle(EditorStyles.boldLabel)
+            {
+                fontSize = 18,
+                fontStyle = FontStyle.Bold,
+            };
+            _bigSampleLine = new GUIStyle(EditorStyles.label)
+            {
+                fontSize = 16,
+                wordWrap = true,
+            };
+        }
 
         private struct LatestFrame
         {
@@ -167,6 +200,7 @@ namespace Calibration.EditorTools
 
         private void OnGUI()
         {
+            EnsureStyles();
             EditorGUILayout.LabelField("Multi-Camera Extrinsic Calibration", EditorStyles.boldLabel);
             EditorGUILayout.Space();
 
@@ -214,21 +248,25 @@ namespace Calibration.EditorTools
 
                     using (new EditorGUI.DisabledScope(_boardSpec == null))
                     {
-                        if (GUILayout.Button("Capture")) DoCapture();
+                        if (GUILayout.Button("Capture", _bigButton)) DoCapture();
                     }
-                    using (new EditorGUI.DisabledScope(_samples.Count == 0))
+                    // Solve / Reset / Dump are secondary — keep them small in a single row.
+                    using (new EditorGUILayout.HorizontalScope())
                     {
-                        if (GUILayout.Button($"Solve & Write extrinsics.yaml ({_samples.Count} sample(s))")) DoSolve();
+                        using (new EditorGUI.DisabledScope(_samples.Count == 0))
+                        {
+                            if (GUILayout.Button($"Solve ({_samples.Count})")) DoSolve();
+                        }
+                        if (GUILayout.Button("Reset")) DoReset();
+                        if (GUILayout.Button("Dump")) DoDumpFrames();
                     }
-                    if (GUILayout.Button("Reset (write identity for all detected serials)")) DoReset();
-                    if (GUILayout.Button("Dump Latest Frames (debug)")) DoDumpFrames();
                 }
             }
 
             EditorGUILayout.Space();
             using (new EditorGUILayout.HorizontalScope())
             {
-                EditorGUILayout.LabelField($"Samples  ({_samples.Count})", EditorStyles.boldLabel);
+                EditorGUILayout.LabelField($"Samples  ({_samples.Count})", _bigHeader, GUILayout.Height(34));
                 GUILayout.FlexibleSpace();
                 using (new EditorGUI.DisabledScope(_samples.Count == 0))
                 {
@@ -243,7 +281,7 @@ namespace Calibration.EditorTools
                 _samplesShownCount = _samples.Count;
             }
             _samplesScroll = EditorGUILayout.BeginScrollView(_samplesScroll,
-                GUILayout.MinHeight(120), GUILayout.MaxHeight(360));
+                GUILayout.MinHeight(220), GUILayout.MaxHeight(600));
             for (int i = 0; i < _samples.Count; i++)
             {
                 var s = _samples[i];
@@ -254,12 +292,13 @@ namespace Calibration.EditorTools
                 string header = s.SkewOk
                     ? $"#{i} {s.CapturedAtUtc:HH:mm:ss}  skew={s.SkewMs:0.0}ms  detected {detectedCount}/{total}"
                     : $"#{i} {s.CapturedAtUtc:HH:mm:ss}  skew={s.SkewMs:0.0}ms  REJECTED (skew)";
-                EditorGUILayout.LabelField(header);
+                EditorGUILayout.LabelField(header, _bigSampleHeader);
                 if (s.Cameras != null)
                 {
                     foreach (var c in s.Cameras)
                         EditorGUILayout.LabelField($"   {c.Serial}: " +
-                            (c.Detected ? $"OK (markers={c.Markers}, corners={c.Corners})" : $"no detection (markers={c.Markers})"));
+                            (c.Detected ? $"OK (markers={c.Markers}, corners={c.Corners})" : $"no detection (markers={c.Markers})"),
+                            _bigSampleLine);
                 }
             }
             EditorGUILayout.EndScrollView();

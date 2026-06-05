@@ -532,13 +532,13 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 96892899ec43f7246a88f0b3f63d9e67, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::PointCloud.PointCloudCameraManager
-  playbackOnly: 1
+  playbackOnly: 0
   defaultPointMaterial: {fileID: 0}
-  depthWidth: 640
-  depthHeight: 576
+  depthWidth: 320
+  depthHeight: 288
   depthFps: 30
-  colorWidth: 1920
-  colorHeight: 1080
+  colorWidth: 1280
+  colorHeight: 960
   colorFps: 30
   colorFormat: 5
   alignTargetStream: 2
