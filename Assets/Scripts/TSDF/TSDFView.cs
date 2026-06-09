@@ -71,6 +71,17 @@ namespace TSDF
         [Header("Mesh view")]
         [Tooltip("Material that uses the TSDF/Mesh shader. Auto-created if null.")]
         public Material meshMaterial;
+        [Tooltip("Optional second TSDF volume for fixed-2-moment smooth-union composition. " +
+                 "When disabled or unset, mesh extraction uses only 'volume'.")]
+        public TSDFVolume meshSmoothUnionVolumeB;
+        [Tooltip("Compose volume(A) + volume(B) with smooth-min before Marching Cubes. " +
+                 "Best when the two moments overlap or almost touch; far-apart shapes can " +
+                 "bulge/bridge around the outside.")]
+        public bool meshUseSmoothUnion = false;
+        [Min(0f)]
+        [Tooltip("smooth-min blend width k in metres (0 = hard min). Larger values thicken " +
+                 "the neck between the two moments.")]
+        public float meshSmoothUnionK = 0.03f;
 
         [Header("Mesh colour grading")]
         [Range(0f, 3f)]
@@ -125,6 +136,7 @@ namespace TSDF
 
         private float _diagWindowStart;
         private int _diagMcDispatchesThisWindow;
+        private bool _smoothUnionGridMismatchLogged = false;
 
         // ---------------------------------------------------------------
         private void OnEnable()
@@ -352,12 +364,40 @@ namespace TSDF
         {
             _meshTrianglesBuffer.SetCounterValue(0);
 
+            bool useSmoothUnion = false;
+            var volB = meshSmoothUnionVolumeB;
+            if (meshUseSmoothUnion && volB != null && volB.FrontBuffer != null && volB.FrontColorBuffer != null)
+            {
+                bool dimMatch = volB.Dim == volume.Dim;
+                bool gridMatch = (volB.WorldFromVoxel.GetColumn(0) - volume.WorldFromVoxel.GetColumn(0)).sqrMagnitude < 1e-8f
+                                 && (volB.WorldFromVoxel.GetColumn(1) - volume.WorldFromVoxel.GetColumn(1)).sqrMagnitude < 1e-8f
+                                 && (volB.WorldFromVoxel.GetColumn(2) - volume.WorldFromVoxel.GetColumn(2)).sqrMagnitude < 1e-8f
+                                 && (volB.WorldFromVoxel.GetColumn(3) - volume.WorldFromVoxel.GetColumn(3)).sqrMagnitude < 1e-8f;
+                useSmoothUnion = dimMatch && gridMatch;
+                if (!useSmoothUnion)
+                {
+                    if (!_smoothUnionGridMismatchLogged)
+                    {
+                        Debug.LogWarning("[TSDFView] meshUseSmoothUnion is ON but volume B grid does not match volume A (Dim/WorldFromVoxel). Falling back to volume A only.", this);
+                        _smoothUnionGridMismatchLogged = true;
+                    }
+                }
+                else
+                {
+                    _smoothUnionGridMismatchLogged = false;
+                }
+            }
+
             _mcShader.SetBuffer(_mcKernel, "_Voxels", volume.FrontBuffer);
             _mcShader.SetBuffer(_mcKernel, "_Colors", volume.FrontColorBuffer);
+            _mcShader.SetBuffer(_mcKernel, "_VoxelsB", useSmoothUnion ? volB.FrontBuffer : volume.FrontBuffer);
+            _mcShader.SetBuffer(_mcKernel, "_ColorsB", useSmoothUnion ? volB.FrontColorBuffer : volume.FrontColorBuffer);
             _mcShader.SetInts("_Dim", volume.Dim.x, volume.Dim.y, volume.Dim.z);
             _mcShader.SetMatrix("_WorldFromVoxel", volume.WorldFromVoxel);
             _mcShader.SetFloat("_IsoLevel", meshIsoLevel);
             _mcShader.SetFloat("_MinWeight", meshMinWeight);
+            _mcShader.SetInt("_UseSmoothUnion", useSmoothUnion ? 1 : 0);
+            _mcShader.SetFloat("_SmoothUnionK", Mathf.Max(0f, meshSmoothUnionK));
             _mcShader.SetBuffer(_mcKernel, "_Triangles", _meshTrianglesBuffer);
 
             int gx = Mathf.CeilToInt((volume.Dim.x - 1) / 4f);
