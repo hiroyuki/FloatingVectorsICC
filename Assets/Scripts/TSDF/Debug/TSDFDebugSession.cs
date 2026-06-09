@@ -149,6 +149,15 @@ namespace TSDF.DebugTools
         {
             yield return null;
             yield return null;
+            // Auto path ONLY: jump to the configured start frame and hold there,
+            // THEN enter B mode. Manual b never jumps — it toggles at the current
+            // playhead.
+            if (recorder != null)
+            {
+                EnsureRecorderPlaying();
+                if (recorder.CurrentState == PointCloudRecorder.State.Playing)
+                    recorder.SeekToPlayheadSeconds(startPlayheadSec);   // seek auto-pauses at the frame
+            }
             SetBMode(true);
         }
 
@@ -417,20 +426,17 @@ namespace TSDF.DebugTools
                 // Remember normal-render state so OFF can restore it.
                 _savedAccum = volume.accumulationMode;
                 _savedIntegEnabled = integrator.integrationEnabled;
+                integrator.integrationEnabled = false;   // we drive integration manually
+                volume.accumulationMode = TSDFVolume.AccumulationMode.RetainGhost;
                 ResetRing();
                 _bMode = true;
-                // Land on startPlayheadSec and HOLD there (paused), showing the
-                // red/blue pair — NOT play from frame 0. BuildFixedFrames seeks to
-                // startPlayheadSec, integrates start=red / start+skip=blue, and
-                // leaves playback paused + the integrator frozen. From here the
-                // recorder's own space = play, <-/-> = step drive the trailing
-                // rebuild in LateUpdate.
-                BuildFixedFrames();
-                string refS0 = ResolveSerials(out _);
-                _lastBuiltRefCursor = refS0 != null ? recorder.GetPlaybackCursor(refS0) : int.MinValue;
-                bModeStatus = $"ON (paused @ {startPlayheadSec:0.000}s) — space=play, <-/->=step";
-                Debug.Log($"[TSDFDebugSession] B mode ON — paused at startPlayheadSec ({startPlayheadSec:0.000}s), " +
-                          "red/blue shown. space=play, <-/->=step.", this);
+                // Enter at the CURRENT playhead — do NOT jump to startPlayheadSec.
+                // Only the auto-play path (AutoRunCo) seeks to that frame. Keep the
+                // current play/pause state; trailing red/blue follows from here.
+                _lastBuiltRefCursor = int.MinValue;
+                RebuildAtCurrent();
+                Debug.Log("[TSDFDebugSession] B mode ON at current playhead (no jump). " +
+                          "space=play, <-/->=step, b=off.", this);
             }
             else
             {
@@ -458,6 +464,16 @@ namespace TSDF.DebugTools
                 return null;
             }
             return serials[0];
+        }
+
+        // Build the trailing pair at the current playhead without seeking (used on
+        // manual B-mode enter). Pulls from the ring / latest cache as-is.
+        private void RebuildAtCurrent()
+        {
+            string refS = ResolveSerials(out var serials);
+            if (refS == null) return;
+            RebuildTrailing(serials);
+            _lastBuiltRefCursor = recorder.GetPlaybackCursor(refS);
         }
 
         private void RebuildTrailing(string[] serials)
