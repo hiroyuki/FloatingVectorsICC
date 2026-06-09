@@ -393,6 +393,16 @@ namespace TSDF.DebugTools
                     Debug.LogWarning($"[TSDFDebugSession] No cached frame for '{s}' ({label}).", this);
                     continue;
                 }
+                // A seek that doesn't move a track leaves _cache at its last-emitted
+                // cursor; only integrate when the cache is actually the frame now at
+                // the playhead (guards stale data on repeated/all-cam/end seeks).
+                int curIdx = recorder.GetPlaybackCursor(s);
+                if (snap.Cursor != curIdx)
+                {
+                    Debug.LogWarning($"[TSDFDebugSession] stale cache for '{s}' (cache@{snap.Cursor}, " +
+                                     $"playhead@{curIdx}) — skipping ({label}).", this);
+                    continue;
+                }
                 IntegrateSnapshot(snap);   // RetainGhost accumulate, no clear between
                 n++;
             }
@@ -448,6 +458,10 @@ namespace TSDF.DebugTools
                 integrator.colorOverride = new Color(0f, 0f, 0f, 0f);   // drop red/blue tag
                 volume.accumulationMode = _savedAccum;                  // restore normal accumulation
                 integrator.integrationEnabled = _savedIntegEnabled;     // resume live integration
+                // We drove ClearWrite/Publish directly during B mode, so reset the
+                // integrator's live-follow batch + clear the write buffer; otherwise
+                // the first resumed batch could publish leftover debug content.
+                integrator.BeginFreshBatch();
                 bModeStatus = "(off)";
                 Debug.Log("[TSDFDebugSession] B mode OFF — restored live integration " +
                           $"(accum={_savedAccum}, integrationEnabled={_savedIntegEnabled}).", this);
@@ -498,8 +512,12 @@ namespace TSDF.DebugTools
             foreach (var s in serials)
             {
                 if (string.IsNullOrEmpty(s)) continue;
-                var c = RingGet(s, recorder.GetPlaybackCursor(s));
-                if (c == null) _cache.TryGetValue(s, out c);   // current is freshest; cache fallback
+                int cur = recorder.GetPlaybackCursor(s);
+                var c = RingGet(s, cur);
+                // Ring miss: fall back to the latest cache only if it really is the
+                // frame at the current cursor (never integrate an older blue frame).
+                if (c == null && _cache.TryGetValue(s, out var cached) && cached != null && cached.Cursor == cur)
+                    c = cached;
                 if (c != null) { IntegrateSnapshot(c); blue++; }
             }
             if (colorByInstant) integrator.colorOverride = new Color(0f, 0f, 0f, 0f);

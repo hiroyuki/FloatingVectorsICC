@@ -223,6 +223,20 @@ namespace TSDF
             => IntegrateOne(serial, camParam, sourceTransform, raw);
 
         /// <summary>
+        /// Reset live-follow batch tracking and clear the write buffer so the NEXT
+        /// live/playback batch starts clean. Call after external code (e.g. debug
+        /// B mode) has driven volume.ClearWrite/Publish + IntegrateRawFrame directly
+        /// while <see cref="integrationEnabled"/> was off — otherwise the resumed
+        /// batch state machine could think it is mid-batch and publish a partial or
+        /// debug-contaminated buffer for the first batch.
+        /// </summary>
+        public void BeginFreshBatch()
+        {
+            _batchSerials.Clear();
+            if (volume != null) volume.ClearWrite();
+        }
+
+        /// <summary>
         /// Event-path entry: integrate one cam frame AND drive the live-follow
         /// batch state machine (clear the back buffer at batch start, publish it
         /// to the front once <see cref="expectedCamCount"/> unique cams have
