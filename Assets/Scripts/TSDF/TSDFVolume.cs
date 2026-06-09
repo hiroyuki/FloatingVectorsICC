@@ -109,6 +109,9 @@ namespace TSDF
 
         private ComputeShader _clearShader;
         private int _clearKernel;
+        private ComputeShader _morphCloseShader;
+        private int _morphMinKernel = -1;
+        private int _morphMaxKernel = -1;
         private bool _dimsDirty = true;
 
         // Physical backing buffers. _bufB is null in single-buffer mode.
@@ -229,6 +232,57 @@ namespace TSDF
             PublishVersion++;
         }
 
+        /// <summary>
+        /// Convert a target bridgeable gap width [m] into the close-filter radius in
+        /// voxels. Morphological close bridges up to roughly 2r voxels.
+        /// </summary>
+        public static int ComputeCloseRadiusVoxels(float maxGapMeters, float voxelSizeMetres)
+        {
+            if (maxGapMeters <= 0f || voxelSizeMetres <= 0f) return 0;
+            return Mathf.Max(1, Mathf.CeilToInt(maxGapMeters / (2f * voxelSizeMetres)));
+        }
+
+        /// <summary>
+        /// Run one TSDF morphological close pass (separable X→Y→Z min, then X→Y→Z max)
+        /// on the CURRENT front buffer. Intended for freeze-time bridge filling.
+        /// Returns false when skipped (no buffers, zero radius, shader missing...).
+        /// </summary>
+        public bool ApplyMorphologicalClose(float maxGapMeters, float minBridgeWeight = 1f)
+        {
+            if (FrontBuffer == null || FrontColorBuffer == null) return false;
+            int radius = ComputeCloseRadiusVoxels(maxGapMeters, voxelSize);
+            if (radius <= 0) return false;
+            if (!EnsureMorphCloseShader()) return false;
+
+            int total = Dim.x * Dim.y * Dim.z;
+            var tmpA = new ComputeBuffer(total, sizeof(float) * 2);
+            var tmpB = new ComputeBuffer(total, sizeof(float) * 2);
+            var tmpColA = new ComputeBuffer(total, sizeof(float) * 4);
+            var tmpColB = new ComputeBuffer(total, sizeof(float) * 4);
+            try
+            {
+                // min pass: X -> Y -> Z
+                DispatchMorphPass(_morphMinKernel, 0, radius, minBridgeWeight, FrontBuffer, FrontColorBuffer, tmpA, tmpColA);
+                DispatchMorphPass(_morphMinKernel, 1, radius, minBridgeWeight, tmpA, tmpColA, tmpB, tmpColB);
+                DispatchMorphPass(_morphMinKernel, 2, radius, minBridgeWeight, tmpB, tmpColB, tmpA, tmpColA);
+
+                // max pass: X -> Y -> Z
+                DispatchMorphPass(_morphMaxKernel, 0, radius, minBridgeWeight, tmpA, tmpColA, tmpB, tmpColB);
+                DispatchMorphPass(_morphMaxKernel, 1, radius, minBridgeWeight, tmpB, tmpColB, tmpA, tmpColA);
+                DispatchMorphPass(_morphMaxKernel, 2, radius, minBridgeWeight, tmpA, tmpColA, FrontBuffer, FrontColorBuffer);
+            }
+            finally
+            {
+                tmpA.Release();
+                tmpB.Release();
+                tmpColA.Release();
+                tmpColB.Release();
+            }
+
+            PublishVersion++;
+            return true;
+        }
+
         private void EnsureClearShader()
         {
             if (_clearShader != null) return;
@@ -240,6 +294,46 @@ namespace TSDF
                 return;
             }
             _clearKernel = _clearShader.FindKernel("Clear");
+        }
+
+        private bool EnsureMorphCloseShader()
+        {
+            if (_morphCloseShader == null)
+            {
+                _morphCloseShader = Resources.Load<ComputeShader>("TSDFMorphClose");
+                if (_morphCloseShader == null)
+                {
+                    Debug.LogError("[TSDFVolume] Compute shader \"Resources/TSDFMorphClose.compute\" not found.", this);
+                    return false;
+                }
+            }
+            if (_morphMinKernel < 0) _morphMinKernel = _morphCloseShader.FindKernel("MinPass");
+            if (_morphMaxKernel < 0) _morphMaxKernel = _morphCloseShader.FindKernel("MaxPass");
+            return _morphMinKernel >= 0 && _morphMaxKernel >= 0;
+        }
+
+        private void DispatchMorphPass(int kernel, int axis, int radius, float minBridgeWeight,
+                                       ComputeBuffer srcVoxels, ComputeBuffer srcColors,
+                                       ComputeBuffer dstVoxels, ComputeBuffer dstColors)
+        {
+            if (_morphCloseShader == null) return;
+
+            _morphCloseShader.SetBuffer(kernel, "_InputVoxels", srcVoxels);
+            _morphCloseShader.SetBuffer(kernel, "_InputColors", srcColors);
+            _morphCloseShader.SetBuffer(kernel, "_OutputVoxels", dstVoxels);
+            _morphCloseShader.SetBuffer(kernel, "_OutputColors", dstColors);
+            _morphCloseShader.SetInts("_Dim", Dim.x, Dim.y, Dim.z);
+            _morphCloseShader.SetInt("_Axis", axis);
+            _morphCloseShader.SetInt("_Radius", radius);
+            _morphCloseShader.SetFloat("_Tau", Tau);
+            _morphCloseShader.SetFloat("_MinBridgeWeight", Mathf.Max(0f, minBridgeWeight));
+
+            int total = Dim.x * Dim.y * Dim.z;
+            int groups = Mathf.CeilToInt(total / 64f);
+            int gx = Mathf.Min(groups, 65535);
+            int gy = Mathf.CeilToInt(groups / (float)gx);
+            _morphCloseShader.SetInt("_DispatchWidth", gx * 64);
+            _morphCloseShader.Dispatch(kernel, Mathf.Max(1, gx), Mathf.Max(1, gy), 1);
         }
 
         private void RebuildIfNeeded(bool forceClear)

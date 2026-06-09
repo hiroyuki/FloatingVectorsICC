@@ -42,6 +42,19 @@ namespace TSDF
                  "kept instead of averaged away (spec §3.2 A vs B).")]
         public bool forceRetainGhost = true;
 
+        [Header("Freeze post-process")]
+        [Tooltip("Run one TSDF morphological close when capture freezes. Bridges only " +
+                 "small gaps without globally thickening the shape.")]
+        public bool runMorphologicalCloseOnStop = true;
+        [Min(0f)]
+        [Tooltip("Maximum gap width [m] to bridge during freeze close. Radius in voxels " +
+                 "is ceil(gap / (2*voxelSize)). 0 disables bridging.")]
+        public float closeMaxGapMeters = 0.06f;
+        [Min(0f)]
+        [Tooltip("Synthetic minimum voxel weight written on bridged voxels so Marching " +
+                 "Cubes' min-weight gate can emit them.")]
+        public float closeMinBridgeWeight = 1f;
+
         [Header("Triggers")]
         [Tooltip("Start a capture automatically when this component enables (e.g. on Play).")]
         public bool autoStartOnEnable = false;
@@ -116,6 +129,8 @@ namespace TSDF
         public void StopCapture()
         {
             if (integrator != null) integrator.integrationEnabled = false;
+            if (volume != null && runMorphologicalCloseOnStop)
+                volume.ApplyMorphologicalClose(closeMaxGapMeters, closeMinBridgeWeight);
             State = SessionState.Idle;
             Elapsed = captureDuration;
         }
