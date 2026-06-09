@@ -149,16 +149,19 @@ namespace TSDF.DebugTools
         {
             yield return null;
             yield return null;
-            // Auto path ONLY: jump to the configured start frame and hold there,
-            // THEN enter B mode. Manual b never jumps — it toggles at the current
-            // playhead.
-            if (recorder != null)
-            {
-                EnsureRecorderPlaying();
-                if (recorder.CurrentState == PointCloudRecorder.State.Playing)
-                    recorder.SeekToPlayheadSeconds(startPlayheadSec);   // seek auto-pauses at the frame
-            }
+            // Auto path ONLY: enter B mode, then render the full red/blue pair at
+            // startPlayheadSec via BuildFixedFrames (seeks to fetch BOTH frames, so
+            // red shows even while paused — the ring is empty at this point).
+            // Leaves playback paused/held. Manual b never jumps — it toggles at the
+            // current playhead with trailing-from-ring (red fills in once playing).
             SetBMode(true);
+            if (_bMode)
+            {
+                BuildFixedFrames();                 // seek to startPlayheadSec, build start=red / start+skip=blue, paused
+                string r = ResolveSerials(out _);
+                _lastBuiltRefCursor = r != null ? recorder.GetPlaybackCursor(r) : _lastBuiltRefCursor;
+                bModeStatus = $"ON (paused @ {startPlayheadSec:0.000}s) — space=play, <-/->=step";
+            }
         }
 
         private void OnDisable()
