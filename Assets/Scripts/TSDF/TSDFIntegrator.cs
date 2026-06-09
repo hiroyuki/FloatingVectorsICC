@@ -56,6 +56,24 @@ namespace TSDF
                  "bypasses this gate.")]
         public bool integrationEnabled = true;
 
+        [Header("Mesh completion C (optical-flow morph)")]
+        [Tooltip("When on, every new frame B morph-warps the previous frame A toward B and " +
+                 "integrates N intermediate frames before B. Endpoints A/B stay real frames; " +
+                 "only the bridge is synthetic (issue #28).")]
+        public bool enableOpticalFlowMorph = false;
+        [Range(0, 16)]
+        [Tooltip("Number of synthetic intermediate frames integrated between adjacent real " +
+                 "frames when optical-flow morph is enabled.")]
+        public int flowMorphIntermediateFrames = 3;
+        [Range(1, 4)]
+        [Tooltip("Lucas-Kanade neighborhood radius (pixels) used for the depth-image flow " +
+                 "estimate. 1=3x3, 2=5x5.")]
+        public int flowMorphWindowRadius = 1;
+        [Min(0f)]
+        [Tooltip("Small diagonal term added while solving flow to avoid unstable vectors " +
+                 "in low-texture regions.")]
+        public float flowMorphRegularization = 1e-3f;
+
         // Set of serials that have integrated since the last clear. Once it
         // reaches expectedCamCount, the batch is published to the front buffer
         // and the next integrate clears the back buffer to start a fresh batch.
@@ -94,6 +112,13 @@ namespace TSDF
             public int ColorWidth;
             public int ColorHeight;
             public int FramesIntegrated;        // diag counter, reset per second
+            // Last accepted real frame A for issue #28's A->B flow morph.
+            public byte[] PrevDepthBytes;
+            public int PrevDepthByteCount;
+            public int PrevDepthWidth;
+            public int PrevDepthHeight;
+            public ulong PrevTimestampUs;
+            public bool HasPrevDepth;
         }
         private readonly Dictionary<string, CamState> _states = new Dictionary<string, CamState>();
 
@@ -239,7 +264,17 @@ namespace TSDF
                 _batchSerials.Clear();
             }
 
+            if (enableOpticalFlowMorph
+                && flowMorphIntermediateFrames > 0
+                && _states.TryGetValue(serial, out var st)
+                && st.HasPrevDepth)
+            {
+                IntegrateMorphIntermediates(serial, camParam, sourceTransform, raw, st);
+            }
+
             if (!IntegrateOne(serial, camParam, sourceTransform, raw)) return;
+            if (_states.TryGetValue(serial, out var nowSt))
+                CopyAsPrevDepth(nowSt, raw);
 
             if (clearVolumeOnNewBatch)
             {
@@ -252,6 +287,74 @@ namespace TSDF
                     CompletedBatchCount++;
                     volume.Publish();
                 }
+            }
+
+            private void IntegrateMorphIntermediates(string serial, ObCameraParam? camParam,
+                                                     Transform sourceTransform, RawFrameData currentRaw,
+                                                     CamState st)
+            {
+                if (st.PrevDepthBytes == null || st.PrevDepthByteCount <= 0) return;
+                if (currentRaw.DepthBytes == null || currentRaw.DepthByteCount <= 0) return;
+                if (st.PrevDepthWidth != currentRaw.DepthWidth
+                    || st.PrevDepthHeight != currentRaw.DepthHeight)
+                    return;
+
+                int n = Mathf.Max(0, flowMorphIntermediateFrames);
+                if (n <= 0) return;
+                ulong aTs = st.PrevTimestampUs;
+                ulong bTs = currentRaw.TimestampUs;
+                for (int k = 1; k <= n; k++)
+                {
+                    float t = k / (n + 1f);
+                    if (!OpticalFlowDepthMorph.TryBuildWarpedDepthFrame(
+                            st.PrevDepthBytes, st.PrevDepthByteCount,
+                            currentRaw.DepthBytes, currentRaw.DepthByteCount,
+                            st.PrevDepthWidth, st.PrevDepthHeight,
+                            t, Mathf.Max(1, flowMorphWindowRadius),
+                            Mathf.Max(0f, flowMorphRegularization),
+                            out var warpedDepthBytes))
+                        continue;
+
+                    ulong ts = aTs;
+                    if (bTs > aTs)
+                    {
+                        double span = bTs - aTs;
+                        ts = aTs + (ulong)(span * t);
+                    }
+
+                    var warpedRaw = new RawFrameData(
+                        depthBytes: warpedDepthBytes,
+                        depthByteCount: warpedDepthBytes.Length,
+                        depthWidth: currentRaw.DepthWidth,
+                        depthHeight: currentRaw.DepthHeight,
+                        colorBytes: null,
+                        colorByteCount: 0,
+                        colorWidth: 0,
+                        colorHeight: 0,
+                        irBytes: null,
+                        irByteCount: 0,
+                        irWidth: 0,
+                        irHeight: 0,
+                        timestampUs: ts);
+                    IntegrateOne(serial, camParam, sourceTransform, warpedRaw);
+                }
+            }
+
+            private static void CopyAsPrevDepth(CamState st, RawFrameData raw)
+            {
+                if (st == null || raw.DepthBytes == null || raw.DepthByteCount <= 0)
+                {
+                    if (st != null) st.HasPrevDepth = false;
+                    return;
+                }
+                if (st.PrevDepthBytes == null || st.PrevDepthBytes.Length != raw.DepthByteCount)
+                    st.PrevDepthBytes = new byte[raw.DepthByteCount];
+                System.Buffer.BlockCopy(raw.DepthBytes, 0, st.PrevDepthBytes, 0, raw.DepthByteCount);
+                st.PrevDepthByteCount = raw.DepthByteCount;
+                st.PrevDepthWidth = raw.DepthWidth;
+                st.PrevDepthHeight = raw.DepthHeight;
+                st.PrevTimestampUs = raw.TimestampUs;
+                st.HasPrevDepth = true;
             }
             else
             {
