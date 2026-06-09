@@ -1,0 +1,125 @@
+// Freeze-time TSDF morphological close:
+//   close = max_filter(min_filter(sdf, r), r)
+// using separable 1D passes (X -> Y -> Z for min, then X -> Y -> Z for max).
+// Unobserved voxels (weight <= 0) participate as free-space (+tau).
+// The winning neighbour's colour + weight are propagated so bridged voxels can
+// pass the Marching Cubes min-weight gate.
+
+#pragma kernel MinPass
+#pragma kernel MaxPass
+
+StructuredBuffer<float2> _InputVoxels;   // x = sdf, y = weight
+StructuredBuffer<float4> _InputColors;   // rgb + color-weight
+RWStructuredBuffer<float2> _OutputVoxels;
+RWStructuredBuffer<float4> _OutputColors;
+
+int3 _Dim;
+int _Axis;            // 0=X, 1=Y, 2=Z
+int _Radius;          // in voxels
+float _Tau;           // free-space sdf for unobserved voxels
+float _MinBridgeWeight;
+int _DispatchWidth;
+
+int3 Unflatten(uint lin)
+{
+    uint dx = (uint)_Dim.x;
+    uint dy = (uint)_Dim.y;
+    return int3((int)(lin % dx), (int)((lin / dx) % dy), (int)(lin / (dx * dy)));
+}
+
+uint LinIdx(int3 c) { return (uint)(c.x + _Dim.x * (c.y + _Dim.y * c.z)); }
+
+void DecodeVoxel(uint idx, out float sdf, out float weight, out float3 rgb)
+{
+    float2 v = _InputVoxels[idx];
+    float4 c = _InputColors[idx];
+    if (v.y <= 0.0)
+    {
+        sdf = _Tau;
+        weight = 0.0;
+    }
+    else
+    {
+        sdf = v.x;
+        weight = v.y;
+    }
+    rgb = c.rgb;
+}
+
+[numthreads(64, 1, 1)]
+void MinPass(uint3 id : SV_DispatchThreadID)
+{
+    uint lin = id.y * (uint)_DispatchWidth + id.x;
+    uint total = (uint)(_Dim.x * _Dim.y * _Dim.z);
+    if (lin >= total) return;
+
+    int3 c = Unflatten(lin);
+    float bestSdf = _Tau;
+    float bestWeight = 0.0;
+    float3 bestRgb = float3(0.5, 0.5, 0.5);
+    float centerRawWeight = _InputVoxels[lin].y;
+
+    [loop]
+    for (int o = -_Radius; o <= _Radius; o++)
+    {
+        int3 n = c;
+        if (_Axis == 0) n.x = clamp(c.x + o, 0, _Dim.x - 1);
+        else if (_Axis == 1) n.y = clamp(c.y + o, 0, _Dim.y - 1);
+        else n.z = clamp(c.z + o, 0, _Dim.z - 1);
+
+        float sdf, weight;
+        float3 rgb;
+        DecodeVoxel(LinIdx(n), sdf, weight, rgb);
+        if (sdf < bestSdf)
+        {
+            bestSdf = sdf;
+            bestWeight = weight;
+            bestRgb = rgb;
+        }
+    }
+
+    float outWeight = 0.0;
+    if (bestWeight > 0.0)
+        outWeight = (centerRawWeight <= 0.0) ? max(bestWeight, _MinBridgeWeight) : bestWeight;
+    _OutputVoxels[lin] = float2(bestSdf, outWeight);
+    _OutputColors[lin] = float4(bestRgb, outWeight);
+}
+
+[numthreads(64, 1, 1)]
+void MaxPass(uint3 id : SV_DispatchThreadID)
+{
+    uint lin = id.y * (uint)_DispatchWidth + id.x;
+    uint total = (uint)(_Dim.x * _Dim.y * _Dim.z);
+    if (lin >= total) return;
+
+    int3 c = Unflatten(lin);
+    float bestSdf = -_Tau;
+    float bestWeight = 0.0;
+    float3 bestRgb = float3(0.5, 0.5, 0.5);
+    float centerRawWeight = _InputVoxels[lin].y;
+
+    [loop]
+    for (int o = -_Radius; o <= _Radius; o++)
+    {
+        int3 n = c;
+        if (_Axis == 0) n.x = clamp(c.x + o, 0, _Dim.x - 1);
+        else if (_Axis == 1) n.y = clamp(c.y + o, 0, _Dim.y - 1);
+        else n.z = clamp(c.z + o, 0, _Dim.z - 1);
+
+        float sdf, weight;
+        float3 rgb;
+        DecodeVoxel(LinIdx(n), sdf, weight, rgb);
+        if (sdf > bestSdf)
+        {
+            bestSdf = sdf;
+            bestWeight = weight;
+            bestRgb = rgb;
+        }
+    }
+
+    float outWeight = 0.0;
+    if (bestWeight > 0.0)
+        outWeight = (centerRawWeight <= 0.0) ? max(bestWeight, _MinBridgeWeight) : bestWeight;
+    _OutputVoxels[lin] = float2(bestSdf, outWeight);
+    _OutputColors[lin] = float4(bestRgb, outWeight);
+}
