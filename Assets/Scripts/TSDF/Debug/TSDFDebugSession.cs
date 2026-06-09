@@ -44,6 +44,34 @@ namespace TSDF.DebugTools
                  "seekToCursor. Auto-resets after the seek runs.")]
         public bool seekRequested = false;
 
+        [Header("Fixed-frame bench (close/smooth validation)")]
+        [Tooltip("Camera serial whose frames to accumulate. LEAVE EMPTY to use ALL " +
+                 "cameras (every serial gets folded in at each playhead — multi-view).")]
+        public string validateSerial = "";
+        [Tooltip("Start playhead in SECONDS from the recording start (the value shown " +
+                 "in 'Current Playhead Sec'). The bench integrates the frame at this " +
+                 "instant PLUS the frame 'skipFrames' later — two shells in ONE volume " +
+                 "with RetainGhost. The result holds (integrator frozen) so you can " +
+                 "inspect the raw two-shell state before bridging it.")]
+        public double startPlayheadSec = 0.0;
+        [Tooltip("How many frames after the start instant the SECOND shell is taken " +
+                 "from. 1 = the immediately-next frame; larger = a wider motion gap. " +
+                 "The second playhead time is COMPUTED from this camera's frame " +
+                 "timestamps (uses validateSerial, or the first camera when blank).")]
+        [Min(1)] public int skipFrames = 1;
+        [Tooltip("Colour-code the two instants in the baked mesh (dev aid): instant 1 " +
+                 "= instant1Color, instant 2 = instant2Color, instead of camera RGB. " +
+                 "Visible in the MESH view — the Voxel view colours by SDF, not by " +
+                 "this. Off = keep camera colour.")]
+        public bool colorByInstant = true;
+        public Color instant1Color = Color.red;
+        public Color instant2Color = Color.blue;
+        [Tooltip("Tick true (or hit \"Build Fixed Frames\" context menu / key B) to " +
+                 "run the bench. Auto-resets after it runs.")]
+        public bool buildRequested = false;
+        [Tooltip("Key to rebuild the fixed-frame bench (Game View must have focus).")]
+        public KeyCode buildFixedFramesKey = KeyCode.B;
+
         [Header("Cache status (read-only)")]
         [SerializeField] private int cachedCount = 0;
         [SerializeField] private string lastReplayKind = "(none)";
@@ -51,6 +79,9 @@ namespace TSDF.DebugTools
         [Tooltip("Live cursor readout per camera (frame index / total). " +
                  "Use the numbers shown to fill in seekToCursor.")]
         [SerializeField] private string[] currentCursors = new string[0];
+        [Tooltip("Live playhead readout in seconds from the recording start — the " +
+                 "master timeline value. Copy the numbers shown into playheadsSec.")]
+        [SerializeField] private string currentPlayheadSec = "(idle)";
 
         // Per-serial snapshot of the most recently observed depth frame. The
         // recorder's RcsvFrameStream re-uses its scratch byte[], so we copy
@@ -127,11 +158,16 @@ namespace TSDF.DebugTools
             HandleKeyboard();
             UpdateCursorReadout();
             if (seekRequested) PerformSeek();
+            if (Input.GetKeyDown(buildFixedFramesKey)) BuildFixedFrames();
+            if (buildRequested) BuildFixedFrames();
         }
 
         private void UpdateCursorReadout()
         {
-            if (recorder == null) { currentCursors = System.Array.Empty<string>(); return; }
+            if (recorder == null) { currentCursors = System.Array.Empty<string>(); currentPlayheadSec = "(no recorder)"; return; }
+            currentPlayheadSec = recorder.CurrentState == PointCloudRecorder.State.Playing
+                ? recorder.CurrentPlayheadSeconds.ToString("0.000")
+                : "(not playing)";
             if (cameraKeys == null || cameraKeys.Length == 0) AutoPopulateCameraKeys();
             if (cameraKeys == null) return;
             if (currentCursors == null || currentCursors.Length != cameraKeys.Length)
@@ -156,6 +192,126 @@ namespace TSDF.DebugTools
             if (recorder == null || seekToCursor < 0) return;
             bool moved = recorder.SeekAllTracksTo(seekToCursor);
             Debug.Log($"[TSDFDebugSession] SeekAllTracksTo({seekToCursor}) moved={moved}", this);
+        }
+
+        [ContextMenu("Build Fixed Frames")]
+        public void TriggerBuildFixedFrames() { buildRequested = true; }
+
+        /// <summary>
+        /// Accumulate two instants — the frame at <see cref="startPlayheadSec"/> and
+        /// the frame <see cref="skipFrames"/> later — into a single volume with
+        /// RetainGhost, then freeze. The second playhead is COMPUTED from a reference
+        /// camera's frame timestamps (so you give a frame offset, not a second time).
+        /// Each instant is seeked by TIME (every camera lands on its own
+        /// timestamp-matched frame) and integrated WITHOUT clearing between, so the
+        /// two instants land as two shells — the raw "do they overlap or sit apart?"
+        /// state we want to inspect before choosing how to bridge them. When
+        /// <see cref="validateSerial"/> is blank, ALL cameras are folded in at each
+        /// instant (multi-view) and the first camera is the timing reference. The
+        /// live integrator is gated OFF during the seeks so it can't fold frames in
+        /// twice; our IntegrateRawFrame calls bypass that gate.
+        /// </summary>
+        public void BuildFixedFrames()
+        {
+            buildRequested = false;
+            if (recorder == null || volume == null || integrator == null)
+            {
+                Debug.LogWarning("[TSDFDebugSession] Build needs recorder + volume + integrator.", this);
+                return;
+            }
+            if (recorder.CurrentState != PointCloudRecorder.State.Playing)
+            {
+                Debug.LogWarning("[TSDFDebugSession] Recorder must be Playing to seek — hit Play first.", this);
+                return;
+            }
+
+            if (cameraKeys == null || cameraKeys.Length == 0) AutoPopulateCameraKeys();
+
+            // Cameras to fold in (one serial, or ALL when blank) and the reference
+            // camera used to convert the skipFrames offset into a playhead time.
+            string[] serials = !string.IsNullOrEmpty(validateSerial)
+                ? new[] { validateSerial }
+                : cameraKeys;
+            if (serials == null || serials.Length == 0 || string.IsNullOrEmpty(serials[0]))
+            {
+                Debug.LogWarning("[TSDFDebugSession] No validateSerial set and no cameraKeys to fall back on.", this);
+                return;
+            }
+            string refSerial = serials[0];
+
+            // Freeze live integration during the seeks (its event handler honors
+            // this gate; our direct IntegrateRawFrame calls do not) and force
+            // RetainGhost so the frames accumulate as separate shells.
+            integrator.integrationEnabled = false;
+            volume.accumulationMode = TSDFVolume.AccumulationMode.RetainGhost;
+
+            PauseRecorder();
+
+            // Instant 1: seek to the start playhead, then compute instant 2 from a
+            // frame offset on the reference camera's track.
+            recorder.SeekToPlayheadSeconds(startPlayheadSec);
+            int refCursor = recorder.GetPlaybackCursor(refSerial);
+            if (refCursor < 0)
+            {
+                Debug.LogWarning($"[TSDFDebugSession] Reference camera '{refSerial}' has no cursor at " +
+                                 $"{startPlayheadSec:0.000}s — aborting.", this);
+                return;
+            }
+            int total = recorder.GetTrackFrameCount(refSerial);
+            int targetCursor = refCursor + Mathf.Max(1, skipFrames);
+            if (total > 0 && targetCursor > total - 1)
+            {
+                Debug.LogWarning($"[TSDFDebugSession] start cursor {refCursor} + {skipFrames} exceeds last " +
+                                 $"frame {total - 1} on '{refSerial}' — clamping. Pick an earlier start.", this);
+                targetCursor = total - 1;
+            }
+            double secondSec = recorder.GetFramePlayheadSeconds(refSerial, targetCursor);
+            if (targetCursor == refCursor)
+                Debug.LogWarning("[TSDFDebugSession] Second instant equals the first (skip clamped) — " +
+                                 "you'll see only one shell.", this);
+
+            volume.ClearWrite();   // clear ONCE; both instants accumulate
+
+            int done = 0;
+            if (colorByInstant) integrator.colorOverride = instant1Color;
+            done += IntegrateAllCached(serials, $"instant1 @ {startPlayheadSec:0.000}s");
+
+            recorder.SeekToPlayheadSeconds(secondSec);
+            if (colorByInstant) integrator.colorOverride = instant2Color;
+            done += IntegrateAllCached(serials, $"instant2 @ {secondSec:0.000}s (+{skipFrames}f)");
+
+            // Reset so live integration / later builds use camera colour again.
+            if (colorByInstant) integrator.colorOverride = new Color(0f, 0f, 0f, 0f);
+
+            volume.Publish();
+
+            string who = !string.IsNullOrEmpty(validateSerial)
+                ? validateSerial.Substring(System.Math.Max(0, validateSerial.Length - 6))
+                : $"ALL x{serials.Length}";
+            lastReplayKind = $"fixed[{done}] ({who})";
+            Debug.Log($"[TSDFDebugSession] Built two instants on {who}: " +
+                      $"start={startPlayheadSec:0.000}s (cursor {refCursor}) + {skipFrames}f " +
+                      $"-> {secondSec:0.000}s (cursor {targetCursor}). {done} integrations, RetainGhost. " +
+                      "Integrator FROZEN — set integrator.integrationEnabled=true to resume live.", this);
+        }
+
+        /// <summary>Integrate the currently-cached snapshot of every serial in
+        /// <paramref name="serials"/>. Returns how many integrated.</summary>
+        private int IntegrateAllCached(string[] serials, string label)
+        {
+            int n = 0;
+            foreach (string s in serials)
+            {
+                if (string.IsNullOrEmpty(s)) continue;
+                if (!_cache.TryGetValue(s, out var snap) || snap == null)
+                {
+                    Debug.LogWarning($"[TSDFDebugSession] No cached frame for '{s}' ({label}).", this);
+                    continue;
+                }
+                IntegrateSnapshot(snap);   // RetainGhost accumulate, no clear between
+                n++;
+            }
+            return n;
         }
 
         private void HandleKeyboard()

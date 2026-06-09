@@ -28,6 +28,12 @@ namespace TSDF
                  "scaled by view-angle / range later — start at 1.0.")]
         [Min(0f)] public float observationWeight = 1f;
 
+        [Tooltip("Dev colour override: when alpha > 0, bake this flat colour into " +
+                 "integrated voxels instead of the camera RGB (debug tooling uses it " +
+                 "to tag frames/instants — e.g. red vs blue). Alpha == 0 (default) = " +
+                 "use camera colour. Callers must reset it after use.")]
+        public Color colorOverride = new Color(0f, 0f, 0f, 0f);
+
         [Tooltip("Subscribe to live PointCloudRenderer.OnRawFramesReady too. " +
                  "Leave on so live capture also feeds the TSDF when a Femto Bolt " +
                  "is attached.")]
@@ -367,6 +373,8 @@ namespace TSDF
             _shader.SetFloat("_CyC", cintr.Cy);
             _shader.SetMatrix("_ColorFromWorld", colorFromWorld);
             _shader.SetInt("_HasColor", hasColor ? 1 : 0);
+            _shader.SetInt("_UseColorOverride", colorOverride.a > 0f ? 1 : 0);
+            _shader.SetVector("_OverrideColor", new Vector4(colorOverride.r, colorOverride.g, colorOverride.b, 0f));
 
             int total = volume.Dim.x * volume.Dim.y * volume.Dim.z;
             int groups = Mathf.CeilToInt(total / 64f);

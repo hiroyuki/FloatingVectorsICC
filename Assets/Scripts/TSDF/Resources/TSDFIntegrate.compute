@@ -53,6 +53,11 @@ float _FxC, _FyC, _CxC, _CyC;         // colour-camera intrinsics
 float4x4 _ColorFromWorld;             // world metres -> colour camera millimetres
 int _HasColor;                        // 0 = no colour frame this dispatch
 
+// Dev colour override: when _UseColorOverride != 0, bake _OverrideColor into the
+// voxel instead of the sampled camera colour (used to tag frames / instants).
+int _UseColorOverride;
+float3 _OverrideColor;
+
 uint LoadByte(uint byteOffset)
 {
     uint word = _ColorImg.Load(byteOffset & ~3u);
@@ -142,6 +147,7 @@ void Integrate(uint3 id : SV_DispatchThreadID)
     float wObs = _WObs;
     float2 prev = _Voxels[lin];
     float3 rgb = SampleColor(pWorld);
+    if (_UseColorOverride != 0) rgb = _OverrideColor;
 
     if (_AccumulationMode == 0)
     {

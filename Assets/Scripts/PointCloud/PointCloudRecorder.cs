@@ -362,6 +362,7 @@ namespace PointCloud
         private double _playbackWallStart;
         private ulong _playbackTrackStartNs;
         private double _pauseWallStart;
+        private ulong _lastPlayheadNs;   // most recent playhead (for readout / time-seek)
 
         [Header("Diagnostics")]
         [Tooltip("Log per-second playback fire counts per serial (FirePlaybackEvent rate). " +
@@ -523,6 +524,21 @@ namespace PointCloud
         }
 
         /// <summary>
+        /// Playhead position, in SECONDS from the recording start, of a given
+        /// depth frame index on one camera's track. Returns -1 if the serial or
+        /// cursor is out of range. Lets time-based tooling turn a frame OFFSET
+        /// (e.g. "the frame 1 step later") into the playhead time of that frame.
+        /// </summary>
+        public double GetFramePlayheadSeconds(string serial, int cursor)
+        {
+            if (_tracks == null || string.IsNullOrEmpty(serial)) return -1.0;
+            if (!_tracks.TryGetValue(serial, out var t)) return -1.0;
+            if (t.DepthFrames == null || cursor < 0 || cursor >= t.DepthFrames.Count) return -1.0;
+            ulong ts = TimestampNsAt(t.DepthFrames, cursor);
+            return (ts > _playbackTrackStartNs ? ts - _playbackTrackStartNs : 0UL) / 1_000_000_000.0;
+        }
+
+        /// <summary>
         /// Seek every track to <paramref name="targetCursor"/> (clamped to each
         /// track's [0, Count-1]) and re-emit the frame so the rest of the
         /// pipeline catches up. Auto-pauses playback like the Step* APIs so the
@@ -554,6 +570,57 @@ namespace PointCloud
                 // from the stepped playhead instead of jumping back.
                 SyncWallClockTo(maxSteppedTs);
             }
+            return moved;
+        }
+
+        /// <summary>
+        /// Current playhead position, in SECONDS from the recording start (0 at
+        /// the first frame). This is the shared master-timeline value that
+        /// Update() advances every track against. Valid while Playing (frozen
+        /// while paused); 0 otherwise.
+        /// </summary>
+        public double CurrentPlayheadSeconds =>
+            CurrentState != State.Playing ? 0.0
+            : (_lastPlayheadNs > _playbackTrackStartNs ? _lastPlayheadNs - _playbackTrackStartNs : 0UL)
+              / 1_000_000_000.0;
+
+        /// <summary>
+        /// Seek to a playhead given in SECONDS from the recording start and land
+        /// EVERY track on its own timestamp-matched frame (the latest frame whose
+        /// recorded timestamp is &lt;= the playhead) — i.e. resolve each camera
+        /// independently exactly like Update() does, instead of forcing a shared
+        /// cursor index. Auto-pauses like the Step* / SeekAllTracksTo APIs.
+        /// Returns true if any track moved.
+        /// </summary>
+        [ContextMenu("Seek To Playhead (debug)")]
+        public bool SeekToPlayheadSeconds(double secondsFromStart)
+        {
+            if (CurrentState != State.Playing) return false;
+            if (_tracks.Count == 0) return false;
+            if (!IsPaused) PausePlayback();
+
+            ulong offsetNs = secondsFromStart > 0.0
+                ? (ulong)(secondsFromStart * 1_000_000_000.0) : 0UL;
+            ulong playheadNs = _playbackTrackStartNs + offsetNs;
+
+            bool moved = false;
+            foreach (var kv in _tracks)
+            {
+                var track = kv.Value;
+                if (track.DepthFrames.Count == 0) continue;
+                // Latest frame whose timestamp <= playhead (clamped to frame 0
+                // when the whole track starts after the playhead).
+                int target = 0;
+                for (int i = 0; i < track.DepthFrames.Count; i++)
+                {
+                    if (TimestampNsAt(track.DepthFrames, i) <= playheadNs) target = i;
+                    else break;
+                }
+                if (target == track.PlaybackCursor) continue;
+                SetCursorAndEmit(track, target);
+                moved = true;
+            }
+            SyncWallClockTo(playheadNs);   // also stamps _lastPlayheadNs
             return moved;
         }
 
@@ -724,6 +791,7 @@ namespace PointCloud
             double elapsedSec = fromOrigin / 1_000_000_000.0 / rate;
             _playbackWallStart = Time.timeAsDouble - elapsedSec;
             if (IsPaused) _pauseWallStart = Time.timeAsDouble;
+            _lastPlayheadNs = playheadNs;
         }
 
         [ContextMenu("Rewrite metadata (yaml)")]
@@ -1419,6 +1487,7 @@ namespace PointCloud
             }
             _playbackTrackStartNs = firstTs == ulong.MaxValue ? 0 : firstTs;
             _playbackWallStart = Time.timeAsDouble;
+            _lastPlayheadNs = _playbackTrackStartNs;
             IsPaused = false;
             CurrentState = State.Playing;
             SetStatus($"Playing {_tracks.Count} device(s)…");
@@ -1480,6 +1549,7 @@ namespace PointCloud
             double elapsedSec = (Time.timeAsDouble - _playbackWallStart) * Mathf.Max(0.01f, playbackRate);
             ulong elapsedNs = (ulong)Math.Max(0.0, elapsedSec * 1_000_000_000.0);
             ulong playheadNs = _playbackTrackStartNs + elapsedNs;
+            _lastPlayheadNs = playheadNs;
 
             bool anyRemaining = false;
             foreach (var kv in _tracks)
