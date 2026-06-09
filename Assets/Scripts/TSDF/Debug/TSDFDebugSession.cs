@@ -71,6 +71,11 @@ namespace TSDF.DebugTools
         public bool buildRequested = false;
         [Tooltip("Key to rebuild the fixed-frame bench (Game View must have focus).")]
         public KeyCode buildFixedFramesKey = KeyCode.B;
+        [Tooltip("On entering Play, automatically Read + Play the recorder and run the " +
+                 "bench once (no need to press the recorder's Play button by hand — its " +
+                 "playback state is otherwise lost on every EnterPlaymode). The build " +
+                 "leaves playback paused/frozen at the two fixed instants.")]
+        public bool autoRunOnPlay = true;
 
         [Header("Cache status (read-only)")]
         [SerializeField] private int cachedCount = 0;
@@ -80,8 +85,11 @@ namespace TSDF.DebugTools
                  "Use the numbers shown to fill in seekToCursor.")]
         [SerializeField] private string[] currentCursors = new string[0];
         [Tooltip("Live playhead readout in seconds from the recording start — the " +
-                 "master timeline value. Copy the numbers shown into playheadsSec.")]
+                 "master timeline value. Copy the numbers shown into startPlayheadSec.")]
         [SerializeField] private string currentPlayheadSec = "(idle)";
+        [Tooltip("B mode status (realtime trailing red/blue): off, or the cursors " +
+                 "currently shown as red (cursor-skip) / blue (cursor).")]
+        [SerializeField] private string bModeStatus = "(off)";
 
         // Per-serial snapshot of the most recently observed depth frame. The
         // recorder's RcsvFrameStream re-uses its scratch byte[], so we copy
@@ -97,11 +105,27 @@ namespace TSDF.DebugTools
             public int DepthWidth;
             public int DepthHeight;
             public ulong TimestampUs;
+            public int Cursor;          // playback cursor this snapshot was emitted at (B mode ring)
         }
         private readonly Dictionary<string, Snapshot> _cache = new Dictionary<string, Snapshot>();
 
         private PointCloudRecorder _subscribedRecorder;
         private System.Action<string, ObCameraParam?, Transform, RawFrameData> _handler;
+
+        // --- B mode: realtime trailing red/blue ---
+        // While active, playback runs normally; every time the reference camera's
+        // cursor advances we re-tag the volume as red = frame (cursor - skipFrames),
+        // blue = frame (cursor), pulled from a per-serial ring buffer of recent
+        // emitted frames (no seeking, so playback stays smooth). space / arrows are
+        // the recorder's own pause / step keys.
+        private bool _bMode;
+        private int _lastBuiltRefCursor = int.MinValue;
+        private readonly Dictionary<string, Snapshot[]> _ring = new Dictionary<string, Snapshot[]>();
+        private int _ringCap;
+        // Integrator/volume state captured on B-mode enter so OFF restores it
+        // (otherwise the volume stays frozen on RetainGhost and nothing renders).
+        private TSDFVolume.AccumulationMode _savedAccum;
+        private bool _savedIntegEnabled;
 
         private void OnEnable()
         {
@@ -113,6 +137,19 @@ namespace TSDF.DebugTools
             _handler = HandlePlaybackRawFrame;
             recorder.OnPlaybackRawFrame += _handler;
             _subscribedRecorder = recorder;
+
+            if (autoRunOnPlay && Application.isPlaying)
+                StartCoroutine(AutoRunCo());
+        }
+
+        // Wait a couple of frames so the recorder's own enable/start ran, then
+        // Read+Play+Build automatically. BuildFixedFrames self-starts playback,
+        // so this only needs to fire it once.
+        private System.Collections.IEnumerator AutoRunCo()
+        {
+            yield return null;
+            yield return null;
+            SetBMode(true);
         }
 
         private void OnDisable()
@@ -150,7 +187,10 @@ namespace TSDF.DebugTools
             snap.CamParam = camParam.Value;
             snap.SourceTransform = sourceTransform;
             snap.TimestampUs = raw.TimestampUs;
+            snap.Cursor = recorder != null ? recorder.GetPlaybackCursor(serial) : -1;
             cachedCount = _cache.Count;
+
+            if (_bMode) StoreRing(serial, snap);
         }
 
         private void Update()
@@ -158,8 +198,23 @@ namespace TSDF.DebugTools
             HandleKeyboard();
             UpdateCursorReadout();
             if (seekRequested) PerformSeek();
-            if (Input.GetKeyDown(buildFixedFramesKey)) BuildFixedFrames();
-            if (buildRequested) BuildFixedFrames();
+            if (Input.GetKeyDown(buildFixedFramesKey)) ToggleBMode();
+            if (buildRequested) BuildFixedFrames();   // context-menu / tick = one-shot frozen pair
+        }
+
+        // Re-tag the trailing red/blue pair after the recorder has emitted this
+        // frame's data (run in LateUpdate so it's after the recorder's Update,
+        // whatever the execution order).
+        private void LateUpdate()
+        {
+            if (!_bMode || recorder == null) return;
+            if (recorder.CurrentState != PointCloudRecorder.State.Playing) return;
+            string refSerial = ResolveSerials(out var serials);
+            if (refSerial == null) return;
+            int refCursor = recorder.GetPlaybackCursor(refSerial);
+            if (refCursor < 0 || refCursor == _lastBuiltRefCursor) return;
+            _lastBuiltRefCursor = refCursor;
+            RebuildTrailing(serials);
         }
 
         private void UpdateCursorReadout()
@@ -198,6 +253,19 @@ namespace TSDF.DebugTools
         public void TriggerBuildFixedFrames() { buildRequested = true; }
 
         /// <summary>
+        /// Get the recorder into Playing state without the user touching its Play
+        /// button: Read (Load) the recording if nothing is loaded yet, then start
+        /// playback. No-op if already playing.
+        /// </summary>
+        private void EnsureRecorderPlaying()
+        {
+            if (recorder == null || recorder.CurrentState == PointCloudRecorder.State.Playing) return;
+            var tracks = recorder.GetRecordedDepthTracks();
+            if (tracks == null || tracks.Count == 0) recorder.Load();   // "Read"
+            recorder.TogglePlay();                                      // Idle -> Playing
+        }
+
+        /// <summary>
         /// Accumulate two instants — the frame at <see cref="startPlayheadSec"/> and
         /// the frame <see cref="skipFrames"/> later — into a single volume with
         /// RetainGhost, then freeze. The second playhead is COMPUTED from a reference
@@ -221,8 +289,13 @@ namespace TSDF.DebugTools
             }
             if (recorder.CurrentState != PointCloudRecorder.State.Playing)
             {
-                Debug.LogWarning("[TSDFDebugSession] Recorder must be Playing to seek — hit Play first.", this);
-                return;
+                EnsureRecorderPlaying();
+                if (recorder.CurrentState != PointCloudRecorder.State.Playing)
+                {
+                    Debug.LogWarning("[TSDFDebugSession] Could not start playback — is a recording set/loaded " +
+                                     "(recorder folderPath)? Press Read manually if needed.", this);
+                    return;
+                }
             }
 
             if (cameraKeys == null || cameraKeys.Length == 0) AutoPopulateCameraKeys();
@@ -312,6 +385,151 @@ namespace TSDF.DebugTools
                 n++;
             }
             return n;
+        }
+
+        // ---------------- B mode: realtime trailing red/blue ----------------
+
+        public void ToggleBMode() { SetBMode(!_bMode); }
+
+        /// <summary>
+        /// Enter/leave B mode. On enter: ensure the recorder is playing (resume if
+        /// paused), freeze the live integrator (we drive it manually), force
+        /// RetainGhost, and start re-tagging the trailing red/blue pair each frame
+        /// in LateUpdate. space / arrows remain the recorder's own pause / step.
+        /// </summary>
+        public void SetBMode(bool on)
+        {
+            if (recorder == null || volume == null || integrator == null)
+            {
+                Debug.LogWarning("[TSDFDebugSession] B mode needs recorder + volume + integrator.", this);
+                return;
+            }
+            if (on)
+            {
+                if (_bMode) return;   // already on — don't re-capture saved state
+                EnsureRecorderPlaying();
+                if (recorder.CurrentState != PointCloudRecorder.State.Playing)
+                {
+                    Debug.LogWarning("[TSDFDebugSession] B mode: could not start playback (recording loaded?).", this);
+                    bModeStatus = "(no playback)";
+                    return;
+                }
+                // Remember normal-render state so OFF can restore it.
+                _savedAccum = volume.accumulationMode;
+                _savedIntegEnabled = integrator.integrationEnabled;
+                ResetRing();
+                _bMode = true;
+                // Land on startPlayheadSec and HOLD there (paused), showing the
+                // red/blue pair — NOT play from frame 0. BuildFixedFrames seeks to
+                // startPlayheadSec, integrates start=red / start+skip=blue, and
+                // leaves playback paused + the integrator frozen. From here the
+                // recorder's own space = play, <-/-> = step drive the trailing
+                // rebuild in LateUpdate.
+                BuildFixedFrames();
+                string refS0 = ResolveSerials(out _);
+                _lastBuiltRefCursor = refS0 != null ? recorder.GetPlaybackCursor(refS0) : int.MinValue;
+                bModeStatus = $"ON (paused @ {startPlayheadSec:0.000}s) — space=play, <-/->=step";
+                Debug.Log($"[TSDFDebugSession] B mode ON — paused at startPlayheadSec ({startPlayheadSec:0.000}s), " +
+                          "red/blue shown. space=play, <-/->=step.", this);
+            }
+            else
+            {
+                if (!_bMode) return;   // already off
+                _bMode = false;
+                integrator.colorOverride = new Color(0f, 0f, 0f, 0f);   // drop red/blue tag
+                volume.accumulationMode = _savedAccum;                  // restore normal accumulation
+                integrator.integrationEnabled = _savedIntegEnabled;     // resume live integration
+                bModeStatus = "(off)";
+                Debug.Log("[TSDFDebugSession] B mode OFF — restored live integration " +
+                          $"(accum={_savedAccum}, integrationEnabled={_savedIntegEnabled}).", this);
+            }
+        }
+
+        // Pick the camera list (all, or the single validateSerial) and the
+        // reference serial used to drive the per-frame rebuild. Returns null ref
+        // when nothing usable is configured.
+        private string ResolveSerials(out string[] serials)
+        {
+            if (cameraKeys == null || cameraKeys.Length == 0) AutoPopulateCameraKeys();
+            serials = !string.IsNullOrEmpty(validateSerial) ? new[] { validateSerial } : cameraKeys;
+            if (serials == null || serials.Length == 0 || string.IsNullOrEmpty(serials[0]))
+            {
+                serials = null;
+                return null;
+            }
+            return serials[0];
+        }
+
+        private void RebuildTrailing(string[] serials)
+        {
+            int skip = Mathf.Max(1, skipFrames);
+            volume.ClearWrite();
+
+            int red = 0, blue = 0;
+            // red = trailing frame (cursor - skip) per camera
+            if (colorByInstant) integrator.colorOverride = instant1Color;
+            foreach (var s in serials)
+            {
+                if (string.IsNullOrEmpty(s)) continue;
+                var t = RingGet(s, recorder.GetPlaybackCursor(s) - skip);
+                if (t != null) { IntegrateSnapshot(t); red++; }
+            }
+            // blue = current frame (cursor) per camera
+            if (colorByInstant) integrator.colorOverride = instant2Color;
+            foreach (var s in serials)
+            {
+                if (string.IsNullOrEmpty(s)) continue;
+                var c = RingGet(s, recorder.GetPlaybackCursor(s));
+                if (c == null) _cache.TryGetValue(s, out c);   // current is freshest; cache fallback
+                if (c != null) { IntegrateSnapshot(c); blue++; }
+            }
+            if (colorByInstant) integrator.colorOverride = new Color(0f, 0f, 0f, 0f);
+            volume.Publish();
+
+            int refCur = recorder.GetPlaybackCursor(serials[0]);
+            bModeStatus = $"ON  red {refCur - skip} / blue {refCur}  (r{red}/b{blue})";
+        }
+
+        // --- per-serial ring buffer of recent emitted frames (B mode) ---
+
+        private void EnsureRingCap()
+        {
+            int want = Mathf.Max(1, skipFrames) + 2;
+            if (want != _ringCap) { _ring.Clear(); _ringCap = want; }
+        }
+
+        private void ResetRing() { _ring.Clear(); _ringCap = 0; EnsureRingCap(); }
+
+        private void StoreRing(string serial, Snapshot src)
+        {
+            EnsureRingCap();
+            if (!_ring.TryGetValue(serial, out var slots) || slots.Length != _ringCap)
+            {
+                slots = new Snapshot[_ringCap];
+                _ring[serial] = slots;
+            }
+            int idx = ((src.Cursor % _ringCap) + _ringCap) % _ringCap;
+            var dst = slots[idx];
+            if (dst == null) { dst = new Snapshot { Serial = serial }; slots[idx] = dst; }
+            if (dst.DepthBytes == null || dst.DepthBytes.Length < src.DepthByteCount)
+                dst.DepthBytes = new byte[src.DepthByteCount];
+            System.Buffer.BlockCopy(src.DepthBytes, 0, dst.DepthBytes, 0, src.DepthByteCount);
+            dst.DepthByteCount = src.DepthByteCount;
+            dst.DepthWidth = src.DepthWidth;
+            dst.DepthHeight = src.DepthHeight;
+            dst.CamParam = src.CamParam;
+            dst.SourceTransform = src.SourceTransform;
+            dst.TimestampUs = src.TimestampUs;
+            dst.Cursor = src.Cursor;
+        }
+
+        private Snapshot RingGet(string serial, int cursor)
+        {
+            if (cursor < 0 || _ringCap <= 0) return null;
+            if (!_ring.TryGetValue(serial, out var slots) || slots.Length != _ringCap) return null;
+            int idx = ((cursor % _ringCap) + _ringCap) % _ringCap;
+            var s = slots[idx];
+            return (s != null && s.Cursor == cursor && s.DepthBytes != null) ? s : null;
         }
 
         private void HandleKeyboard()
