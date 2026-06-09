@@ -302,6 +302,7 @@ namespace TSDF
             _ccShader.Dispatch(_ccInit, gx, gy, 1);
 
             int iters = Mathf.Max(1, ccMaxIterations);
+            bool converged = false;
             var changed = new uint[1];
             for (int it = 0; it < iters; it++)
             {
@@ -309,7 +310,18 @@ namespace TSDF
                 Bind(_ccProp);
                 _ccShader.Dispatch(_ccProp, gx, gy, 1);
                 _ccChanged.GetData(changed);
-                if (changed[0] == 0) break;   // labels stabilised
+                if (changed[0] == 0) { converged = true; break; }   // labels stabilised
+            }
+
+            if (!converged)
+            {
+                // Still changing at the cap: a large body may be split into partial
+                // labels, so culling could delete sub-threshold pieces of it and
+                // punch holes. Leave the volume untouched and ask for more iterations.
+                Debug.LogWarning($"[TSDFVolume] connected-component labelling did not converge in " +
+                                 $"{iters} iterations — skipping noise cull to avoid holes in the " +
+                                 "surface. Raise ccMaxIterations.", this);
+                return;
             }
 
             Bind(_ccResetSize);
