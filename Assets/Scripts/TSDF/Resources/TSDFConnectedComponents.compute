@@ -1,0 +1,116 @@
+// Connected-component noise filter for the TSDF voxel volume (issue #29).
+//
+// Removes small floating "islands" (depth noise / floor reflections) by total
+// component size, NOT by thickness — so the thin main surface is preserved
+// (unlike a morphological opening, which erodes thin shells away entirely).
+//
+// Foreground = solid voxel: sdf < 0 AND weight >= _MinWeight. Components are the
+// 6-connected sets of foreground voxels, labelled by iterative label propagation
+// (each voxel adopts the minimum linear index in its component). After labelling,
+// per-component voxel counts are tallied and any component smaller than
+// _MinComponent is removed by setting its voxels to +tau (free space), so Marching
+// Cubes emits no surface there.
+//
+// Driven from TSDFVolume.RemoveSmallComponents(): InitLabels -> Propagate (looped
+// until _Changed stays 0) -> ResetSizes -> CountSizes -> Cull.
+
+#pragma kernel InitLabels
+#pragma kernel Propagate
+#pragma kernel ResetSizes
+#pragma kernel CountSizes
+#pragma kernel Cull
+
+RWStructuredBuffer<float2> _Voxels;   // x = tsdf, y = weight
+RWStructuredBuffer<uint>   _Label;    // per-voxel component label (min linear index)
+RWStructuredBuffer<uint>   _Size;     // per-label voxel count (indexed by label)
+RWStructuredBuffer<uint>   _Changed;  // [0] : set to 1 when any label changed this pass
+
+int3  _Dim;
+float _MinWeight;
+float _Tau;
+uint  _MinComponent;       // drop components with fewer than this many voxels
+int   _DispatchWidth;      // groupsX * 64
+
+static const uint INVALID = 0xFFFFFFFFu;
+
+uint Lin(int i, int j, int k) { return (uint)(i + _Dim.x * (j + _Dim.y * k)); }
+
+bool IsSolid(uint lin)
+{
+    float2 v = _Voxels[lin];
+    return v.x < 0.0 && v.y >= _MinWeight;
+}
+
+bool Unflatten(uint3 id, out uint lin, out int i, out int j, out int k)
+{
+    lin = id.y * (uint)_DispatchWidth + id.x;
+    uint total = (uint)(_Dim.x * _Dim.y * _Dim.z);
+    if (lin >= total) { i = j = k = 0; return false; }
+    int dx = _Dim.x, dy = _Dim.y;
+    i = (int)(lin % (uint)dx);
+    j = (int)((lin / (uint)dx) % (uint)dy);
+    k = (int)(lin / (uint)(dx * dy));
+    return true;
+}
+
+[numthreads(64,1,1)]
+void InitLabels(uint3 id : SV_DispatchThreadID)
+{
+    uint lin; int i, j, k;
+    if (!Unflatten(id, lin, i, j, k)) return;
+    _Label[lin] = IsSolid(lin) ? lin : INVALID;
+}
+
+[numthreads(64,1,1)]
+void Propagate(uint3 id : SV_DispatchThreadID)
+{
+    uint lin; int i, j, k;
+    if (!Unflatten(id, lin, i, j, k)) return;
+    if (!IsSolid(lin)) return;
+
+    uint best = _Label[lin];
+    // 6-connectivity. Each neighbour contributes its label if it is solid.
+    if (i > 0)            { uint n = Lin(i-1,j,k); if (IsSolid(n)) best = min(best, _Label[n]); }
+    if (i < _Dim.x - 1)   { uint n = Lin(i+1,j,k); if (IsSolid(n)) best = min(best, _Label[n]); }
+    if (j > 0)            { uint n = Lin(i,j-1,k); if (IsSolid(n)) best = min(best, _Label[n]); }
+    if (j < _Dim.y - 1)   { uint n = Lin(i,j+1,k); if (IsSolid(n)) best = min(best, _Label[n]); }
+    if (k > 0)            { uint n = Lin(i,j,k-1); if (IsSolid(n)) best = min(best, _Label[n]); }
+    if (k < _Dim.z - 1)   { uint n = Lin(i,j,k+1); if (IsSolid(n)) best = min(best, _Label[n]); }
+
+    if (best < _Label[lin])
+    {
+        _Label[lin] = best;
+        _Changed[0] = 1;
+    }
+}
+
+[numthreads(64,1,1)]
+void ResetSizes(uint3 id : SV_DispatchThreadID)
+{
+    uint lin; int i, j, k;
+    if (!Unflatten(id, lin, i, j, k)) return;
+    _Size[lin] = 0;
+}
+
+[numthreads(64,1,1)]
+void CountSizes(uint3 id : SV_DispatchThreadID)
+{
+    uint lin; int i, j, k;
+    if (!Unflatten(id, lin, i, j, k)) return;
+    if (!IsSolid(lin)) return;
+    uint lbl = _Label[lin];
+    if (lbl != INVALID)
+        InterlockedAdd(_Size[lbl], 1u);
+}
+
+[numthreads(64,1,1)]
+void Cull(uint3 id : SV_DispatchThreadID)
+{
+    uint lin; int i, j, k;
+    if (!Unflatten(id, lin, i, j, k)) return;
+    if (!IsSolid(lin)) return;
+    uint lbl = _Label[lin];
+    if (lbl == INVALID) return;
+    if (_Size[lbl] < _MinComponent)
+        _Voxels[lin] = float2(_Tau, _Voxels[lin].y);   // remove: collapse to free space
+}

@@ -76,6 +76,10 @@ namespace TSDF.DebugTools
                  "playback state is otherwise lost on every EnterPlaymode). The build " +
                  "leaves playback paused/frozen at the two fixed instants.")]
         public bool autoRunOnPlay = true;
+        [Tooltip("Run the connected-component noise filter (TSDFVolume.RemoveSmallComponents) " +
+                 "on the current frozen result — drops small floating islands, keeps the " +
+                 "thin main surface. Run while paused (it's a one-shot, not per-frame).")]
+        public KeyCode removeNoiseKey = KeyCode.N;
 
         [Header("Cache status (read-only)")]
         [SerializeField] private int cachedCount = 0;
@@ -211,8 +215,12 @@ namespace TSDF.DebugTools
             UpdateCursorReadout();
             if (seekRequested) PerformSeek();
             if (Input.GetKeyDown(buildFixedFramesKey)) ToggleBMode();
+            if (Input.GetKeyDown(removeNoiseKey) && volume != null) volume.RemoveSmallComponents();
             if (buildRequested) BuildFixedFrames();   // context-menu / tick = one-shot frozen pair
         }
+
+        [ContextMenu("Remove Small Components (noise)")]
+        public void TriggerRemoveNoise() { if (volume != null) volume.RemoveSmallComponents(); }
 
         // Re-tag the trailing red/blue pair after the recorder has emitted this
         // frame's data (run in LateUpdate so it's after the recorder's Update,

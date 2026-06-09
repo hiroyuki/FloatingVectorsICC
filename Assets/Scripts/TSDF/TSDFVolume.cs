@@ -111,6 +111,23 @@ namespace TSDF
         private int _clearKernel;
         private bool _dimsDirty = true;
 
+        [Header("Noise removal (connected-component filter — issue #29)")]
+        [Tooltip("On RemoveSmallComponents(), drop solid components smaller than this " +
+                 "many voxels (floating islands), keeping the thin main surface intact. " +
+                 "Run on a frozen result (B-mode pause), not per frame.")]
+        [Min(1)] public int minComponentVoxels = 200;
+        [Tooltip("Max label-propagation iterations for connected-component labelling " +
+                 "(stops early once labels stabilise). Raise if large bodies get holes.")]
+        [Min(1)] public int ccMaxIterations = 256;
+        [Tooltip("A voxel counts as solid for the component filter when sdf < 0 and " +
+                 "weight >= this. Keep at/below the Marching Cubes weight gate so the " +
+                 "filter sees everything that gets meshed.")]
+        [Min(0f)] public float ccMinWeight = 0.5f;
+
+        private ComputeShader _ccShader;
+        private int _ccInit, _ccProp, _ccResetSize, _ccCount, _ccCull;
+        private ComputeBuffer _ccLabel, _ccSize, _ccChanged;
+
         // Physical backing buffers. _bufB is null in single-buffer mode.
         private ComputeBuffer _bufA;
         private ComputeBuffer _bufB;
@@ -229,6 +246,105 @@ namespace TSDF
             PublishVersion++;
         }
 
+        private void EnsureCcShader()
+        {
+            if (_ccShader != null) return;
+            _ccShader = Resources.Load<ComputeShader>("TSDFConnectedComponents");
+            if (_ccShader == null)
+            {
+                Debug.LogError("[TSDFVolume] Compute shader \"Resources/TSDFConnectedComponents.compute\" not found.", this);
+                return;
+            }
+            _ccInit = _ccShader.FindKernel("InitLabels");
+            _ccProp = _ccShader.FindKernel("Propagate");
+            _ccResetSize = _ccShader.FindKernel("ResetSizes");
+            _ccCount = _ccShader.FindKernel("CountSizes");
+            _ccCull = _ccShader.FindKernel("Cull");
+        }
+
+        /// <summary>
+        /// Connected-component noise filter on the DISPLAYED (front) buffer: label
+        /// solid voxels (sdf &lt; 0, weight ≥ minWeight) by 6-connectivity via
+        /// iterative label propagation, then remove every component smaller than
+        /// <see cref="minComponentVoxels"/> (set those voxels to +tau). Removes
+        /// floating islands by total size without eroding the thin main surface.
+        /// Re-publishes so Marching Cubes re-extracts. Run on a frozen result
+        /// (B-mode pause) — it is a one-shot, not a per-frame, operation.
+        /// </summary>
+        public void RemoveSmallComponents() => RemoveSmallComponents(minComponentVoxels);
+
+        public void RemoveSmallComponents(int minVoxels)
+        {
+            EnsureCcShader();
+            if (_ccShader == null || FrontBuffer == null) return;
+            int total = Dim.x * Dim.y * Dim.z;
+            if (total <= 0) return;
+
+            EnsureCcResources(total);
+            int gx, gy;
+            DispatchGrid(total, out gx, out gy);
+            int dw = gx * 64;
+
+            void Bind(int k)
+            {
+                _ccShader.SetBuffer(k, "_Voxels", FrontBuffer);
+                _ccShader.SetBuffer(k, "_Label", _ccLabel);
+                _ccShader.SetBuffer(k, "_Size", _ccSize);
+                _ccShader.SetBuffer(k, "_Changed", _ccChanged);
+                _ccShader.SetInts("_Dim", Dim.x, Dim.y, Dim.z);
+                _ccShader.SetFloat("_MinWeight", ccMinWeight);
+                _ccShader.SetFloat("_Tau", Tau);
+                _ccShader.SetInt("_MinComponent", Mathf.Max(1, minVoxels));
+                _ccShader.SetInt("_DispatchWidth", dw);
+            }
+
+            Bind(_ccInit);
+            _ccShader.Dispatch(_ccInit, gx, gy, 1);
+
+            int iters = Mathf.Max(1, ccMaxIterations);
+            var changed = new uint[1];
+            for (int it = 0; it < iters; it++)
+            {
+                _ccChanged.SetData(new uint[] { 0 });
+                Bind(_ccProp);
+                _ccShader.Dispatch(_ccProp, gx, gy, 1);
+                _ccChanged.GetData(changed);
+                if (changed[0] == 0) break;   // labels stabilised
+            }
+
+            Bind(_ccResetSize);
+            _ccShader.Dispatch(_ccResetSize, gx, gy, 1);
+            Bind(_ccCount);
+            _ccShader.Dispatch(_ccCount, gx, gy, 1);
+            Bind(_ccCull);
+            _ccShader.Dispatch(_ccCull, gx, gy, 1);
+
+            PublishVersion++;   // re-extract Marching Cubes on the cleaned front buffer
+        }
+
+        private void EnsureCcResources(int total)
+        {
+            if (_ccLabel == null || _ccLabel.count != total)
+            {
+                _ccLabel?.Release();
+                _ccLabel = new ComputeBuffer(total, sizeof(uint));
+            }
+            if (_ccSize == null || _ccSize.count != total)
+            {
+                _ccSize?.Release();
+                _ccSize = new ComputeBuffer(total, sizeof(uint));
+            }
+            if (_ccChanged == null)
+                _ccChanged = new ComputeBuffer(1, sizeof(uint));
+        }
+
+        private void DispatchGrid(int total, out int gx, out int gy)
+        {
+            int groups = Mathf.CeilToInt(total / 64f);
+            gx = Mathf.Max(1, Mathf.Min(groups, 65535));
+            gy = Mathf.Max(1, Mathf.CeilToInt(groups / (float)gx));
+        }
+
         private void EnsureClearShader()
         {
             if (_clearShader != null) return;
@@ -334,6 +450,12 @@ namespace TSDF
             _bufB?.Release();
             _colA?.Release();
             _colB?.Release();
+            _ccLabel?.Release();
+            _ccSize?.Release();
+            _ccChanged?.Release();
+            _ccLabel = null;
+            _ccSize = null;
+            _ccChanged = null;
             _bufA = null;
             _bufB = null;
             _colA = null;
