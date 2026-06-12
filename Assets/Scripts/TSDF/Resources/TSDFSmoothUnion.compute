@@ -1,0 +1,103 @@
+// Smooth-union (smin / metaball) composition of two separate TSDF instants —
+// issue #27 (parent #25). Holds two fixed moments as SEPARATE sdf+colour
+// buffers (A and B), then blends them with a polynomial smooth-min so the two
+// shells grow an organic neck toward each other (k tunes the neck thickness).
+//
+//   Copy        : snapshot one freshly-integrated instant out of the volume's
+//                 write buffer into a scratch A/B buffer pair.
+//   SmoothUnion : result = smin(sdfA, sdfB, k) written back into the B buffer
+//                 (= the volume write buffer), with colour blended by the same
+//                 smin weight so the seam is a natural A/B colour mix.
+//
+// Notes:
+//  - smin <= min, so the seam bulges OUTWARD. This only looks clean where the
+//    two shells overlap / nearly touch; far-apart shells bridge with a global
+//    outward swell (the documented caveat — method A is better when far apart).
+//  - The dip term only kicks in where |sdfA - sdfB| < k, so empty free-space
+//    voxels (both clamped to +tau) stay above the iso level as long as k stays
+//    well under 4*tau — no phantom surface in open space.
+//  - A voxel observed by only one instant passes that instant straight through
+//    (no smin), so single-sided regions are unchanged.
+
+#pragma kernel Copy
+#pragma kernel SmoothUnion
+
+// = groupsX * 64; linearises the 2D dispatch grid so large volumes stay under
+// the 65535 threadgroup-per-axis D3D limit (matches TSDFClear / TSDFIntegrate).
+int _DispatchWidth;
+int3 _Dim;
+float _Tau;          // truncation distance (metres) — the "no observation" sdf seed
+float _K;            // smooth-min blend radius (metres). Larger = fatter neck.
+
+// ---- Copy: _Src* -> _Dst* (snapshot an instant out of the write buffer) ----
+StructuredBuffer<float2> _SrcVoxels;
+StructuredBuffer<float4> _SrcColors;
+RWStructuredBuffer<float2> _DstVoxels;
+RWStructuredBuffer<float4> _DstColors;
+
+[numthreads(64, 1, 1)]
+void Copy(uint3 id : SV_DispatchThreadID)
+{
+    uint lin = id.y * (uint)_DispatchWidth + id.x;
+    uint total = (uint)(_Dim.x * _Dim.y * _Dim.z);
+    if (lin >= total) return;
+    _DstVoxels[lin] = _SrcVoxels[lin];
+    _DstColors[lin] = _SrcColors[lin];
+}
+
+// ---- SmoothUnion: smin(A, B) -> Out ----
+// A and B are the two cached instant snapshots; Out is the volume write buffer
+// that Marching Cubes extracts. Keeping A/B separate from Out lets the caller
+// re-run this kernel for a new k without re-integrating either instant.
+StructuredBuffer<float2> _VoxelsA;
+StructuredBuffer<float4> _ColorsA;
+StructuredBuffer<float2> _VoxelsB;
+StructuredBuffer<float4> _ColorsB;
+RWStructuredBuffer<float2> _VoxelsOut;
+RWStructuredBuffer<float4> _ColorsOut;
+
+[numthreads(64, 1, 1)]
+void SmoothUnion(uint3 id : SV_DispatchThreadID)
+{
+    uint lin = id.y * (uint)_DispatchWidth + id.x;
+    uint total = (uint)(_Dim.x * _Dim.y * _Dim.z);
+    if (lin >= total) return;
+
+    float2 va = _VoxelsA[lin];
+    float2 vb = _VoxelsB[lin];
+    bool aValid = va.y > 0.0;
+    bool bValid = vb.y > 0.0;
+
+    if (aValid && bValid)
+    {
+        float a = va.x;
+        float b = vb.x;
+        float k = max(_K, 1e-6);
+        // Polynomial smooth-min (Inigo Quilez). h is the A-vs-B blend weight:
+        // h -> 1 picks A, h -> 0 picks B, h ~ 0.5 is the smoothed seam.
+        float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+        float s = lerp(b, a, h) - k * h * (1.0 - h);
+        float3 col = lerp(_ColorsB[lin].rgb, _ColorsA[lin].rgb, h);
+        float w = max(va.y, vb.y);
+        _VoxelsOut[lin] = float2(s, w);
+        _ColorsOut[lin] = float4(col, w);
+    }
+    else if (aValid)
+    {
+        // Only instant 1 observed this voxel — pass it through unchanged.
+        _VoxelsOut[lin] = va;
+        _ColorsOut[lin] = _ColorsA[lin];
+    }
+    else if (bValid)
+    {
+        // Only instant 2 observed this voxel — pass it through unchanged.
+        _VoxelsOut[lin] = vb;
+        _ColorsOut[lin] = _ColorsB[lin];
+    }
+    else
+    {
+        // Neither instant observed it: keep it empty so MC's weight gate skips.
+        _VoxelsOut[lin] = float2(_Tau, 0.0);
+        _ColorsOut[lin] = float4(0.0, 0.0, 0.0, 0.0);
+    }
+}
