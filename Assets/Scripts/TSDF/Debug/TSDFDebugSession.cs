@@ -428,19 +428,19 @@ namespace TSDF.DebugTools
                 // buffer (clear the write buffer BEFORE each one), snapshot it out, then
                 // smin(A,B,k) -> write buffer. The two shells stay independent so the
                 // blend produces an organic neck instead of two flat RetainGhost shells.
-                int total = volume.Dim.x * volume.Dim.y * volume.Dim.z;
-                EnsureSmoothUnionBuffers(total);
+                int voxelTotal = volume.Dim.x * volume.Dim.y * volume.Dim.z;
+                EnsureSmoothUnionBuffers(voxelTotal);
 
                 volume.ClearWrite();
                 if (colorByInstant) integrator.colorOverride = instant1Color;
                 done += IntegrateAllCached(serials, $"instant1 @ {startPlayheadSec:0.000}s (SDF A)");
-                SnapshotWriteBuffer(_suVoxA, _suColA, total);
+                SnapshotWriteBuffer(_suVoxA, _suColA, voxelTotal);
 
                 recorder.SeekToPlayheadSeconds(secondSec);
                 volume.ClearWrite();
                 if (colorByInstant) integrator.colorOverride = instant2Color;
                 done += IntegrateAllCached(serials, $"instant2 @ {secondSec:0.000}s (+{skipFrames}f, SDF B)");
-                SnapshotWriteBuffer(_suVoxB, _suColB, total);
+                SnapshotWriteBuffer(_suVoxB, _suColB, voxelTotal);
 
                 if (colorByInstant) integrator.colorOverride = new Color(0f, 0f, 0f, 0f);
 
