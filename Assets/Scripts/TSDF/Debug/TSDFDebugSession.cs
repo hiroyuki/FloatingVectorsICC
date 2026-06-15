@@ -80,6 +80,10 @@ namespace TSDF.DebugTools
                  "on the current frozen result — drops small floating islands, keeps the " +
                  "thin main surface. Run while paused (it's a one-shot, not per-frame).")]
         public KeyCode removeNoiseKey = KeyCode.N;
+        [Tooltip("Toggle colorByInstant live (camera RGB <-> red/blue instant tags) and " +
+                 "immediately re-tag the current result, so you can flip the colour mode " +
+                 "during Play without rebuilding by hand.")]
+        public KeyCode colorModeKey = KeyCode.C;
 
         [Header("Cache status (read-only)")]
         [SerializeField] private int cachedCount = 0;
@@ -108,6 +112,10 @@ namespace TSDF.DebugTools
             public int DepthByteCount;
             public int DepthWidth;
             public int DepthHeight;
+            public byte[] ColorBytes;   // RGB8; ColorByteCount==0 means no colour this frame
+            public int ColorByteCount;
+            public int ColorWidth;
+            public int ColorHeight;
             public ulong TimestampUs;
             public int Cursor;          // playback cursor this snapshot was emitted at (B mode ring)
         }
@@ -204,6 +212,20 @@ namespace TSDF.DebugTools
             snap.SourceTransform = sourceTransform;
             snap.TimestampUs = raw.TimestampUs;
             snap.Cursor = recorder != null ? recorder.GetPlaybackCursor(serial) : -1;
+            // Cache the colour frame too so colorByInstant=false bakes real camera RGB
+            // (without this the integrator gets no colour and SampleColor returns grey).
+            bool hasColor = raw.ColorBytes != null && raw.ColorByteCount > 0
+                            && raw.ColorWidth > 0 && raw.ColorHeight > 0;
+            if (hasColor)
+            {
+                if (snap.ColorBytes == null || snap.ColorBytes.Length < raw.ColorByteCount)
+                    snap.ColorBytes = new byte[raw.ColorByteCount];
+                System.Buffer.BlockCopy(raw.ColorBytes, 0, snap.ColorBytes, 0, raw.ColorByteCount);
+                snap.ColorByteCount = raw.ColorByteCount;
+                snap.ColorWidth = raw.ColorWidth;
+                snap.ColorHeight = raw.ColorHeight;
+            }
+            else snap.ColorByteCount = 0;
             cachedCount = _cache.Count;
 
             if (_bMode) StoreRing(serial, snap);
@@ -216,6 +238,13 @@ namespace TSDF.DebugTools
             if (seekRequested) PerformSeek();
             if (Input.GetKeyDown(buildFixedFramesKey)) ToggleBMode();
             if (Input.GetKeyDown(removeNoiseKey) && volume != null) volume.RemoveSmallComponents();
+            if (Input.GetKeyDown(colorModeKey))
+            {
+                // Flip camera-RGB <-> red/blue tags and re-tag immediately so the
+                // change is visible without a manual rebuild (works paused too).
+                colorByInstant = !colorByInstant;
+                if (_bMode) RebuildAtCurrent(); else BuildFixedFrames();
+            }
             if (buildRequested) BuildFixedFrames();   // context-menu / tick = one-shot frozen pair
         }
 
@@ -566,6 +595,16 @@ namespace TSDF.DebugTools
             dst.SourceTransform = src.SourceTransform;
             dst.TimestampUs = src.TimestampUs;
             dst.Cursor = src.Cursor;
+            // carry colour so B-mode camera-colour works, not just red/blue tags
+            dst.ColorByteCount = src.ColorByteCount;
+            dst.ColorWidth = src.ColorWidth;
+            dst.ColorHeight = src.ColorHeight;
+            if (src.ColorByteCount > 0)
+            {
+                if (dst.ColorBytes == null || dst.ColorBytes.Length < src.ColorByteCount)
+                    dst.ColorBytes = new byte[src.ColorByteCount];
+                System.Buffer.BlockCopy(src.ColorBytes, 0, dst.ColorBytes, 0, src.ColorByteCount);
+            }
         }
 
         private Snapshot RingGet(string serial, int cursor)
@@ -680,7 +719,9 @@ namespace TSDF.DebugTools
             var raw = new RawFrameData(
                 depthBytes: snap.DepthBytes, depthByteCount: snap.DepthByteCount,
                 depthWidth: snap.DepthWidth, depthHeight: snap.DepthHeight,
-                colorBytes: null, colorByteCount: 0, colorWidth: 0, colorHeight: 0,
+                colorBytes: snap.ColorByteCount > 0 ? snap.ColorBytes : null,
+                colorByteCount: snap.ColorByteCount,
+                colorWidth: snap.ColorWidth, colorHeight: snap.ColorHeight,
                 irBytes: null, irByteCount: 0, irWidth: 0, irHeight: 0,
                 timestampUs: snap.TimestampUs);
             integrator.IntegrateRawFrame(snap.Serial, snap.CamParam, snap.SourceTransform, raw);
