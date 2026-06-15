@@ -66,6 +66,19 @@ namespace TSDF.DebugTools
         public bool colorByInstant = true;
         public Color instant1Color = Color.red;
         public Color instant2Color = Color.blue;
+        [Header("Smooth-union (issue #27)")]
+        [Tooltip("Method B: instead of folding the two instants into ONE RetainGhost " +
+                 "buffer, integrate them as TWO SEPARATE SDFs and blend with " +
+                 "smin(A,B,k) so the shells grow an organic neck. Only the fixed-frame " +
+                 "bench (Build Fixed Frames) uses this; the realtime trailing red/blue " +
+                 "(B) path stays RetainGhost. While the bench is frozen, dragging " +
+                 "smoothUnionK re-blends the cached pair live (no re-integration).")]
+        public bool smoothUnion = false;
+        [Tooltip("smin neck radius k in METRES. Larger = fatter / longer neck (and more " +
+                 "outward bulge when the two shells sit far apart — the documented " +
+                 "caveat). ~1-4 voxels is a sensible start. Drag while frozen to watch " +
+                 "the neck change live.")]
+        [Range(0.001f, 0.3f)] public float smoothUnionK = 0.03f;
         [Tooltip("Tick true (or hit \"Build Fixed Frames\" context menu / key B) to " +
                  "run the bench. Auto-resets after it runs.")]
         public bool buildRequested = false;
@@ -139,6 +152,22 @@ namespace TSDF.DebugTools
         private TSDFVolume.AccumulationMode _savedAccum;
         private bool _savedIntegEnabled;
 
+        // --- Smooth-union (issue #27): two instants held as separate SDFs ---
+        // _suVoxA/_suColA and _suVoxB/_suColB cache the two integrated instants so
+        // the smin compose can be re-run for a new k without re-integrating. The
+        // result lands in the volume's write buffer (so MC extracts it normally).
+        private ComputeShader _suShader;
+        private int _suCopyKernel = -1, _suUnionKernel = -1;
+        private ComputeBuffer _suVoxA, _suColA, _suVoxB, _suColB;
+        private int _suBufCount = -1;
+        private bool _haveInstants;
+        private float _lastComposedK = float.NaN;
+        // Grid mapping the cached instants were integrated against. If the volume
+        // rebuilds (bbox transform / voxelSize) with the SAME voxel count, the cached
+        // SDFs no longer match the new world<->voxel mapping, so invalidate them.
+        private Matrix4x4 _suWorldFromVoxel;
+        private float _suVoxelSizeAtBuild;
+
         private void OnEnable()
         {
             if (volume == null)     volume = FindAnyObjectByType<TSDFVolume>(FindObjectsInactive.Include);
@@ -184,6 +213,7 @@ namespace TSDF.DebugTools
                 _subscribedRecorder = null;
                 _handler = null;
             }
+            ReleaseSmoothUnionBuffers();
         }
 
         // Cache every cam's latest depth as it arrives. The main TSDFIntegrator
@@ -246,6 +276,33 @@ namespace TSDF.DebugTools
                 if (_bMode) RebuildAtCurrent(); else BuildFixedFrames();
             }
             if (buildRequested) BuildFixedFrames();   // context-menu / tick = one-shot frozen pair
+
+            // Live k tuning: while the smin bench is frozen (paused / idle), dragging
+            // smoothUnionK re-blends the cached A/B pair without re-integrating. Skip
+            // while actively playing so we don't fight the realtime trailing path (the
+            // trailing path also clears _haveInstants when it runs, so this only ever
+            // touches a freshly-built, still-current smin cache).
+            if (smoothUnion && SmoothUnionCacheValid()
+                && !Mathf.Approximately(smoothUnionK, _lastComposedK)
+                && !IsRecorderActivelyPlaying())
+                ComposeSmoothUnion();
+        }
+
+        private bool IsRecorderActivelyPlaying()
+            => recorder != null
+               && recorder.CurrentState == PointCloudRecorder.State.Playing
+               && !recorder.IsPaused;
+
+        // The cached instants are usable only while the volume still has the same
+        // voxel count AND the same world<->voxel mapping they were integrated against
+        // (a bbox/voxelSize edit rebuilds the grid and the cache would project wrong).
+        private bool SmoothUnionCacheValid()
+        {
+            if (!_haveInstants || volume == null) return false;
+            int total = volume.Dim.x * volume.Dim.y * volume.Dim.z;
+            if (_suBufCount != total) return false;
+            if (!Mathf.Approximately(_suVoxelSizeAtBuild, volume.voxelSize)) return false;
+            return _suWorldFromVoxel == volume.WorldFromVoxel;
         }
 
         [ContextMenu("Remove Small Components (noise)")]
@@ -392,29 +449,156 @@ namespace TSDF.DebugTools
                 Debug.LogWarning("[TSDFDebugSession] Second instant equals the first (skip clamped) — " +
                                  "you'll see only one shell.", this);
 
-            volume.ClearWrite();   // clear ONCE; both instants accumulate
-
             int done = 0;
-            if (colorByInstant) integrator.colorOverride = instant1Color;
-            done += IntegrateAllCached(serials, $"instant1 @ {startPlayheadSec:0.000}s");
+            bool smin = smoothUnion && EnsureSmoothUnionShader();
+            if (smin)
+            {
+                // Method B (issue #27): integrate each instant into its OWN sdf+colour
+                // buffer (clear the write buffer BEFORE each one), snapshot it out, then
+                // smin(A,B,k) -> write buffer. The two shells stay independent so the
+                // blend produces an organic neck instead of two flat RetainGhost shells.
+                int voxelTotal = volume.Dim.x * volume.Dim.y * volume.Dim.z;
+                EnsureSmoothUnionBuffers(voxelTotal);
 
-            recorder.SeekToPlayheadSeconds(secondSec);
-            if (colorByInstant) integrator.colorOverride = instant2Color;
-            done += IntegrateAllCached(serials, $"instant2 @ {secondSec:0.000}s (+{skipFrames}f)");
+                volume.ClearWrite();
+                if (colorByInstant) integrator.colorOverride = instant1Color;
+                done += IntegrateAllCached(serials, $"instant1 @ {startPlayheadSec:0.000}s (SDF A)");
+                SnapshotWriteBuffer(_suVoxA, _suColA, voxelTotal);
 
-            // Reset so live integration / later builds use camera colour again.
-            if (colorByInstant) integrator.colorOverride = new Color(0f, 0f, 0f, 0f);
+                recorder.SeekToPlayheadSeconds(secondSec);
+                volume.ClearWrite();
+                if (colorByInstant) integrator.colorOverride = instant2Color;
+                done += IntegrateAllCached(serials, $"instant2 @ {secondSec:0.000}s (+{skipFrames}f, SDF B)");
+                SnapshotWriteBuffer(_suVoxB, _suColB, voxelTotal);
 
-            volume.Publish();
+                if (colorByInstant) integrator.colorOverride = new Color(0f, 0f, 0f, 0f);
+
+                _haveInstants = true;
+                _suWorldFromVoxel = volume.WorldFromVoxel;   // mapping the cache is valid for
+                _suVoxelSizeAtBuild = volume.voxelSize;
+                ComposeSmoothUnion();   // smin(A,B,k) -> write buffer + Publish
+            }
+            else
+            {
+                // Method-neutral baseline: both instants fold into ONE RetainGhost
+                // buffer as two co-existing shells (the raw "overlap or apart?" view).
+                _haveInstants = false;
+
+                volume.ClearWrite();   // clear ONCE; both instants accumulate
+
+                if (colorByInstant) integrator.colorOverride = instant1Color;
+                done += IntegrateAllCached(serials, $"instant1 @ {startPlayheadSec:0.000}s");
+
+                recorder.SeekToPlayheadSeconds(secondSec);
+                if (colorByInstant) integrator.colorOverride = instant2Color;
+                done += IntegrateAllCached(serials, $"instant2 @ {secondSec:0.000}s (+{skipFrames}f)");
+
+                // Reset so live integration / later builds use camera colour again.
+                if (colorByInstant) integrator.colorOverride = new Color(0f, 0f, 0f, 0f);
+
+                volume.Publish();
+            }
 
             string who = !string.IsNullOrEmpty(validateSerial)
                 ? validateSerial.Substring(System.Math.Max(0, validateSerial.Length - 6))
                 : $"ALL x{serials.Length}";
-            lastReplayKind = $"fixed[{done}] ({who})";
+            string mode = smin ? $"smooth-union k={smoothUnionK:0.000}m (separate SDFs)" : "RetainGhost (one buffer)";
+            lastReplayKind = $"fixed[{done}] ({who}) {(smin ? "smin" : "ghost")}";
             Debug.Log($"[TSDFDebugSession] Built two instants on {who}: " +
                       $"start={startPlayheadSec:0.000}s (cursor {refCursor}) + {skipFrames}f " +
-                      $"-> {secondSec:0.000}s (cursor {targetCursor}). {done} integrations, RetainGhost. " +
+                      $"-> {secondSec:0.000}s (cursor {targetCursor}). {done} integrations, {mode}. " +
                       "Integrator FROZEN — set integrator.integrationEnabled=true to resume live.", this);
+        }
+
+        // ---------------- Smooth-union (issue #27) ----------------
+
+        private bool EnsureSmoothUnionShader()
+        {
+            if (_suShader != null) return true;
+            _suShader = Resources.Load<ComputeShader>("TSDFSmoothUnion");
+            if (_suShader == null)
+            {
+                Debug.LogError("[TSDFDebugSession] Compute shader \"Resources/TSDFSmoothUnion.compute\" " +
+                               "not found — falling back to RetainGhost.", this);
+                return false;
+            }
+            _suCopyKernel = _suShader.FindKernel("Copy");
+            _suUnionKernel = _suShader.FindKernel("SmoothUnion");
+            return true;
+        }
+
+        private void EnsureSmoothUnionBuffers(int total)
+        {
+            if (total <= 0) return;
+            if (_suBufCount == total && _suVoxA != null) return;
+            ReleaseSmoothUnionBuffers();
+            _suVoxA = new ComputeBuffer(total, sizeof(float) * 2);
+            _suColA = new ComputeBuffer(total, sizeof(float) * 4);
+            _suVoxB = new ComputeBuffer(total, sizeof(float) * 2);
+            _suColB = new ComputeBuffer(total, sizeof(float) * 4);
+            _suBufCount = total;
+            _haveInstants = false;   // freshly (re)allocated — no valid instants cached yet
+        }
+
+        private void ReleaseSmoothUnionBuffers()
+        {
+            _suVoxA?.Release(); _suColA?.Release();
+            _suVoxB?.Release(); _suColB?.Release();
+            _suVoxA = _suColA = _suVoxB = _suColB = null;
+            _suBufCount = -1;
+            _haveInstants = false;
+        }
+
+        // Copy the freshly-integrated instant out of the volume's write buffer into
+        // a scratch (sdf, colour) pair so the next instant can reuse the write buffer.
+        private void SnapshotWriteBuffer(ComputeBuffer dstVox, ComputeBuffer dstCol, int total)
+        {
+            if (_suShader == null || _suCopyKernel < 0) return;
+            if (volume == null || volume.WriteBuffer == null) return;
+            SuDispatchDims(total, out int gx, out int gy);
+            _suShader.SetInts("_Dim", volume.Dim.x, volume.Dim.y, volume.Dim.z);
+            _suShader.SetInt("_DispatchWidth", gx * 64);
+            _suShader.SetBuffer(_suCopyKernel, "_SrcVoxels", volume.WriteBuffer);
+            _suShader.SetBuffer(_suCopyKernel, "_SrcColors", volume.WriteColorBuffer);
+            _suShader.SetBuffer(_suCopyKernel, "_DstVoxels", dstVox);
+            _suShader.SetBuffer(_suCopyKernel, "_DstColors", dstCol);
+            _suShader.Dispatch(_suCopyKernel, Mathf.Max(1, gx), Mathf.Max(1, gy), 1);
+        }
+
+        // smin(A, B, k) -> volume write buffer, then publish so MC re-extracts. Used
+        // both by BuildFixedFrames and by the live-k recompose in Update.
+        private void ComposeSmoothUnion()
+        {
+            if (!_haveInstants || volume == null || volume.WriteBuffer == null) return;
+            if (!EnsureSmoothUnionShader()) return;
+            int total = volume.Dim.x * volume.Dim.y * volume.Dim.z;
+            if (total <= 0 || _suBufCount != total) return;   // grid changed under us — re-run Build
+
+            SuDispatchDims(total, out int gx, out int gy);
+            _suShader.SetInts("_Dim", volume.Dim.x, volume.Dim.y, volume.Dim.z);
+            _suShader.SetFloat("_Tau", volume.Tau);
+            _suShader.SetFloat("_K", smoothUnionK);
+            _suShader.SetInt("_DispatchWidth", gx * 64);
+            _suShader.SetBuffer(_suUnionKernel, "_VoxelsA", _suVoxA);
+            _suShader.SetBuffer(_suUnionKernel, "_ColorsA", _suColA);
+            _suShader.SetBuffer(_suUnionKernel, "_VoxelsB", _suVoxB);
+            _suShader.SetBuffer(_suUnionKernel, "_ColorsB", _suColB);
+            _suShader.SetBuffer(_suUnionKernel, "_VoxelsOut", volume.WriteBuffer);
+            _suShader.SetBuffer(_suUnionKernel, "_ColorsOut", volume.WriteColorBuffer);
+            _suShader.Dispatch(_suUnionKernel, Mathf.Max(1, gx), Mathf.Max(1, gy), 1);
+
+            volume.Publish();
+            _lastComposedK = smoothUnionK;
+        }
+
+        // 2D dispatch grid (mirrors TSDFVolume/Integrator): keeps large volumes under
+        // the 65535 threadgroup-per-axis D3D limit; the kernels linearise via
+        // _DispatchWidth = gx * 64.
+        private static void SuDispatchDims(int total, out int gx, out int gy)
+        {
+            int groups = Mathf.CeilToInt(total / 64f);
+            gx = Mathf.Max(1, Mathf.Min(groups, 65535));
+            gy = Mathf.Max(1, Mathf.CeilToInt(groups / (float)gx));
         }
 
         /// <summary>Integrate the currently-cached snapshot of every serial in
@@ -532,6 +716,13 @@ namespace TSDF.DebugTools
 
         private void RebuildTrailing(string[] serials)
         {
+            // The realtime RetainGhost trailing path now owns the write buffer, so any
+            // cached smooth-union instants are stale — invalidate them so a later
+            // smoothUnionK drag can't republish the smin bench over this trailing
+            // result (the existing B-mode path must stay RetainGhost). Re-run Build
+            // Fixed Frames to go back to the smin bench.
+            _haveInstants = false;
+
             int skip = Mathf.Max(1, skipFrames);
             volume.ClearWrite();
 
