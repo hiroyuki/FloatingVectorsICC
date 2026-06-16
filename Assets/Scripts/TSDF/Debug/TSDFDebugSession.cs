@@ -162,6 +162,7 @@ namespace TSDF.DebugTools
         private int _suBufCount = -1;
         private bool _haveInstants;
         private float _lastComposedK = float.NaN;
+        private bool _kClampActive;   // true while smoothUnionK is being clamped below 4*Tau
         // Grid mapping the cached instants were integrated against. If the volume
         // rebuilds (bbox transform / voxelSize) with the SAME voxel count, the cached
         // SDFs no longer match the new world<->voxel mapping, so invalidate them.
@@ -577,7 +578,19 @@ namespace TSDF.DebugTools
             SuDispatchDims(total, out int gx, out int gy);
             _suShader.SetInts("_Dim", volume.Dim.x, volume.Dim.y, volume.Dim.z);
             _suShader.SetFloat("_Tau", volume.Tau);
-            _suShader.SetFloat("_K", smoothUnionK);
+            // The smin seam dip is k/4 at its deepest. Co-observed free space sits at
+            // +Tau, so k >= 4*Tau would pull it below the iso and Marching Cubes would
+            // emit phantom geometry in observed open space (issue #27 caveat). Keep k
+            // strictly under 4*Tau with a margin; the shader also guards this per-voxel.
+            float kMax = 3.8f * volume.Tau;
+            float kEff = Mathf.Min(smoothUnionK, kMax);
+            bool clamped = kEff < smoothUnionK;
+            if (clamped && !_kClampActive)
+                Debug.LogWarning($"[TSDFDebugSession] smoothUnionK {smoothUnionK:0.000}m exceeds the safe " +
+                                 $"limit {kMax:0.000}m (=3.8*Tau, Tau={volume.Tau:0.000}m); clamped to avoid " +
+                                 "phantom free-space geometry. Lower smoothUnionK or raise the volume's Tau.", this);
+            _kClampActive = clamped;
+            _suShader.SetFloat("_K", kEff);
             _suShader.SetInt("_DispatchWidth", gx * 64);
             _suShader.SetBuffer(_suUnionKernel, "_VoxelsA", _suVoxA);
             _suShader.SetBuffer(_suUnionKernel, "_ColorsA", _suColA);
