@@ -421,7 +421,11 @@ namespace TSDF.DebugTools
 
             // Freeze live integration during the seeks (its event handler honors
             // this gate; our direct IntegrateRawFrame calls do not) and force
-            // RetainGhost so the frames accumulate as separate shells.
+            // RetainGhost so the frames accumulate as separate shells. Save the prior
+            // state first so an early abort below (bad reference cursor) can restore
+            // it — otherwise a failed build silently leaves live integration frozen.
+            bool priorIntegEnabled = integrator.integrationEnabled;
+            var priorAccum = volume.accumulationMode;
             integrator.integrationEnabled = false;
             volume.accumulationMode = TSDFVolume.AccumulationMode.RetainGhost;
 
@@ -435,6 +439,8 @@ namespace TSDF.DebugTools
             {
                 Debug.LogWarning($"[TSDFDebugSession] Reference camera '{refSerial}' has no cursor at " +
                                  $"{startPlayheadSec:0.000}s — aborting.", this);
+                integrator.integrationEnabled = priorIntegEnabled;   // restore — nothing was integrated
+                volume.accumulationMode = priorAccum;
                 return;
             }
             int total = recorder.GetTrackFrameCount(refSerial);
