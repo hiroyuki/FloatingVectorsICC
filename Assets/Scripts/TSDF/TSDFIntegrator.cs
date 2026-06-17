@@ -55,12 +55,12 @@ namespace TSDF
                  "set; lower it if you are debugging with fewer cams attached.")]
         [Min(1)] public int expectedCamCount = 4;
 
-        [Tooltip("Gate for the live/playback integration path. When false, incoming " +
-                 "frames are ignored so the volume (and thus the mesh) freezes on its " +
-                 "last state. TSDFCaptureSession flips this to hold the final mesh after " +
-                 "a capture window ends (spec §7). Debug replay via IntegrateRawFrame " +
-                 "bypasses this gate.")]
-        public bool integrationEnabled = true;
+        // Runtime gate for the live/playback integration path. When false, incoming
+        // frames are ignored so the volume (and thus the mesh) freezes on its last
+        // state. MeshCumulative flips this to hold the final mesh after a run ends
+        // (spec §7). Debug replay via IntegrateRawFrame bypasses this gate. Hidden
+        // from the Inspector because it is driven at runtime, not a user setting.
+        [HideInInspector] public bool integrationEnabled = true;
 
         // Set of serials that have integrated since the last clear. Once it
         // reaches expectedCamCount, the batch is published to the front buffer

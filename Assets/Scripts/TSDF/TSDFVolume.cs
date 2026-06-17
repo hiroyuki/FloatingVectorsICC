@@ -24,10 +24,13 @@ namespace TSDF
     {
         public enum AccumulationMode
         {
-            /// <summary>Weighted average — animate-debug only. Smears motion away.</summary>
+            /// <summary>Weighted average across cameras — denoises one static instant.
+            /// Smears motion away if used while accumulating over time.</summary>
+            [InspectorName("Average (merge cameras)")]
             StandardWeightedAvg = 0,
             /// <summary>Spec §3.2 (A) — keeps the closest-to-surface observation, so
             /// a hand passing through a voxel leaves a permanent shell.</summary>
+            [InspectorName("Retain ghost (keep motion)")]
             RetainGhost = 1,
         }
 
@@ -54,19 +57,22 @@ namespace TSDF
         [Min(1f)]
         public float tauMultiplier = 4f;
 
-        [Header("Accumulation")]
-        [Tooltip("StandardWeightedAvg for step 1 smoke test (static targets). " +
-                 "Switch to RetainGhost once the static pipeline is verified (spec §9.2).")]
+        [Header("Camera fusion (multi-cam → one instant)")]
+        [Tooltip("How cameras observing the SAME instant are merged into each voxel.\n" +
+                 "Average = denoise across cameras (live default).\n" +
+                 "Retain ghost = keep the closest-to-surface observation; needed to " +
+                 "capture frame-to-frame motion (MeshCumulative forces it).\n" +
+                 "NOTE: whether observations accumulate over TIME is governed by the " +
+                 "integrator's live-follow clear, not here — this only sets the merge rule.")]
         public AccumulationMode accumulationMode = AccumulationMode.StandardWeightedAvg;
 
-        [Header("Double buffering")]
-        [Tooltip("Ping-pong the voxel buffer so the views (Voxel/Cell/Mesh) only ever " +
-                 "read a COMPLETE batch while the integrator fills the next one into a " +
-                 "hidden back buffer. Eliminates the mid-clear / partial-fill flicker. " +
-                 "Driven by TSDFIntegrator to match its mode: ON for live-follow " +
-                 "(clearVolumeOnNewBatch), OFF for accumulate (read-modify-write needs " +
-                 "a single persistent buffer). Costs 2x VRAM when on.")]
-        public bool doubleBuffered = true;
+        // Ping-pong the voxel buffer so the views (Voxel/Cell/Mesh) only ever read a
+        // COMPLETE batch while the integrator fills the next one into a hidden back
+        // buffer. Eliminates the mid-clear / partial-fill flicker. Hidden from the
+        // Inspector because TSDFIntegrator drives it every frame to match its mode:
+        // ON for live-follow (clearVolumeOnNewBatch), OFF for accumulate
+        // (read-modify-write needs a single persistent buffer). Costs 2x VRAM when on.
+        [HideInInspector] public bool doubleBuffered = true;
 
         [Header("Diagnostics")]
         [Tooltip("Log allocation + clear info on enable. Off by default.")]
