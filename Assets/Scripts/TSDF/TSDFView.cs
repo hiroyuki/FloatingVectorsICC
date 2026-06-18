@@ -38,6 +38,13 @@ namespace TSDF
         [Tooltip("Which representation to draw this frame. Switchable at runtime.")]
         public ViewMode mode = ViewMode.Mesh;
 
+        [Tooltip("Hide / show the TSDF visualisation (whichever mode is active) without " +
+                 "stopping integration or releasing GPU buffers — Update simply skips the " +
+                 "draw call while off. Re-enabling resumes instantly (the mesh keeps being " +
+                 "extracted off the latest published front buffer). Mirrors " +
+                 "PointCloudView.showPointClouds; toggle at runtime (TSDFDebugSession's M key).")]
+        public bool showMesh = true;
+
         // ---------- Voxel mode ----------
         [Header("Voxel view")]
         [Tooltip("Material that uses the TSDF/Voxel shader. Auto-created if null.")]
@@ -252,6 +259,7 @@ namespace TSDF
         private void Update()
         {
             if (volume == null || volume.FrontBuffer == null) return;
+            if (!showMesh) return;
             EnsureBuffers();
             switch (mode)
             {

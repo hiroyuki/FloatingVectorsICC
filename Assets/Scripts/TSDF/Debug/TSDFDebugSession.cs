@@ -35,6 +35,9 @@ namespace TSDF.DebugTools
         [Tooltip("Toggle the existing point-cloud display.")]
         public KeyCode pointCloudToggleKey = KeyCode.P;
 
+        [Tooltip("Toggle the TSDF mesh display (TSDFView.showMesh).")]
+        public KeyCode meshToggleKey = KeyCode.M;
+
         [Header("Frame seek (hardcoded for now)")]
         [Tooltip("If >= 0 and seekRequested is ticked, jumps every cam's " +
                  "PlaybackCursor to this index and pauses. Use to lock the " +
@@ -835,6 +838,16 @@ namespace TSDF.DebugTools
                 {
                     pcv.showPointClouds = !pcv.showPointClouds;
                     Debug.Log($"[TSDFDebugSession] PointCloudView.showPointClouds = {pcv.showPointClouds}", this);
+                }
+            }
+
+            if (Input.GetKeyDown(meshToggleKey))
+            {
+                var view = FindAnyObjectByType<TSDFView>(FindObjectsInactive.Include);
+                if (view != null)
+                {
+                    view.showMesh = !view.showMesh;
+                    Debug.Log($"[TSDFDebugSession] TSDFView.showMesh = {view.showMesh}", this);
                 }
             }
 
