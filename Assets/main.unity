@@ -265,7 +265,7 @@ MonoBehaviour:
   jointMotionField: {fileID: 0}
   cumulative: {fileID: 0}
   folderPath: D:\FloatingVectorsICC\Recordings_jump2
-  folderPathMacOverride: /Users/horihiroyuki/Dropbox/projects/ICC/Recordings/_4cam_btrec
+  folderPathMacOverride: /Users/horihiroyuki/Dropbox/projects/ICC/Recordings/Recordings_jump2
   datasetName: 
   loop: 1
   view: {fileID: 1168113566}
@@ -426,6 +426,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: TSDF::TSDF.TSDFView
   volume: {fileID: 639959844}
   mode: 2
+  showMesh: 1
   voxelMaterial: {fileID: 0}
   voxelSphereScale: 0.5
   voxelHideAboveSdfFraction: 1
@@ -1330,7 +1331,7 @@ GameObject:
   - component: {fileID: 1892179044}
   - component: {fileID: 1892179045}
   m_Layer: 0
-  m_Name: MultiCamera
+  m_Name: CameraOverlay
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -1363,7 +1364,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 70bd2c82906631842a5948cdaa4c92ac, type: 3}
   m_Name: 
   m_EditorClassIdentifier: PointCloud::PointCloud.MultiCameraDebugView
-  toggleKey: 282
+  toggleKey: 96
   showOnStart: 1
   depthNearMm: 300
   depthFarMm: 4000
@@ -1406,6 +1407,7 @@ MonoBehaviour:
   cameraKeys: []
   allCamsKey: 48
   pointCloudToggleKey: 112
+  meshToggleKey: 109
   seekToCursor: -1
   seekRequested: 0
   validateSerial: 
@@ -1421,6 +1423,10 @@ MonoBehaviour:
   autoRunOnPlay: 1
   removeNoiseKey: 110
   colorModeKey: 99
+  highlightSeamKey: 104
+  highlightSeam: 0
+  seamColor: {r: 1, g: 0, b: 1, a: 1}
+  seamThreshold: 0.35
   cachedCount: 0
   lastReplayKind: (none)
   lastReplayTimestampUs: 0

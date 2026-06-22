@@ -1,5 +1,6 @@
 // Debug overlay: shows the color + depth image of every connected camera (live
-// or playback) as an on-screen grid. Toggle with a key (default F1).
+// or playback) as an on-screen grid. Toggle with a key (default backquote `).
+// (F1 is taken by macOS system keys, so backquote is the cross-platform default.)
 //
 // Subscribes to PointCloudRenderer.OnRawFramesReady (live, keyed by deviceSerial)
 // and PointCloudRecorder.OnPlaybackRawFrame (playback, keyed by serial). Both fire
@@ -16,7 +17,7 @@ namespace PointCloud
     {
         [Header("Toggle")]
         [Tooltip("Key that shows/hides the overlay at runtime.")]
-        public KeyCode toggleKey = KeyCode.F1;
+        public KeyCode toggleKey = KeyCode.BackQuote;
         [Tooltip("Whether the overlay is visible when play starts.")]
         public bool showOnStart = true;
 

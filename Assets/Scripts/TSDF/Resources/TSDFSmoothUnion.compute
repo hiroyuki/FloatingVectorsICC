@@ -29,6 +29,13 @@ int3 _Dim;
 float _Tau;          // truncation distance (metres) — the "no observation" sdf seed
 float _K;            // smooth-min blend radius (metres). Larger = fatter neck.
 
+// ---- Debug: recolour the smin seam (where the two instants actually merge) ----
+// Pure visualisation — does NOT touch the sdf, only the output colour, so the
+// extracted mesh is identical; only its vertex colours change on the neck.
+int _HighlightSeam;  // 0 = off (normal A/B colour blend), 1 = paint the seam
+float4 _SeamColor;   // seam highlight colour (rgb; a unused)
+float2 _SeamRange;   // (lo, hi) blend-strength band remapped onto the highlight ramp
+
 // ---- Copy: _Src* -> _Dst* (snapshot an instant out of the write buffer) ----
 StructuredBuffer<float2> _SrcVoxels;
 StructuredBuffer<float4> _SrcColors;
@@ -84,6 +91,16 @@ void SmoothUnion(uint3 id : SV_DispatchThreadID)
         // near a real surface (min < tau) still get the intended neck.
         if (min(a, b) >= _Tau) s = min(a, b);
         float3 col = lerp(_ColorsB[lin].rgb, _ColorsA[lin].rgb, h);
+        if (_HighlightSeam != 0)
+        {
+            // Blend strength: 1 where A and B contribute equally (h~0.5) — the
+            // genuine smin seam / neck — and 0 where one instant dominates (h~0/1,
+            // i.e. plain min, no real blending). Remap [lo,hi] onto the highlight
+            // so a tunable band of the transition is painted seamColour.
+            float blend = 4.0 * h * (1.0 - h);
+            float t = smoothstep(_SeamRange.x, _SeamRange.y, blend);
+            col = lerp(col, _SeamColor.rgb, t);
+        }
         float w = max(va.y, vb.y);
         _VoxelsOut[lin] = float2(s, w);
         _ColorsOut[lin] = float4(col, w);

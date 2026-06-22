@@ -100,6 +100,21 @@ namespace TSDF.DebugTools
                  "immediately re-tag the current result, so you can flip the colour mode " +
                  "during Play without rebuilding by hand.")]
         public KeyCode colorModeKey = KeyCode.C;
+        [Tooltip("Toggle the smin SEAM HIGHLIGHT: recolour just the blended neck " +
+                 "(where the two instants actually merge) to seamColor and leave the " +
+                 "rest of the mesh as-is, so you can see at a glance where smooth-union " +
+                 "connected the two shells. Smooth-union bench only. Game View focus.")]
+        public KeyCode highlightSeamKey = KeyCode.H;
+        [Tooltip("When on, the smin seam is painted seamColor for visual inspection. " +
+                 "Toggled live with highlightSeamKey; re-blends the cached pair without " +
+                 "re-integrating.")]
+        public bool highlightSeam = false;
+        [Tooltip("Colour the smin seam is painted when highlightSeam is on.")]
+        public Color seamColor = Color.magenta;
+        [Tooltip("Blend-strength (0..1) at which a voxel starts counting as seam: lower " +
+                 "= a wider band of the transition is painted, higher = only the tightest " +
+                 "neck. Drag while frozen to watch the highlighted band change live.")]
+        [Range(0f, 1f)] public float seamThreshold = 0.35f;
 
         [Header("Cache status (read-only)")]
         [SerializeField] private int cachedCount = 0;
@@ -165,6 +180,10 @@ namespace TSDF.DebugTools
         private int _suBufCount = -1;
         private bool _haveInstants;
         private float _lastComposedK = float.NaN;
+        // Seam-highlight params the cache was last composed with, so a live toggle /
+        // threshold drag triggers a re-compose just like a smoothUnionK drag does.
+        private bool _lastHighlightSeam;
+        private float _lastSeamThreshold = float.NaN;
         private bool _kClampActive;   // true while smoothUnionK is being clamped below 4*Tau
         // Grid mapping the cached instants were integrated against. If the volume
         // rebuilds (bbox transform / voxelSize) with the SAME voxel count, the cached
@@ -279,6 +298,16 @@ namespace TSDF.DebugTools
                 colorByInstant = !colorByInstant;
                 if (_bMode) RebuildAtCurrent(); else BuildFixedFrames();
             }
+            if (Input.GetKeyDown(highlightSeamKey))
+            {
+                // Recolour just the smin neck. Only the smooth-union bench carries
+                // seam info; re-compose immediately so it shows without a k drag.
+                highlightSeam = !highlightSeam;
+                Debug.Log($"[TSDFDebugSession] smin seam highlight = {highlightSeam}", this);
+                if (smoothUnion && SmoothUnionCacheValid()) ComposeSmoothUnion();
+                else Debug.Log("[TSDFDebugSession] (no smooth-union cache; enable smoothUnion " +
+                               "and press B to build the bench first)", this);
+            }
             if (buildRequested) BuildFixedFrames();   // context-menu / tick = one-shot frozen pair
 
             // Live k tuning: while the smin bench is frozen (paused / idle), dragging
@@ -287,8 +316,10 @@ namespace TSDF.DebugTools
             // trailing path also clears _haveInstants when it runs, so this only ever
             // touches a freshly-built, still-current smin cache).
             if (smoothUnion && SmoothUnionCacheValid()
-                && !Mathf.Approximately(smoothUnionK, _lastComposedK)
-                && !IsRecorderActivelyPlaying())
+                && !IsRecorderActivelyPlaying()
+                && (!Mathf.Approximately(smoothUnionK, _lastComposedK)
+                    || highlightSeam != _lastHighlightSeam
+                    || !Mathf.Approximately(seamThreshold, _lastSeamThreshold)))
                 ComposeSmoothUnion();
         }
 
@@ -600,6 +631,11 @@ namespace TSDF.DebugTools
                                  "phantom free-space geometry. Lower smoothUnionK or raise the volume's Tau.", this);
             _kClampActive = clamped;
             _suShader.SetFloat("_K", kEff);
+            // Debug seam highlight: paint the blended neck seamColor (visual only —
+            // sdf is untouched). Map [threshold..1] blend strength onto the ramp.
+            _suShader.SetInt("_HighlightSeam", highlightSeam ? 1 : 0);
+            _suShader.SetVector("_SeamColor", seamColor);
+            _suShader.SetVector("_SeamRange", new Vector4(Mathf.Clamp01(seamThreshold), 1f, 0f, 0f));
             _suShader.SetInt("_DispatchWidth", gx * 64);
             _suShader.SetBuffer(_suUnionKernel, "_VoxelsA", _suVoxA);
             _suShader.SetBuffer(_suUnionKernel, "_ColorsA", _suColA);
@@ -611,6 +647,8 @@ namespace TSDF.DebugTools
 
             volume.Publish();
             _lastComposedK = smoothUnionK;
+            _lastHighlightSeam = highlightSeam;
+            _lastSeamThreshold = seamThreshold;
         }
 
         // 2D dispatch grid (mirrors TSDFVolume/Integrator): keeps large volumes under
