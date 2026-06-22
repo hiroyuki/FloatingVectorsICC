@@ -21,6 +21,14 @@ namespace TSDF
     [DefaultExecutionOrder(0)]
     public sealed class TSDFIntegrator : MonoBehaviour
     {
+        /// <summary>
+        /// Debug A/B switch mirroring <see cref="PointCloud.PointCloudReconstructor.ForcePinhole"/>:
+        /// when true the integrator skips the forward depth-lens distortion and
+        /// projects voxels with the bare pinhole model. Lets a TSDF mesh be rebuilt
+        /// with and without the correction for comparison. Affects all cameras.
+        /// </summary>
+        public static bool ForcePinhole = false;
+
         [Tooltip("Volume to integrate into. Auto-located on enable if left null.")]
         public TSDFVolume volume;
 
@@ -368,6 +376,20 @@ namespace TSDF
             _shader.SetFloat("_FyD", intr.Fy);
             _shader.SetFloat("_CxD", intr.Cx);
             _shader.SetFloat("_CyD", intr.Cy);
+            // Forward depth-lens distortion (shares the point cloud's gate so the
+            // two paths agree on when distortion applies). The voxel ray is
+            // distorted before projecting, matching the real wide lens.
+            var ddist = st.CamParam.DepthDistortion;
+            bool hasDepthDist = !ForcePinhole && PointCloud.DepthUndistortLut.IsApplicable(ddist);
+            _shader.SetInt("_HasDepthDist", hasDepthDist ? 1 : 0);
+            _shader.SetFloat("_DK1", ddist.K1);
+            _shader.SetFloat("_DK2", ddist.K2);
+            _shader.SetFloat("_DK3", ddist.K3);
+            _shader.SetFloat("_DK4", ddist.K4);
+            _shader.SetFloat("_DK5", ddist.K5);
+            _shader.SetFloat("_DK6", ddist.K6);
+            _shader.SetFloat("_DP1", ddist.P1);
+            _shader.SetFloat("_DP2", ddist.P2);
             _shader.SetMatrix("_DepthFromWorld", depthFromWorld);
             _shader.SetFloat("_WObs", observationWeight);
 

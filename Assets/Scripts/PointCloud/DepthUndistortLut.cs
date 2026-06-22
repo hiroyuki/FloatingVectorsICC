@@ -109,6 +109,15 @@ namespace PointCloud
         // BrownConradyK6 (the rational, k6-enabled Brown-Conrady model). True
         // KannalaBrandt4 (fisheye, k1..k4 only, no tangential) is NOT one of these
         // — it would need a different (angle-based) inverse, so it is rejected.
+        /// <summary>
+        /// True when this distortion should be applied: a supported rational +
+        /// tangential model (e.g. BrownConradyK6) with non-negligible coefficients.
+        /// Lets the TSDF forward-projection share the same gate as the point cloud
+        /// undistort LUT so the two paths agree on when distortion is in effect.
+        /// </summary>
+        public static bool IsApplicable(in ObCameraDistortion dist)
+            => IsRationalTangential(dist.Model) && HasDistortion(dist);
+
         private static bool IsRationalTangential(ObCameraDistortionModel model)
         {
             switch (model)

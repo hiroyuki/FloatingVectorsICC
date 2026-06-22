@@ -42,6 +42,15 @@ float _CxD;
 float _CyD;
 float4x4 _DepthFromWorld;             // world metres -> depth camera millimetres
 
+// Depth lens distortion (rational Brown-Conrady, k6 + tangential). When
+// _HasDepthDist != 0 the voxel's normalized depth-camera ray is forward-distorted
+// before projecting to a pixel, so a voxel lands on the pixel the real (wide,
+// distorted) lens actually imaged it to — matching the undistortion the point
+// cloud path applies. Without it, voxels off-centre read the wrong depth pixel
+// and the reconstructed surface bends toward the frame edges.
+float _DK1, _DK2, _DK3, _DK4, _DK5, _DK6, _DP1, _DP2;
+int _HasDepthDist;
+
 // Optional weight modulators. _WObs is the base observation weight.
 float _WObs;
 
@@ -123,9 +132,22 @@ void Integrate(uint3 id : SV_DispatchThreadID)
     float3 pDepthMm = mul(_DepthFromWorld, float4(pWorld, 1.0)).xyz;
     if (pDepthMm.z <= 0.0) return; // behind the camera
 
-    // Project to depth pixel.
-    float u = _FxD * pDepthMm.x / pDepthMm.z + _CxD;
-    float v = _FyD * pDepthMm.y / pDepthMm.z + _CyD;
+    // Project to depth pixel, applying forward lens distortion so the voxel maps
+    // to the pixel the real lens imaged it to (mirrors the point cloud undistort).
+    float xN = pDepthMm.x / pDepthMm.z;
+    float yN = pDepthMm.y / pDepthMm.z;
+    if (_HasDepthDist != 0)
+    {
+        float r2 = xN * xN + yN * yN;
+        float radial = (1.0 + ((_DK3 * r2 + _DK2) * r2 + _DK1) * r2) /
+                       (1.0 + ((_DK6 * r2 + _DK5) * r2 + _DK4) * r2);
+        float dx = 2.0 * _DP1 * xN * yN + _DP2 * (r2 + 2.0 * xN * xN);
+        float dy = _DP1 * (r2 + 2.0 * yN * yN) + 2.0 * _DP2 * xN * yN;
+        xN = xN * radial + dx;
+        yN = yN * radial + dy;
+    }
+    float u = _FxD * xN + _CxD;
+    float v = _FyD * yN + _CyD;
     int iu = (int)floor(u);
     int iv = (int)floor(v);
     if (iu < 0 || iv < 0 || iu >= _DepthW || iv >= _DepthH) return;
