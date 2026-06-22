@@ -106,12 +106,9 @@ namespace PointCloud
 
         // Models whose 8 coefficients are the rational radial (k1..k6) + tangential
         // (p1, p2) layout this inverse expects. The Femto Bolt depth lens reports
-        // its (wide, fisheye-ish) distortion tagged as KannalaBrandt4 but actually
-        // populates the rational+tangential coefficients — k5/k6 and p1/p2 are
-        // present, which the true 4-parameter Kannala-Brandt model does not have —
-        // so it is consumed here exactly like Brown-Conrady. This matches the
-        // sibling ShiibaNFTUnity project (OpenCV undistortPoints, 8-coeff), which
-        // ignores the model tag entirely on the same hardware.
+        // BrownConradyK6 (the rational, k6-enabled Brown-Conrady model). True
+        // KannalaBrandt4 (fisheye, k1..k4 only, no tangential) is NOT one of these
+        // — it would need a different (angle-based) inverse, so it is rejected.
         private static bool IsRationalTangential(ObCameraDistortionModel model)
         {
             switch (model)
@@ -120,7 +117,7 @@ namespace PointCloud
                 case ObCameraDistortionModel.ModifiedBrownConrady:
                 case ObCameraDistortionModel.InverseBrownConrady:
                 case ObCameraDistortionModel.BrownConrady:
-                case ObCameraDistortionModel.KannalaBrandt4:
+                case ObCameraDistortionModel.BrownConradyK6:
                     return true;
                 default:
                     return false;

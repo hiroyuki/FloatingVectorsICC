@@ -877,6 +877,13 @@ namespace PointCloud
             var n = RequireMapping(parent, key, ctx);
             string sub = $"{ctx}.{key}";
             string modelStr = ReadScalarString(n, "model", sub);
+            // Legacy fix-up: recordings made before the OrbbecNative enum was
+            // corrected wrote "KannalaBrandt4" for native value 4, which is
+            // actually BrownConradyK6 (the enum was missing that entry, so every
+            // model >= 4 was off by one). The Femto Bolt depth is never a true
+            // fisheye, so map the legacy label to its real model.
+            if (string.Equals(modelStr, "KannalaBrandt4", StringComparison.OrdinalIgnoreCase))
+                modelStr = nameof(ObCameraDistortionModel.BrownConradyK6);
             if (!Enum.TryParse(modelStr, ignoreCase: true, out ObCameraDistortionModel model))
                 throw new InvalidDataException($"{sub}.model: unknown distortion model '{modelStr}'");
             return new ObCameraDistortion

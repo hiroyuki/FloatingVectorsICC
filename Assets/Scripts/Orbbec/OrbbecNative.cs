@@ -167,7 +167,8 @@ namespace Orbbec
         ModifiedBrownConrady = 1,
         InverseBrownConrady  = 2,
         BrownConrady         = 3,
-        KannalaBrandt4       = 4,
+        BrownConradyK6       = 4,  // Brown-Conrady with k6 supported (Femto Bolt depth reports this)
+        KannalaBrandt4       = 5,
     }
 
     /// <summary>ob_camera_intrinsic (ObTypes.h): 4 floats + 2 int16 = 20 bytes.</summary>
