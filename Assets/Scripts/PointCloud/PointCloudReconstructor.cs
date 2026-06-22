@@ -51,6 +51,8 @@ namespace PointCloud
         private static readonly int kId_Rrow1 = Shader.PropertyToID("_Rrow1");
         private static readonly int kId_Rrow2 = Shader.PropertyToID("_Rrow2");
         private static readonly int kId_T     = Shader.PropertyToID("_T");
+        private static readonly int kId_RayLut    = Shader.PropertyToID("_RayLut");
+        private static readonly int kId_HasRayLut = Shader.PropertyToID("_HasRayLut");
 
         private readonly string _name;
         private Mesh _mesh;
@@ -59,6 +61,16 @@ namespace PointCloud
         private GraphicsBuffer _colorGpu;
         private uint[] _depthScratchU32;
         private uint[] _colorScratchU32;
+
+        // Undistorted-ray LUT (StructuredBuffer<float2>). Null until a depth
+        // stream with real distortion is seen; rebuilt only when the depth
+        // intrinsics / distortion / resolution change. When null the kernel
+        // falls back to the pinhole back-projection (identical to no distortion).
+        private GraphicsBuffer _rayLutGpu;
+        private bool _rayLutValid;
+        private int _rayLutW, _rayLutH;
+        private ObCameraIntrinsic _rayLutIntr;
+        private ObCameraDistortion _rayLutDist;
 
         /// <summary>Mesh receiving the reconstructed point cloud. Plug into MeshFilter.sharedMesh.
         /// Lazy-created on first <see cref="EnsureMesh"/> or <see cref="Dispatch"/>.</summary>
@@ -146,6 +158,7 @@ namespace PointCloud
             // sample a stale earlier-frame buffer.
             bool hasColor = colorByteCount > 0 && colorW > 0 && colorH > 0;
             EnsureColorBuffer(hasColor ? colorByteCount : 4);
+            EnsureRayLut(cam.DepthIntrinsic, cam.DepthDistortion, depthW, depthH);
 
             // Buffer stride is 4 (uint), so we BlockCopy raw bytes into the
             // scratch u32 array first.
@@ -166,6 +179,10 @@ namespace PointCloud
                 shader.SetBuffer(k, kId_Depth, _depthGpu);
                 shader.SetBuffer(k, kId_Color, _colorGpu);
                 shader.SetBuffer(k, kId_Out,   vbuf);
+                // Always bind a buffer (the placeholder when no LUT) so the
+                // StructuredBuffer slot is never left dangling between frames.
+                shader.SetBuffer(k, kId_RayLut, _rayLutGpu);
+                shader.SetInt(kId_HasRayLut, _rayLutValid ? 1 : 0);
                 shader.SetInt(kId_DepthW, depthW);
                 shader.SetInt(kId_DepthH, depthH);
                 shader.SetInt(kId_ColorW, colorW);
@@ -227,10 +244,51 @@ namespace PointCloud
             _colorScratchU32 = new uint[u32];
         }
 
+        // Rebuild the undistorted-ray LUT only when the depth intrinsics,
+        // distortion, or resolution change (rare — effectively session-static).
+        // A null LUT (no/unsupported distortion) leaves _rayLutValid false and
+        // binds a 1-element placeholder so the kernel uses the pinhole path.
+        private void EnsureRayLut(in ObCameraIntrinsic intr, in ObCameraDistortion dist, int depthW, int depthH)
+        {
+            bool unchanged = _rayLutGpu != null &&
+                             _rayLutW == depthW && _rayLutH == depthH &&
+                             IntrinsicsEqual(_rayLutIntr, intr) && DistortionEqual(_rayLutDist, dist);
+            if (unchanged) return;
+
+            _rayLutIntr = intr;
+            _rayLutDist = dist;
+            _rayLutW = depthW;
+            _rayLutH = depthH;
+
+            Vector2[] lut = DepthUndistortLut.Build(intr, dist, depthW, depthH);
+            _rayLutGpu?.Dispose();
+            if (lut != null)
+            {
+                _rayLutGpu = new GraphicsBuffer(GraphicsBuffer.Target.Structured, lut.Length, sizeof(float) * 2);
+                _rayLutGpu.SetData(lut);
+                _rayLutValid = true;
+            }
+            else
+            {
+                // Placeholder so the StructuredBuffer<float2> slot stays bound.
+                _rayLutGpu = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 1, sizeof(float) * 2);
+                _rayLutValid = false;
+            }
+        }
+
+        private static bool IntrinsicsEqual(in ObCameraIntrinsic a, in ObCameraIntrinsic b)
+            => a.Fx == b.Fx && a.Fy == b.Fy && a.Cx == b.Cx && a.Cy == b.Cy;
+
+        private static bool DistortionEqual(in ObCameraDistortion a, in ObCameraDistortion b)
+            => a.K1 == b.K1 && a.K2 == b.K2 && a.K3 == b.K3 && a.K4 == b.K4 &&
+               a.K5 == b.K5 && a.K6 == b.K6 && a.P1 == b.P1 && a.P2 == b.P2 && a.Model == b.Model;
+
         public void Dispose()
         {
             _depthGpu?.Dispose(); _depthGpu = null;
             _colorGpu?.Dispose(); _colorGpu = null;
+            _rayLutGpu?.Dispose(); _rayLutGpu = null;
+            _rayLutValid = false;
             _depthScratchU32 = null;
             _colorScratchU32 = null;
             if (_mesh != null)

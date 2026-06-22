@@ -28,6 +28,14 @@ uint _HasColor;
 float _FxD; float _FyD; float _CxD; float _CyD;
 float _FxC; float _FyC; float _CxC; float _CyC;
 
+// Undistorted-ray LUT: per depth pixel (row-major, idx = v*_DepthW + u) the
+// undistorted normalized camera ray (x/z, y/z). When _HasRayLut != 0 it
+// replaces the pinhole back-projection so the GPU point cloud matches the
+// SDK PointCloudFilter (which applies the full lens model). When 0 the buffer
+// is a 1-element placeholder and the pinhole path is used.
+StructuredBuffer<float2> _RayLut;
+uint _HasRayLut;
+
 // depth -> color rotation (row-major 3x3) + translation (mm).
 float3 _Rrow0;
 float3 _Rrow1;
@@ -92,8 +100,20 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     }
 
     float z  = (float)zRaw;
-    float xD = ((float)u - _CxD) * z / _FxD;
-    float yD = ((float)v - _CyD) * z / _FyD;
+    float xD, yD;
+    if (_HasRayLut != 0u)
+    {
+        // Undistorted ray (x/z, y/z) precomputed on the CPU from the full lens
+        // model — recover the 3D point as ray * z.
+        float2 ray = _RayLut[idx];
+        xD = ray.x * z;
+        yD = ray.y * z;
+    }
+    else
+    {
+        xD = ((float)u - _CxD) * z / _FxD;
+        yD = ((float)v - _CyD) * z / _FyD;
+    }
 
     float3 pD = float3(xD, yD, z);
     float xC = dot(_Rrow0, pD) + _T.x;
