@@ -31,9 +31,13 @@ namespace PointCloud
 {
     public static class DepthUndistortLut
     {
-        // OpenCV's cvUndistortPoints uses 5 fixed-point iterations by default;
-        // that converges well within depth-camera FOVs.
-        private const int Iterations = 8;
+        // The Femto Bolt depth lens is wide (fisheye-ish) with strong rational
+        // distortion (k1/k4 ~20), so the fixed-point inverse converges slowly:
+        // measured round-trip residual is ~0.3px at 8 iters, 3e-4px at 20, and
+        // ~1e-11px at 50. Use a generous cap with an early-out on convergence.
+        // Cost is paid once per (intrinsics, distortion, resolution).
+        private const int MaxIterations = 50;
+        private const double ConvergenceEpsSq = 1e-14; // |delta|^2 in normalized coords
         private const float NegligibleCoeff = 1e-9f;
 
         /// <summary>
@@ -48,7 +52,7 @@ namespace PointCloud
             if (width <= 0 || height <= 0) return null;
             if (intr.Fx == 0f || intr.Fy == 0f) return null;
 
-            if (!IsBrownConrady(dist.Model))
+            if (!IsRationalTangential(dist.Model))
             {
                 if (HasDistortion(dist))
                 {
@@ -78,7 +82,7 @@ namespace PointCloud
                     // Iteratively invert the forward model to recover the
                     // undistorted normalized ray (matches cvUndistortPoints).
                     double x = x0, y = y0;
-                    for (int i = 0; i < Iterations; i++)
+                    for (int i = 0; i < MaxIterations; i++)
                     {
                         double r2 = x * x + y * y;
                         double radial = (1.0 + ((k3 * r2 + k2) * r2 + k1) * r2) /
@@ -87,8 +91,11 @@ namespace PointCloud
                         double deltaY = p1 * (r2 + 2.0 * y * y) + 2.0 * p2 * x * y;
                         // icdist = 1/radial; (x0 - delta) * icdist
                         double icdist = 1.0 / radial;
-                        x = (x0 - deltaX) * icdist;
-                        y = (y0 - deltaY) * icdist;
+                        double nx = (x0 - deltaX) * icdist;
+                        double ny = (y0 - deltaY) * icdist;
+                        double dx = nx - x, dy = ny - y;
+                        x = nx; y = ny;
+                        if (dx * dx + dy * dy < ConvergenceEpsSq) break;
                     }
 
                     lut[v * width + u] = new Vector2((float)x, (float)y);
@@ -97,7 +104,15 @@ namespace PointCloud
             return lut;
         }
 
-        private static bool IsBrownConrady(ObCameraDistortionModel model)
+        // Models whose 8 coefficients are the rational radial (k1..k6) + tangential
+        // (p1, p2) layout this inverse expects. The Femto Bolt depth lens reports
+        // its (wide, fisheye-ish) distortion tagged as KannalaBrandt4 but actually
+        // populates the rational+tangential coefficients — k5/k6 and p1/p2 are
+        // present, which the true 4-parameter Kannala-Brandt model does not have —
+        // so it is consumed here exactly like Brown-Conrady. This matches the
+        // sibling ShiibaNFTUnity project (OpenCV undistortPoints, 8-coeff), which
+        // ignores the model tag entirely on the same hardware.
+        private static bool IsRationalTangential(ObCameraDistortionModel model)
         {
             switch (model)
             {
@@ -105,6 +120,7 @@ namespace PointCloud
                 case ObCameraDistortionModel.ModifiedBrownConrady:
                 case ObCameraDistortionModel.InverseBrownConrady:
                 case ObCameraDistortionModel.BrownConrady:
+                case ObCameraDistortionModel.KannalaBrandt4:
                     return true;
                 default:
                     return false;

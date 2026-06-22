@@ -31,6 +31,14 @@ namespace PointCloud
         // algorithm, no per-instance customisation.
         private static ComputeShader s_shader;
         private static int s_kernel = -1;
+
+        /// <summary>
+        /// Debug A/B switch: when true the kernel ignores the undistortion LUT and
+        /// back-projects with the bare pinhole model, so the lens-distortion
+        /// correction can be toggled live (e.g. to compare point clouds with and
+        /// without it). Affects every reconstructor instance. Default false.
+        /// </summary>
+        public static bool ForcePinhole = false;
         private static readonly int kId_Depth    = Shader.PropertyToID("_Depth");
         private static readonly int kId_Color    = Shader.PropertyToID("_Color");
         private static readonly int kId_Out      = Shader.PropertyToID("_Out");
@@ -182,7 +190,7 @@ namespace PointCloud
                 // Always bind a buffer (the placeholder when no LUT) so the
                 // StructuredBuffer slot is never left dangling between frames.
                 shader.SetBuffer(k, kId_RayLut, _rayLutGpu);
-                shader.SetInt(kId_HasRayLut, _rayLutValid ? 1 : 0);
+                shader.SetInt(kId_HasRayLut, (_rayLutValid && !ForcePinhole) ? 1 : 0);
                 shader.SetInt(kId_DepthW, depthW);
                 shader.SetInt(kId_DepthH, depthH);
                 shader.SetInt(kId_ColorW, colorW);
