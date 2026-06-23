@@ -58,9 +58,10 @@ namespace TSDF
         // Runtime gate for the live/playback integration path. When false, incoming
         // frames are ignored so the volume (and thus the mesh) freezes on its last
         // state. MeshCumulative flips this to hold the final mesh after a run ends
-        // (spec §7). Debug replay via IntegrateRawFrame bypasses this gate. Hidden
-        // from the Inspector because it is driven at runtime, not a user setting.
-        [HideInInspector] public bool integrationEnabled = true;
+        // (spec §7). Debug replay via IntegrateRawFrame bypasses this gate.
+        // NonSerialized so a frozen state (e.g. left by the fixed-frame bench) can
+        // never get saved into the scene — it always starts true on load/play.
+        [System.NonSerialized] public bool integrationEnabled = true;
 
         // Set of serials that have integrated since the last clear. Once it
         // reaches expectedCamCount, the batch is published to the front buffer

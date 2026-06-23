@@ -760,9 +760,18 @@ namespace TSDF.DebugTools
             integrator.IntegrateRawFrame(snap.Serial, snap.CamParam, snap.SourceTransform, raw);
         }
 
-        [ContextMenu("Resume Playback (let live integration run)")]
+        // Return to plain live single-instance integration after a fixed-frame
+        // bench (which freezes the integrator and holds the two-shell result).
+        // Re-enables integration, clears the frozen bench mesh, and resumes the
+        // recorder so the volume refills from live frames in camera colour.
+        [ContextMenu("Resume Live Integration (single instance)")]
         public void ResumePlayback()
         {
+            if (integrator != null)
+            {
+                integrator.integrationEnabled = true;
+                integrator.BeginFreshBatch();   // drop the frozen bench result
+            }
             if (recorder != null && recorder.IsPaused) recorder.ResumePlayback();
         }
     }
