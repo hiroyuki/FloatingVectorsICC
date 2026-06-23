@@ -43,9 +43,9 @@ namespace TSDF.DebugTools
                  "PlaybackCursor to this index and pauses. Use to lock the " +
                  "scene at a known-bad frame for cell-by-cell verification.")]
         public int seekToCursor = -1;
-        [Tooltip("Tick true (or hit \"Seek Now\" in the context menu) to apply " +
-                 "seekToCursor. Auto-resets after the seek runs.")]
-        public bool seekRequested = false;
+        // One-shot trigger via the "Seek Now" context menu. NonSerialized so a
+        // ticked state can never bake into the scene and fire on every Play.
+        [System.NonSerialized] public bool seekRequested = false;
 
         [Header("Fixed-frame bench (close/smooth validation)")]
         [Tooltip("Camera serial whose frames to accumulate. LEAVE EMPTY to use ALL " +
@@ -81,9 +81,11 @@ namespace TSDF.DebugTools
                  "caveat). ~1-4 voxels is a sensible start. Drag while frozen to watch " +
                  "the neck change live.")]
         [Range(0.001f, 0.3f)] public float smoothUnionK = 0.03f;
-        [Tooltip("Tick true (or hit \"Build Fixed Frames\" context menu) to " +
-                 "run the bench. Auto-resets after it runs.")]
-        public bool buildRequested = false;
+        // One-shot trigger via the "Build Fixed Frames" context menu. NonSerialized
+        // so a ticked state can never bake into the scene and run the bench (seek +
+        // freeze) on every Play — that was the cause of "Play stops on a frame and
+        // shows the red/blue bench". The bench stays available on demand.
+        [System.NonSerialized] public bool buildRequested = false;
         [Tooltip("On entering Play, automatically Read + Play the recorder and run the " +
                  "bench once (no need to press the recorder's Play button by hand — its " +
                  "playback state is otherwise lost on every EnterPlaymode). The build " +

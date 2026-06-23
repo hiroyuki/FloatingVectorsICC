@@ -1268,7 +1268,6 @@ MonoBehaviour:
   subscribePlayback: 1
   clearVolumeOnNewBatch: 1
   expectedCamCount: 4
-  integrationEnabled: 1
   diagnosticLogging: 0
 --- !u!4 &1289138167
 Transform:
@@ -1410,7 +1409,6 @@ MonoBehaviour:
   pointCloudToggleKey: 112
   meshToggleKey: 109
   seekToCursor: -1
-  seekRequested: 0
   validateSerial: 
   startPlayheadSec: 4.336
   skipFrames: 1
@@ -1419,7 +1417,6 @@ MonoBehaviour:
   instant2Color: {r: 0, g: 0, b: 1, a: 1}
   smoothUnion: 0
   smoothUnionK: 0.03
-  buildRequested: 1
   autoRunOnPlay: 0
   removeNoiseKey: 110
   colorModeKey: 99
