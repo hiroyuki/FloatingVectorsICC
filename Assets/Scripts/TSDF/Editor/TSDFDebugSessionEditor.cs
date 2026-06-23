@@ -32,13 +32,15 @@ namespace TSDF.EditorTools
                 }
 
                 // Open the compare/bench section with its header + the toggle button,
-                // then its fields (validateSerial is the first one).
+                // then a serial dropdown in place of the raw text field.
                 if (!buttonDrawn && it.name == "validateSerial")
                 {
                     EditorGUILayout.Space();
                     EditorGUILayout.LabelField("Compare two instants (bench)", EditorStyles.boldLabel);
                     DrawCompareButton(t);
                     buttonDrawn = true;
+                    DrawValidateSerialPopup(t, it);
+                    continue;   // popup replaces the default text field
                 }
 
                 EditorGUILayout.PropertyField(it, true);
@@ -50,6 +52,35 @@ namespace TSDF.EditorTools
             serializedObject.ApplyModifiedProperties();
 
             if (Application.isPlaying) Repaint();
+        }
+
+        // Dropdown of available camera serials (populated from the recorder after
+        // Play) instead of a free-text field. Empty string = all cameras.
+        private static void DrawValidateSerialPopup(TSDFDebugSession t, SerializedProperty prop)
+        {
+            string[] serials = t.cameraKeys;
+            if (serials == null || serials.Length == 0)
+            {
+                // No serials yet (before Play / before the recording loads) — keep a
+                // text field so it's still editable; the dropdown appears once known.
+                EditorGUILayout.PropertyField(prop, new GUIContent("Validate Serial"));
+                return;
+            }
+
+            var options = new string[serials.Length + 1];
+            options[0] = "(ALL cameras)";
+            for (int i = 0; i < serials.Length; i++) options[i + 1] = serials[i];
+
+            string cur = prop.stringValue;
+            int idx = 0;
+            if (!string.IsNullOrEmpty(cur))
+            {
+                int found = System.Array.IndexOf(serials, cur);
+                idx = found >= 0 ? found + 1 : 0;
+            }
+            int next = EditorGUILayout.Popup("Validate Serial", idx, options);
+            if (next != idx)
+                prop.stringValue = next == 0 ? "" : serials[next - 1];
         }
 
         private static void DrawCompareButton(TSDFDebugSession t)
