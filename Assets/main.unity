@@ -265,7 +265,7 @@ MonoBehaviour:
   jointMotionField: {fileID: 0}
   cumulative: {fileID: 0}
   folderPath: D:\FloatingVectorsICC\Recordings_jump2
-  folderPathMacOverride: /Users/horihiroyuki/Dropbox/projects/ICC/Recordings/Recordings_jump2
+  folderPathMacOverride: /Users/horihiroyuki/Dropbox/projects/ICC/Recordings/_4cam_btrec
   datasetName: 
   loop: 1
   view: {fileID: 1168113566}
@@ -1331,7 +1331,7 @@ GameObject:
   - component: {fileID: 1892179044}
   - component: {fileID: 1892179045}
   m_Layer: 0
-  m_Name: CameraOverlay
+  m_Name: MultiCamera
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -1364,7 +1364,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 70bd2c82906631842a5948cdaa4c92ac, type: 3}
   m_Name: 
   m_EditorClassIdentifier: PointCloud::PointCloud.MultiCameraDebugView
-  toggleKey: 96
+  toggleKey: 282
   showOnStart: 0
   depthNearMm: 300
   depthFarMm: 4000
@@ -1412,7 +1412,7 @@ MonoBehaviour:
   validateSerial: 
   startPlayheadSec: 4.336
   skipFrames: 1
-  colorByInstant: 1
+  colorByInstant: 0
   instant1Color: {r: 1, g: 0, b: 0, a: 1}
   instant2Color: {r: 0, g: 0, b: 1, a: 1}
   smoothUnion: 0
