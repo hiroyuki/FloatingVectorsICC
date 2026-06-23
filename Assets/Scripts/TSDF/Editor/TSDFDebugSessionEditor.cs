@@ -1,7 +1,7 @@
 // Inspector for TSDFDebugSession. The single "Compare Two Instants" toggle is the
-// primary control, so it's drawn at the TOP of the component (right under the
-// script field, above all settings). The button freezes playback and overlays two
-// moments; clicking it again resumes normal playback.
+// control for the compare/bench section, so it's drawn at the TOP of that section
+// (right under its header, above the bench settings). The button freezes playback
+// and overlays two moments; clicking it again resumes normal playback.
 
 using UnityEditor;
 using UnityEngine;
@@ -28,11 +28,17 @@ namespace TSDF.EditorTools
                 {
                     using (new EditorGUI.DisabledScope(true))
                         EditorGUILayout.PropertyField(it);
-                    // Primary control: draw the Compare toggle at the top, above all
-                    // settings, right under the script field.
+                    continue;
+                }
+
+                // Open the compare/bench section with its header + the toggle button,
+                // then its fields (validateSerial is the first one).
+                if (!buttonDrawn && it.name == "validateSerial")
+                {
+                    EditorGUILayout.Space();
+                    EditorGUILayout.LabelField("Compare two instants (bench)", EditorStyles.boldLabel);
                     DrawCompareButton(t);
                     buttonDrawn = true;
-                    continue;
                 }
 
                 EditorGUILayout.PropertyField(it, true);

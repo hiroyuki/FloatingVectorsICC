@@ -47,7 +47,8 @@ namespace TSDF.DebugTools
         // ticked state can never bake into the scene and fire on every Play.
         [System.NonSerialized] public bool seekRequested = false;
 
-        [Header("Compare two instants (bench)")]
+        // Header "Compare two instants (bench)" + the toggle button are drawn by
+        // TSDFDebugSessionEditor so the button sits at the top of this section.
         [Tooltip("Camera serial whose frames to accumulate. LEAVE EMPTY to use ALL " +
                  "cameras (every serial gets folded in at each playhead — multi-view).")]
         public string validateSerial = "";
