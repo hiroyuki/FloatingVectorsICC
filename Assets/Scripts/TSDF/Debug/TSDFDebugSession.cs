@@ -49,9 +49,6 @@ namespace TSDF.DebugTools
 
         // Header "Compare two instants (bench)" + the toggle button are drawn by
         // TSDFDebugSessionEditor so the button sits at the top of this section.
-        [Tooltip("Camera serial whose frames to accumulate. LEAVE EMPTY to use ALL " +
-                 "cameras (every serial gets folded in at each playhead — multi-view).")]
-        public string validateSerial = "";
         [Tooltip("Start playhead in SECONDS from the recording start (the value shown " +
                  "in 'Current Playhead Sec'). The bench integrates the frame at this " +
                  "instant PLUS the frame 'skipFrames' later — two shells in ONE volume " +
@@ -60,8 +57,8 @@ namespace TSDF.DebugTools
         public double startPlayheadSec = 0.0;
         [Tooltip("How many frames after the start instant the SECOND shell is taken " +
                  "from. 1 = the immediately-next frame; larger = a wider motion gap. " +
-                 "The second playhead time is COMPUTED from this camera's frame " +
-                 "timestamps (uses validateSerial, or the first camera when blank).")]
+                 "The second playhead time is COMPUTED from the first camera in " +
+                 "cameraKeys' frame timestamps.")]
         [Min(1)] public int skipFrames = 1;
         [Tooltip("Colour-code the two instants in the baked mesh (dev aid): instant 1 " +
                  "= instant1Color, instant 2 = instant2Color, instead of camera RGB. " +
@@ -384,11 +381,12 @@ namespace TSDF.DebugTools
         /// Each instant is seeked by TIME (every camera lands on its own
         /// timestamp-matched frame) and integrated WITHOUT clearing between, so the
         /// two instants land as two shells — the raw "do they overlap or sit apart?"
-        /// state we want to inspect before choosing how to bridge them. When
-        /// <see cref="validateSerial"/> is blank, ALL cameras are folded in at each
-        /// instant (multi-view) and the first camera is the timing reference. The
-        /// live integrator is gated OFF during the seeks so it can't fold frames in
-        /// twice; our IntegrateRawFrame calls bypass that gate.
+        /// state we want to inspect before choosing how to bridge them. All cameras
+        /// in <see cref="cameraKeys"/> are folded in at each instant (multi-view) and
+        /// the first camera is the timing reference — to bench a single camera, leave
+        /// only that serial in cameraKeys. The live integrator is gated OFF during the
+        /// seeks so it can't fold frames in twice; our IntegrateRawFrame calls bypass
+        /// that gate.
         /// </summary>
         public void CompareTwoInstants()
         {
@@ -411,14 +409,12 @@ namespace TSDF.DebugTools
 
             if (cameraKeys == null || cameraKeys.Length == 0) AutoPopulateCameraKeys();
 
-            // Cameras to fold in (one serial, or ALL when blank) and the reference
-            // camera used to convert the skipFrames offset into a playhead time.
-            string[] serials = !string.IsNullOrEmpty(validateSerial)
-                ? new[] { validateSerial }
-                : cameraKeys;
+            // Cameras to fold in (all of cameraKeys) and the reference camera (the
+            // first) used to convert the skipFrames offset into a playhead time.
+            string[] serials = cameraKeys;
             if (serials == null || serials.Length == 0 || string.IsNullOrEmpty(serials[0]))
             {
-                Debug.LogWarning("[TSDFDebugSession] No validateSerial set and no cameraKeys to fall back on.", this);
+                Debug.LogWarning("[TSDFDebugSession] No cameraKeys to bench (none recorded / configured).", this);
                 return;
             }
             string refSerial = serials[0];
@@ -514,8 +510,8 @@ namespace TSDF.DebugTools
                 volume.Publish();
             }
 
-            string who = !string.IsNullOrEmpty(validateSerial)
-                ? validateSerial.Substring(System.Math.Max(0, validateSerial.Length - 6))
+            string who = serials.Length == 1
+                ? serials[0].Substring(System.Math.Max(0, serials[0].Length - 6))
                 : $"ALL x{serials.Length}";
             string mode = smin ? $"smooth-union k={smoothUnionK:0.000}m (separate SDFs)" : "RetainGhost (one buffer)";
             lastReplayKind = $"fixed[{done}] ({who}) {(smin ? "smin" : "ghost")}";
