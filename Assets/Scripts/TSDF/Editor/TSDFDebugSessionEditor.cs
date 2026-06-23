@@ -1,8 +1,7 @@
-// Inspector for TSDFDebugSession. Draws the default fields but places the single
-// "Compare Two Instants" toggle button inside the compare/bench group it controls
-// (right after the smooth-union settings, before the read-only Cache status),
-// instead of floating at the very bottom. The button freezes playback and overlays
-// two moments; clicking it again resumes normal playback.
+// Inspector for TSDFDebugSession. The single "Compare Two Instants" toggle is the
+// primary control, so it's drawn at the TOP of the component (right under the
+// script field, above all settings). The button freezes playback and overlays two
+// moments; clicking it again resumes normal playback.
 
 using UnityEditor;
 using UnityEngine;
@@ -29,21 +28,17 @@ namespace TSDF.EditorTools
                 {
                     using (new EditorGUI.DisabledScope(true))
                         EditorGUILayout.PropertyField(it);
-                    continue;
-                }
-
-                // The compare button belongs with the bench it drives: draw it just
-                // before the "Cache status" block (cachedCount is its first field).
-                if (!buttonDrawn && it.name == "cachedCount")
-                {
+                    // Primary control: draw the Compare toggle at the top, above all
+                    // settings, right under the script field.
                     DrawCompareButton(t);
                     buttonDrawn = true;
+                    continue;
                 }
 
                 EditorGUILayout.PropertyField(it, true);
             }
 
-            // Fallback if the cache-status fields are ever renamed/removed.
+            // Fallback if the script field is ever not first.
             if (!buttonDrawn) DrawCompareButton(t);
 
             serializedObject.ApplyModifiedProperties();
