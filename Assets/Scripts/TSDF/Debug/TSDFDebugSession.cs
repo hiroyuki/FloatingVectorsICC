@@ -88,7 +88,7 @@ namespace TSDF.DebugTools
                  "bench once (no need to press the recorder's Play button by hand — its " +
                  "playback state is otherwise lost on every EnterPlaymode). The build " +
                  "leaves playback paused/frozen at the two fixed instants.")]
-        public bool autoRunOnPlay = true;
+        public bool autoRunOnPlay = false;
         [Tooltip("Run the connected-component noise filter (TSDFVolume.RemoveSmallComponents) " +
                  "on the current frozen result — drops small floating islands, keeps the " +
                  "thin main surface. Run while paused (it's a one-shot, not per-frame).")]

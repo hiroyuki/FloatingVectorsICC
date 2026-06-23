@@ -1260,6 +1260,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: bcbb172f5530a408281650dc596846b2, type: 3}
   m_Name: 
   m_EditorClassIdentifier: TSDF::TSDF.TSDFIntegrator
+  forcePinhole: 0
   volume: {fileID: 639959844}
   observationWeight: 1
   colorOverride: {r: 0, g: 0, b: 0, a: 0}
@@ -1365,13 +1366,13 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: PointCloud::PointCloud.MultiCameraDebugView
   toggleKey: 96
-  showOnStart: 1
+  showOnStart: 0
   depthNearMm: 300
   depthFarMm: 4000
   tileWidth: 320
   margin: 8
   gap: 6
-  flipVertical: 0
+  flipVertical: 1
 --- !u!1 &2040096809
 GameObject:
   m_ObjectHideFlags: 0
@@ -1413,14 +1414,13 @@ MonoBehaviour:
   validateSerial: 
   startPlayheadSec: 4.336
   skipFrames: 1
-  colorByInstant: 0
+  colorByInstant: 1
   instant1Color: {r: 1, g: 0, b: 0, a: 1}
   instant2Color: {r: 0, g: 0, b: 1, a: 1}
   smoothUnion: 0
   smoothUnionK: 0.03
-  buildRequested: 0
-  buildFixedFramesKey: 98
-  autoRunOnPlay: 1
+  buildRequested: 1
+  autoRunOnPlay: 0
   removeNoiseKey: 110
   colorModeKey: 99
   highlightSeamKey: 104
@@ -1432,7 +1432,6 @@ MonoBehaviour:
   lastReplayTimestampUs: 0
   currentCursors: []
   currentPlayheadSec: (idle)
-  bModeStatus: (off)
 --- !u!4 &2040096811
 Transform:
   m_ObjectHideFlags: 0
