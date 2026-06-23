@@ -346,6 +346,12 @@ namespace TSDF.DebugTools
         /// The Inspector exposes this as a single toggle button.</summary>
         public bool IsComparing { get; private set; }
 
+        // Volume accumulation mode captured on compare entry (compare forces
+        // RetainGhost). Restored when exiting compare so live/playback TSDF returns
+        // to the scene default instead of being stuck on RetainGhost.
+        private TSDFVolume.AccumulationMode _accumBeforeCompare;
+        private bool _haveAccumBackup;
+
         /// <summary>One-button compare: enter the two-instant compare if not in it,
         /// otherwise exit back to normal playback.</summary>
         public void ToggleCompare()
@@ -424,6 +430,10 @@ namespace TSDF.DebugTools
             // it — otherwise a failed build silently leaves live integration frozen.
             bool priorIntegEnabled = integrator.integrationEnabled;
             var priorAccum = volume.accumulationMode;
+            // Remember the pre-compare accumulation mode so ResumePlayback can put it
+            // back. Capture only on a fresh entry, not on a rebuild while already
+            // comparing (priorAccum would be RetainGhost then).
+            if (!IsComparing) { _accumBeforeCompare = priorAccum; _haveAccumBackup = true; }
             integrator.integrationEnabled = false;
             volume.accumulationMode = TSDFVolume.AccumulationMode.RetainGhost;
 
@@ -786,6 +796,13 @@ namespace TSDF.DebugTools
             {
                 integrator.integrationEnabled = true;
                 integrator.BeginFreshBatch();   // drop the frozen compare result
+            }
+            // Restore the accumulation mode compare forced to RetainGhost, so live
+            // playback returns to the scene default (e.g. StandardWeightedAvg).
+            if (_haveAccumBackup && volume != null)
+            {
+                volume.accumulationMode = _accumBeforeCompare;
+                _haveAccumBackup = false;
             }
             if (recorder != null && recorder.IsPaused) recorder.ResumePlayback();
             IsComparing = false;
