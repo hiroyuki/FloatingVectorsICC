@@ -81,10 +81,10 @@ namespace TSDF.DebugTools
                  "caveat). ~1-4 voxels is a sensible start. Drag while frozen to watch " +
                  "the neck change live.")]
         [Range(0.001f, 0.3f)] public float smoothUnionK = 0.03f;
-        // One-shot trigger via the "Build Fixed Frames" context menu. NonSerialized
-        // so a ticked state can never bake into the scene and run the bench (seek +
-        // freeze) on every Play — that was the cause of "Play stops on a frame and
-        // shows the red/blue bench". The bench stays available on demand.
+        // One-shot trigger fired by the Compare toggle / "Compare Two Instants"
+        // context menu. NonSerialized so a ticked state can never bake into the scene
+        // and run the compare (seek + freeze) on every Play — that was the cause of
+        // "Play stops on a frame and shows the red/blue bench".
         [System.NonSerialized] public bool buildRequested = false;
         [Tooltip("On entering Play, automatically Read + Play the recorder and run the " +
                  "bench once (no need to press the recorder's Play button by hand — its " +
@@ -188,13 +188,13 @@ namespace TSDF.DebugTools
         }
 
         // Wait a couple of frames so the recorder's own enable/start ran, then
-        // Read+Play+Build automatically. BuildFixedFrames self-starts playback,
+        // Read+Play+Build automatically. CompareTwoInstants self-starts playback,
         // so this only needs to fire it once.
         private System.Collections.IEnumerator AutoRunCo()
         {
             yield return null;
             yield return null;
-            BuildFixedFrames();   // seek to startPlayheadSec, build the two fixed instants, paused
+            CompareTwoInstants();   // seek to startPlayheadSec, build the two fixed instants, paused
         }
 
         private void OnDisable()
@@ -262,7 +262,7 @@ namespace TSDF.DebugTools
                 // Flip camera-RGB <-> red/blue tags and re-tag immediately so the
                 // change is visible without a manual rebuild (works paused too).
                 colorByInstant = !colorByInstant;
-                BuildFixedFrames();
+                CompareTwoInstants();
             }
             if (Input.GetKeyDown(highlightSeamKey))
             {
@@ -272,9 +272,9 @@ namespace TSDF.DebugTools
                 Debug.Log($"[TSDFDebugSession] smin seam highlight = {highlightSeam}", this);
                 if (smoothUnion && SmoothUnionCacheValid()) ComposeSmoothUnion();
                 else Debug.Log("[TSDFDebugSession] (no smooth-union cache; enable smoothUnion " +
-                               "and press B to build the bench first)", this);
+                               "and toggle Compare on first)", this);
             }
-            if (buildRequested) BuildFixedFrames();   // context-menu / tick = one-shot frozen pair
+            if (buildRequested) CompareTwoInstants();   // context-menu / tick = one-shot frozen pair
 
             // Live k tuning: while the smin bench is frozen (paused / idle), dragging
             // smoothUnionK re-blends the cached A/B pair without re-integrating. Skip
@@ -341,8 +341,20 @@ namespace TSDF.DebugTools
             Debug.Log($"[TSDFDebugSession] SeekAllTracksTo({seekToCursor}) moved={moved}", this);
         }
 
-        [ContextMenu("Build Fixed Frames")]
-        public void TriggerBuildFixedFrames() { buildRequested = true; }
+        /// <summary>True while the two-instant compare is held (integrator frozen).
+        /// The Inspector exposes this as a single toggle button.</summary>
+        public bool IsComparing { get; private set; }
+
+        /// <summary>One-button compare: enter the two-instant compare if not in it,
+        /// otherwise exit back to normal playback.</summary>
+        public void ToggleCompare()
+        {
+            if (IsComparing) ResumePlayback();   // exit -> resume normal playback
+            else buildRequested = true;          // enter -> built on the next Update tick
+        }
+
+        [ContextMenu("Compare Two Instants")]
+        public void TriggerCompareTwoInstants() { buildRequested = true; }
 
         /// <summary>
         /// Get the recorder into Playing state without the user touching its Play
@@ -371,7 +383,7 @@ namespace TSDF.DebugTools
         /// live integrator is gated OFF during the seeks so it can't fold frames in
         /// twice; our IntegrateRawFrame calls bypass that gate.
         /// </summary>
-        public void BuildFixedFrames()
+        public void CompareTwoInstants()
         {
             buildRequested = false;
             if (recorder == null || volume == null || integrator == null)
@@ -496,10 +508,11 @@ namespace TSDF.DebugTools
                 : $"ALL x{serials.Length}";
             string mode = smin ? $"smooth-union k={smoothUnionK:0.000}m (separate SDFs)" : "RetainGhost (one buffer)";
             lastReplayKind = $"fixed[{done}] ({who}) {(smin ? "smin" : "ghost")}";
-            Debug.Log($"[TSDFDebugSession] Built two instants on {who}: " +
+            IsComparing = true;
+            Debug.Log($"[TSDFDebugSession] Compared two instants on {who}: " +
                       $"start={startPlayheadSec:0.000}s (cursor {refCursor}) + {skipFrames}f " +
                       $"-> {secondSec:0.000}s (cursor {targetCursor}). {done} integrations, {mode}. " +
-                      "Integrator FROZEN — set integrator.integrationEnabled=true to resume live.", this);
+                      "Integrator FROZEN — toggle Compare off (or Resume Playback) to go live.", this);
         }
 
         // ---------------- Smooth-union (issue #27) ----------------
@@ -558,7 +571,7 @@ namespace TSDF.DebugTools
         }
 
         // smin(A, B, k) -> volume write buffer, then publish so MC re-extracts. Used
-        // both by BuildFixedFrames and by the live-k recompose in Update.
+        // both by CompareTwoInstants and by the live-k recompose in Update.
         private void ComposeSmoothUnion()
         {
             if (!_haveInstants || volume == null || volume.WriteBuffer == null) return;
@@ -762,19 +775,19 @@ namespace TSDF.DebugTools
             integrator.IntegrateRawFrame(snap.Serial, snap.CamParam, snap.SourceTransform, raw);
         }
 
-        // Return to plain live single-instance integration after a fixed-frame
-        // bench (which freezes the integrator and holds the two-shell result).
-        // Re-enables integration, clears the frozen bench mesh, and resumes the
-        // recorder so the volume refills from live frames in camera colour.
-        [ContextMenu("Resume Live Integration (single instance)")]
+        // Exit the two-instant compare back to normal continuous playback: re-enable
+        // integration, clear the frozen compare mesh, and resume the recorder so the
+        // volume refills from live frames in camera colour.
+        [ContextMenu("Resume Playback (exit compare)")]
         public void ResumePlayback()
         {
             if (integrator != null)
             {
                 integrator.integrationEnabled = true;
-                integrator.BeginFreshBatch();   // drop the frozen bench result
+                integrator.BeginFreshBatch();   // drop the frozen compare result
             }
             if (recorder != null && recorder.IsPaused) recorder.ResumePlayback();
+            IsComparing = false;
         }
     }
 }
