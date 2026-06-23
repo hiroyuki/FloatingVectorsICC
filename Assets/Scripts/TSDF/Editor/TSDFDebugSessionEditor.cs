@@ -1,7 +1,8 @@
-// Inspector for TSDFDebugSession: the default fields plus a single Compare
-// toggle button. "Compare Two Instants" freezes playback and overlays two
-// moments; clicking it again resumes normal playback. Replaces the old
-// confusing "Build Fixed Frames" + separate "Resume" split.
+// Inspector for TSDFDebugSession. Draws the default fields but places the single
+// "Compare Two Instants" toggle button inside the compare/bench group it controls
+// (right after the smooth-union settings, before the read-only Cache status),
+// instead of floating at the very bottom. The button freezes playback and overlays
+// two moments; clicking it again resumes normal playback.
 
 using UnityEditor;
 using UnityEngine;
@@ -14,10 +15,44 @@ namespace TSDF.EditorTools
     {
         public override void OnInspectorGUI()
         {
-            DrawDefaultInspector();
-
+            serializedObject.Update();
             var t = (TSDFDebugSession)target;
 
+            var it = serializedObject.GetIterator();
+            bool enterChildren = true;
+            bool buttonDrawn = false;
+            while (it.NextVisible(enterChildren))
+            {
+                enterChildren = false;
+
+                if (it.propertyPath == "m_Script")
+                {
+                    using (new EditorGUI.DisabledScope(true))
+                        EditorGUILayout.PropertyField(it);
+                    continue;
+                }
+
+                // The compare button belongs with the bench it drives: draw it just
+                // before the "Cache status" block (cachedCount is its first field).
+                if (!buttonDrawn && it.name == "cachedCount")
+                {
+                    DrawCompareButton(t);
+                    buttonDrawn = true;
+                }
+
+                EditorGUILayout.PropertyField(it, true);
+            }
+
+            // Fallback if the cache-status fields are ever renamed/removed.
+            if (!buttonDrawn) DrawCompareButton(t);
+
+            serializedObject.ApplyModifiedProperties();
+
+            if (Application.isPlaying) Repaint();
+        }
+
+        private static void DrawCompareButton(TSDFDebugSession t)
+        {
             EditorGUILayout.Space();
             using (new EditorGUI.DisabledScope(!Application.isPlaying))
             {
@@ -27,18 +62,15 @@ namespace TSDF.EditorTools
                 string label = comparing
                     ? "● Comparing — click to resume playback"
                     : "Compare Two Instants";
-                if (GUILayout.Button(label, GUILayout.Height(28)))
+                if (GUILayout.Button(label, GUILayout.Height(26)))
                     t.ToggleCompare();
                 GUI.backgroundColor = prev;
             }
-
             if (!Application.isPlaying)
                 EditorGUILayout.HelpBox(
-                    "Play: the recording plays normally. Toggle 'Compare Two Instants' to " +
-                    "freeze and overlay two moments (red/blue); toggle it off to resume playback.",
-                    MessageType.None);
-
-            if (Application.isPlaying) Repaint();
+                    "In Play: toggle on to freeze and overlay two moments (red/blue); " +
+                    "toggle off to resume normal playback.", MessageType.None);
+            EditorGUILayout.Space();
         }
     }
 }
