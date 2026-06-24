@@ -124,6 +124,18 @@ namespace TSDF.DebugTools
                  "instant B in blue (sphere = elbow/wrist, line = bone). Use this to verify " +
                  "the skeleton lines up with the arm mesh in the same world space.")]
         public bool showLimbGizmos = true;
+        [Tooltip("Tier 3: after smin, sweep instant A's forearm SDF along the elbow->wrist " +
+                 "bone motion (A->B) and min-union it in, bridging the two arm positions with " +
+                 "the real arm cross-section. Needs a smooth-union bench + captured skeleton. " +
+                 "Toggle with limbSweepKey; re-composes the cached pair live.")]
+        public bool limbSweep = false;
+        [Tooltip("Intermediate poses swept between A and B. More = smoother bridge, slower.")]
+        [Range(2, 32)] public int limbSweepSteps = 12;
+        [Tooltip("Accept instant-A samples within this distance (m) of the elbow-wrist bone, " +
+                 "so only the forearm is swept (~forearm radius + margin). Drag while frozen.")]
+        [Range(0.02f, 0.25f)] public float limbBindRadius = 0.08f;
+        [Tooltip("Key to toggle the limb sweep (Game View must have focus).")]
+        public KeyCode limbSweepKey = KeyCode.J;
 
         [Header("Cache status (read-only)")]
         [SerializeField] private int cachedCount = 0;
@@ -199,6 +211,12 @@ namespace TSDF.DebugTools
         // Forearm joints captured at instant A / B, in volume WORLD space (metres).
         private bool _haveLimb;
         private Vector3 _elbowA, _wristA, _elbowB, _wristB;
+        // Tier 3 limb-sweep compute (warp instant A's arm along the bone motion).
+        private ComputeShader _limbShader;
+        private int _limbKernel = -1;
+        private bool _lastLimbSweep;
+        private int _lastLimbSteps = -1;
+        private float _lastLimbRadius = float.NaN;
 
         private void OnEnable()
         {
@@ -354,6 +372,15 @@ namespace TSDF.DebugTools
                 else Debug.Log("[TSDFDebugSession] (no smooth-union cache; enable smoothUnion " +
                                "and toggle Compare on first)", this);
             }
+            if (Input.GetKeyDown(limbSweepKey))
+            {
+                // Tier 3: toggle the skeleton-guided forearm bridge and re-compose.
+                limbSweep = !limbSweep;
+                Debug.Log($"[TSDFDebugSession] limb sweep = {limbSweep}", this);
+                if (smoothUnion && SmoothUnionCacheValid() && _haveLimb) ComposeSmoothUnion();
+                else Debug.Log("[TSDFDebugSession] (need a smooth-union bench + captured skeleton; " +
+                               "enable smoothUnion and run Compare first)", this);
+            }
             if (buildRequested) CompareTwoInstants();   // context-menu / tick = one-shot frozen pair
 
             // Live k tuning: while the smin bench is frozen (paused / idle), dragging
@@ -365,7 +392,10 @@ namespace TSDF.DebugTools
                 && !IsRecorderActivelyPlaying()
                 && (!Mathf.Approximately(smoothUnionK, _lastComposedK)
                     || highlightSeam != _lastHighlightSeam
-                    || !Mathf.Approximately(seamThreshold, _lastSeamThreshold)))
+                    || !Mathf.Approximately(seamThreshold, _lastSeamThreshold)
+                    || limbSweep != _lastLimbSweep
+                    || limbSweepSteps != _lastLimbSteps
+                    || !Mathf.Approximately(limbBindRadius, _lastLimbRadius)))
                 ComposeSmoothUnion();
         }
 
@@ -564,6 +594,9 @@ namespace TSDF.DebugTools
                 SnapshotWriteBuffer(_suVoxA, _suColA, voxelTotal);
 
                 recorder.SeekToPlayheadSeconds(secondSec);
+                // Capture instant-B forearm now (recorder parked at secondSec) so the
+                // limb sweep inside ComposeSmoothUnion below already has both bones.
+                _haveLimb = gotLimbA && CaptureForearm(refSerial, out _elbowB, out _wristB);
                 volume.ClearWrite();
                 if (colorByInstant) integrator.colorOverride = instant2Color;
                 done += IntegrateAllCached(serials, $"instant2 @ {secondSec:0.000}s (+{skipFrames}f, SDF B)");
@@ -574,7 +607,7 @@ namespace TSDF.DebugTools
                 _haveInstants = true;
                 _suWorldFromVoxel = volume.WorldFromVoxel;   // mapping the cache is valid for
                 _suVoxelSizeAtBuild = volume.voxelSize;
-                ComposeSmoothUnion();   // smin(A,B,k) -> write buffer + Publish
+                ComposeSmoothUnion();   // smin(A,B,k) [+ limb sweep] -> write buffer + Publish
             }
             else
             {
@@ -714,10 +747,55 @@ namespace TSDF.DebugTools
             _suShader.SetBuffer(_suUnionKernel, "_ColorsOut", volume.WriteColorBuffer);
             _suShader.Dispatch(_suUnionKernel, Mathf.Max(1, gx), Mathf.Max(1, gy), 1);
 
+            // Tier 3 (#34): bridge the forearm by sweeping instant A's arm SDF along
+            // the bone motion into the same write buffer before publishing.
+            if (limbSweep && _haveLimb) DispatchLimbSweep(gx, gy);
+
             volume.Publish();
             _lastComposedK = smoothUnionK;
             _lastHighlightSeam = highlightSeam;
             _lastSeamThreshold = seamThreshold;
+            _lastLimbSweep = limbSweep;
+            _lastLimbSteps = limbSweepSteps;
+            _lastLimbRadius = limbBindRadius;
+        }
+
+        private bool EnsureLimbShader()
+        {
+            if (_limbShader != null && _limbKernel >= 0) return true;
+            _limbShader = Resources.Load<ComputeShader>("TSDFLimbSweep");
+            if (_limbShader == null)
+            {
+                Debug.LogError("[TSDFDebugSession] Compute shader \"Resources/TSDFLimbSweep.compute\" not found.", this);
+                return false;
+            }
+            _limbKernel = _limbShader.FindKernel("LimbSweep");
+            return _limbKernel >= 0;
+        }
+
+        // Sweep instant A's forearm (bone _elbowA->_wristA) along the interpolated
+        // motion to bone B and min-union it into the volume write buffer (reading the
+        // cached instant-A sdf/colour). Runs inside ComposeSmoothUnion, before Publish.
+        private void DispatchLimbSweep(int gx, int gy)
+        {
+            if (!EnsureLimbShader()) return;
+            if (_suVoxA == null || volume.WriteBuffer == null) return;
+            _limbShader.SetInts("_Dim", volume.Dim.x, volume.Dim.y, volume.Dim.z);
+            _limbShader.SetInt("_DispatchWidth", gx * 64);
+            _limbShader.SetFloat("_Tau", volume.Tau);
+            _limbShader.SetMatrix("_WorldFromVoxel", volume.WorldFromVoxel);
+            _limbShader.SetMatrix("_VoxelFromWorld", volume.VoxelFromWorld);
+            _limbShader.SetVector("_ElbowA", _elbowA);
+            _limbShader.SetVector("_WristA", _wristA);
+            _limbShader.SetVector("_ElbowB", _elbowB);
+            _limbShader.SetVector("_WristB", _wristB);
+            _limbShader.SetInt("_Steps", Mathf.Max(2, limbSweepSteps));
+            _limbShader.SetFloat("_BindRadius", limbBindRadius);
+            _limbShader.SetBuffer(_limbKernel, "_VoxelsA", _suVoxA);
+            _limbShader.SetBuffer(_limbKernel, "_ColorsA", _suColA);
+            _limbShader.SetBuffer(_limbKernel, "_VoxelsOut", volume.WriteBuffer);
+            _limbShader.SetBuffer(_limbKernel, "_ColorsOut", volume.WriteColorBuffer);
+            _limbShader.Dispatch(_limbKernel, Mathf.Max(1, gx), Mathf.Max(1, gy), 1);
         }
 
         // 2D dispatch grid (mirrors TSDFVolume/Integrator): keeps large volumes under
