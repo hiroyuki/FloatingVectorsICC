@@ -320,6 +320,19 @@ namespace BodyTracking
 
         private void Update()
         {
+            Pump();
+            if (diagnosticLogging) PerSecondDiag();
+        }
+
+        /// <summary>
+        /// Poll every live worker's output slot once and fire <see cref="OnSkeletonsReady"/>
+        /// for any new skeletons. <see cref="Update"/> calls this each play-mode frame;
+        /// edit-mode batch drivers (offline bodies recompute) call it manually from a
+        /// blocking loop / EditorApplication.update since MonoBehaviour.Update doesn't
+        /// tick outside play mode.
+        /// </summary>
+        public void Pump()
+        {
             // Local snapshot; StopWorker mutates the dictionary.
             if (_sessions.Count == 0) return;
             // Avoid LINQ; iterate a fresh array each frame.
@@ -330,18 +343,21 @@ namespace BodyTracking
             for (int i = 0; i < keys.Length; i++)
             {
                 if (!_sessions.TryGetValue(keys[i], out var s)) continue;
-                if (!s.Ready) continue;
+                // Check liveness before the readiness gate: a worker that dies during
+                // startup (e.g. BT model load failure, or the ReadyWatcher killing it on
+                // timeout) never flips Ready, so gating on Ready first would leave the
+                // dead session hanging. Tearing it down here lets callers re-spawn (live)
+                // or surface the failure promptly (offline recompute).
                 if (s.Process != null && s.Process.HasExited)
                 {
                     Debug.LogWarning($"[K4abtWorkerHost] worker for serial='{s.Serial}' exited (code={s.Process.ExitCode}); tearing down session");
                     StopWorker(s.Serial);
                     continue;
                 }
+                if (!s.Ready) continue;
                 if (!s.OutputEvt.WaitOne(0)) continue;
                 ProcessOutputSlot(s);
             }
-
-            if (diagnosticLogging) PerSecondDiag();
         }
 
         private void OnDisable() => StopAllWorkers();
