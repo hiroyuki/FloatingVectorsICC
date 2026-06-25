@@ -265,7 +265,7 @@ MonoBehaviour:
   jointMotionField: {fileID: 0}
   cumulative: {fileID: 0}
   folderPath: D:\FloatingVectorsICC\Recordings_jump2
-  folderPathMacOverride: /Users/horihiroyuki/Dropbox/projects/ICC/Recordings/Recordings_jump2
+  folderPathMacOverride: /Users/horihiroyuki/Dropbox/projects/ICC/Recordings/_4cam_btrec
   datasetName: 
   loop: 1
   view: {fileID: 1168113566}
@@ -1409,6 +1409,7 @@ MonoBehaviour:
   pointCloudToggleKey: 112
   meshToggleKey: 109
   seekToCursor: -1
+  validateSerial: 
   startPlayheadSec: 4.336
   skipFrames: 1
   colorByInstant: 0
@@ -1423,8 +1424,6 @@ MonoBehaviour:
   highlightSeam: 0
   seamColor: {r: 1, g: 0, b: 1, a: 1}
   seamThreshold: 0.35
-  sweepArm: 1
-  showLimbGizmos: 1
   cachedCount: 0
   lastReplayKind: (none)
   lastReplayTimestampUs: 0

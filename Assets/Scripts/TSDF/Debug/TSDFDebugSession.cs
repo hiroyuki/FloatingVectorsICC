@@ -12,8 +12,6 @@
 using System.Collections.Generic;
 using Orbbec;
 using PointCloud;
-using BodyTracking;
-using BodyTracking.MultiCam;
 using UnityEngine;
 
 namespace TSDF.DebugTools
@@ -115,16 +113,6 @@ namespace TSDF.DebugTools
                  "neck. Drag while frozen to watch the highlighted band change live.")]
         [Range(0f, 1f)] public float seamThreshold = 0.35f;
 
-        [Header("Limb sweep (Tier 3 — skeleton-guided, prototype)")]
-        [Tooltip("Which forearm (elbow->wrist) to bridge between the two instants using " +
-                 "the k4abt skeleton. STEP 1 only captures + draws the joints so we can " +
-                 "confirm they land on the actual arm mesh before warping anything.")]
-        public ArmSide sweepArm = ArmSide.Right;
-        [Tooltip("Draw the captured forearm bones as Scene-view gizmos: instant A in red, " +
-                 "instant B in blue (sphere = elbow/wrist, line = bone). Use this to verify " +
-                 "the skeleton lines up with the arm mesh in the same world space.")]
-        public bool showLimbGizmos = true;
-
         [Header("Cache status (read-only)")]
         [SerializeField] private int cachedCount = 0;
         [SerializeField] private string lastReplayKind = "(none)";
@@ -182,24 +170,6 @@ namespace TSDF.DebugTools
         private Matrix4x4 _suWorldFromVoxel;
         private float _suVoxelSizeAtBuild;
 
-        // --- Limb sweep (Tier 3): skeleton at the two bench instants ---
-        // Which arm to bridge. Single person (CLAUDE.md) -> always body index 0.
-        public enum ArmSide { Left, Right }
-        private const int MaxBodies = 6;
-        // Latest decoded body per camera serial, updated as OnPlaybackBodies fires
-        // during each seek (mirrors how _cache holds the latest depth/colour).
-        private sealed class BodyLatest
-        {
-            public BodySnapshot[] Bodies;
-            public int Count;
-            public Transform Source;   // _Playback_<serial> transform (world mapping)
-        }
-        private readonly Dictionary<string, BodyLatest> _bodyCache = new Dictionary<string, BodyLatest>();
-        private System.Action<string, ulong, byte[], int, Transform> _bodyHandler;
-        // Forearm joints captured at instant A / B, in volume WORLD space (metres).
-        private bool _haveLimb;
-        private Vector3 _elbowA, _wristA, _elbowB, _wristB;
-
         private void OnEnable()
         {
             if (volume == null)     volume = FindAnyObjectByType<TSDFVolume>(FindObjectsInactive.Include);
@@ -209,8 +179,6 @@ namespace TSDF.DebugTools
 
             _handler = HandlePlaybackRawFrame;
             recorder.OnPlaybackRawFrame += _handler;
-            _bodyHandler = HandlePlaybackBodies;
-            recorder.OnPlaybackBodies += _bodyHandler;
             _subscribedRecorder = recorder;
 
             if (autoRunOnPlay && Application.isPlaying)
@@ -232,10 +200,8 @@ namespace TSDF.DebugTools
             if (_subscribedRecorder != null && _handler != null)
             {
                 _subscribedRecorder.OnPlaybackRawFrame -= _handler;
-                if (_bodyHandler != null) _subscribedRecorder.OnPlaybackBodies -= _bodyHandler;
                 _subscribedRecorder = null;
                 _handler = null;
-                _bodyHandler = null;
             }
             ReleaseSmoothUnionBuffers();
         }
@@ -281,54 +247,6 @@ namespace TSDF.DebugTools
             }
             else snap.ColorByteCount = 0;
             cachedCount = _cache.Count;
-        }
-
-        // Keep the latest decoded skeleton per camera as playback/seeks fire body
-        // frames (single person -> we only ever read body index 0). The bench then
-        // snapshots this right after each instant's seek, the same way it reads the
-        // depth _cache after a seek.
-        private void HandlePlaybackBodies(string serial, ulong tsNs, byte[] bytes, int byteCount,
-                                          Transform sourceTransform)
-        {
-            if (string.IsNullOrEmpty(serial) || bytes == null || byteCount <= 0) return;
-            if (!_bodyCache.TryGetValue(serial, out var bl))
-            {
-                bl = new BodyLatest { Bodies = new BodySnapshot[MaxBodies] };
-                for (int i = 0; i < bl.Bodies.Length; i++) bl.Bodies[i] = new BodySnapshot();
-                _bodyCache[serial] = bl;
-            }
-            bl.Count = RecordedBodySerializer.Decode(bytes, byteCount, bl.Bodies);
-            bl.Source = sourceTransform;
-        }
-
-        // Elbow/wrist of the selected forearm for body 0 on `serial`, in world metres.
-        // Returns false if that camera has no body decoded at the current playhead.
-        private bool CaptureForearm(string serial, out Vector3 elbow, out Vector3 wrist)
-        {
-            elbow = wrist = Vector3.zero;
-            if (string.IsNullOrEmpty(serial)) return false;
-            if (!_bodyCache.TryGetValue(serial, out var bl) || bl.Count <= 0) return false;
-            var body = bl.Bodies[0];   // single-person installation -> body index 0
-            int e = (int)(sweepArm == ArmSide.Right
-                ? k4abt_joint_id_t.K4ABT_JOINT_ELBOW_RIGHT : k4abt_joint_id_t.K4ABT_JOINT_ELBOW_LEFT);
-            int w = (int)(sweepArm == ArmSide.Right
-                ? k4abt_joint_id_t.K4ABT_JOINT_WRIST_RIGHT : k4abt_joint_id_t.K4ABT_JOINT_WRIST_LEFT);
-            elbow = SkeletonWorldTransform.ToWorld(body.Joints[e].Position, bl.Source);
-            wrist = SkeletonWorldTransform.ToWorld(body.Joints[w].Position, bl.Source);
-            return true;
-        }
-
-        private void OnDrawGizmos()
-        {
-            if (!_haveLimb || !showLimbGizmos) return;
-            float r = 0.03f;
-            Gizmos.color = Color.red;
-            Gizmos.DrawSphere(_elbowA, r); Gizmos.DrawSphere(_wristA, r); Gizmos.DrawLine(_elbowA, _wristA);
-            Gizmos.color = Color.blue;
-            Gizmos.DrawSphere(_elbowB, r); Gizmos.DrawSphere(_wristB, r); Gizmos.DrawLine(_elbowB, _wristB);
-            // Faint links between corresponding joints (the gap the sweep must fill).
-            Gizmos.color = new Color(1f, 0f, 1f, 0.6f);
-            Gizmos.DrawLine(_elbowA, _elbowB); Gizmos.DrawLine(_wristA, _wristB);
         }
 
         private void Update()
@@ -542,11 +460,6 @@ namespace TSDF.DebugTools
                 Debug.LogWarning("[TSDFDebugSession] Second instant equals the first (skip clamped) — " +
                                  "you'll see only one shell.", this);
 
-            // STEP 1 (limb sweep): capture the selected forearm at instant A — the
-            // recorder is parked at startPlayheadSec here, so the latest body in
-            // _bodyCache is this instant's. World-space metres (same frame as volume).
-            bool gotLimbA = CaptureForearm(refSerial, out _elbowA, out _wristA);
-
             int done = 0;
             bool smin = smoothUnion && EnsureSmoothUnionShader();
             if (smin)
@@ -596,17 +509,6 @@ namespace TSDF.DebugTools
 
                 volume.Publish();
             }
-
-            // STEP 1 (limb sweep): both branches end parked at secondSec, so the latest
-            // body now is instant B. Capture it and enable the verification gizmos.
-            bool gotLimbB = CaptureForearm(refSerial, out _elbowB, out _wristB);
-            _haveLimb = gotLimbA && gotLimbB;
-            if (_haveLimb)
-                Debug.Log($"[TSDFDebugSession] limb({sweepArm}) world  A: elbow={_elbowA} wrist={_wristA}  " +
-                          $"B: elbow={_elbowB} wrist={_wristB}  wristMove={(_wristB - _wristA).magnitude * 100f:0.0}cm", this);
-            else
-                Debug.LogWarning($"[TSDFDebugSession] no skeleton on '{refSerial}' at one/both instants — " +
-                                 "limb gizmos off. Is bodies_main recorded for this camera?", this);
 
             string who = serials.Length == 1
                 ? serials[0].Substring(System.Math.Max(0, serials[0].Length - 6))
