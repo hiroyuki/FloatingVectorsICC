@@ -86,7 +86,7 @@ namespace PointCloud
         [Tooltip("Playback rate multiplier (1.0 = real time).")]
         public float playbackRate = 1.0f;
 
-        [Range(-5, 5)]
+        [Range(-10, 10)]
         [Tooltip("Lead the body (skeleton) stream by this many frames relative to depth, to " +
                  "compensate the k4abt skeleton lag baked into bodies_main (+1/+2 typical). " +
                  "Positive = show the body frame this many ahead of the depth frame (skeleton " +
