@@ -270,6 +270,7 @@ MonoBehaviour:
   loop: 1
   view: {fileID: 1168113566}
   playbackRate: 1
+  bodyLeadFrames: 0
   diagnosticLogging: 0
 --- !u!4 &86788059
 Transform:
@@ -1119,7 +1120,7 @@ GameObject:
   - component: {fileID: 1180694594}
   - component: {fileID: 1180694595}
   m_Layer: 0
-  m_Name: '[MultiLive]'
+  m_Name: '[SkeletonMerger]'
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -1154,8 +1155,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::BodyTracking.BodyTrackingMultiLive
   cameraManager: {fileID: 925702423}
   workerHost: {fileID: 100997492}
-  showSkeleton: 0
-  showAnatomicalBones: 0
+  showBones: 1
   jointRadius: 0.005
   skeletonColor: {r: 0.094645746, g: 0.22020026, b: 0.23773581, a: 1}
   showTrails: 1
@@ -1409,7 +1409,6 @@ MonoBehaviour:
   pointCloudToggleKey: 112
   meshToggleKey: 109
   seekToCursor: -1
-  validateSerial: 
   startPlayheadSec: 4.336
   skipFrames: 1
   colorByInstant: 0
