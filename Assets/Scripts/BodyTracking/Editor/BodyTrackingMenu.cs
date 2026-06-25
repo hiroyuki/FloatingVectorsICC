@@ -1,5 +1,5 @@
 // One-click setup for the body tracking pipeline. Adds a "BodyTracking" parent
-// GameObject with two children — MultiLive (skeleton overlay, single- or
+// GameObject with two children — [SkeletonMerger] (skeleton overlay, single- or
 // multi-camera) and Playback (motion line). Avoids hand-editing main.unity
 // from outside the Editor.
 
@@ -22,15 +22,15 @@ namespace BodyTracking.EditorTools
             }
 
             // Live skeleton overlay (single- or multi-camera via K4abtWorkerHost).
-            var live = parent.transform.Find("MultiLive")?.gameObject;
+            var live = parent.transform.Find("[SkeletonMerger]")?.gameObject;
             if (live == null)
             {
-                live = new GameObject("MultiLive");
+                live = new GameObject("[SkeletonMerger]");
                 live.transform.SetParent(parent.transform, false);
-                Undo.RegisterCreatedObjectUndo(live, "Create MultiLive");
+                Undo.RegisterCreatedObjectUndo(live, "Create SkeletonMerger");
             }
-            var liveComp = live.GetComponent<BodyTrackingMultiLive>();
-            if (liveComp == null) liveComp = Undo.AddComponent<BodyTrackingMultiLive>(live);
+            var liveComp = live.GetComponent<SkeletonMerger>();
+            if (liveComp == null) liveComp = Undo.AddComponent<SkeletonMerger>(live);
             if (liveComp.cameraManager == null)
             {
                 liveComp.cameraManager = Object.FindFirstObjectByType<PointCloudCameraManager>();

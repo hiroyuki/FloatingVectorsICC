@@ -7,7 +7,7 @@
 // cumulative snapshot pattern accumulating those frozen points as a body
 // movement trail (issue #23).
 //
-// LateUpdate is intentional: BodyTrackingMultiLive updates skeletons in Update,
+// LateUpdate is intentional: SkeletonMerger updates skeletons in Update,
 // so this picks up the same-frame joint positions. PointCloudRenderer's Update
 // reads the filter contents next frame — a one-frame lag matching the existing
 // OBB transform read.
@@ -21,8 +21,8 @@ namespace BodyTracking
     public class BodyTubeCapsuleFeeder : MonoBehaviour
     {
         [Tooltip("Body-tracking source. Leave empty to auto-resolve the first " +
-                 "BodyTrackingMultiLive in the scene at OnEnable.")]
-        public BodyTrackingMultiLive bodyTracking;
+                 "SkeletonMerger in the scene at OnEnable.")]
+        public SkeletonMerger bodyTracking;
 
         [Tooltip("Capsule filter that receives the per-bone world-space capsules. " +
                  "Leave empty to auto-resolve the first PointCloudCapsuleFilter in the scene at OnEnable.")]
@@ -30,14 +30,14 @@ namespace BodyTracking
 
         [Min(0f)]
         [Tooltip("Per-bone tube radius in meters used for the point cloud filter. " +
-                 "Independent from BodyTrackingMultiLive.boneWidth (which controls the " +
+                 "Independent from SkeletonMerger.boneWidth (which controls the " +
                  "rendered bone tube width). Use a generous value (e.g. 0.1–0.25 m) to " +
                  "scoop a wide slab of points around the body for the movement trail.")]
         public float tubeRadius = 0.15f;
 
         private void OnEnable()
         {
-            if (bodyTracking == null) bodyTracking = FindFirstObjectByType<BodyTrackingMultiLive>();
+            if (bodyTracking == null) bodyTracking = FindFirstObjectByType<SkeletonMerger>();
             if (target == null) target = FindFirstObjectByType<PointCloudCapsuleFilter>();
         }
 

@@ -335,9 +335,9 @@ namespace PointCloud
 
             // 3) Body-tracking visuals — joint spheres, bone tubes, joint trails,
             // bone-interp trails. All live as MeshRenderer descendants of every
-            // BodyTrackingMultiLive transform. The BodyTracking asmdef references
+            // SkeletonMerger transform. The BodyTracking asmdef references
             // PointCloud (not the other way round), so we can't type-reference
-            // BodyTrackingMultiLive here without a cyclic asmdef. Match by full
+            // SkeletonMerger here without a cyclic asmdef. Match by full
             // type name instead — there's only ever one or two MultiLive
             // instances so the FindObjectsByType<MonoBehaviour> walk is cheap.
             // The shadow uses the same PointCloudShadow shader with filters
@@ -349,7 +349,7 @@ namespace PointCloud
             {
                 var mb = allMb[b];
                 if (mb == null || !mb.isActiveAndEnabled) continue;
-                if (mb.GetType().FullName != "BodyTracking.BodyTrackingMultiLive") continue;
+                if (mb.GetType().FullName != "BodyTracking.SkeletonMerger") continue;
                 mb.GetComponentsInChildren(false, s_meshRendererScratch);
                 for (int i = 0; i < s_meshRendererScratch.Count; i++)
                 {

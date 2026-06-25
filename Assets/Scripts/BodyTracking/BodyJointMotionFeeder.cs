@@ -5,7 +5,7 @@
 // path. This is what gives each point in the cloud its "nearest joint
 // motion" attribute the way issue #24 asks for.
 //
-// LateUpdate matches BodyTubeCapsuleFeeder: BodyTrackingMultiLive updates
+// LateUpdate matches BodyTubeCapsuleFeeder: SkeletonMerger updates
 // skeletons in Update, so by LateUpdate the joint positions reflect the
 // current frame. The point cloud shader picks up the values next frame —
 // same one-frame lag the OBB / capsule paths already accept.
@@ -19,8 +19,8 @@ namespace BodyTracking
     public class BodyJointMotionFeeder : MonoBehaviour
     {
         [Tooltip("Body-tracking source. Leave empty to auto-resolve the first " +
-                 "BodyTrackingMultiLive in the scene at OnEnable.")]
-        public BodyTrackingMultiLive bodyTracking;
+                 "SkeletonMerger in the scene at OnEnable.")]
+        public SkeletonMerger bodyTracking;
 
         [Tooltip("Joint motion field that receives the per-joint world-space pos + velocity. " +
                  "Leave empty to auto-resolve the first PointCloudJointMotionField in the scene at OnEnable.")]
@@ -35,7 +35,7 @@ namespace BodyTracking
 
         private void OnEnable()
         {
-            if (bodyTracking == null) bodyTracking = FindFirstObjectByType<BodyTrackingMultiLive>();
+            if (bodyTracking == null) bodyTracking = FindFirstObjectByType<SkeletonMerger>();
             if (target == null) target = FindFirstObjectByType<PointCloudJointMotionField>();
         }
 

@@ -44,7 +44,7 @@ namespace Calibration.EditorTools
         // adjacent). The body-tracking machinery isn't relevant for calibration, so
         // the calibration window auto-disables it while open and restores on close.
         private static readonly string[] BodyTrackingTypeNames = {
-            "BodyTracking.BodyTrackingMultiLive, Assembly-CSharp",
+            "BodyTracking.SkeletonMerger, Assembly-CSharp",
             "BodyTracking.BodyTrackingPlayback, Assembly-CSharp",
         };
         private readonly Dictionary<Behaviour, bool> _suspendedBodyTracking = new Dictionary<Behaviour, bool>();
@@ -132,7 +132,7 @@ namespace Calibration.EditorTools
         }
 
         /// <summary>
-        /// Find every active <c>BodyTrackingMultiLive</c> / <c>BodyTrackingPlayback</c>
+        /// Find every active <c>SkeletonMerger</c> / <c>BodyTrackingPlayback</c>
         /// component, save its <c>enabled</c> state, and disable it. Reverts on
         /// <see cref="RestoreBodyTracking"/>. We use reflection so the calibration
         /// asmdef stays decoupled from the BodyTracking code in Assembly-CSharp.

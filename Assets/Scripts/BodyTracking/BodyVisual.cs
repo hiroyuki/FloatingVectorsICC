@@ -1,5 +1,5 @@
 // Per-body skeleton visual: 32 joint markers + a single tube mesh of
-// bones + per-joint TrailRenderers. Used by BodyTrackingMultiLive's pool to
+// bones + per-joint TrailRenderers. Used by SkeletonMerger's pool to
 // draw merged and per-worker skeletons.
 
 using System.Collections.Generic;
@@ -311,7 +311,7 @@ namespace BodyTracking
 
         /// <summary>
         /// Re-apply visual configuration without ingesting a new skeleton sample.
-        /// Used by BodyTrackingMultiLive while the Editor is paused so Inspector
+        /// Used by SkeletonMerger while the Editor is paused so Inspector
         /// tweaks (joint radius, bone width, trail step / width / duration / color
         /// mode, frame-hue params) reflect immediately instead of waiting for
         /// unpause. Does not touch _jointPositions, _jointValid, or trail sample

@@ -35,7 +35,7 @@ using UnityEngine;
 namespace BodyTracking
 {
     [DisallowMultipleComponent]
-    public class BodyTrackingMultiLive : MonoBehaviour
+    public class SkeletonMerger : MonoBehaviour
     {
         [Header("Sources")]
         [Tooltip("PointCloudCameraManager whose Renderers we drive workers off. " +
@@ -47,13 +47,13 @@ namespace BodyTracking
         public K4abtWorkerHost workerHost;
 
         [Header("Display")]
-        [Tooltip("Master switch for skeleton rendering.")]
-        public bool showSkeleton = true;
+        [Tooltip("Master switch for skeleton rendering: ON draws the bone lines between " +
+                 "joints (and the joint spheres). OFF hides everything.")]
+        [UnityEngine.Serialization.FormerlySerializedAs("showSkeleton")]
+        public bool showBones = true;
 
-        [Tooltip("Show the bone lines between joints.")]
-        public bool showAnatomicalBones = true;
-
-        [Tooltip("Joint marker radius (m). Set to 0 to hide joint spheres entirely (bones stay visible if showAnatomicalBones is on).")]
+        [Tooltip("Joint marker radius (m). Set to 0 to hide the joint spheres entirely " +
+                 "(the bone lines stay visible while showBones is on).")]
         [Range(0f, 0.2f)] public float jointRadius = 0.05f;
 
         [Tooltip("Skeleton color. Bones inherit this; joints are slightly brighter.")]
@@ -320,7 +320,7 @@ namespace BodyTracking
         // Reusable synthetic skeleton handed to BodyVisual.UpdateFromSkeleton.
         // We encode merged world joint positions back into k4a camera-local mm
         // such that K4AmmToUnity (called inside BodyVisual) produces the desired
-        // world position. With BodyTrackingMultiLive's own transform at world
+        // world position. With SkeletonMerger's own transform at world
         // identity, the per-joint K4AmmToUnity output IS the world position.
         private k4abt_skeleton_t _mergedSkel = new k4abt_skeleton_t
         {
@@ -400,7 +400,7 @@ namespace BodyTracking
         // BodySnapshot inputs from disk instead of the worker MMF.
         private void OnPlaybackBodies(string serial, ulong tsNs, byte[] bytes, int byteCount, Transform sourceTransform)
         {
-            if (!showSkeleton) return;
+            if (!showBones) return;
             if (string.IsNullOrEmpty(serial)) return;
             if (!_latestBySerial.TryGetValue(serial, out var slot))
             {
@@ -473,7 +473,7 @@ namespace BodyTracking
             // Late-binding for renderers spawned mid-Play by PointCloudCameraManager.
             BindNewRenderers();
 
-            if (showSkeleton)
+            if (showBones)
             {
                 CollectCandidates();
                 BuildClusters();
@@ -492,7 +492,7 @@ namespace BodyTracking
             // skipped the per-visual Apply call that would normally push the latest
             // Inspector values into geometry + trail Configure. Push them now so
             // jointRadius / boneWidth / boneTrailStep / color tweaks reflect live.
-            if (nowPaused && showSkeleton && _pool != null)
+            if (nowPaused && showBones && _pool != null)
             {
                 var cfg = BuildVisualConfig();
                 _pool.ReapplyConfigToAll(in cfg);
@@ -576,7 +576,7 @@ namespace BodyTracking
             // Time.timeScale == 0 is a reasonable proxy for "Editor Paused" without
             // pulling in UnityEditor.* (which would break player builds).
             bool paused = Time.timeScale <= 0.0001f;
-            _hudSb.AppendLine($"<b>[BodyTrackingMultiLive Debug]</b> {(paused ? "PAUSED" : "running")}  frame={Time.frameCount}");
+            _hudSb.AppendLine($"<b>[SkeletonMerger Debug]</b> {(paused ? "PAUSED" : "running")}  frame={Time.frameCount}");
             _hudSb.AppendLine($"workers={_latestBySerial.Count} candidates={_candidateCount} clusters={_clusterCount} merged={_pool.Count}");
 
             // Per-worker bodies
@@ -638,19 +638,19 @@ namespace BodyTracking
             if (cameraManager == null) cameraManager = FindFirstObjectByType<PointCloudCameraManager>();
             if (cameraManager == null)
             {
-                Debug.LogError("[BodyTrackingMultiLive] PointCloudCameraManager not found in scene; disabling.", this);
+                Debug.LogError("[SkeletonMerger] PointCloudCameraManager not found in scene; disabling.", this);
                 return false;
             }
             if (workerHost == null) workerHost = FindFirstObjectByType<K4abtWorkerHost>();
             if (workerHost == null)
             {
-                Debug.LogError("[BodyTrackingMultiLive] K4abtWorkerHost not found in scene; disabling. " +
+                Debug.LogError("[SkeletonMerger] K4abtWorkerHost not found in scene; disabling. " +
                                "Add a K4abtWorkerHost MonoBehaviour and reference it here.", this);
                 return false;
             }
             if (!workerHost.useWorker)
             {
-                Debug.LogWarning("[BodyTrackingMultiLive] K4abtWorkerHost.useWorker is false; forcing it true.", this);
+                Debug.LogWarning("[SkeletonMerger] K4abtWorkerHost.useWorker is false; forcing it true.", this);
                 workerHost.useWorker = true;
             }
             return true;
@@ -702,7 +702,7 @@ namespace BodyTracking
 
         private void DispatchRawFrame(string serial, ObCameraParam? cameraParam, Transform sourceTransform, in RawFrameData frame)
         {
-            if (!showSkeleton) return;
+            if (!showBones) return;
 
             // Recorded BT short-circuit: when the recorder is in Playing state AND
             // has a bodies_main track for this serial, skeletons flow in through
@@ -734,7 +734,7 @@ namespace BodyTracking
                 if (RequiresApplyExtrinsics() && cameraManager != null && !cameraManager.applyExtrinsics)
                 {
                     Debug.LogError(
-                        "[BodyTrackingMultiLive] applyExtrinsics is false but multi-camera mode " +
+                        "[SkeletonMerger] applyExtrinsics is false but multi-camera mode " +
                         "needs world-aligned transforms. Enable PointCloudCameraManager.applyExtrinsics " +
                         "and load extrinsics.yaml. Disabling.", this);
                     enabled = false;
@@ -750,12 +750,12 @@ namespace BodyTracking
                         frame.ColorWidth, frame.ColorHeight))
                 {
                     // StartWorker logs the underlying reason; don't spam this every frame.
-                    if (!slotExisted) Debug.LogError($"[BodyTrackingMultiLive] StartWorker failed for serial='{serial}'", this);
+                    if (!slotExisted) Debug.LogError($"[SkeletonMerger] StartWorker failed for serial='{serial}'", this);
                     return;
                 }
                 if (slotExisted)
                 {
-                    Debug.LogWarning($"[BodyTrackingMultiLive] re-spawned worker for serial='{serial}' (previous instance died)", this);
+                    Debug.LogWarning($"[SkeletonMerger] re-spawned worker for serial='{serial}' (previous instance died)", this);
                     _latestBySerial[serial].SourceTransform = sourceTransform;
                     _latestBySerial[serial].BodyCount = 0;
                 }
@@ -789,7 +789,7 @@ namespace BodyTracking
         // from its input slot).
         private void OnWorkerSkeletons(string serial, ulong tsNs, BodySnapshot[] bodies, int count)
         {
-            if (!showSkeleton) return;
+            if (!showBones) return;
             if (!_latestBySerial.TryGetValue(serial, out var slot)) return;
             int n = Mathf.Min(count, slot.Bodies.Length);
             for (int i = 0; i < n; i++)
@@ -829,7 +829,7 @@ namespace BodyTracking
             int totalBodiesNow = 0;
             foreach (var kv in _latestBySerial) totalBodiesNow += kv.Value.BodyCount;
             Debug.Log(
-                $"[BodyTrackingMultiLive] workers={boundWorkers} " +
+                $"[SkeletonMerger] workers={boundWorkers} " +
                 $"snapshots/s={_diagSnapshotsRecv} dropped_stale/s={_diagDroppedStaleSnapshots} " +
                 $"fresh_iter/s={_diagFreshIterations} max_age_ms={_diagMaxObservedAgeMs:F0} " +
                 $"clusters/s={_diagClustersFormed} persons/s={_diagPersonsOutput} " +
@@ -855,6 +855,12 @@ namespace BodyTracking
             _candidateCount = 0;
             float now = Time.realtimeSinceStartup;
             float maxSkewSec = maxSkewMs * 0.001f;
+            // While the recorder is paused (e.g. the TSDF bench freezes playback, or
+            // the user scrubs to a frame), the frame is intentionally held still, so
+            // wall-clock age is meaningless. Skipping the maxSkew staleness drop keeps
+            // the held skeleton alive so the overlay stays on the frozen frame instead
+            // of going stale within maxSkewMs and freezing at its last live pose.
+            bool recorderPaused = _subscribedRecorder != null && _subscribedRecorder.IsPaused;
 
             foreach (var kv in _latestBySerial)
             {
@@ -862,7 +868,7 @@ namespace BodyTracking
                 if (slot == null || slot.BodyCount == 0) continue;
                 float ageMs = (now - slot.CapturedAtRealtime) * 1000f;
                 if (ageMs > _diagMaxObservedAgeMs) _diagMaxObservedAgeMs = ageMs;
-                if (now - slot.CapturedAtRealtime > maxSkewSec)
+                if (!recorderPaused && now - slot.CapturedAtRealtime > maxSkewSec)
                 {
                     _diagDroppedStaleSnapshots += slot.BodyCount;
                     continue;
@@ -955,13 +961,15 @@ namespace BodyTracking
 
         private void GcStaleVisuals()
         {
-            // Skip eviction while playback is paused — Time.frameCount keeps
-            // advancing during pause but no skeleton frames flow, so the
-            // unseen counter would tick past unseenFramesBeforeDestroy and
-            // the BodyVisual (including bones) would be destroyed mid-pause.
-            // The user expects the frame to stay visually frozen for
-            // inspection. Per-worker pools below are gated the same way.
-            if (_subscribedRecorder != null && _subscribedRecorder.IsPaused) return;
+            // Runs even while paused. Paused playback still re-applies the held
+            // frame's skeletons every Update (CollectCandidates keeps the frozen
+            // slots alive), so a body backed by the current frame keeps its unseen
+            // counter at 0 and survives. Only genuinely dead visuals tick past
+            // unseenFramesBeforeDestroy — e.g. a ghost left over from the pre-seek
+            // warmup frame that no current skeleton matches (the bench seeks the
+            // playhead, so the start-of-play body would otherwise float forever).
+            // (Before the slots were kept alive while paused this GC had to be
+            // skipped, or it would have destroyed the frozen skeleton mid-pause.)
             _pool.GcStale(unseenFramesBeforeDestroy, OnVisualEvicted);
         }
 
@@ -1273,7 +1281,7 @@ namespace BodyTracking
         {
             JointRadius = jointRadius,
             SkeletonColor = skeletonColor,
-            ShowAnatomicalBones = showAnatomicalBones,
+            ShowAnatomicalBones = showBones,
             ShowTrails = showTrails,
             TrailDuration = trailDuration,
             TrailWidth = trailWidth,
@@ -1605,13 +1613,10 @@ namespace BodyTracking
                 cfg.TrailWidth = baseCfg.TrailWidth * scale;
                 pool.Apply((uint)cand.BodyIndex, in _rawScratchSkel, cfg, _trailNow);
             }
-            // GC stale per-worker visuals on the same threshold as merged.
-            // Same pause-gating as merged GcStaleVisuals above.
-            if (_subscribedRecorder == null || !_subscribedRecorder.IsPaused)
-            {
-                foreach (var pool in _perWorkerPools.Values)
-                    pool.GcStale(unseenFramesBeforeDestroy);
-            }
+            // GC stale per-worker visuals on the same threshold as merged — also
+            // while paused (held slots keep current bodies fresh; see GcStaleVisuals).
+            foreach (var pool in _perWorkerPools.Values)
+                pool.GcStale(unseenFramesBeforeDestroy);
         }
 
         private void ClearPerWorkerSkeletons()

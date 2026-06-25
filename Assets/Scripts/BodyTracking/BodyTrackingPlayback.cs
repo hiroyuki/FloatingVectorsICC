@@ -130,7 +130,7 @@ namespace BodyTracking
             if (t0 == ulong.MaxValue)
             {
                 ProcessingStatus = "no recorded body frames to process " +
-                                   "(record while BodyTrackingMultiLive is feeding K4abtWorkerHost, then Read).";
+                                   "(record while SkeletonMerger is feeding K4abtWorkerHost, then Read).";
                 Debug.LogWarning("[BodyTrackingPlayback] " + ProcessingStatus, this);
                 _processing = null;
                 yield break;

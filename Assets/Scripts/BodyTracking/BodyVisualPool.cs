@@ -1,4 +1,4 @@
-// Per-body visual lifecycle / GC owned by BodyTrackingMultiLive.
+// Per-body visual lifecycle / GC owned by SkeletonMerger.
 // Handles EvictIfFull + ApplyBodySkeleton + GC loop.
 
 using System;
@@ -132,7 +132,7 @@ namespace BodyTracking
         /// <summary>
         /// Tick diagnostics and destroy visuals not seen for the given number of frames.
         /// <paramref name="onEvicted"/> fires once per destroyed id so callers can clean
-        /// their own per-id state (e.g. BodyTrackingMultiLive's continuity dictionaries).
+        /// their own per-id state (e.g. SkeletonMerger's continuity dictionaries).
         /// </summary>
         public void GcStale(int unseenFramesBeforeDestroy, Action<uint> onEvicted = null)
         {
