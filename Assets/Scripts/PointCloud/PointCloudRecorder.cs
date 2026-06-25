@@ -86,10 +86,19 @@ namespace PointCloud
         [Tooltip("Playback rate multiplier (1.0 = real time).")]
         public float playbackRate = 1.0f;
 
+        [Range(-5, 5)]
+        [Tooltip("Lead the body (skeleton) stream by this many frames relative to depth, to " +
+                 "compensate the k4abt skeleton lag baked into bodies_main (+1/+2 typical). " +
+                 "Positive = show the body frame this many ahead of the depth frame (skeleton " +
+                 "catches up to the point cloud); negative = lag it. Frame-exact because the " +
+                 "body and depth tracks are 1:1. Playback only.")]
+        public int bodyLeadFrames = 0;
+        private int _lastBodyLeadFrames;
+
         /// <summary>
         /// Fires once per advanced playback frame per device, with the same payload
         /// shape a live PointCloudRenderer would produce in <c>OnRawFramesReady</c>.
-        /// Subscribers (e.g. BodyTrackingMultiLive) use this to run merge / inference
+        /// Subscribers (e.g. SkeletonMerger) use this to run merge / inference
         /// against recorded footage; frame-by-frame stepping then works via Unity's
         /// built-in Pause + Step buttons because cursor advancement is driven by
         /// <see cref="Time.timeAsDouble"/>.
@@ -210,7 +219,7 @@ namespace PointCloud
 
         /// <summary>
         /// True when a body track is loaded on disk for <paramref name="serial"/>
-        /// (recorded BT data exists). Used by BodyTrackingMultiLive to skip the
+        /// (recorded BT data exists). Used by SkeletonMerger to skip the
         /// k4abt worker spawn during playback — the live merge pipeline picks up
         /// bodies via <see cref="OnPlaybackBodies"/> instead, which also works on
         /// platforms without k4abt (Mac).
@@ -1423,7 +1432,7 @@ namespace PointCloud
 
         /// <summary>
         /// Append one body-tracker frame to <c>bodies_main</c> for the given
-        /// device. Called by BodyTrackingMultiLive on every K4abtWorkerHost output
+        /// device. Called by SkeletonMerger on every K4abtWorkerHost output
         /// while the recorder is in <see cref="State.Recording"/>; no-op otherwise.
         /// <paramref name="bytes"/> + <paramref name="byteCount"/> follow the
         /// usual SDK-buffer convention — no reference is retained after this
@@ -1532,6 +1541,20 @@ namespace PointCloud
                 return;
             }
             if (CurrentState != State.Playing) return;
+
+            // Re-emit each track's current body frame when the lead offset is tuned in
+            // the Inspector — runs even while paused so the skeleton shifts live during
+            // frame-by-frame inspection (BodyPlaybackCursor stays the depth-matched
+            // frame; FireBodyEvent re-applies the new lead).
+            if (bodyLeadFrames != _lastBodyLeadFrames)
+            {
+                _lastBodyLeadFrames = bodyLeadFrames;
+                foreach (var kv in _tracks)
+                {
+                    var track = kv.Value;
+                    if (track.BodyPlaybackCursor >= 0) FireBodyEvent(track, track.BodyPlaybackCursor);
+                }
+            }
 
             // Spacebar toggles pause/resume during playback (issue #17).
             if (Input.GetKeyDown(KeyCode.Space)) TogglePause();
@@ -1906,10 +1929,16 @@ namespace PointCloud
         private void FireBodyEvent(DeviceTrack track, int cursor)
         {
             if (OnPlaybackBodies == null) return;
+            // Lead/lag the emitted body frame relative to the depth-matched cursor to
+            // compensate the k4abt skeleton latency baked into bodies_main. The cursor
+            // tracking (BodyPlaybackCursor) stays on the depth-matched frame; only the
+            // frame we hand to subscribers shifts. Tracks are 1:1 so this is exact.
+            int count = track.BodyFrames.Count;
+            int emit = count > 0 ? Mathf.Clamp(cursor + bodyLeadFrames, 0, count - 1) : cursor;
             // Indexer materializes the bytes into the stream's reusable scratch.
             // The handler must consume the buffer synchronously — callers downstream
             // either decode into their own buffers or fire-and-forget per-frame.
-            var bodyFrame = track.BodyFrames[cursor];
+            var bodyFrame = track.BodyFrames[emit];
             if (bodyFrame == null || bodyFrame.Bytes == null || bodyFrame.ByteCount <= 0) return;
             Transform t = track.PlaybackObject != null ? track.PlaybackObject.transform : null;
             OnPlaybackBodies.Invoke(track.Serial, bodyFrame.TimestampNs,
@@ -1917,7 +1946,7 @@ namespace PointCloud
         }
 
         // Wraps the per-frame playback data in a RawFrameData and fires
-        // OnPlaybackRawFrame so downstream subscribers (e.g. BodyTrackingMultiLive)
+        // OnPlaybackRawFrame so downstream subscribers (e.g. SkeletonMerger)
         // can run the same merge pipeline they use on live OnRawFramesReady.
         private void FirePlaybackEvent(
             DeviceTrack track,
