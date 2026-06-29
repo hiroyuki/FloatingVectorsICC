@@ -93,11 +93,16 @@ namespace TSDF.EditorTools
             {
                 bool acc = t.IsAccumulating;
                 var prev = GUI.backgroundColor;
-                GUI.backgroundColor = acc ? new Color(1f, 0.55f, 0.55f) : new Color(0.6f, 0.95f, 0.6f);
-                string label = acc ? "● Accumulating — click to STOP (freeze)" : "Start Accumulating";
-                if (GUILayout.Button(label, GUILayout.Height(28)))
-                    t.ToggleAccumulate();
-                GUI.backgroundColor = prev;
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    GUI.backgroundColor = acc ? new Color(1f, 0.55f, 0.55f) : new Color(0.6f, 0.95f, 0.6f);
+                    string label = acc ? "● Accumulating — click to STOP (freeze)" : "Start Accumulating";
+                    if (GUILayout.Button(label, GUILayout.Height(28)))
+                        t.ToggleAccumulate();
+                    GUI.backgroundColor = prev;
+                    if (GUILayout.Button("Clear", GUILayout.Height(28), GUILayout.Width(60)))
+                        t.ClearAccumulate();
+                }
             }
             if (!Application.isPlaying)
                 EditorGUILayout.HelpBox(

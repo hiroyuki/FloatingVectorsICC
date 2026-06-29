@@ -66,6 +66,14 @@ namespace TSDF
                  "integrator's live-follow clear, not here — this only sets the merge rule.")]
         public AccumulationMode accumulationMode = AccumulationMode.StandardWeightedAvg;
 
+        // Time-union neck radius for the accumulate (motion-sweep) fold, in metres.
+        // 0 = hard RetainGhost |sdf|-min (separate pose-shells, no bridging). >0 makes
+        // FoldInstanceIntoAccumulation blend consecutive instants with a separation-gated
+        // smooth-min so the sweep reads as one connected ribbon. Driven by
+        // TSDFDebugSession (smoothUnion / smoothUnionK) while accumulating; hidden because
+        // it only matters during the accumulate pipeline.
+        [HideInInspector] public float accumulateSmoothK = 0f;
+
         // Ping-pong the voxel buffer so the views (Voxel/Cell/Mesh) only ever read a
         // COMPLETE batch while the integrator fills the next one into a hidden back
         // buffer. Eliminates the mid-clear / partial-fill flicker. Hidden from the
@@ -243,6 +251,10 @@ namespace TSDF
             _foldShader.SetBuffer(_foldKernel, "_InstColor", _instColor);
             _foldShader.SetInts("_Dim", Dim.x, Dim.y, Dim.z);
             _foldShader.SetInt("_DispatchWidth", gx * 64);
+            // 0 = hard RetainGhost |sdf|-min; >0 = separation-gated smooth-min so the
+            // motion sweep's pose-shells join with organic necks (see TSDFFold.compute).
+            _foldShader.SetFloat("_Tau", Tau);
+            _foldShader.SetFloat("_SmoothK", Mathf.Max(0f, accumulateSmoothK));
             _foldShader.Dispatch(_foldKernel, gx, gy, 1);
         }
 

@@ -285,23 +285,25 @@ namespace TSDF.DebugTools
             }
             if (buildRequested) CompareTwoInstants();   // context-menu / tick = one-shot frozen pair
 
-            // Live k tuning: while the smin bench is frozen (paused / idle), dragging
-            // smoothUnionK re-blends the cached A/B pair without re-integrating. Skip
-            // while actively playing so we don't fight the realtime trailing path (the
-            // trailing path also clears _haveInstants when it runs, so this only ever
-            // touches a freshly-built, still-current smin cache).
+            // Live k tuning: whenever smoothUnion is ON and a frozen A/B pair exists,
+            // dragging smoothUnionK (or the seam controls) re-blends the cached pair
+            // without re-integrating. No play-state guard: SmoothUnionCacheValid()
+            // already gates on _haveInstants, which is only ever true while the compare
+            // bench owns the volume with the integrator frozen (CompareTwoInstants sets
+            // it; StartAccumulate / ResumePlayback / a grid rebuild clear it). So this
+            // never fights live integration even if the recorder is advancing frames.
             if (smoothUnion && SmoothUnionCacheValid()
-                && !IsRecorderActivelyPlaying()
                 && (!Mathf.Approximately(smoothUnionK, _lastComposedK)
                     || highlightSeam != _lastHighlightSeam
                     || !Mathf.Approximately(seamThreshold, _lastSeamThreshold)))
                 ComposeSmoothUnion();
-        }
 
-        private bool IsRecorderActivelyPlaying()
-            => recorder != null
-               && recorder.CurrentState == PointCloudRecorder.State.Playing
-               && !recorder.IsPaused;
+            // While accumulating, keep the motion-fold's smin neck radius live so toggling
+            // smoothUnion or dragging smoothUnionK changes how SUBSEQUENT frames bridge.
+            // (Already-folded shells stay as baked — a streaming fold can't retro-blend.)
+            if (IsAccumulating && volume != null)
+                volume.accumulateSmoothK = smoothUnion ? Mathf.Max(0f, smoothUnionK) : 0f;
+        }
 
         // The cached instants are usable only while the volume still has the same
         // voxel count AND the same world<->voxel mapping they were integrated against
@@ -575,6 +577,11 @@ namespace TSDF.DebugTools
             IsComparing = false;
             _haveInstants = false;
 
+            // Apply smooth-union to the TIME fold: when smoothUnion is ON the motion sweep
+            // bridges consecutive pose-shells with a separation-gated smin neck (one
+            // connected ribbon); OFF keeps the hard RetainGhost |sdf|-min (separate shells).
+            volume.accumulateSmoothK = smoothUnion ? Mathf.Max(0f, smoothUnionK) : 0f;
+
             integrator.clearVolumeOnNewBatch = false;                                   // accumulate, don't wipe per batch
             // Accumulate always separates camera fusion (per-instant Average) from the
             // time union (|sdf|-min fold), so volume.accumulationMode is not consulted here.
@@ -616,6 +623,64 @@ namespace TSDF.DebugTools
             IsAccumulating = false;
             lastReplayKind = "accumulated (frozen)";
             Debug.Log("[TSDFDebugSession] STOP accumulate: motion mesh frozen.", this);
+        }
+
+        /// <summary>Wipe the volume and start clean. While accumulating it stays in
+        /// accumulate mode and keeps folding new frames from empty (restart the sweep);
+        /// otherwise it returns to NORMAL live playback — StopAccumulate leaves the
+        /// integrator frozen + single-buffered to hold the mesh on screen, so we restore
+        /// per-batch clearing, re-enable integration, and resume the recorder.</summary>
+        public void ClearAccumulate()
+        {
+            if (volume == null)
+            {
+                Debug.LogWarning("[TSDFDebugSession] Clear needs a volume.", this);
+                return;
+            }
+
+            if (IsAccumulating)
+            {
+                // Restart the sweep: wipe (single-buffer accumulate config) and keep folding.
+                volume.ClearWrite();
+                volume.Publish();
+                if (integrator != null) integrator.BeginFreshBatch();
+                lastReplayKind = "accumulating… (cleared)";
+                Debug.Log("[TSDFDebugSession] CLEAR: motion mesh wiped, still accumulating.", this);
+                return;
+            }
+
+            // Not accumulating (frozen after Stop, exiting compare, or idle): wipe and
+            // return to normal live playback. Post-Stop accumulate left the volume
+            // single-buffered, so restore per-batch clearing — the integrator's Update
+            // syncs volume.doubleBuffered=true (a rebuild that clears), so each resumed
+            // frame clears+integrates and the mesh tracks the current frame again.
+            if (integrator != null) integrator.clearVolumeOnNewBatch = true;
+
+            if (IsComparing)
+            {
+                // Exiting the compare/smooth-union bench: ResumePlayback does the full
+                // teardown — restores volume.accumulationMode (compare forced RetainGhost),
+                // invalidates the smin A/B cache (_haveInstants) + accum backup, re-enables
+                // integration, resumes the recorder, and clears IsComparing. Skipping it
+                // would leave live playback stuck on RetainGhost and let a later
+                // smoothUnionK drag re-blend stale A/B shells over the live volume.
+                ResumePlayback();
+            }
+            else
+            {
+                if (integrator != null)
+                {
+                    integrator.integrationEnabled = true;
+                    integrator.BeginFreshBatch();
+                }
+                else if (volume.doubleBuffered) volume.ForceRebuild();
+                else { volume.ClearWrite(); volume.Publish(); }
+
+                if (recorder != null && recorder.IsPaused) recorder.ResumePlayback();
+            }
+
+            lastReplayKind = "normal playback";
+            Debug.Log("[TSDFDebugSession] CLEAR: wiped and resumed normal live playback.", this);
         }
 
         // ---------------- Smooth-union (issue #27) ----------------
@@ -889,6 +954,10 @@ namespace TSDF.DebugTools
                 integrator.integrationEnabled = true;
                 integrator.BeginFreshBatch();   // drop the frozen compare result
             }
+            // The frozen compare mesh is gone and live integration now owns the volume,
+            // so the smin A/B cache no longer maps to anything on screen — invalidate it
+            // (else a later smoothUnionK drag would re-blend stale shells over live frames).
+            _haveInstants = false;
             // Restore the accumulation mode compare forced to RetainGhost, so live
             // playback returns to the scene default (e.g. StandardWeightedAvg).
             if (_haveAccumBackup && volume != null)

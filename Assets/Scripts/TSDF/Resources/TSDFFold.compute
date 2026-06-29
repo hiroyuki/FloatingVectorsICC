@@ -4,11 +4,22 @@
 // This is the TIME-axis merge of the accumulate pipeline (TSDFIntegrator):
 // the instance buffer holds ONE instant already merged across all cameras
 // with a weighted AVERAGE (denoised, single clean surface),
-// and this kernel unions that clean instant into the accumulation buffer using
-// the RetainGhost rule (keep the observation closest to a surface, |sdf| min).
+// and this kernel unions that clean instant into the accumulation buffer.
 // Splitting camera-fusion (average) from time-fusion (this union) is what stops
 // thin limbs fraying into the double-shell strands that a single RetainGhost
 // pass over cameras+time produces.
+//
+// Two time-union rules, selected by _SmoothK:
+//   _SmoothK <= 0 : RetainGhost (hard |sdf|-min) — closest surface wins, the
+//                   sweeping limb leaves a permanent shell. No bridging between
+//                   separate pose-shells.
+//   _SmoothK  > 0 : SEPARATION-GATED polynomial smooth-min — separate pose-shells
+//                   grow an organic neck (metaball union) so the motion sweep
+//                   reads as one connected ribbon. The blend radius is gated by
+//                   |a-b| (kEff = k*smoothstep(0,k,|a-b|)) so a re-observed
+//                   COINCIDENT surface gets kEff->0 = plain min: the fold stays
+//                   idempotent and static regions don't bloat frame after frame
+//                   (plain smin would dip by up to k/4 EVERY fold and drift out).
 
 #pragma kernel Fold
 
@@ -18,6 +29,8 @@ StructuredBuffer<float2> _Inst;         // instance (this instant, camera-averag
 StructuredBuffer<float4> _InstColor;    // instance colour
 int3 _Dim;
 int _DispatchWidth;                     // = groupsX * 64 (2D dispatch linearisation)
+float _Tau;                             // truncation distance (m) — free-space seed
+float _SmoothK;                         // 0 = hard min; >0 = smin neck radius (m)
 
 [numthreads(64, 1, 1)]
 void Fold(uint3 id : SV_DispatchThreadID)
@@ -30,12 +43,46 @@ void Fold(uint3 id : SV_DispatchThreadID)
     if (inst.y <= 0.0) return;          // this instant never observed this voxel
 
     float2 acc = _Acc[lin];
-    // RetainGhost across time: the instant whose surface sits closest to this
-    // voxel wins, so a limb sweeping through leaves a permanent shell (the
-    // motion trail) while a clean averaged surface replaces any noisier prior.
-    if (acc.y <= 0.0 || abs(inst.x) < abs(acc.x))
+    if (acc.y <= 0.0)                   // first observation: take the instant
     {
         _Acc[lin] = inst;
         _AccColor[lin] = _InstColor[lin];
+        return;
     }
+
+    if (_SmoothK <= 1e-6)
+    {
+        // RetainGhost (hard |sdf|-min): the instant whose surface sits closest to
+        // this voxel wins, so a limb sweeping through leaves a permanent shell.
+        if (abs(inst.x) < abs(acc.x))
+        {
+            _Acc[lin] = inst;
+            _AccColor[lin] = _InstColor[lin];
+        }
+        return;
+    }
+
+    // Separation-gated polynomial smooth-min (Inigo Quilez smin). a = running
+    // accumulation, b = new instant. kEff shrinks to 0 as the two surfaces
+    // coincide (|a-b|->0), so a re-observed static surface reduces to plain min
+    // (no bulge) while genuinely separated pose-shells get a neck.
+    float a = acc.x;
+    float b = inst.x;
+    float kEff = _SmoothK * smoothstep(0.0, _SmoothK, abs(a - b));
+    if (kEff <= 1e-6)
+    {
+        // Coincident surfaces — plain min, keep the closer one's colour.
+        if (abs(b) < abs(a)) { _Acc[lin] = inst; _AccColor[lin] = _InstColor[lin]; }
+        return;
+    }
+    // h is the A-vs-B blend weight: h->1 keeps the accumulation, h->0 the instant.
+    float h = clamp(0.5 + 0.5 * (b - a) / kEff, 0.0, 1.0);
+    float s = lerp(b, a, h) - kEff * h * (1.0 - h);
+    // Free-space guard: where BOTH are clamped to +tau (co-observed open space),
+    // the seam dip must not pull below the iso level and emit phantom geometry.
+    if (min(a, b) >= _Tau) s = min(a, b);
+    float w = max(acc.y, inst.y);
+    float3 col = lerp(_InstColor[lin].rgb, _AccColor[lin].rgb, h);
+    _Acc[lin] = float2(s, w);
+    _AccColor[lin] = float4(col, w);
 }
