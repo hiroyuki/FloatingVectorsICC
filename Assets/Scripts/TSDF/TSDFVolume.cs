@@ -142,12 +142,10 @@ namespace TSDF
         private ComputeBuffer _colB;
         private bool _lastDoubleBuffered;
 
-        // Per-instant "instance" buffers for the separated camera/time pipeline
-        // (TSDFIntegrator.separateCameraFusion). One instant's cameras average
-        // into these (denoised), then FoldInstanceIntoAccumulation() unions the
-        // clean instant into the persistent accumulation buffer over time.
-        // Allocated lazily on first use so the extra VRAM is only paid when the
-        // separated path is active.
+        // Per-instant "instance" buffers for the accumulate pipeline. One instant's
+        // cameras average into these (denoised), then FoldInstanceIntoAccumulation()
+        // unions the clean instant into the persistent accumulation buffer over time.
+        // Allocated lazily on first use so the extra VRAM is only paid in accumulate.
         private ComputeBuffer _instSdf;
         private ComputeBuffer _instColor;
         private ComputeShader _foldShader;

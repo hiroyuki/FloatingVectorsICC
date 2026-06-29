@@ -1,9 +1,9 @@
 // Fold the per-instant "instance" volume into the persistent "accumulation"
 // volume owned by TSDFVolume.cs. One thread per voxel.
 //
-// This is the TIME-axis merge of the separated pipeline (see TSDFIntegrator
-// .separateCameraFusion): the instance buffer holds ONE instant already merged
-// across all cameras with a weighted AVERAGE (denoised, single clean surface),
+// This is the TIME-axis merge of the accumulate pipeline (TSDFIntegrator):
+// the instance buffer holds ONE instant already merged across all cameras
+// with a weighted AVERAGE (denoised, single clean surface),
 // and this kernel unions that clean instant into the accumulation buffer using
 // the RetainGhost rule (keep the observation closest to a surface, |sdf| min).
 // Splitting camera-fusion (average) from time-fusion (this union) is what stops

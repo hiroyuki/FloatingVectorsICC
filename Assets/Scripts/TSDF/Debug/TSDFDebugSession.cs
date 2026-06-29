@@ -576,11 +576,8 @@ namespace TSDF.DebugTools
             _haveInstants = false;
 
             integrator.clearVolumeOnNewBatch = false;                                   // accumulate, don't wipe per batch
-            // accumulationMode now only matters for the legacy single-pass accumulate
-            // (separateCameraFusion OFF). With separation ON the per-instant cameras are
-            // averaged and the time union is a fixed |sdf|-min fold, so this is a no-op
-            // there — left set for the fallback path.
-            volume.accumulationMode = TSDFVolume.AccumulationMode.RetainGhost;           // keep max surface (union)
+            // Accumulate always separates camera fusion (per-instant Average) from the
+            // time union (|sdf|-min fold), so volume.accumulationMode is not consulted here.
             // Accumulation publishes EVERY frame; with double-buffering each publish swaps
             // the back/front buffers, so the surface would ping-pong across two half-filled
             // buffers and never render. Run single-buffered while accumulating (the

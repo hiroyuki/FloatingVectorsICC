@@ -61,18 +61,6 @@ namespace TSDF
                  "set; lower it if you are debugging with fewer cams attached.")]
         [Min(1)] public int expectedCamCount = 4;
 
-        [Tooltip("Accumulate mode only (clearVolumeOnNewBatch OFF): separate camera " +
-                 "fusion from time accumulation. Each instant's <expectedCamCount> " +
-                 "cameras merge into a scratch 'instance' volume with a weighted " +
-                 "AVERAGE (denoise → one clean surface), then that clean instant is " +
-                 "union-folded (RetainGhost, |sdf| min) into the persistent volume so " +
-                 "the motion trail still builds up over time. Fixes thin limbs fraying " +
-                 "into double-shell strands that a single RetainGhost pass over " +
-                 "cameras+time produces. Costs extra VRAM (one instance sdf+colour " +
-                 "buffer). Requires expectedCamCount to match the actual cam set so an " +
-                 "instant can complete and fold.")]
-        public bool separateCameraFusion = true;
-
         // Runtime gate for the live/playback integration path. When false, incoming
         // frames are ignored so the volume (and thus the mesh) freezes on its last
         // state. MeshCumulative flips this to hold the final mesh after a run ends
@@ -296,12 +284,15 @@ namespace TSDF
                     volume.Publish();
                 }
             }
-            else if (separateCameraFusion)
+            else
             {
-                // Accumulate, separated: average this instant's cameras into the
-                // scratch INSTANCE buffer (denoised), then union the finished clean
-                // instant into the persistent accumulation buffer over time. The
-                // instance is cleared at the start of each instant (batch empty).
+                // Accumulate: separate camera fusion from time accumulation. Average
+                // this instant's cameras into the scratch INSTANCE buffer (denoise →
+                // one clean surface), then union the finished clean instant into the
+                // persistent accumulation buffer over time (the motion trail). This
+                // stops thin limbs fraying into double-shell strands. The instance is
+                // cleared at the start of each instant (batch empty); also
+                // (re)allocate if a mid-accumulate grid rebuild released it.
                 if (_batchSerials.Count == 0 || volume.InstanceBuffer == null) volume.ClearInstance();
 
                 if (!IntegrateOne(serial, camParam, sourceTransform, raw,
@@ -315,15 +306,6 @@ namespace TSDF
                     CompletedBatchCount++;
                     volume.Publish();
                 }
-            }
-            else
-            {
-                // Accumulate, single-pass legacy: fold cameras AND time into one
-                // buffer with the volume's mode (RetainGhost). Frays thin moving
-                // limbs — kept for comparison / fallback.
-                if (!IntegrateOne(serial, camParam, sourceTransform, raw,
-                                  volume.WriteBuffer, volume.WriteColorBuffer, -1)) return;
-                volume.Publish();
             }
         }
 
