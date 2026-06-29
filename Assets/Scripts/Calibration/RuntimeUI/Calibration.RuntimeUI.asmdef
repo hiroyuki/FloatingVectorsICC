@@ -1,0 +1,18 @@
+{
+    "name": "Calibration.RuntimeUI",
+    "rootNamespace": "Calibration.RuntimeUI",
+    "references": [
+        "PointCloud",
+        "Calibration",
+        "Orbbec"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

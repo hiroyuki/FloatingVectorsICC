@@ -1,0 +1,19 @@
+{
+    "name": "TSDF.Editor",
+    "rootNamespace": "TSDF.EditorTools",
+    "references": [
+        "TSDF",
+        "PointCloud"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
