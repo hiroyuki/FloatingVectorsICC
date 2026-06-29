@@ -30,10 +30,15 @@ AppendStructuredBuffer<Tri> _Triangles;
 // off the AppendBuffer<Tri> counter) into "vertex count" for the
 // DrawProceduralIndirect args buffer layout [vertCount, 1, 0, 0].
 RWStructuredBuffer<uint> _Args;
+uint _MaxTriangles;   // capacity of the Append buffer (in triangles)
 [numthreads(1, 1, 1)]
 void ScaleArgs(uint3 id : SV_DispatchThreadID)
 {
-    if (id.x == 0u) _Args[0] = _Args[0] * 3u;
+    // The Append counter can exceed the buffer capacity when Marching Cubes
+    // emits more triangles than fit (e.g. a huge accumulated volume). Drawing
+    // that count reads past the buffer -> garbage spike triangles. Clamp to the
+    // real capacity so we draw a truncated-but-valid mesh instead of junk.
+    if (id.x == 0u) _Args[0] = min(_Args[0], _MaxTriangles) * 3u;
 }
 
 int LinIdx(int3 c) { return c.x + _Dim.x * (c.y + _Dim.y * c.z); }

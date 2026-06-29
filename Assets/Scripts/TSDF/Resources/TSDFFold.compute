@@ -1,0 +1,41 @@
+// Fold the per-instant "instance" volume into the persistent "accumulation"
+// volume owned by TSDFVolume.cs. One thread per voxel.
+//
+// This is the TIME-axis merge of the separated pipeline (see TSDFIntegrator
+// .separateCameraFusion): the instance buffer holds ONE instant already merged
+// across all cameras with a weighted AVERAGE (denoised, single clean surface),
+// and this kernel unions that clean instant into the accumulation buffer using
+// the RetainGhost rule (keep the observation closest to a surface, |sdf| min).
+// Splitting camera-fusion (average) from time-fusion (this union) is what stops
+// thin limbs fraying into the double-shell strands that a single RetainGhost
+// pass over cameras+time produces.
+
+#pragma kernel Fold
+
+RWStructuredBuffer<float2> _Acc;        // accumulation: x = sdf, y = weight (read+write)
+RWStructuredBuffer<float4> _AccColor;   // accumulation colour rgb + w
+StructuredBuffer<float2> _Inst;         // instance (this instant, camera-averaged)
+StructuredBuffer<float4> _InstColor;    // instance colour
+int3 _Dim;
+int _DispatchWidth;                     // = groupsX * 64 (2D dispatch linearisation)
+
+[numthreads(64, 1, 1)]
+void Fold(uint3 id : SV_DispatchThreadID)
+{
+    uint lin = id.y * (uint)_DispatchWidth + id.x;
+    uint total = (uint)(_Dim.x * _Dim.y * _Dim.z);
+    if (lin >= total) return;
+
+    float2 inst = _Inst[lin];
+    if (inst.y <= 0.0) return;          // this instant never observed this voxel
+
+    float2 acc = _Acc[lin];
+    // RetainGhost across time: the instant whose surface sits closest to this
+    // voxel wins, so a limb sweeping through leaves a permanent shell (the
+    // motion trail) while a clean averaged surface replaces any noisier prior.
+    if (acc.y <= 0.0 || abs(inst.x) < abs(acc.x))
+    {
+        _Acc[lin] = inst;
+        _AccColor[lin] = _InstColor[lin];
+    }
+}

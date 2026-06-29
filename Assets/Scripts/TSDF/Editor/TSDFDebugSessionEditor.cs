@@ -1,7 +1,8 @@
-// Inspector for TSDFDebugSession. The single "Compare Two Instants" toggle is the
-// control for the compare/bench section, so it's drawn at the TOP of that section
-// (right under its header, above the bench settings). The button freezes playback
-// and overlays two moments; clicking it again resumes normal playback.
+// Inspector for TSDFDebugSession. Each action button is drawn right under the
+// fields it operates on, so the controls aren't hidden in the component's
+// context-menu:
+//   - "Compare Two Instants" sits at the top of the bench section (startPlayheadSec).
+//   - "Integrate Frame Range" sits right under the Frame-range fields.
 
 using UnityEditor;
 using UnityEngine;
@@ -19,7 +20,8 @@ namespace TSDF.EditorTools
 
             var it = serializedObject.GetIterator();
             bool enterChildren = true;
-            bool buttonDrawn = false;
+            bool compareDrawn = false;
+            bool accumDrawn = false;
             while (it.NextVisible(enterChildren))
             {
                 enterChildren = false;
@@ -31,56 +33,35 @@ namespace TSDF.EditorTools
                     continue;
                 }
 
-                // Open the compare/bench section with its header + the toggle button,
-                // then a serial dropdown in place of the raw text field.
-                if (!buttonDrawn && it.name == "validateSerial")
+                // Bench header + Compare button, just above the bench settings.
+                if (!compareDrawn && it.name == "startPlayheadSec")
                 {
                     EditorGUILayout.Space();
                     EditorGUILayout.LabelField("Compare two instants (bench)", EditorStyles.boldLabel);
                     DrawCompareButton(t);
-                    buttonDrawn = true;
-                    DrawValidateSerialPopup(t, it);
-                    continue;   // popup replaces the default text field
+                    compareDrawn = true;
+                }
+
+                // Accumulate header + Start/Stop button, just above the read-only cache status.
+                if (!accumDrawn && it.name == "cachedCount")
+                {
+                    EditorGUILayout.Space();
+                    EditorGUILayout.LabelField("Accumulate during playback (motion mesh)", EditorStyles.boldLabel);
+                    DrawAccumulateButton(t);
+                    accumDrawn = true;
                 }
 
                 EditorGUILayout.PropertyField(it, true);
             }
 
-            // Fallback if the script field is ever not first.
-            if (!buttonDrawn) DrawCompareButton(t);
+            if (!accumDrawn) DrawAccumulateButton(t);
+
+            // Fallback if startPlayheadSec is ever not present.
+            if (!compareDrawn) DrawCompareButton(t);
 
             serializedObject.ApplyModifiedProperties();
 
             if (Application.isPlaying) Repaint();
-        }
-
-        // Dropdown of available camera serials (populated from the recorder after
-        // Play) instead of a free-text field. Empty string = all cameras.
-        private static void DrawValidateSerialPopup(TSDFDebugSession t, SerializedProperty prop)
-        {
-            string[] serials = t.cameraKeys;
-            if (serials == null || serials.Length == 0)
-            {
-                // No serials yet (before Play / before the recording loads) — keep a
-                // text field so it's still editable; the dropdown appears once known.
-                EditorGUILayout.PropertyField(prop, new GUIContent("Validate Serial"));
-                return;
-            }
-
-            var options = new string[serials.Length + 1];
-            options[0] = "(ALL cameras)";
-            for (int i = 0; i < serials.Length; i++) options[i + 1] = serials[i];
-
-            string cur = prop.stringValue;
-            int idx = 0;
-            if (!string.IsNullOrEmpty(cur))
-            {
-                int found = System.Array.IndexOf(serials, cur);
-                idx = found >= 0 ? found + 1 : 0;
-            }
-            int next = EditorGUILayout.Popup("Validate Serial", idx, options);
-            if (next != idx)
-                prop.stringValue = next == 0 ? "" : serials[next - 1];
         }
 
         private static void DrawCompareButton(TSDFDebugSession t)
@@ -100,8 +81,29 @@ namespace TSDF.EditorTools
             }
             if (!Application.isPlaying)
                 EditorGUILayout.HelpBox(
-                    "In Play: toggle on to freeze and overlay two moments (red/blue); " +
+                    "In Play: toggle on to freeze and overlay two moments; " +
                     "toggle off to resume normal playback.", MessageType.None);
+            EditorGUILayout.Space();
+        }
+
+        private static void DrawAccumulateButton(TSDFDebugSession t)
+        {
+            EditorGUILayout.Space();
+            using (new EditorGUI.DisabledScope(!Application.isPlaying))
+            {
+                bool acc = t.IsAccumulating;
+                var prev = GUI.backgroundColor;
+                GUI.backgroundColor = acc ? new Color(1f, 0.55f, 0.55f) : new Color(0.6f, 0.95f, 0.6f);
+                string label = acc ? "● Accumulating — click to STOP (freeze)" : "Start Accumulating";
+                if (GUILayout.Button(label, GUILayout.Height(28)))
+                    t.ToggleAccumulate();
+                GUI.backgroundColor = prev;
+            }
+            if (!Application.isPlaying)
+                EditorGUILayout.HelpBox(
+                    "In Play: press Start, then every frame playback advances folds into one " +
+                    "RetainGhost motion mesh (it builds up live). Press Stop to freeze.",
+                    MessageType.None);
             EditorGUILayout.Space();
         }
     }

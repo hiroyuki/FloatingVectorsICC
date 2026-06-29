@@ -142,6 +142,24 @@ namespace TSDF
         private ComputeBuffer _colB;
         private bool _lastDoubleBuffered;
 
+        // Per-instant "instance" buffers for the separated camera/time pipeline
+        // (TSDFIntegrator.separateCameraFusion). One instant's cameras average
+        // into these (denoised), then FoldInstanceIntoAccumulation() unions the
+        // clean instant into the persistent accumulation buffer over time.
+        // Allocated lazily on first use so the extra VRAM is only paid when the
+        // separated path is active.
+        private ComputeBuffer _instSdf;
+        private ComputeBuffer _instColor;
+        private ComputeShader _foldShader;
+        private int _foldKernel;
+
+        /// <summary>Per-instant sdf+weight scratch (camera-averaged). Bind the integrate
+        /// kernel here, not <see cref="WriteBuffer"/>, when separating camera fusion from
+        /// time accumulation. Null until <see cref="ClearInstance"/> first allocates it.</summary>
+        public ComputeBuffer InstanceBuffer => _instSdf;
+        /// <summary>Per-instant colour scratch, parallel to <see cref="InstanceBuffer"/>.</summary>
+        public ComputeBuffer InstanceColorBuffer => _instColor;
+
         // Track the bbox transform values we last built the grid from so we
         // can rebuild lazily when the user edits the bbox or voxel size.
         private Vector3 _lastBboxPos;
@@ -189,6 +207,74 @@ namespace TSDF
         public void ClearWrite()
         {
             ClearBuffer(WriteBuffer);
+        }
+
+        /// <summary>
+        /// (Separated pipeline) Reset the per-instant instance buffer to (tsdf=+tau,
+        /// weight=0) so the next instant's cameras average in from scratch. Allocates
+        /// the instance buffers on first call (sized to the current grid).
+        /// </summary>
+        public void ClearInstance()
+        {
+            EnsureInstanceBuffers();
+            ClearBuffer(_instSdf);
+            // Colour scratch never needs clearing: the integrate Average path takes
+            // rgb fresh on a voxel's first observation (sdf weight 0), matching the
+            // main colour-buffer contract.
+        }
+
+        /// <summary>
+        /// (Separated pipeline) Union the just-built instance volume into the
+        /// accumulation buffer (<see cref="WriteBuffer"/>) with the RetainGhost rule
+        /// (|sdf| min wins) — keeps the motion trail while replacing noisier priors
+        /// with the clean camera-averaged instant. No-op until ClearInstance has
+        /// allocated the instance buffers.
+        /// </summary>
+        public void FoldInstanceIntoAccumulation()
+        {
+            if (_instSdf == null || WriteBuffer == null) return;
+            if (!EnsureFoldShader()) return;
+            int total = Dim.x * Dim.y * Dim.z;
+            if (total <= 0) return;
+
+            int gx, gy;
+            DispatchGrid(total, out gx, out gy);
+            _foldShader.SetBuffer(_foldKernel, "_Acc", WriteBuffer);
+            _foldShader.SetBuffer(_foldKernel, "_AccColor", WriteColorBuffer);
+            _foldShader.SetBuffer(_foldKernel, "_Inst", _instSdf);
+            _foldShader.SetBuffer(_foldKernel, "_InstColor", _instColor);
+            _foldShader.SetInts("_Dim", Dim.x, Dim.y, Dim.z);
+            _foldShader.SetInt("_DispatchWidth", gx * 64);
+            _foldShader.Dispatch(_foldKernel, gx, gy, 1);
+        }
+
+        private void EnsureInstanceBuffers()
+        {
+            int total = Dim.x * Dim.y * Dim.z;
+            if (total <= 0) return;
+            if (_instSdf == null || _instSdf.count != total)
+            {
+                _instSdf?.Release();
+                _instSdf = new ComputeBuffer(total, sizeof(float) * 2);
+            }
+            if (_instColor == null || _instColor.count != total)
+            {
+                _instColor?.Release();
+                _instColor = new ComputeBuffer(total, sizeof(float) * 4);
+            }
+        }
+
+        private bool EnsureFoldShader()
+        {
+            if (_foldShader != null) return true;
+            _foldShader = Resources.Load<ComputeShader>("TSDFFold");
+            if (_foldShader == null)
+            {
+                Debug.LogError("[TSDFVolume] Compute shader \"Resources/TSDFFold.compute\" not found.", this);
+                return false;
+            }
+            _foldKernel = _foldShader.FindKernel("Fold");
+            return true;
         }
 
         /// <summary>
@@ -376,6 +462,11 @@ namespace TSDF
             _clearKernel = _clearShader.FindKernel("Clear");
         }
 
+        /// <summary>Force a (re)build of the backing buffers now — used after toggling
+        /// <see cref="doubleBuffered"/> at runtime so the change takes effect immediately
+        /// instead of on the next Update. Clears the volume.</summary>
+        public void ForceRebuild() => RebuildIfNeeded(true);
+
         private void RebuildIfNeeded(bool forceClear)
         {
             if (boundingBox == null)
@@ -468,6 +559,10 @@ namespace TSDF
             _bufB?.Release();
             _colA?.Release();
             _colB?.Release();
+            _instSdf?.Release();
+            _instColor?.Release();
+            _instSdf = null;
+            _instColor = null;
             _ccLabel?.Release();
             _ccSize?.Release();
             _ccChanged?.Release();

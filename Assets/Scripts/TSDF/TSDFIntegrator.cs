@@ -61,6 +61,18 @@ namespace TSDF
                  "set; lower it if you are debugging with fewer cams attached.")]
         [Min(1)] public int expectedCamCount = 4;
 
+        [Tooltip("Accumulate mode only (clearVolumeOnNewBatch OFF): separate camera " +
+                 "fusion from time accumulation. Each instant's <expectedCamCount> " +
+                 "cameras merge into a scratch 'instance' volume with a weighted " +
+                 "AVERAGE (denoise → one clean surface), then that clean instant is " +
+                 "union-folded (RetainGhost, |sdf| min) into the persistent volume so " +
+                 "the motion trail still builds up over time. Fixes thin limbs fraying " +
+                 "into double-shell strands that a single RetainGhost pass over " +
+                 "cameras+time produces. Costs extra VRAM (one instance sdf+colour " +
+                 "buffer). Requires expectedCamCount to match the actual cam set so an " +
+                 "instant can complete and fold.")]
+        public bool separateCameraFusion = true;
+
         // Runtime gate for the live/playback integration path. When false, incoming
         // frames are ignored so the volume (and thus the mesh) freezes on its last
         // state. MeshCumulative flips this to hold the final mesh after a run ends
@@ -227,7 +239,10 @@ namespace TSDF
         /// </summary>
         public void IntegrateRawFrame(string serial, ObCameraParam? camParam,
                                       Transform sourceTransform, RawFrameData raw)
-            => IntegrateOne(serial, camParam, sourceTransform, raw);
+            => IntegrateOne(serial, camParam, sourceTransform, raw,
+                            volume != null ? volume.WriteBuffer : null,
+                            volume != null ? volume.WriteColorBuffer : null,
+                            -1);
 
         /// <summary>
         /// Reset live-follow batch tracking and clear the write buffer so the NEXT
@@ -256,20 +271,21 @@ namespace TSDF
             if (volume == null) return;
             if (!integrationEnabled) return; // frozen — hold the last accumulated state
 
-            // Live-follow: when a complete batch finished last time, wipe the
-            // hidden BACK buffer here at the START of the next batch's first
-            // integration. The displayed front keeps showing the last complete
-            // batch until this one finishes and publishes — no flicker.
-            if (clearVolumeOnNewBatch && _batchSerials.Count >= expectedCamCount)
-            {
-                volume.ClearWrite();
-                _batchSerials.Clear();
-            }
-
-            if (!IntegrateOne(serial, camParam, sourceTransform, raw)) return;
-
             if (clearVolumeOnNewBatch)
             {
+                // Live-follow: when a complete batch finished last time, wipe the
+                // hidden BACK buffer here at the START of the next batch's first
+                // integration. The displayed front keeps showing the last complete
+                // batch until this one finishes and publishes — no flicker.
+                if (_batchSerials.Count >= expectedCamCount)
+                {
+                    volume.ClearWrite();
+                    _batchSerials.Clear();
+                }
+
+                if (!IntegrateOne(serial, camParam, sourceTransform, raw,
+                                  volume.WriteBuffer, volume.WriteColorBuffer, -1)) return;
+
                 // Tally this serial into the in-flight batch. Once full, bump the
                 // batch counter and publish the back buffer to the front so all
                 // three views pick up the same complete snapshot this frame.
@@ -280,10 +296,33 @@ namespace TSDF
                     volume.Publish();
                 }
             }
+            else if (separateCameraFusion)
+            {
+                // Accumulate, separated: average this instant's cameras into the
+                // scratch INSTANCE buffer (denoised), then union the finished clean
+                // instant into the persistent accumulation buffer over time. The
+                // instance is cleared at the start of each instant (batch empty).
+                if (_batchSerials.Count == 0 || volume.InstanceBuffer == null) volume.ClearInstance();
+
+                if (!IntegrateOne(serial, camParam, sourceTransform, raw,
+                                  volume.InstanceBuffer, volume.InstanceColorBuffer, 0)) return;
+
+                _batchSerials.Add(serial);
+                if (_batchSerials.Count >= expectedCamCount)
+                {
+                    volume.FoldInstanceIntoAccumulation();   // time union → mesh re-extracts
+                    _batchSerials.Clear();
+                    CompletedBatchCount++;
+                    volume.Publish();
+                }
+            }
             else
             {
-                // Accumulate (single buffer): content is already in the visible
-                // buffer; just bump the publish version so the mesh re-extracts.
+                // Accumulate, single-pass legacy: fold cameras AND time into one
+                // buffer with the volume's mode (RetainGhost). Frays thin moving
+                // limbs — kept for comparison / fallback.
+                if (!IntegrateOne(serial, camParam, sourceTransform, raw,
+                                  volume.WriteBuffer, volume.WriteColorBuffer, -1)) return;
                 volume.Publish();
             }
         }
@@ -294,10 +333,12 @@ namespace TSDF
         /// Returns false if the frame was rejected (missing intrinsics, no depth…).
         /// </summary>
         private unsafe bool IntegrateOne(string serial, ObCameraParam? camParam,
-                                         Transform sourceTransform, RawFrameData raw)
+                                         Transform sourceTransform, RawFrameData raw,
+                                         ComputeBuffer targetSdf, ComputeBuffer targetColor,
+                                         int modeOverride)
         {
             if (string.IsNullOrEmpty(serial)) return false;
-            if (volume == null || volume.WriteBuffer == null) return false;
+            if (volume == null || targetSdf == null) return false;
             if (raw.DepthBytes == null || raw.DepthByteCount <= 0) return false;
             if (!camParam.HasValue) return false; // need intrinsics
             if (sourceTransform == null) return false;
@@ -361,11 +402,11 @@ namespace TSDF
             Matrix4x4 depthFromWorld = ComputeDepthFromWorld(sourceTransform, st.CamParam);
             var intr = st.CamParam.DepthIntrinsic;
 
-            _shader.SetBuffer(_kernel, "_Voxels", volume.WriteBuffer);
+            _shader.SetBuffer(_kernel, "_Voxels", targetSdf);
             _shader.SetInts("_Dim", volume.Dim.x, volume.Dim.y, volume.Dim.z);
             _shader.SetMatrix("_WorldFromVoxel", volume.WorldFromVoxel);
             _shader.SetFloat("_Tau", volume.Tau);
-            _shader.SetInt("_AccumulationMode", (int)volume.accumulationMode);
+            _shader.SetInt("_AccumulationMode", modeOverride >= 0 ? modeOverride : (int)volume.accumulationMode);
 
             _shader.SetBuffer(_kernel, "_Depth", st.DepthBuf);
             _shader.SetInt("_DepthW", raw.DepthWidth);
@@ -398,7 +439,7 @@ namespace TSDF
             Matrix4x4 colorFromWorld = Matrix4x4.Scale(new Vector3(1000f, 1000f, 1000f))
                                        * sourceTransform.worldToLocalMatrix;
             var cintr = st.CamParam.RgbIntrinsic;
-            _shader.SetBuffer(_kernel, "_Colors", volume.WriteColorBuffer);
+            _shader.SetBuffer(_kernel, "_Colors", targetColor);
             _shader.SetBuffer(_kernel, "_ColorImg", st.ColorBuf);
             _shader.SetInt("_ColorW", st.ColorWidth);
             _shader.SetInt("_ColorH", st.ColorHeight);

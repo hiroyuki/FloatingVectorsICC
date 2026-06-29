@@ -377,6 +377,7 @@ namespace TSDF
             // args[0] by 3 so DrawProceduralIndirect sees a vertex count.
             ComputeBuffer.CopyCount(_meshTrianglesBuffer, _meshArgsBuffer, 0);
             _mcShader.SetBuffer(_scaleArgsKernel, "_Args", _meshArgsBuffer);
+            _mcShader.SetInt("_MaxTriangles", meshMaxTriangles);   // clamp overflow -> no out-of-bounds draw
             _mcShader.Dispatch(_scaleArgsKernel, 1, 1, 1);
 
             _diagMcDispatchesThisWindow++;

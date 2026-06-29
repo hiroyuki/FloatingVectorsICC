@@ -113,6 +113,10 @@ namespace TSDF.DebugTools
                  "neck. Drag while frozen to watch the highlighted band change live.")]
         [Range(0f, 1f)] public float seamThreshold = 0.35f;
 
+        // "Accumulate during playback (motion mesh)" section + the Start/Stop button are
+        // drawn by TSDFDebugSessionEditor. Start folds every PLAYED frame into one
+        // RetainGhost volume as playback runs (the mesh builds up live); Stop freezes it.
+
         [Header("Cache status (read-only)")]
         [SerializeField] private int cachedCount = 0;
         [SerializeField] private string lastReplayKind = "(none)";
@@ -197,6 +201,13 @@ namespace TSDF.DebugTools
 
         private void OnDisable()
         {
+            // If disabled mid-accumulate, freeze now. Update() stops once the
+            // component is disabled, so the integrator would otherwise be left in
+            // accumulate mode (integrationEnabled=true, clearVolumeOnNewBatch=false,
+            // RetainGhost) — a hidden component silently changing integration. Freeze
+            // closes the gate and holds the captured mesh. (Mirrors MeshCumulative.)
+            if (IsAccumulating) StopAccumulate();
+
             if (_subscribedRecorder != null && _handler != null)
             {
                 _subscribedRecorder.OnPlaybackRawFrame -= _handler;
@@ -349,6 +360,11 @@ namespace TSDF.DebugTools
         private TSDFVolume.AccumulationMode _accumBeforeCompare;
         private bool _haveAccumBackup;
 
+        // Playback-accumulate state. While accumulating, every played frame is folded
+        // into one RetainGhost volume (the live integrator runs with per-batch clearing
+        // off). Stop freezes the result and restores the integrator/volume config.
+        public bool IsAccumulating { get; private set; }
+
         /// <summary>One-button compare: enter the two-instant compare if not in it,
         /// otherwise exit back to normal playback.</summary>
         public void ToggleCompare()
@@ -396,6 +412,10 @@ namespace TSDF.DebugTools
                 Debug.LogWarning("[TSDFDebugSession] Build needs recorder + volume + integrator.", this);
                 return;
             }
+            // Compare takes ownership of the volume (its own integrate + freeze). If an
+            // accumulate run is live, end it first so the two features never fight over
+            // the volume or leave both "Accumulating" and "Comparing" lit at once.
+            if (IsAccumulating) StopAccumulate();
             if (recorder.CurrentState != PointCloudRecorder.State.Playing)
             {
                 EnsureRecorderPlaying();
@@ -520,6 +540,85 @@ namespace TSDF.DebugTools
                       $"start={startPlayheadSec:0.000}s (cursor {refCursor}) + {skipFrames}f " +
                       $"-> {secondSec:0.000}s (cursor {targetCursor}). {done} integrations, {mode}. " +
                       "Integrator FROZEN — toggle Compare off (or Resume Playback) to go live.", this);
+        }
+
+        /// <summary>Start (begin accumulating every played frame into one RetainGhost
+        /// motion mesh) or Stop (freeze the result). Bound to the editor button.</summary>
+        public void ToggleAccumulate()
+        {
+            if (IsAccumulating) StopAccumulate();
+            else StartAccumulate();
+        }
+
+        /// <summary>
+        /// Begin accumulating: clear the volume, switch the live integrator to RetainGhost
+        /// WITHOUT per-batch clearing, and let playback run — every frame it advances folds
+        /// into the same volume, so the motion sweep builds up live until <see cref="StopAccumulate"/>.
+        /// </summary>
+        public void StartAccumulate()
+        {
+            if (recorder == null || volume == null || integrator == null)
+            {
+                Debug.LogWarning("[TSDFDebugSession] Accumulate needs recorder + volume + integrator.", this);
+                return;
+            }
+            if (recorder.CurrentState != PointCloudRecorder.State.Playing)
+            {
+                EnsureRecorderPlaying();
+                if (recorder.CurrentState != PointCloudRecorder.State.Playing)
+                {
+                    Debug.LogWarning("[TSDFDebugSession] Could not start playback — is a recording loaded?", this);
+                    return;
+                }
+            }
+            // If the smin/compare bench was frozen, drop it — accumulate owns the volume now.
+            IsComparing = false;
+            _haveInstants = false;
+
+            integrator.clearVolumeOnNewBatch = false;                                   // accumulate, don't wipe per batch
+            // accumulationMode now only matters for the legacy single-pass accumulate
+            // (separateCameraFusion OFF). With separation ON the per-instant cameras are
+            // averaged and the time union is a fixed |sdf|-min fold, so this is a no-op
+            // there — left set for the fallback path.
+            volume.accumulationMode = TSDFVolume.AccumulationMode.RetainGhost;           // keep max surface (union)
+            // Accumulation publishes EVERY frame; with double-buffering each publish swaps
+            // the back/front buffers, so the surface would ping-pong across two half-filled
+            // buffers and never render. Run single-buffered while accumulating (the
+            // integrator's accumulate path assumes one buffer). ForceRebuild clears it.
+            if (volume.doubleBuffered)
+            {
+                volume.doubleBuffered = false;
+                volume.ForceRebuild();      // realloc to a single buffer + clear (fresh start)
+            }
+            else
+            {
+                volume.ClearWrite();        // already single-buffer — just wipe for a fresh start
+                volume.Publish();
+            }
+            integrator.BeginFreshBatch();                                                // reset instant/batch tracking + clear write for a clean start
+            integrator.integrationEnabled = true;                                        // integrate every played frame
+            if (recorder.IsPaused) recorder.ResumePlayback();                            // let frames advance
+            IsAccumulating = true;
+            lastReplayKind = "accumulating…";
+            Debug.Log("[TSDFDebugSession] START accumulate: every played frame now folds into one " +
+                      "RetainGhost motion mesh. Press Stop to freeze.", this);
+        }
+
+        /// <summary>Stop accumulating: freeze the integrator and pause playback, keeping the
+        /// single-buffer accumulate config so the frozen motion mesh stays on screen.</summary>
+        public void StopAccumulate()
+        {
+            if (integrator != null) integrator.integrationEnabled = false;   // freeze the result
+            if (volume != null) volume.Publish();   // single-buffer: bump PublishVersion -> re-extract the final mesh
+            if (recorder != null && !recorder.IsPaused) recorder.PausePlayback();
+            // Deliberately DO NOT restore clearVolumeOnNewBatch / doubleBuffered. The
+            // integrator keeps volume.doubleBuffered == clearVolumeOnNewBatch, so flipping
+            // clearVolumeOnNewBatch back to true would make it re-enable double-buffering,
+            // which reallocs the volume and WIPES the result we just froze. Leaving the
+            // accumulate (single-buffer) config keeps the frozen motion mesh on screen.
+            IsAccumulating = false;
+            lastReplayKind = "accumulated (frozen)";
+            Debug.Log("[TSDFDebugSession] STOP accumulate: motion mesh frozen.", this);
         }
 
         // ---------------- Smooth-union (issue #27) ----------------
