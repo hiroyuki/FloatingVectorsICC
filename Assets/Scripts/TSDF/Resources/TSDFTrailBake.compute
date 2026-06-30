@@ -1,0 +1,105 @@
+// Bakes a body-tracking motion TRAIL into the TSDF volume as authored geometry
+// (issue: "feed the BT trail back into the SDF and re-mesh"). Each trail segment
+// (a pair of consecutive joint-trajectory samples) is treated as an analytic
+// CAPSULE: sdf(p) = distance(p, segment) - radius. The nearest capsule's signed
+// distance is min-unioned into the volume write buffer, then the existing
+// Marching Cubes pass re-extracts a solid tube mesh that follows the motion.
+//
+// Why analytic (not a swept real-surface SDF like the parked Tier-3 limb sweep):
+// the trail is NEW geometry authored from the skeleton, so there is no
+// surface-vs-bone offset to fight — a clean single distance field, written
+// directly, also sidesteps the multi-camera RetainGhost double-shell fray that
+// breaks thin observed limbs. radius >= ~1 voxel is all that's needed.
+//
+// Dispatch contract matches TSDFIntegrate / TSDFSmoothUnion: one thread per
+// voxel, the 2D grid linearised via _DispatchWidth (= groupsX * 64) so large
+// volumes stay under the 65535-threadgroup-per-axis D3D limit. Segments are fed
+// in BATCHES across multiple Dispatch calls (_SegOffset / _SegCount) so a single
+// dispatch never runs long enough to trip the GPU TDR watchdog; min-union makes
+// the batches order-independent and idempotent.
+
+#pragma kernel BakeTrail
+
+int _DispatchWidth;
+int3 _Dim;
+float _Tau;                  // truncation distance (metres) — clamp + "no surface" seed
+float4x4 _WorldFromVoxel;    // voxel index centre -> world metres
+
+// One capsule segment. xyz endpoints in WORLD metres; ra/rb radii (metres) taper
+// a -> b; rgb is the segment colour. Stride = 12 floats = 48 bytes (matches the
+// C# TrailSeg struct in TSDFTrailBaker).
+struct Seg
+{
+    float3 a;
+    float3 b;
+    float  ra;
+    float  rb;
+    float3 color;
+    float  _pad;
+};
+StructuredBuffer<Seg> _Segs;
+int _SegOffset;              // first segment index processed by this dispatch
+int _SegCount;               // number of segments in this batch
+
+RWStructuredBuffer<float2> _VoxelsOut;  // x = sdf (m), y = weight
+RWStructuredBuffer<float4> _ColorsOut;  // rgb + colour weight (parallel to _VoxelsOut)
+
+// Distance from p to segment a->b, plus the clamped axial parameter h in [0,1]
+// (0 = at a, 1 = at b) so the radius can taper along the capsule.
+float DistPointSeg(float3 p, float3 a, float3 b, out float h)
+{
+    float3 ab = b - a;
+    h = saturate(dot(p - a, ab) / max(dot(ab, ab), 1e-9));
+    return length(p - a - ab * h);
+}
+
+[numthreads(64, 1, 1)]
+void BakeTrail(uint3 id : SV_DispatchThreadID)
+{
+    uint lin = id.y * (uint)_DispatchWidth + id.x;
+    uint total = (uint)(_Dim.x * _Dim.y * _Dim.z);
+    if (lin >= total) return;
+
+    uint dx = (uint)_Dim.x, dy = (uint)_Dim.y;
+    uint i = lin % dx, j = (lin / dx) % dy, k = lin / (dx * dy);
+    float3 p = mul(_WorldFromVoxel, float4((float)i + 0.5, (float)j + 0.5, (float)k + 0.5, 1.0)).xyz;
+
+    // Best (nearest) capsule for THIS voxel across the current batch.
+    float bestSdf = _Tau;
+    float3 bestCol = float3(0, 0, 0);
+    bool hit = false;
+
+    for (int s = 0; s < _SegCount; s++)
+    {
+        Seg seg = _Segs[_SegOffset + s];
+
+        // Cheap bounding-sphere reject: a voxel beyond the capsule's reach can't
+        // beat bestSdf, so skip the sqrt-heavy segment distance for it.
+        float3 mid = (seg.a + seg.b) * 0.5;
+        float halfLen = length(seg.b - seg.a) * 0.5;
+        float maxR = max(seg.ra, seg.rb);
+        if (length(p - mid) > halfLen + maxR + _Tau) continue;
+
+        float h;
+        float d = DistPointSeg(p, seg.a, seg.b, h) - lerp(seg.ra, seg.rb, h);
+        if (d < bestSdf)
+        {
+            bestSdf = d;
+            bestCol = seg.color;
+            hit = true;
+        }
+    }
+
+    if (!hit) return;   // no capsule in range for this batch — leave the voxel as is
+
+    // Clamp into the truncation band so MC sees a proper +/- sign crossing, then
+    // min-union into whatever is already there (prior batches, or — in fuse mode —
+    // the accumulated body TSDF).
+    float sdf = clamp(bestSdf, -_Tau, _Tau);
+    float2 cur = _VoxelsOut[lin];
+    if (cur.y <= 0.0 || sdf < cur.x)
+    {
+        _VoxelsOut[lin] = float2(sdf, 1.0);
+        _ColorsOut[lin] = float4(bestCol, 1.0);
+    }
+}

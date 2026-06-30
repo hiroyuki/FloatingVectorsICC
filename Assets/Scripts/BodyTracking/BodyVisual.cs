@@ -456,6 +456,21 @@ namespace BodyTracking
             return _root != null ? _root.transform.TransformPoint(local) : local;
         }
 
+        /// <summary>Append this body's windowed per-joint trail centerline (the same samples
+        /// the JointTrailMesh ribbon draws) for <paramref name="jointIdx"/> to
+        /// <paramref name="outWorld"/>, in WORLD space (oldest→newest). Returns the number
+        /// appended. Used by the SDF trail baker to bake the ribbon as capsules.</summary>
+        public int CopyTrailWorldPoints(int jointIdx, List<Vector3> outWorld)
+        {
+            if (_trails == null || jointIdx < 0 || jointIdx >= _trails.Length) return 0;
+            var tr = _trails[jointIdx];
+            if (tr == null) return 0;
+            int n = tr.SampleCount;
+            for (int i = 0; i < n; i++)
+                outWorld.Add(WorldOf(tr.SampleLocalPos(i)));
+            return n;
+        }
+
         // Diagnostic: how often did this body's visibility toggle and how big are
         // the per-pop position jumps? Reset by ResetDiagWindow.
         public int VisibilityToggles { get; private set; }
