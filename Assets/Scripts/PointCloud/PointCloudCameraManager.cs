@@ -92,6 +92,18 @@ namespace PointCloud
                  "Auto-found via FindFirstObjectByType if left null.")]
         public PointCloudView view;
 
+        [Header("Camera markers")]
+        [Tooltip("Attach a wireframe square-pyramid (frustum) marker to each spawned renderer. " +
+                 "The apex sits at the camera origin and the base opens along the view direction, " +
+                 "so each camera's position and aim are visible inside the merged point cloud. " +
+                 "Rides the renderer transform, so it tracks the applied extrinsics.")]
+        public bool showCameraMarkers = false;
+        [Tooltip("Frustum length (apex -> base) in metres.")]
+        public float markerLength = 0.2f;
+        [Tooltip("Frustum base half-width / half-height in metres.")]
+        public float markerBaseHalfWidth = 0.12f;
+        public float markerBaseHalfHeight = 0.09f;
+
         [Header("Extrinsics (issue #9)")]
         [Tooltip("Apply per-device global_tr_colorCamera read from <extrinsicsRoot>/calibration/" +
                  "extrinsics.yaml to each spawned renderer GO. Off → renderers stay at the manager's " +
@@ -111,6 +123,24 @@ namespace PointCloud
         private void Awake()
         {
             if (view == null) view = FindFirstObjectByType<PointCloudView>();
+        }
+
+        private bool _markerToggleInit;
+        private bool _lastShowCameraMarkers;
+
+        // Propagate the manager-level marker toggle to existing markers, but only when
+        // it actually changes — so per-marker Inspector toggles aren't clobbered each frame.
+        private void Update()
+        {
+            if (_markerToggleInit && _lastShowCameraMarkers == showCameraMarkers) return;
+            _markerToggleInit = true;
+            _lastShowCameraMarkers = showCameraMarkers;
+            foreach (var r in _renderers)
+            {
+                if (r == null) continue;
+                var m = r.GetComponent<CameraPoseMarker>();
+                if (m != null) m.showVisualization = showCameraMarkers;
+            }
         }
 
         private void Start()
@@ -202,6 +232,14 @@ namespace PointCloud
             pcr.timerSyncWithHost = enableTimerSyncWithHost;
             pcr.enableGlobalTimestamp = enableGlobalTimestamp;
             pcr.depthWorkMode = depthWorkMode;
+
+            var marker = go.AddComponent<CameraPoseMarker>();
+            marker.showVisualization = showCameraMarkers;
+            marker.length = markerLength;
+            marker.baseHalfWidth = markerBaseHalfWidth;
+            marker.baseHalfHeight = markerBaseHalfHeight;
+            // Golden-ratio hue spacing so each camera's frustum is a distinct color.
+            marker.color = Color.HSVToRGB((index * 0.61803398875f) % 1f, 0.8f, 1f);
 
             return pcr;
         }
