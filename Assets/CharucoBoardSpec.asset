@@ -14,6 +14,6 @@ MonoBehaviour:
   m_EditorClassIdentifier: Calibration::Calibration.CharucoBoardSpec
   squaresX: 4
   squaresY: 3
-  squareLengthMeters: 0.095
-  markerLengthMeters: 0.075
+  squareLengthMeters: 0.19
+  markerLengthMeters: 0.15
   dictionary: 21
