@@ -66,6 +66,13 @@ namespace BodyTracking
         /// <summary>|a| computed for the most recent AddSample call. Zero until 3 samples are seen.</summary>
         public float LastAccel { get; private set; }
 
+        /// <summary>Number of windowed centerline samples currently retained (oldest→newest).</summary>
+        public int SampleCount => _samples.Count;
+
+        /// <summary>Sample i's position in the trail's PARENT-LOCAL space (caller maps to world).
+        /// Used by the SDF trail baker to read the ribbon centerline.</summary>
+        public Vector3 SampleLocalPos(int i) => _samples[i].Pos;
+
         /// <summary>Override the accelMax set via Configure. Called by BodyVisualPool when
         /// autoAccelMax is on so the rolling p95 controls the heatmap's hot end.</summary>
         public void SetAccelMax(float v) { _accelMax = v; }

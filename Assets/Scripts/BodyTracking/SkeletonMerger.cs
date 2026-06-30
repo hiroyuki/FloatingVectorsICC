@@ -456,6 +456,19 @@ namespace BodyTracking
         private void OnDestroy() => OnDisable();
         private void OnApplicationQuit() => OnDisable();
 
+        /// <summary>Append the current merged body's windowed trail centerline (world space,
+        /// oldest→newest) for <paramref name="joint"/> to <paramref name="outWorld"/>. Single
+        /// person assumed (first visual in the pool). Returns the number appended; 0 if no body
+        /// or no trail. Exposes the same per-joint ribbon the JointTrailMesh draws so the SDF
+        /// trail baker can bake it as capsules. Trails only accumulate while showBones is on.</summary>
+        public int CopyTrailWorldPoints(k4abt_joint_id_t joint, List<UnityEngine.Vector3> outWorld)
+        {
+            if (_pool == null || outWorld == null) return 0;
+            foreach (var bv in _pool.Visuals.Values)
+                return bv.CopyTrailWorldPoints((int)joint, outWorld);
+            return 0;
+        }
+
         private void Update()
         {
             // Pause-aware trail clock. Track entry/exit transitions so the
