@@ -39,10 +39,16 @@ Femto Bolt / Azure Kinect の depth-color センサー物理チルト **約5.8°
 `D:\FloatingVectorsICC\Rec2_jump`(depth 214 / body 214, 完全整合)。Windows で
 検証する際は folderPath をこちらに。
 
-### 残タスク (未対応)
-- `BodyVisual.cs` / `BodyTrackingPlayback.cs` の**旧・単一カメラ経路**も同じ
-  extrinsic 未適用。今回のマージ経路(アクティブ)のみ修正済み。単一カメラ経路を
-  使う場合は同様の補正が必要。
+### 残タスク (意図的に放置)
+- `BodyTrackingPlayback.cs:164`（`bodies_main` 全フレームを軌跡=モーションラインに
+  デコードする `MotionLineRenderer` 用コンポーネント）は depth→color 補正も
+  per-camera SourceTransform も未適用。有効化して使うと軌跡線が同じく約37cm浮く。
+  ただし現シーンでは **component が disabled の休眠状態**でほぼ未使用のため、
+  ユーザー判断で**放置**（2026-07-01）。使う時が来たら merger と同様に
+  `SkeletonWorldTransform.ToWorld(joint, depthToColorMm, sourceTransform)` へ置換。
+- 補足: `BodyVisual.cs` は**バグではない**。SkeletonMerger 専用の描画で、マージ側が
+  world 座標を合成 mm にエンコードして渡す（`SkeletonMerger.cs:1515-1525`）だけ。
+  ライブの Show Trail（`showTrails`）もこの修正済みマージ経路に乗るので正常。
 
 以下は解決前の調査記録(歴史的資料)。
 
