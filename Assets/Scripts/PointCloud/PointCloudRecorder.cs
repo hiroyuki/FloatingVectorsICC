@@ -115,7 +115,7 @@ namespace PointCloud
         /// the per-device <c>_Playback_&lt;serial&gt;</c> transform so subscribers can
         /// re-project skeletons into world space the same way live frames do.
         /// </summary>
-        public event System.Action<string, ulong, byte[], int, Transform> OnPlaybackBodies;
+        public event System.Action<string, ulong, byte[], int, Transform, ObCameraParam?> OnPlaybackBodies;
 
         // --- Runtime state ---
         public State CurrentState { get; private set; } = State.Idle;
@@ -1941,8 +1941,10 @@ namespace PointCloud
             var bodyFrame = track.BodyFrames[emit];
             if (bodyFrame == null || bodyFrame.Bytes == null || bodyFrame.ByteCount <= 0) return;
             Transform t = track.PlaybackObject != null ? track.PlaybackObject.transform : null;
+            // Forward the depth→color extrinsic so SkeletonMerger can map raw depth-frame
+            // k4abt joints into the color frame the point cloud is reconstructed in.
             OnPlaybackBodies.Invoke(track.Serial, bodyFrame.TimestampNs,
-                bodyFrame.Bytes, bodyFrame.ByteCount, t);
+                bodyFrame.Bytes, bodyFrame.ByteCount, t, track.CameraParam);
         }
 
         // Wraps the per-frame playback data in a RawFrameData and fires

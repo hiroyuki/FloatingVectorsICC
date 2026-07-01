@@ -25,9 +25,31 @@ namespace BodyTracking.MultiCam
         /// world origin, the result reduces to <see cref="BodyTrackingShared.K4AmmToUnity"/>.
         /// </summary>
         public static Vector3 ToWorld(in k4a_float3_t jointMm, Transform rendererTransform)
+            => ToWorld(jointMm, Matrix4x4.identity, rendererTransform);
+
+        /// <summary>
+        /// Same as <see cref="ToWorld(in k4a_float3_t, Transform)"/> but first maps the
+        /// k4abt joint (which is expressed in the DEPTH camera 3D frame) into the COLOR
+        /// camera frame via the depth→color extrinsic. This is required because the point
+        /// cloud is reconstructed in color space (PointCloudReconstruct.compute applies the
+        /// same R,T), while raw k4abt joints stay in depth space. The Femto Bolt / Azure
+        /// Kinect depth and color sensors are tilted ~6° relative to each other, so
+        /// omitting this makes the skeleton float ~30–40 cm above the point cloud at a few
+        /// metres depth. Pass <see cref="Matrix4x4.identity"/> when no extrinsic is known.
+        /// </summary>
+        /// <param name="depthToColorMm">
+        /// Rigid depth→color transform in the sensor's mm / OpenCV frame
+        /// (color_mm = R · depth_mm + T), matching ObCameraParam.Transform.
+        /// </param>
+        public static Vector3 ToWorld(in k4a_float3_t jointMm, in Matrix4x4 depthToColorMm,
+                                       Transform rendererTransform)
         {
-            // 1. mm/OpenCV → m/Unity-local (Y flip, mm→m).
-            Vector3 unityLocal = BodyTrackingShared.K4AmmToUnity(jointMm);
+            // 0. depth-camera mm → color-camera mm (identity is a no-op).
+            Vector3 colorMm = depthToColorMm.MultiplyPoint3x4(
+                new Vector3(jointMm.X, jointMm.Y, jointMm.Z));
+
+            // 1. mm/OpenCV → m/Unity-local (Y flip, mm→m); mirrors BodyTrackingShared.K4AmmToUnity.
+            Vector3 unityLocal = new Vector3(colorMm.x, -colorMm.y, colorMm.z) * 0.001f;
 
             if (rendererTransform == null) return unityLocal;
 
@@ -45,6 +67,19 @@ namespace BodyTracking.MultiCam
         /// S = diag(1,-1,1)) so the rotated frame matches Unity's left-handed axes.
         /// </summary>
         public static Quaternion ToWorldRotation(in k4a_quaternion_t orient, Transform rendererTransform)
+            => ToWorldRotation(orient, Quaternion.identity, rendererTransform);
+
+        /// <summary>
+        /// Same as <see cref="ToWorldRotation(in k4a_quaternion_t, Transform)"/> but first
+        /// rotates the joint orientation from the DEPTH camera frame into the COLOR camera
+        /// frame. <paramref name="depthToColorRotUnity"/> is the depth→color rotation with
+        /// the S = diag(1,-1,1) basis change already applied (so it composes directly with
+        /// the basis-changed joint quaternion). Pass <see cref="Quaternion.identity"/> when
+        /// no extrinsic is known. See <see cref="ToWorld(in k4a_float3_t, in Matrix4x4, Transform)"/>.
+        /// </summary>
+        public static Quaternion ToWorldRotation(in k4a_quaternion_t orient,
+                                                  in Quaternion depthToColorRotUnity,
+                                                  Transform rendererTransform)
         {
             // k4a_quaternion_t is wxyz; build a Unity Quaternion (xyzw constructor).
             // Apply S = diag(1,-1,1) basis change to the local rotation: this negates
@@ -52,7 +87,10 @@ namespace BodyTracking.MultiCam
             // the imaginary part. For unit quaternions q = (w, x, y, z):
             //   S * q * S^-1 = (w, x, -y, z) when S = diag(1,-1,1)
             // (derivable from the rotation matrix conjugation in ExtrinsicsApply).
-            Quaternion unityLocal = new Quaternion(orient.X, -orient.Y, orient.Z, orient.W).normalized;
+            // depthToColorRotUnity (already basis-changed) left-multiplies to move the
+            // joint frame depth→color before the renderer/world transform.
+            Quaternion unityLocal =
+                (depthToColorRotUnity * new Quaternion(orient.X, -orient.Y, orient.Z, orient.W)).normalized;
 
             if (rendererTransform == null) return unityLocal;
 

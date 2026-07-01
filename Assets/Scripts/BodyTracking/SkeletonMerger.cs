@@ -260,6 +260,14 @@ namespace BodyTracking
             // same convention (localPosition / localRotation from extrinsics, plus
             // the per-mesh localScale.y = -1 that SkeletonWorldTransform ignores).
             public Transform SourceTransform;
+            // Depth→color extrinsic for this camera, in the sensor's mm / OpenCV frame
+            // (color_mm = R · depth_mm + T). k4abt joints are in the DEPTH frame; the point
+            // cloud is reconstructed in the COLOR frame, so this maps the skeleton into the
+            // same space (see SkeletonWorldTransform.ToWorld). Identity = no correction
+            // (old recordings without extrinsics fall back to the previous behavior).
+            public Matrix4x4 DepthToColorMm = Matrix4x4.identity;
+            // Same rotation with the S=diag(1,-1,1) basis change baked in, for orientations.
+            public Quaternion DepthToColorRotUnity = Quaternion.identity;
             public string Serial;
             public int BodyCount;
             public ulong CapturedTsNs; // raw frame ts from the worker
@@ -398,7 +406,8 @@ namespace BodyTracking
         // serial slot directly — no k4abt worker, so this works on platforms
         // without the BT SDK (Mac). Mirrors OnWorkerSkeletons but takes its
         // BodySnapshot inputs from disk instead of the worker MMF.
-        private void OnPlaybackBodies(string serial, ulong tsNs, byte[] bytes, int byteCount, Transform sourceTransform)
+        private void OnPlaybackBodies(string serial, ulong tsNs, byte[] bytes, int byteCount,
+                                      Transform sourceTransform, ObCameraParam? cameraParam)
         {
             if (!showBones) return;
             if (string.IsNullOrEmpty(serial)) return;
@@ -413,6 +422,11 @@ namespace BodyTracking
                 // refresh on every frame to track the latest transform.
                 slot.SourceTransform = sourceTransform;
             }
+
+            // k4abt joints in bodies_main are raw DEPTH-frame; map into the COLOR frame the
+            // point cloud lives in (recorded bodies_main stays raw on disk — this is a
+            // display-time correction only). See SkeletonWorldTransform.ToWorld.
+            SetSlotExtrinsic(slot, cameraParam);
 
             int count = RecordedBodySerializer.Decode(bytes, byteCount, slot.Bodies);
             slot.BodyCount = count;
@@ -784,6 +798,9 @@ namespace BodyTracking
                 _latestBySerial[serial].SourceTransform = sourceTransform;
             }
 
+            // Refresh the depth→color extrinsic each frame (cheap; camParam is stable).
+            SetSlotExtrinsic(_latestBySerial[serial], cameraParam);
+
             if (!workerHost.IsReady(serial)) return;
 
             int depthBytes = frame.DepthByteCount;
@@ -791,6 +808,26 @@ namespace BodyTracking
             int irBytes = frame.IRByteCount;
             ulong tsNs = frame.TimestampUs * 1000UL;
             workerHost.EnqueueFrame(serial, frame.DepthBytes, depthBytes, ir, irBytes, tsNs);
+        }
+
+        // Store the per-camera depth→color extrinsic on the slot so world-space joint
+        // conversion can map k4abt's depth-frame joints into the color frame the point
+        // cloud lives in. No-op when the param is absent or lacks a transform.
+        private static void SetSlotExtrinsic(WorkerLatest slot, ObCameraParam? cameraParam)
+        {
+            if (slot == null || !cameraParam.HasValue) return;
+            var e = cameraParam.Value.Transform;
+            if (e.Rot == null || e.Rot.Length < 9 || e.Trans == null || e.Trans.Length < 3) return;
+
+            var m = Matrix4x4.identity;
+            m.SetRow(0, new Vector4(e.Rot[0], e.Rot[1], e.Rot[2], e.Trans[0]));
+            m.SetRow(1, new Vector4(e.Rot[3], e.Rot[4], e.Rot[5], e.Trans[1]));
+            m.SetRow(2, new Vector4(e.Rot[6], e.Rot[7], e.Rot[8], e.Trans[2]));
+            slot.DepthToColorMm = m;
+
+            // Rotation part (unit scale) with the S=diag(1,-1,1) basis change baked in.
+            Quaternion qR = m.rotation;
+            slot.DepthToColorRotUnity = new Quaternion(qR.x, -qR.y, qR.z, qR.w).normalized;
         }
 
         // --- per-serial snapshot intake ---
@@ -898,6 +935,7 @@ namespace BodyTracking
                     // pelvis at zero — clustering still works on the predicted pos.
                     Vector3 pelvisWorld = SkeletonWorldTransform.ToWorld(
                         pelvisJoint.Position,
+                        slot.DepthToColorMm,
                         slot.SourceTransform);
 
                     var c = AcquireCandidate();
@@ -1360,7 +1398,7 @@ namespace BodyTracking
                         var jt = cand.Slot.Bodies[cand.BodyIndex].Joints[jointIndex];
                         if (jt.ConfidenceLevel >= k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW)
                         {
-                            Vector3 worldPos = SkeletonWorldTransform.ToWorld(jt.Position, cand.Slot.SourceTransform);
+                            Vector3 worldPos = SkeletonWorldTransform.ToWorld(jt.Position, cand.Slot.DepthToColorMm, cand.Slot.SourceTransform);
                             sb.AppendFormat(" | cam={0} conf={1} pos=({2:F2},{3:F2},{4:F2})",
                                 cand.Slot.Serial, jt.ConfidenceLevel, worldPos.x, worldPos.y, worldPos.z);
                         }
@@ -1413,8 +1451,8 @@ namespace BodyTracking
                 if (level < minAcceptLevel) continue; // NONE always excluded; LOW conditionally excluded
 
                 float weight = WeightFor(level);
-                Vector3 worldPos = SkeletonWorldTransform.ToWorld(jt.Position, cand.Slot.SourceTransform);
-                Quaternion worldRot = SkeletonWorldTransform.ToWorldRotation(jt.Orientation, cand.Slot.SourceTransform);
+                Vector3 worldPos = SkeletonWorldTransform.ToWorld(jt.Position, cand.Slot.DepthToColorMm, cand.Slot.SourceTransform);
+                Quaternion worldRot = SkeletonWorldTransform.ToWorldRotation(jt.Orientation, cand.Slot.DepthToColorRotUnity, cand.Slot.SourceTransform);
 
                 wSum += weight;
                 posSum += worldPos * weight;
@@ -1459,7 +1497,7 @@ namespace BodyTracking
                 if (level < minAcceptLevel) continue;
 
                 float weight = WeightFor(level);
-                Quaternion qLocal = SkeletonWorldTransform.ToWorldRotation(jt.Orientation, cand.Slot.SourceTransform);
+                Quaternion qLocal = SkeletonWorldTransform.ToWorldRotation(jt.Orientation, cand.Slot.DepthToColorRotUnity, cand.Slot.SourceTransform);
                 if (Quaternion.Dot(qLocal, refRot) < 0f)
                 {
                     qLocal = new Quaternion(-qLocal.x, -qLocal.y, -qLocal.z, -qLocal.w);
@@ -1643,6 +1681,7 @@ namespace BodyTracking
         {
             var body = cand.Slot.Bodies[cand.BodyIndex];
             Transform rendererT = cand.Slot.SourceTransform;
+            Matrix4x4 depthToColor = cand.Slot.DepthToColorMm;
             for (int j = 0; j < K4ABTConsts.K4ABT_JOINT_COUNT; j++)
             {
                 var jt = body.Joints[j];
@@ -1652,7 +1691,7 @@ namespace BodyTracking
                     output.Joints[j] = new k4abt_joint_t { ConfidenceLevel = k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_NONE };
                     continue;
                 }
-                Vector3 worldPos = SkeletonWorldTransform.ToWorld(jt.Position, rendererT);
+                Vector3 worldPos = SkeletonWorldTransform.ToWorld(jt.Position, depthToColor, rendererT);
                 output.Joints[j] = new k4abt_joint_t
                 {
                     Position = new k4a_float3_t
