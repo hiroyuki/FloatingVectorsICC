@@ -2,6 +2,52 @@
 
 作成 2026-07-01 (Mac セッションからの引き継ぎ / 続きは Windows でデバッグ)
 
+---
+
+## ✅ 解決 (2026-07-01, Windows セッション)
+
+**原因**: k4abt 関節は **depth camera 3D 空間**、点群は **color camera 空間**
+(`PointCloudReconstruct.compute` が `pC = R·pD + T` を適用)。両カメラ間には
+Femto Bolt / Azure Kinect の depth-color センサー物理チルト **約5.8°ピッチ**
+(`extrinsics.yaml` の `colorCamera_tr_depthCamera` R[5]=0.1014, R[7]=−0.1014,
+= X軸回転) がある。点群にはこの回転がかかるのに、スケルトンには depth→color
+変換が一切かかっていなかった → 奥行き3.7mで縦約37cmの浮き。
+
+**下の「除外した仮説」が誤り**: depth→color 外部パラメータを「T の縦成分が
+ほぼ0だから」で除外していたが、見ていたのは**並進 T だけで回転 R を見落として
+いた**。「12%縦圧縮」も、足(z=3.97)が頭(z=3.64)より遠く浮き量が大きいことに
+よる見かけで、この単一原因(未適用ピッチ回転)で全て説明できる。
+
+**修正** (commit `fix/skeleton-depth-to-color-extrinsic`):
+- `SkeletonWorldTransform.ToWorld/ToWorldRotation` に depth→color を受ける
+  overload 追加。Y フリップ前に `R·p+T` を適用(点群と対称)。旧署名は identity
+  委譲で後方互換。
+- `SkeletonMerger.WorkerLatest` が per-camera の depth→color 行列を保持。
+  `SetSlotExtrinsic` が live(`DispatchRawFrame`)/録画bodies再生(`OnPlaybackBodies`)
+  両経路で `CameraParam` から供給。world変換6箇所を更新。
+- `PointCloudRecorder.OnPlaybackBodies` イベントが `ObCameraParam?` を転送。
+- `bodies_main` はディスク上は生 depth 空間のまま(表示時補正のみ)。extrinsic
+  未知の旧録画は identity フォールバック(回帰なし)。
+
+**検証** (Rec2_jump, cam N, frame 100): FOOT_LEFT が y=−0.62(床から+0.37浮く)
+→ y=−0.97 で点群の床(−0.986)に着地。実描画パイプラインでも整列を目視確認済み。
+
+### ⚠️ 別件の落とし穴 (このセッションで発見)
+`PointCloudRecorder.folderPath = Recordings_jump2` は **depth と bodies_main が
+別セッションの誤フォルダ**(ts が約25日差・214 vs 381フレームで不整合)。ts同期が
+常に末尾bodyを拾い、点群と骨が対応せずマージが機能しない。正しいのは
+`D:\FloatingVectorsICC\Rec2_jump`(depth 214 / body 214, 完全整合)。Windows で
+検証する際は folderPath をこちらに。
+
+### 残タスク (未対応)
+- `BodyVisual.cs` / `BodyTrackingPlayback.cs` の**旧・単一カメラ経路**も同じ
+  extrinsic 未適用。今回のマージ経路(アクティブ)のみ修正済み。単一カメラ経路を
+  使う場合は同様の補正が必要。
+
+以下は解決前の調査記録(歴史的資料)。
+
+---
+
 ## 症状（一言で）
 再生時、**k4abt スケルトン(骨)が点群に対して縦方向にズレて浮く**。
 単純な平行移動ではなく、**スケルトンが縦に約12%圧縮されて上寄りに配置**されている。
