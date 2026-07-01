@@ -2033,6 +2033,12 @@ namespace PointCloud
             if (CurrentState == State.Recording) StopRecording();
             else FinalizeAnyOpenStreamWriters();
             UnsubscribeAll();
+            // Destroy the _Playback_<serial> GameObjects (+ dispose reconstructors
+            // and file handles) here too, not only in OnDestroy. OnDisable fires on
+            // play-mode exit AND on the disable half of a domain reload, so this is
+            // what keeps stale playback point-cloud objects from lingering in the
+            // scene between sessions.
+            ClearTracks();
             if (CurrentState != State.Idle) CurrentState = State.Idle;
         }
 
@@ -2098,6 +2104,21 @@ namespace PointCloud
                 track.Dispose();
             }
             _tracks.Clear();
+
+            // Belt-and-suspenders: a script recompile (domain reload) while in
+            // play mode resets the runtime _tracks dictionary but leaves the
+            // _Playback_<serial> child GameObjects alive. Those become orphans the
+            // loop above can no longer reach, so a subsequent Read spawns a fresh
+            // set on top of them — they accumulate and, being ordinary children of
+            // this transform, dirty the scene. Sweep any lingering _Playback_*
+            // children by name so nothing is ever left behind.
+            for (int i = transform.childCount - 1; i >= 0; i--)
+            {
+                var child = transform.GetChild(i);
+                if (child == null || !child.name.StartsWith("_Playback_")) continue;
+                if (Application.isPlaying) Destroy(child.gameObject);
+                else DestroyImmediate(child.gameObject);
+            }
         }
 
         private DeviceTrack GetOrCreateTrack(string serial)
