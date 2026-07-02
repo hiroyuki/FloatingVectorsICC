@@ -41,10 +41,9 @@ namespace PointCloud.EditorTools
                     if (GUILayout.Button(recLabel)) t.ToggleRecord();
 
                     string playLabel = t.CurrentState == PointCloudRecorder.State.Playing ? "Stop Play" : "Play";
-                    using (new EditorGUI.DisabledScope(t.RecordedFrameCount == 0 && t.CurrentState != PointCloudRecorder.State.Playing))
-                    {
-                        if (GUILayout.Button(playLabel)) t.TogglePlay();
-                    }
+                    // Play auto-Reads the configured folder if nothing is loaded, so it's
+                    // clickable without a separate Read step.
+                    if (GUILayout.Button(playLabel)) t.TogglePlay();
 
                     string pauseLabel = t.IsPaused ? "Resume" : "Pause";
                     using (new EditorGUI.DisabledScope(t.CurrentState != PointCloudRecorder.State.Playing))
@@ -66,14 +65,15 @@ namespace PointCloud.EditorTools
                 }
             }
 
-            // Load a recording from folderPath for playback, and (rarely) re-emit
-            // the metadata sidecars after a recalibrate. Recording itself needs no
-            // Save — Rec streams to disk and Stop Rec finalizes the files.
+            // Reload is now OPTIONAL — Play auto-Reads. Use it only to re-load the
+            // folder without pressing Play (e.g. after editing folderPath or a
+            // recalibrate). Recording needs no Save — Rec streams to disk and Stop
+            // Rec finalizes the files.
             using (new EditorGUILayout.HorizontalScope())
             {
                 using (new EditorGUI.DisabledScope(!Application.isPlaying || t.CurrentState != PointCloudRecorder.State.Idle))
                 {
-                    if (GUILayout.Button("Read")) t.Load();
+                    if (GUILayout.Button("Reload (optional)")) t.Load();
                 }
                 using (new EditorGUI.DisabledScope(t.RecordedFrameCount == 0))
                 {

@@ -78,6 +78,11 @@ namespace PointCloud
         [Header("Playback")]
         public bool loop = true;
 
+        [Tooltip("When Play mode starts, automatically Read + Play this recording so you don't " +
+                 "have to press Read/Play by hand. (Also implied when the camera manager is in " +
+                 "playbackOnly mode.)")]
+        public bool autoPlayOnStart = false;
+
         [Tooltip("Where to register playback meshes for visibility toggling. " +
                  "Auto-found via FindFirstObjectByType if left null.")]
         public PointCloudView view;
@@ -1466,8 +1471,14 @@ namespace PointCloud
             if (CurrentState == State.Recording) StopRecording();
             if (_tracks.Count == 0)
             {
-                SetStatus("Play: nothing to play. Record or Read first.", warn: true);
-                return;
+                // Auto-Read: pressing Play with nothing loaded loads the configured
+                // recording first, so Read is not a separate manual step.
+                Load();
+                if (_tracks.Count == 0)
+                {
+                    SetStatus("Play: nothing to play (Read found no dataset — check folderPath).", warn: true);
+                    return;
+                }
             }
 
             // Refresh extrinsics from yaml so a fresh calibration written between
@@ -1520,15 +1531,12 @@ namespace PointCloud
 
         private void Start()
         {
-            // PointCloudCameraManager.playbackOnly means "don't connect to live devices,
-            // play this folder instead". When set, auto-Load the configured folderPath
-            // and immediately enter playback so pressing Editor Play "just works".
-            if (cameraManager != null && cameraManager.playbackOnly)
-            {
-                Load();
-                if (CurrentState == State.Idle && RecordedFrameCount > 0)
-                    TogglePlay();
-            }
+            // Auto-play on entering Play mode when either the recorder's own
+            // autoPlayOnStart toggle is set, or the camera manager is in playbackOnly
+            // mode ("don't connect to live devices, play this folder instead").
+            // StartPlayback auto-Reads, so pressing Editor Play "just works".
+            if (autoPlayOnStart || (cameraManager != null && cameraManager.playbackOnly))
+                TogglePlay();
         }
 
         private void Update()
