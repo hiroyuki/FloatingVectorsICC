@@ -29,7 +29,7 @@ using UnityEngine;
 namespace TSDF
 {
     [DisallowMultipleComponent]
-    public class TSDFTrailBaker : MonoBehaviour, Shared.IAccumulationController
+    public class TSDFTrailBaker : MonoBehaviour, Shared.IAccumulationController, Shared.IAccumulationExtraActions
     {
         [Header("Capture (Start/Stop accumulation)")]
         [Tooltip("What the frozen sculpture contains. ON: also accumulate the body TSDF sweep " +
@@ -74,6 +74,13 @@ namespace TSDF
         public bool CanClear => false;
         public string ClearLabel => "";
         public void ClearAccumulated() { }
+
+        // ---- Shared.IAccumulationExtraActions (Control Panel) ----
+        // Resume live is this component's exit action; exposing it here lets the
+        // central Control Panel offer it without selecting the GameObject.
+        public int ExtraActionCount => 1;
+        public string ExtraActionLabel(int index) => "Resume live (body back)";
+        public void RunExtraAction(int index) => ResumeLive();
 
         [Header("Wiring")]
         [Tooltip("Target volume. Leave empty to auto-resolve the first TSDFVolume in the scene.")]
