@@ -50,6 +50,10 @@ namespace TSDF
                  "0 = no limit.")]
         public float maxSegmentStep = 0.5f;
 
+        [Tooltip("On Stop capture, also PAUSE the recording playback so the whole scene freezes " +
+                 "with the sculpture. Resume live un-pauses it.")]
+        public bool pausePlaybackOnStop = true;
+
         /// <summary>True between StartCapture() and StopCapture(): the volume is a single
         /// persistent accumulation buffer that only grows (never per-batch cleared), so the
         /// motion between Start and Stop builds up into one static mesh, then freezes.</summary>
@@ -68,6 +72,9 @@ namespace TSDF
 
         [Tooltip("Manual-bake source: whole-recording per-joint trajectories. Auto-resolved if empty.")]
         public BodyTrackingPlayback playback;
+
+        [Tooltip("Recorder paused on Stop capture / resumed on Resume live. Auto-resolved if empty.")]
+        public PointCloud.PointCloudRecorder recorder;
 
         [Tooltip("Manual bake: transform mapping camera-local trajectory samples into world. " +
                  "Leave empty to use the first MotionLineRenderer's transform.")]
@@ -246,6 +253,15 @@ namespace TSDF
             if (integrator != null) integrator.integrationEnabled = false;   // freeze the body sweep
             UnsubscribeFuse();                                               // stop adding trail
             if (volume != null) volume.Publish();                           // show the final accumulated mesh
+
+            // Freeze the recording playback too, so the whole scene holds with the sculpture.
+            if (pausePlaybackOnStop)
+            {
+                if (recorder == null) recorder = FindFirstObjectByType<PointCloud.PointCloudRecorder>();
+                if (recorder != null && recorder.CurrentState == PointCloud.PointCloudRecorder.State.Playing && !recorder.IsPaused)
+                    recorder.PausePlayback();
+            }
+
             LastStatus = "CAPTURE stopped — frozen sculpture on screen. (Resume live to get the body back.)";
             Debug.Log($"[TSDFTrailBaker] {LastStatus}", this);
         }
@@ -269,6 +285,12 @@ namespace TSDF
             }
             volume.ForceRebuild();                         // drop the frozen sculpture, rebuild double-buffered
             if (integrator != null) integrator.BeginFreshBatch();
+
+            // Un-pause the playback that Stop capture froze, so the live body actually updates.
+            if (recorder == null) recorder = FindFirstObjectByType<PointCloud.PointCloudRecorder>();
+            if (recorder != null && recorder.CurrentState == PointCloud.PointCloudRecorder.State.Playing && recorder.IsPaused)
+                recorder.ResumePlayback();
+
             LastStatus = "Resumed live — body follows the current frame again.";
             Debug.Log($"[TSDFTrailBaker] {LastStatus}", this);
         }
