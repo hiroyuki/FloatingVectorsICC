@@ -139,14 +139,21 @@ namespace/asmdef 分離は**現構造では不成立**（SensorManager/SensorRec
    その際 **Calibration/RuntimeUI の `PointCloudRecording` 依存も棚卸し**（今回は漏れていた）。
 2. `IRawFrameSource` 抽象を導入して TSDF/BT の `PointCloudRenderer` 直依存を切る。
 - D6 決定: `PointCloudRecording` の rename は上記実施時に同一コミットで行う。今回は触らない。
-- D5 決定: 可視化トグル統一（showPointClouds/showMesh/showBones）は隣接 UX 作業で
-  スコープ膨張するため今回やらない。
+- D5 決定: 可視化トグル統一はプラン時点では見送り → **その後ユーザー要望で実施済み**
+  （commit `6756608`）: `Shared.IViewToggle` を PointCloudView/TSDFView/SkeletonMerger が
+  実装し、Views パネル（Window > Floating Vectors > Views）で一括操作。対象は主要3レバー
+  のみ（デバッグ系可視化は対象外のまま）。あわせて showBones OFF で merged skeleton が
+  凍結表示のまま残る既存バグを修正（pool DestroyAll）。
 
 ## 決定事項（Codex Round 1 推奨を採用）
 - D1: Phase 4（asmdef 分離）除外 ✅ / D2: `IAccumulationController` ✅ /
   D3: TSDFTrailBaker は共通 Clear を出さず（CanClear=false）専用 Resume live ボタンのみ ✅ /
-  D4: TSDFTrailBaker GO は `Mesh/` 配下 ✅ / D5: 可視化トグル統一しない ✅ /
+  D4: TSDFTrailBaker GO は `Mesh/` 配下 ✅ /
+  D5: 当初見送り → 後日ユーザー要望で最小版を実施（`6756608`） /
   D6: `PointCloudRecording` 触らない ✅
+
+## 実施結果
+- Phase 1 `ab35a26` / Phase 2 `1b26286` / Phase 3 `9bce66d` / D5 追補 `6756608` — 完了。
 
 ## 実行順序と運用
 Phase 2 → 3。**各フェーズ完了ごとにコンパイル + Play 検証 → コミット**。
