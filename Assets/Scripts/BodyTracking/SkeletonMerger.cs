@@ -35,7 +35,7 @@ using UnityEngine;
 namespace BodyTracking
 {
     [DisallowMultipleComponent]
-    public class SkeletonMerger : MonoBehaviour
+    public class SkeletonMerger : MonoBehaviour, global::Shared.IViewToggle
     {
         [Header("Sources")]
         [Tooltip("SensorManager whose Renderers we drive workers off. " +
@@ -51,6 +51,10 @@ namespace BodyTracking
                  "joints (and the joint spheres). OFF hides everything.")]
         [UnityEngine.Serialization.FormerlySerializedAs("showSkeleton")]
         public bool showBones = true;
+
+        // ---- Shared.IViewToggle (unified Views panel) ----
+        public string ViewLabel => "BT skeleton";
+        public bool Visible { get => showBones; set => showBones = value; }
 
         [Tooltip("Joint marker radius (m). Set to 0 to hide the joint spheres entirely " +
                  "(the bone lines stay visible while showBones is on).")]
@@ -427,9 +431,14 @@ namespace BodyTracking
                 if (showPerWorkerSkeletons) ApplyPerWorkerSkeletons();
                 else ClearPerWorkerSkeletons();
             }
-            else if (_perWorkerPools.Count > 0)
+            else
             {
-                ClearPerWorkerSkeletons();
+                // showBones OFF must actually hide the skeleton: without this the last
+                // merged visual stayed frozen on screen (the block above just stops
+                // updating it). Destroy the pool; it respawns from the next pop when
+                // the toggle comes back on.
+                if (_pool != null && _pool.Count > 0) _pool.DestroyAll();
+                if (_perWorkerPools.Count > 0) ClearPerWorkerSkeletons();
             }
 
             // While paused, no new merged skeleton arrives → ApplyMergedSkeletons

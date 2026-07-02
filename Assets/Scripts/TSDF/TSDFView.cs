@@ -22,7 +22,7 @@ namespace TSDF
 {
     [AddComponentMenu("TSDF/View")]
     [DefaultExecutionOrder(10)]
-    public sealed class TSDFView : MonoBehaviour
+    public sealed class TSDFView : MonoBehaviour, Shared.IViewToggle
     {
         public enum ViewMode
         {
@@ -45,6 +45,10 @@ namespace TSDF
                  "extracted off the latest published front buffer). Mirrors " +
                  "PointCloudView.showPointClouds; toggle at runtime (TSDFDebugSession's M key).")]
         public bool showMesh = true;
+
+        // ---- Shared.IViewToggle (unified Views panel) ----
+        public string ViewLabel => "TSDF mesh";
+        public bool Visible { get => showMesh; set => showMesh = value; }
 
         // ---------- Voxel mode ----------
         [Header("Voxel view")]

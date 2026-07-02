@@ -3,7 +3,8 @@
     "rootNamespace": "BodyTracking",
     "references": [
         "Orbbec",
-        "PointCloud"
+        "PointCloud",
+        "Shared"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],

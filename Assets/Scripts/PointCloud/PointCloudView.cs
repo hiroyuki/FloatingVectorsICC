@@ -17,13 +17,17 @@ using UnityEngine;
 
 namespace PointCloud
 {
-    public sealed class PointCloudView : MonoBehaviour
+    public sealed class PointCloudView : MonoBehaviour, Shared.IViewToggle
     {
         [Tooltip("Hide / show every registered point cloud mesh (Live + Playback) and the " +
                  "cumulative snapshots, without stopping capture / reconstruction. Toggle at " +
                  "runtime; re-enabling resumes instantly because the underlying pipeline keeps " +
                  "running.")]
         public bool showPointClouds = true;
+
+        // ---- Shared.IViewToggle (unified Views panel) ----
+        public string ViewLabel => "Point cloud";
+        public bool Visible { get => showPointClouds; set => showPointClouds = value; }
 
         [Tooltip("Optional explicit Cumulative reference. Auto-found via FindFirstObjectByType " +
                  "if left null.")]
