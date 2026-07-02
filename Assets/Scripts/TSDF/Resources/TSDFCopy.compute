@@ -1,0 +1,32 @@
+// GPU-side copy of one TSDF buffer pair (sdf float2 + colour float4) into
+// another, one thread per voxel. Used by TSDFVolume.CopyFrontToWrite() so the
+// TSDFTrailBaker can fuse a trail into the CURRENTLY DISPLAYED body: after a
+// Publish() the body lives in FrontBuffer while WriteBuffer holds the old
+// scratch, so a fuse that writes WriteBuffer would min-union into stale content.
+// Copying Front -> Write first (both sdf AND colour) puts the displayed body
+// back into the write buffer so the trail overlays exactly what is on screen.
+//
+// Dispatch contract matches the other TSDF kernels: 2D group grid linearised via
+// _DispatchWidth (= groupsX * 64) so large volumes stay under the 65535
+// threadgroup-per-axis D3D limit.
+
+#pragma kernel Copy
+
+int3 _Dim;
+int _DispatchWidth;
+
+StructuredBuffer<float2>   _SrcSdf;
+StructuredBuffer<float4>   _SrcColor;
+RWStructuredBuffer<float2> _DstSdf;
+RWStructuredBuffer<float4> _DstColor;
+
+[numthreads(64, 1, 1)]
+void Copy(uint3 id : SV_DispatchThreadID)
+{
+    uint lin = id.y * (uint)_DispatchWidth + id.x;
+    uint total = (uint)(_Dim.x * _Dim.y * _Dim.z);
+    if (lin >= total) return;
+
+    _DstSdf[lin]   = _SrcSdf[lin];
+    _DstColor[lin] = _SrcColor[lin];
+}

@@ -159,6 +159,10 @@ namespace TSDF
         private ComputeShader _foldShader;
         private int _foldKernel;
 
+        // Front->Write copy (sdf + colour) for TSDFTrailBaker's fuse-into-displayed-body.
+        private ComputeShader _copyShader;
+        private int _copyKernel;
+
         /// <summary>Per-instant sdf+weight scratch (camera-averaged). Bind the integrate
         /// kernel here, not <see cref="WriteBuffer"/>, when separating camera fusion from
         /// time accumulation. Null until <see cref="ClearInstance"/> first allocates it.</summary>
@@ -256,6 +260,46 @@ namespace TSDF
             _foldShader.SetFloat("_Tau", Tau);
             _foldShader.SetFloat("_SmoothK", Mathf.Max(0f, accumulateSmoothK));
             _foldShader.Dispatch(_foldKernel, gx, gy, 1);
+        }
+
+        /// <summary>
+        /// Copy the displayed FrontBuffer (sdf AND colour) into the hidden
+        /// WriteBuffer so a subsequent write-buffer bake (e.g. TSDFTrailBaker's fuse)
+        /// min-unions into EXACTLY what is on screen, not the stale scratch left in the
+        /// write buffer after the last Publish() swap. No-op in single-buffer mode
+        /// (Front == Write), where the write buffer already holds the displayed content.
+        /// Copies colour too — geometry-only would leave the body's colour stale.
+        /// </summary>
+        public void CopyFrontToWrite()
+        {
+            if (FrontBuffer == null || WriteBuffer == null) return;
+            if (ReferenceEquals(FrontBuffer, WriteBuffer)) return;   // single buffer: nothing to do
+            if (!EnsureCopyShader()) return;
+            int total = Dim.x * Dim.y * Dim.z;
+            if (total <= 0) return;
+
+            int gx, gy;
+            DispatchGrid(total, out gx, out gy);
+            _copyShader.SetInts("_Dim", Dim.x, Dim.y, Dim.z);
+            _copyShader.SetInt("_DispatchWidth", gx * 64);
+            _copyShader.SetBuffer(_copyKernel, "_SrcSdf", FrontBuffer);
+            _copyShader.SetBuffer(_copyKernel, "_SrcColor", FrontColorBuffer);
+            _copyShader.SetBuffer(_copyKernel, "_DstSdf", WriteBuffer);
+            _copyShader.SetBuffer(_copyKernel, "_DstColor", WriteColorBuffer);
+            _copyShader.Dispatch(_copyKernel, gx, gy, 1);
+        }
+
+        private bool EnsureCopyShader()
+        {
+            if (_copyShader != null) return true;
+            _copyShader = Resources.Load<ComputeShader>("TSDFCopy");
+            if (_copyShader == null)
+            {
+                Debug.LogError("[TSDFVolume] Compute shader \"Resources/TSDFCopy.compute\" not found.", this);
+                return false;
+            }
+            _copyKernel = _copyShader.FindKernel("Copy");
+            return true;
         }
 
         private void EnsureInstanceBuffers()

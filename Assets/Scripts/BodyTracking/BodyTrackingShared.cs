@@ -66,18 +66,17 @@ namespace BodyTracking
             (k4abt_joint_id_t.K4ABT_JOINT_CLAVICLE_LEFT, k4abt_joint_id_t.K4ABT_JOINT_SHOULDER_LEFT),
             (k4abt_joint_id_t.K4ABT_JOINT_SHOULDER_LEFT, k4abt_joint_id_t.K4ABT_JOINT_ELBOW_LEFT),
             (k4abt_joint_id_t.K4ABT_JOINT_ELBOW_LEFT, k4abt_joint_id_t.K4ABT_JOINT_WRIST_LEFT),
-            (k4abt_joint_id_t.K4ABT_JOINT_WRIST_LEFT, k4abt_joint_id_t.K4ABT_JOINT_HAND_LEFT),
-            (k4abt_joint_id_t.K4ABT_JOINT_HAND_LEFT, k4abt_joint_id_t.K4ABT_JOINT_HANDTIP_LEFT),
-            (k4abt_joint_id_t.K4ABT_JOINT_WRIST_LEFT, k4abt_joint_id_t.K4ABT_JOINT_THUMB_LEFT),
+            // WRIST is the arm tip: HAND/HANDTIP/THUMB are dropped project-wide because
+            // k4abt cannot resolve them reliably from these camera views (confidence
+            // collapses to NONE across all 4 cams in every recording, so the joint is a
+            // wild ~2 m prediction that stretches the bone). See IsDrawnJoint below.
 
             // right arm
             (k4abt_joint_id_t.K4ABT_JOINT_SPINE_CHEST, k4abt_joint_id_t.K4ABT_JOINT_CLAVICLE_RIGHT),
             (k4abt_joint_id_t.K4ABT_JOINT_CLAVICLE_RIGHT, k4abt_joint_id_t.K4ABT_JOINT_SHOULDER_RIGHT),
             (k4abt_joint_id_t.K4ABT_JOINT_SHOULDER_RIGHT, k4abt_joint_id_t.K4ABT_JOINT_ELBOW_RIGHT),
             (k4abt_joint_id_t.K4ABT_JOINT_ELBOW_RIGHT, k4abt_joint_id_t.K4ABT_JOINT_WRIST_RIGHT),
-            (k4abt_joint_id_t.K4ABT_JOINT_WRIST_RIGHT, k4abt_joint_id_t.K4ABT_JOINT_HAND_RIGHT),
-            (k4abt_joint_id_t.K4ABT_JOINT_HAND_RIGHT, k4abt_joint_id_t.K4ABT_JOINT_HANDTIP_RIGHT),
-            (k4abt_joint_id_t.K4ABT_JOINT_WRIST_RIGHT, k4abt_joint_id_t.K4ABT_JOINT_THUMB_RIGHT),
+            // (right HAND/HANDTIP/THUMB bones dropped — see left arm note)
 
             // left leg
             (k4abt_joint_id_t.K4ABT_JOINT_PELVIS, k4abt_joint_id_t.K4ABT_JOINT_HIP_LEFT),
@@ -91,5 +90,28 @@ namespace BodyTracking
             (k4abt_joint_id_t.K4ABT_JOINT_KNEE_RIGHT, k4abt_joint_id_t.K4ABT_JOINT_ANKLE_RIGHT),
             (k4abt_joint_id_t.K4ABT_JOINT_ANKLE_RIGHT, k4abt_joint_id_t.K4ABT_JOINT_FOOT_RIGHT),
         };
+
+        // Project-wide policy: the hand joints past the wrist (HAND/HANDTIP/THUMB, both
+        // sides) are NOT drawn or used. k4abt reports them at confidence NONE from every
+        // camera view we have (verified across the jump / turn / walking recordings), so
+        // their position is a wild prediction that only produces stretched bones and
+        // floating blobs. WRIST is the reliable arm tip. Consumers (BodyVisual joint
+        // spheres/trails, TSDFTrailBaker ribbons) gate on this so the exclusion lives in
+        // one place. The Bones table above already omits the hand bones for the same reason.
+        public static bool IsDrawnJoint(k4abt_joint_id_t j)
+        {
+            switch (j)
+            {
+                case k4abt_joint_id_t.K4ABT_JOINT_HAND_LEFT:
+                case k4abt_joint_id_t.K4ABT_JOINT_HANDTIP_LEFT:
+                case k4abt_joint_id_t.K4ABT_JOINT_THUMB_LEFT:
+                case k4abt_joint_id_t.K4ABT_JOINT_HAND_RIGHT:
+                case k4abt_joint_id_t.K4ABT_JOINT_HANDTIP_RIGHT:
+                case k4abt_joint_id_t.K4ABT_JOINT_THUMB_RIGHT:
+                    return false;
+                default:
+                    return true;
+            }
+        }
     }
 }

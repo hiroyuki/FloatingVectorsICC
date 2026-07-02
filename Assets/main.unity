@@ -265,7 +265,7 @@ MonoBehaviour:
   jointMotionField: {fileID: 0}
   cumulative: {fileID: 18533122}
   folderPath: D:\FloatingVectorsICC\Recordings_jump2
-  folderPathMacOverride: /Users/horihiroyuki/Dropbox/projects/ICC/Recordings/Rec2_jump
+  folderPathMacOverride: /Volumes/horristicSSD2T/Dropbox/projects/ICC/Recordings/Rec2_jump
   datasetName: 
   loop: 1
   view: {fileID: 1168113566}
@@ -427,7 +427,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: TSDF::TSDF.TSDFView
   volume: {fileID: 639959844}
   mode: 2
-  showMesh: 0
+  showMesh: 1
   voxelMaterial: {fileID: 0}
   voxelSphereScale: 0.5
   voxelHideAboveSdfFraction: 1
@@ -473,7 +473,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: TSDF::TSDF.TSDFVolume
   boundingBox: {fileID: 1151541767}
-  voxelSize: 0.01
+  voxelSize: 0.02
   tauMultiplier: 4
   accumulationMode: 1
   accumulateSmoothK: 0
@@ -1227,7 +1227,7 @@ MonoBehaviour:
   showBones: 1
   jointRadius: 0.03
   skeletonColor: {r: 0.094645746, g: 0.22020026, b: 0.23773581, a: 1}
-  showTrails: 0
+  showTrails: 1
   trailColorMode: 3
   trailFlatColor: {r: 0, g: 0, b: 0, a: 1}
   frameHueCenter: 0.5
@@ -1266,6 +1266,67 @@ MonoBehaviour:
   alertMessage: "\u8907\u6570\u4EBA\u691C\u51FA: 1\u4EBA\u306E\u307F\u3054\u5229\u7528\u304F\u3060\u3055\u3044\nMultiple
     people detected \u2014 please use solo"
   diagnosticLogging: 0
+--- !u!1 &1214840952
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 1214840954}
+  - component: {fileID: 1214840953}
+  m_Layer: 0
+  m_Name: TSDFTrailBaker
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!114 &1214840953
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1214840952}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: db1e237720e7c4b32997b8eea3107c4b, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: TSDF::TSDF.TSDFTrailBaker
+  source: 1
+  liveMode: 2
+  accumulateBody: 1
+  volume: {fileID: 639959844}
+  integrator: {fileID: 1289138166}
+  playback: {fileID: 0}
+  skeleton: {fileID: 1180694595}
+  ribbonJoints: 070000000e00000015000000190000001a000000
+  sourceSpace: {fileID: 0}
+  radius: 0.015
+  minConfidence: 2
+  sampleStride: 1
+  perJointHue: 1
+  trailColor: {r: 1, g: 1, b: 1, a: 1}
+  clearVolumeFirst: 1
+  maxSegments: 20000
+  batchSize: 512
+--- !u!4 &1214840954
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1214840952}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &1238217649
 GameObject:
   m_ObjectHideFlags: 0
@@ -1597,3 +1658,4 @@ SceneRoots:
   - {fileID: 1574009487}
   - {fileID: 1168916135}
   - {fileID: 836522996}
+  - {fileID: 1214840954}

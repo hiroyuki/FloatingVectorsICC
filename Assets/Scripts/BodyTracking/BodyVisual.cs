@@ -209,6 +209,16 @@ namespace BodyTracking
             {
                 var j = skel.Joints[i];
                 _lastConfidence[i] = j.ConfidenceLevel;
+                // Hand joints past the wrist are excluded project-wide (see
+                // BodyTrackingShared.IsDrawnJoint): hide the sphere and drop its trail so
+                // nothing draws at the unreliable NONE-confidence prediction.
+                if (!BodyTrackingShared.IsDrawnJoint((k4abt_joint_id_t)i))
+                {
+                    if (_joints[i] != null && _joints[i].gameObject.activeSelf) _joints[i].gameObject.SetActive(false);
+                    if (_trails != null && _trails[i] != null && _trails[i].SampleCount > 0) _trails[i].Clear();
+                    _jointValid[i] = false;
+                    continue;
+                }
                 if (j.ConfidenceLevel >= k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW)
                 {
                     _lastFreshFrame[i] = Time.frameCount;
@@ -454,6 +464,18 @@ namespace BodyTracking
         public Vector3 WorldOf(Vector3 local)
         {
             return _root != null ? _root.transform.TransformPoint(local) : local;
+        }
+
+        /// <summary>Current merged world position of one joint, straight from the per-frame
+        /// smoothed <c>_jointPositions</c> (NOT the trail history) so callers don't depend on
+        /// the fading-trail buffer. Returns false if the joint isn't currently valid.</summary>
+        public bool TryGetJointWorld(int jointIdx, out Vector3 world)
+        {
+            world = Vector3.zero;
+            if (jointIdx < 0 || jointIdx >= _jointPositions.Length) return false;
+            if (!_jointValid[jointIdx]) return false;
+            world = WorldOf(_jointPositions[jointIdx]);
+            return true;
         }
 
         /// <summary>Append this body's windowed per-joint trail centerline (the same samples

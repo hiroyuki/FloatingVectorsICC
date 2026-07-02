@@ -82,6 +82,32 @@ namespace TSDF
         /// </summary>
         public int CompletedBatchCount { get; private set; }
 
+        /// <summary>
+        /// Fired ONCE per completed multi-cam batch, immediately BEFORE the batch is
+        /// published to the front buffer. Subscribers (e.g. TSDFTrailBaker.LiveFuse)
+        /// may min-union extra geometry into <see cref="TSDFVolume.WriteBuffer"/> so it
+        /// rides along in the same Publish — they must NOT publish themselves. The
+        /// integrator always publishes right after, even if a subscriber throws
+        /// (each is invoked in its own try/catch), so a failing trail can never stall
+        /// the body's publish. Fires for both the live-follow (clear-per-batch) and
+        /// accumulate (fold) paths, just before their respective Publish().
+        /// </summary>
+        public event System.Action<TSDFIntegrator, TSDFVolume> BeforePublishCompleteBatch;
+
+        // Invoke each subscriber in isolation so one that throws neither stops the
+        // others nor blocks the Publish that follows (Codex: a trail-bake exception
+        // must never freeze the body mesh).
+        private void InvokeBeforePublishCompleteBatch()
+        {
+            var ev = BeforePublishCompleteBatch;
+            if (ev == null) return;
+            foreach (var d in ev.GetInvocationList())
+            {
+                try { ((System.Action<TSDFIntegrator, TSDFVolume>)d)(this, volume); }
+                catch (System.Exception e) { Debug.LogException(e, this); }
+            }
+        }
+
         [Tooltip("Log a per-second summary of integrated frames per serial.")]
         public bool diagnosticLogging = false;
 
@@ -281,6 +307,7 @@ namespace TSDF
                 if (_batchSerials.Count == expectedCamCount)
                 {
                     CompletedBatchCount++;
+                    InvokeBeforePublishCompleteBatch();   // baker may min-union a trail into WriteBuffer
                     volume.Publish();
                 }
             }
@@ -304,6 +331,7 @@ namespace TSDF
                     volume.FoldInstanceIntoAccumulation();   // time union → mesh re-extracts
                     _batchSerials.Clear();
                     CompletedBatchCount++;
+                    InvokeBeforePublishCompleteBatch();   // baker may min-union a trail into WriteBuffer
                     volume.Publish();
                 }
             }

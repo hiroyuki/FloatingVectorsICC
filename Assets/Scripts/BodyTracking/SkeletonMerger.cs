@@ -483,6 +483,19 @@ namespace BodyTracking
             return 0;
         }
 
+        /// <summary>Current merged WORLD position of one joint (single-person: first visual),
+        /// read straight from the per-frame smoothed pose — NOT the fading-trail buffer. Returns
+        /// false if no body or the joint isn't currently valid. Used by the TSDF trail capture so
+        /// it doesn't depend on the trail visual being enabled.</summary>
+        public bool TryGetJointWorld(k4abt_joint_id_t joint, out UnityEngine.Vector3 world)
+        {
+            world = UnityEngine.Vector3.zero;
+            if (_pool == null) return false;
+            foreach (var bv in _pool.Visuals.Values)
+                return bv.TryGetJointWorld((int)joint, out world);
+            return false;
+        }
+
         private void Update()
         {
             // Pause-aware trail clock. Track entry/exit transitions so the
