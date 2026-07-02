@@ -3,7 +3,8 @@
     "rootNamespace": "PointCloud",
     "references": [
         "Orbbec",
-        "Calibration"
+        "Calibration",
+        "Shared"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],

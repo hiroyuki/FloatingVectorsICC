@@ -1,6 +1,11 @@
-// Inspector for TSDFTrailBaker: default fields plus a Bake button and the last
-// bake status, so the trail->SDF re-mesh can be triggered without the context menu.
+// Inspector for TSDFTrailBaker: default fields, the manual bake buttons, the
+// shared accumulation row (Start/Stop capture — status box shows LastStatus),
+// and the dedicated "Resume live" button. Resume live intentionally does NOT
+// ride the shared Clear slot (CanClear=false): its side effects (discard
+// sculpture + rebuild double-buffered + re-enable integration + resume
+// playback) deserve their own explicit button.
 
+using Shared.EditorTools;
 using UnityEditor;
 using UnityEngine;
 
@@ -22,29 +27,18 @@ namespace TSDF.EditorTools
             if (GUILayout.Button("Fuse trail into displayed body", GUILayout.Height(28)))
                 t.FuseTrailIntoDisplayedBody();
 
-            EditorGUILayout.Space();
-            EditorGUILayout.LabelField("Capture (Start/Stop accumulation)", EditorStyles.boldLabel);
-            using (new EditorGUILayout.HorizontalScope())
+            AccumulationControllerGUI.Draw(t, t, new AccumulationControllerGUI.Options
             {
-                GUI.enabled = !t.IsCapturing;
-                if (GUILayout.Button("● Start capture", GUILayout.Height(28)))
-                    t.StartCapture();
-                GUI.enabled = t.IsCapturing;
-                if (GUILayout.Button("■ Stop capture", GUILayout.Height(28)))
-                    t.StopCapture();
-                GUI.enabled = true;
-            }
-            if (t.IsCapturing)
-                EditorGUILayout.HelpBox("Capturing… motion is accumulating into the frozen buffer.",
-                                        MessageType.Warning);
+                requirePlayMode = true,
+                clearUndo = AccumulationControllerGUI.UndoMode.None,
+            });
 
-            // After a capture the body integrator is left frozen (trail-only capture disables it),
-            // so the live surface mesh stays gone. This one-click restores live-follow.
+            // After a capture the body integrator is left frozen (trail-only capture
+            // disables it), so the live surface mesh stays gone. One click restores it.
             if (GUILayout.Button("Resume live (exit capture → body back)", GUILayout.Height(24)))
                 t.ResumeLive();
 
-            if (!string.IsNullOrEmpty(t.LastStatus))
-                EditorGUILayout.HelpBox(t.LastStatus, MessageType.Info);
+            if (Application.isPlaying) Repaint();
         }
     }
 }

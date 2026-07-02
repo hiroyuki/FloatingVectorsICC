@@ -1,11 +1,8 @@
 {
-    "name": "PointCloud.Editor",
-    "rootNamespace": "PointCloud.EditorTools",
+    "name": "Shared.Editor",
+    "rootNamespace": "Shared.EditorTools",
     "references": [
-        "PointCloud",
-        "Orbbec",
-        "Shared",
-        "Shared.Editor"
+        "Shared"
     ],
     "includePlatforms": [
         "Editor"

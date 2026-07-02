@@ -29,7 +29,7 @@ using UnityEngine;
 namespace TSDF
 {
     [DisallowMultipleComponent]
-    public class TSDFTrailBaker : MonoBehaviour
+    public class TSDFTrailBaker : MonoBehaviour, Shared.IAccumulationController
     {
         [Header("Capture (Start/Stop accumulation)")]
         [Tooltip("What the frozen sculpture contains. ON: also accumulate the body TSDF sweep " +
@@ -58,6 +58,22 @@ namespace TSDF
         /// persistent accumulation buffer that only grows (never per-batch cleared), so the
         /// motion between Start and Stop builds up into one static mesh, then freezes.</summary>
         public bool IsCapturing { get; private set; }
+
+        // ---- Shared.IAccumulationController (unified accumulation UI) ----
+        // Start/Stop = capture. CanClear=false ON PURPOSE: this component's "clear"
+        // (ResumeLive) has heavier side effects (discard sculpture + rebuild double-
+        // buffered + re-enable integration + resume playback), so it keeps its own
+        // dedicated "Resume live" button instead of riding the shared Clear slot.
+        public bool IsAccumulating => IsCapturing;
+        public string StatusText => LastStatus;
+        public bool CanStart => !IsCapturing;
+        public string StartLabel => "Start capture";
+        public void StartAccumulate() => StartCapture();
+        public bool CanStop => IsCapturing;
+        public void StopAccumulate() => StopCapture();
+        public bool CanClear => false;
+        public string ClearLabel => "";
+        public void ClearAccumulated() { }
 
         [Header("Wiring")]
         [Tooltip("Target volume. Leave empty to auto-resolve the first TSDFVolume in the scene.")]

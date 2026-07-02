@@ -3,7 +3,9 @@
     "rootNamespace": "TSDF.EditorTools",
     "references": [
         "TSDF",
-        "PointCloud"
+        "PointCloud",
+        "Shared",
+        "Shared.Editor"
     ],
     "includePlatforms": [
         "Editor"

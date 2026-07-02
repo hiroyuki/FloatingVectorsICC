@@ -1,8 +1,9 @@
-// Inspector for PointCloudCumulative: default fields plus an inline Clear button
-// (per issue #4, "clearボタンで全部削除") and a snapshot-count readout.
+// Inspector for PointCloudCumulative: default fields plus the shared
+// accumulation row (Start/Stop = noErase toggle, Clear = delete snapshots).
+// Clear uses FullHierarchy undo because it destroys the snapshot child GOs.
 
+using Shared.EditorTools;
 using UnityEditor;
-using UnityEngine;
 
 namespace PointCloud.EditorTools
 {
@@ -14,19 +15,11 @@ namespace PointCloud.EditorTools
             DrawDefaultInspector();
 
             var t = (PointCloudCumulative)target;
-
-            EditorGUILayout.Space();
-            EditorGUILayout.LabelField("Snapshots", t.SnapshotCount.ToString());
-
-            using (new EditorGUI.DisabledScope(t.SnapshotCount == 0))
+            AccumulationControllerGUI.Draw(t, t, new AccumulationControllerGUI.Options
             {
-                if (GUILayout.Button("Clear"))
-                {
-                    Undo.RegisterFullObjectHierarchyUndo(t.gameObject, "Clear Point Cloud Snapshots");
-                    t.Clear();
-                    EditorUtility.SetDirty(t);
-                }
-            }
+                requirePlayMode = false,   // edit-time Clear allowed (existing behaviour)
+                clearUndo = AccumulationControllerGUI.UndoMode.FullHierarchy,
+            });
         }
     }
 }

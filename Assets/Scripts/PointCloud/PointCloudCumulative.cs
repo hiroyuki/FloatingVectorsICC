@@ -29,7 +29,7 @@ using UnityEngine.Rendering;
 namespace PointCloud
 {
     [DisallowMultipleComponent]
-    public class PointCloudCumulative : MonoBehaviour
+    public class PointCloudCumulative : MonoBehaviour, Shared.IAccumulationController
     {
         [Tooltip("When enabled, every 'interval' frames the current point cloud is " +
                  "snapshotted and kept visible, accumulating over time. When disabled, " +
@@ -61,6 +61,20 @@ namespace PointCloud
         public bool diagnosticLogging = false;
 
         public int SnapshotCount => _snapshots.Count;
+
+        // ---- Shared.IAccumulationController (unified accumulation UI) ----
+        // Start/Stop decompose the noErase toggle; Clear deletes all snapshots
+        // (destroys child GOs — the shared editor uses FullHierarchy undo).
+        public bool IsAccumulating => noErase;
+        public string StatusText => SnapshotCount + " snapshot(s)" + (noErase ? " — accumulating" : "");
+        public bool CanStart => !noErase;
+        public string StartLabel => "Start (no erase)";
+        public void StartAccumulate() => noErase = true;
+        public bool CanStop => noErase;
+        public void StopAccumulate() => noErase = false;
+        public bool CanClear => SnapshotCount > 0;
+        public string ClearLabel => "Clear snapshots";
+        public void ClearAccumulated() => Clear();
 
         // Whether accumulated snapshots are currently rendered. Toggling this
         // off disables the MeshRenderer on every snapshot GO without destroying

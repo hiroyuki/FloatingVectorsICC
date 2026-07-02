@@ -22,7 +22,7 @@ namespace TSDF
 {
     [AddComponentMenu("Mesh/Cumulative")]
     [DefaultExecutionOrder(-5)]
-    public sealed class MeshCumulative : MonoBehaviour
+    public sealed class MeshCumulative : MonoBehaviour, Shared.IAccumulationController
     {
         public enum CumulativeState { Idle, Accumulating, Frozen }
 
@@ -66,6 +66,23 @@ namespace TSDF
         public float Elapsed { get; private set; }
         public float Remaining => State == CumulativeState.Accumulating
             ? Mathf.Max(0f, duration - Elapsed) : 0f;
+
+        // ---- Shared.IAccumulationController (unified accumulation UI) ----
+        // Start=Begin (allowed while accumulating = "Restart", matching the old editor),
+        // Stop=Freeze, Clear=Release (clears the fused mesh AND returns to live-follow —
+        // the label states that so the side effect isn't hidden).
+        public bool IsAccumulating => State == CumulativeState.Accumulating;
+        public string StatusText => State == CumulativeState.Accumulating
+            ? $"Accumulating — {Remaining:0.0}s / {duration:0.0}s remaining"
+            : State.ToString();
+        public bool CanStart => true;                       // Restart while accumulating
+        public string StartLabel => IsAccumulating ? "Restart" : "Begin";
+        public void StartAccumulate() => Begin();
+        public bool CanStop => IsAccumulating;
+        public void StopAccumulate() => Freeze();
+        public bool CanClear => State != CumulativeState.Idle;
+        public string ClearLabel => "Clear & resume live";
+        public void ClearAccumulated() => Release();
 
         private double _startTime;
 
