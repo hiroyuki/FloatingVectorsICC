@@ -63,6 +63,13 @@ StructuredBuffer<float4> _ColorsB;
 RWStructuredBuffer<float2> _VoxelsOut;
 RWStructuredBuffer<float4> _ColorsOut;
 
+// Write-time active-block marking (task 0-1): SmoothUnion writes the volume write
+// buffer that Marching Cubes extracts, so it must mark occupancy or active-block MC
+// drops the composed surface (A-only regions + smin necks). TSDFDebugSession zeroes
+// WriteBlockActive then binds it here before dispatch. Only referenced by SmoothUnion
+// (Copy writes scratch buffers, not the volume), so Copy needs no _BlockActive binding.
+#include "TSDFBlockActive.hlsl"
+
 [numthreads(64, 1, 1)]
 void SmoothUnion(uint3 id : SV_DispatchThreadID)
 {
@@ -123,4 +130,11 @@ void SmoothUnion(uint3 id : SV_DispatchThreadID)
         _VoxelsOut[lin] = float2(_Tau, 0.0);
         _ColorsOut[lin] = float4(0.0, 0.0, 0.0, 0.0);
     }
+
+    // Mark the composed voxel's blocks active (re-read the final value; the empty
+    // branch wrote weight 0, which MarkVoxelActive skips).
+    uint dx = (uint)_Dim.x, dy = (uint)_Dim.y;
+    int3 vc = int3((int)(lin % dx), (int)((lin / dx) % dy), (int)(lin / (dx * dy)));
+    float2 fin = _VoxelsOut[lin];
+    MarkVoxelActive(vc, _Dim, fin.x, fin.y);
 }

@@ -418,6 +418,15 @@ namespace TSDF
             _shader.SetFloat("_Tau", volume.Tau);
             _shader.SetInt("_AccumulationMode", modeOverride >= 0 ? modeOverride : (int)volume.accumulationMode);
 
+            // Active-block marking (task 0-1): mark the occupancy set of whichever
+            // buffer we're filling. Live-follow writes the write buffer (→ its set, MC-
+            // consumed after Publish); accumulate writes the instance scratch (→ its
+            // unread set — the real accumulation set is marked later by TSDFFold).
+            volume.BindBlockMarking(_shader, _kernel,
+                ReferenceEquals(targetSdf, volume.WriteBuffer)
+                    ? volume.WriteBlockActive
+                    : volume.InstanceBlockActive);
+
             _shader.SetBuffer(_kernel, "_Depth", st.DepthBuf);
             _shader.SetInt("_DepthW", raw.DepthWidth);
             _shader.SetInt("_DepthH", raw.DepthHeight);

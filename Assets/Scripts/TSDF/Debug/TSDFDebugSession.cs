@@ -775,6 +775,12 @@ namespace TSDF.DebugTools
             _suShader.SetBuffer(_suUnionKernel, "_ColorsB", _suColB);
             _suShader.SetBuffer(_suUnionKernel, "_VoxelsOut", volume.WriteBuffer);
             _suShader.SetBuffer(_suUnionKernel, "_ColorsOut", volume.WriteColorBuffer);
+            // Active-block marking (task 0-1): the compose overwrites every voxel, so
+            // rebuild the write occupancy set from scratch — zero it, then let the
+            // kernel mark the composed surface. Without this, active-block MC
+            // (useFullGridMC=false) would drop the A-only + smin-neck geometry.
+            volume.ClearWriteBlockActive();
+            volume.BindBlockMarking(_suShader, _suUnionKernel, volume.WriteBlockActive);
             _suShader.Dispatch(_suUnionKernel, Mathf.Max(1, gx), Mathf.Max(1, gy), 1);
 
             volume.Publish();

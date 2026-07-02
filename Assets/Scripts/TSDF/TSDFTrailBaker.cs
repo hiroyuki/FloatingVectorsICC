@@ -331,6 +331,9 @@ namespace TSDF
             _shader.SetBuffer(_boxKernel, "_Segs", _segBuf);
             _shader.SetBuffer(_boxKernel, "_VoxelsOut", volume.WriteBuffer);
             _shader.SetBuffer(_boxKernel, "_ColorsOut", volume.WriteColorBuffer);
+            // Active-block marking (task 0-1): baked trail voxels mark the write set so
+            // active-block MC meshes the sculpture (rides the same Publish/swap).
+            volume.BindBlockMarking(_shader, _boxKernel, volume.WriteBlockActive);
 
             float padVox = (radius + volume.Tau) / Mathf.Max(1e-6f, volume.voxelSize) + 1f;
             for (int b = 0; b < batchN; b++)
@@ -433,6 +436,9 @@ namespace TSDF
             _shader.SetBuffer(_kernel, "_Segs", _segBuf);
             _shader.SetBuffer(_kernel, "_VoxelsOut", volume.WriteBuffer);
             _shader.SetBuffer(_kernel, "_ColorsOut", volume.WriteColorBuffer);
+            // Active-block marking (task 0-1): baked trail voxels mark the write set so
+            // active-block MC meshes the sculpture (rides the Publish/swap).
+            volume.BindBlockMarking(_shader, _kernel, volume.WriteBlockActive);
 
             int batches = 0;
             for (int off = 0; off < _segScratch.Count; off += batchSize)

@@ -1,6 +1,28 @@
 # Implementation Plan: Higher-resolution live point-cloud mesh (TSDF + Marching Cubes)
 
-> Status: reviewed and APPROVED by Codex (4 rounds). Plan only — implementation not yet started.
+> Status: reviewed and APPROVED by Codex (4 rounds).
+> IMPLEMENTED: Task 0-0 (per-pass ProfilerMarkers, VRAM + frame-ms per-second diag,
+>   `TSDFView.useFullGridMC` A/B toggle) and Task 0-1 (persistent per-buffer active-block
+>   occupancy set, write-time marking with near-surface band + halo in
+>   integrate/fold/trail-bake, CompactBlocks + BuildDispatchArgs + MarchCubesActive
+>   indirect dispatch). New file `Resources/TSDFBlockActive.hlsl` holds the shared
+>   MarkVoxelActive. `TSDFClear.compute` gained a `ClearUint` kernel.
+> VERIFIED (Mac/Metal, synthetic sphere AND real Rec2_jump playback):
+>   - Real data caught a marking bug: a SYMMETRIC |sdf|<k*voxelSize band drops
+>     straddling cells whose corners are all outside the band (steep real TSDF). FIXED
+>     to ONE-SIDED marking (mark all sdf<0 down to -tau + a ~1*voxelSize positive rim);
+>     every emitting cell has an inside corner, so completeness is gradient-independent.
+>   - After fix: full-grid vs active-block are triangle-count IDENTICAL (diff=0) across
+>     frames and modes. Zero-active-blocks dispatch is a safe no-op.
+>   - Perf (MC pass, dispatch+GPU sync): live-follow @voxelSize 0.01 = 1% blocks active,
+>     1.80ms→0.68ms (2.67x, grows finer); accumulate smeared @0.01 = 100% blocks,
+>     5.51→4.66ms (1.18x); accumulate @0.02 = 26% blocks, 1.21→1.47ms (slightly slower —
+>     fixed overhead not amortized when full-grid is already ~1ms). So the win is for the
+>     LIVE finer-density path; at coarse voxelSize it's neutral/slightly negative.
+>   `useFullGridMC` defaults to true (old path) — flip to false to enable the win.
+> NOT DONE: 0-2 (integration frustum culling), 0-3 (SDF smoothing), 0-4 (gradient
+>   normals), 0-5 (voxelSize sweep / exit gate). End-to-end verification with the real
+>   jump recording must run on the Windows box (recordings live at D:\...).
 
 ## Project context
 

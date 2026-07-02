@@ -32,12 +32,23 @@ int _DispatchWidth;                     // = groupsX * 64 (2D dispatch linearisa
 float _Tau;                             // truncation distance (m) — free-space seed
 float _SmoothK;                         // 0 = hard min; >0 = smin neck radius (m)
 
+// Write-time active-block marking (task 0-1). Accumulate mode preserves old surfaces
+// while touching only new voxels, so Fold MUST mark the accumulation set or MC drops
+// unchanged-but-visible geometry. TSDFVolume binds _BlockActive to WriteBlockActive
+// (= the accumulation buffer's set) each fold; the set is never cleared per instant.
+#include "TSDFBlockActive.hlsl"
+
 [numthreads(64, 1, 1)]
 void Fold(uint3 id : SV_DispatchThreadID)
 {
     uint lin = id.y * (uint)_DispatchWidth + id.x;
     uint total = (uint)(_Dim.x * _Dim.y * _Dim.z);
     if (lin >= total) return;
+
+    // Voxel coord for active-block marking (only voxels we WRITE need marking;
+    // untouched-but-accumulated voxels keep the block bit set by an earlier fold).
+    uint dx = (uint)_Dim.x, dy = (uint)_Dim.y;
+    int3 vc = int3((int)(lin % dx), (int)((lin / dx) % dy), (int)(lin / (dx * dy)));
 
     float2 inst = _Inst[lin];
     if (inst.y <= 0.0) return;          // this instant never observed this voxel
@@ -47,6 +58,7 @@ void Fold(uint3 id : SV_DispatchThreadID)
     {
         _Acc[lin] = inst;
         _AccColor[lin] = _InstColor[lin];
+        MarkVoxelActive(vc, _Dim, inst.x, inst.y);
         return;
     }
 
@@ -58,6 +70,7 @@ void Fold(uint3 id : SV_DispatchThreadID)
         {
             _Acc[lin] = inst;
             _AccColor[lin] = _InstColor[lin];
+            MarkVoxelActive(vc, _Dim, inst.x, inst.y);
         }
         return;
     }
@@ -72,7 +85,7 @@ void Fold(uint3 id : SV_DispatchThreadID)
     if (kEff <= 1e-6)
     {
         // Coincident surfaces — plain min, keep the closer one's colour.
-        if (abs(b) < abs(a)) { _Acc[lin] = inst; _AccColor[lin] = _InstColor[lin]; }
+        if (abs(b) < abs(a)) { _Acc[lin] = inst; _AccColor[lin] = _InstColor[lin]; MarkVoxelActive(vc, _Dim, inst.x, inst.y); }
         return;
     }
     // h is the A-vs-B blend weight: h->1 keeps the accumulation, h->0 the instant.
@@ -85,4 +98,5 @@ void Fold(uint3 id : SV_DispatchThreadID)
     float3 col = lerp(_InstColor[lin].rgb, _AccColor[lin].rgb, h);
     _Acc[lin] = float2(s, w);
     _AccColor[lin] = float4(col, w);
+    MarkVoxelActive(vc, _Dim, s, w);
 }
