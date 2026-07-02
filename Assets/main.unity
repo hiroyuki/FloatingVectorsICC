@@ -239,7 +239,7 @@ GameObject:
   - component: {fileID: 86788059}
   - component: {fileID: 86788058}
   m_Layer: 0
-  m_Name: Playback&Record
+  m_Name: SensorRecorder
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -290,7 +290,7 @@ Transform:
   - {fileID: 1796953153}
   - {fileID: 1555383027}
   - {fileID: 1176761114}
-  m_Father: {fileID: 1105748082}
+  m_Father: {fileID: 894098144}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &100997490
 GameObject:
@@ -731,6 +731,40 @@ Material:
     - _MotionHotColor: {r: 1, g: 0.19999996, b: 0.049999982, a: 1}
   m_BuildTextureStacks: []
   m_AllowLocking: 1
+--- !u!1 &894098143
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 894098144}
+  m_Layer: 0
+  m_Name: Capture
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &894098144
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 894098143}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children:
+  - {fileID: 925702424}
+  - {fileID: 86788059}
+  - {fileID: 1151541768}
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &925702422
 GameObject:
   m_ObjectHideFlags: 0
@@ -742,7 +776,7 @@ GameObject:
   - component: {fileID: 925702424}
   - component: {fileID: 925702423}
   m_Layer: 0
-  m_Name: PointCloudManager
+  m_Name: SensorManager
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -800,7 +834,7 @@ Transform:
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
-  m_Father: {fileID: 1105748082}
+  m_Father: {fileID: 894098144}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &943244990
 GameObject:
@@ -865,11 +899,8 @@ Transform:
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children:
-  - {fileID: 925702424}
-  - {fileID: 1151541768}
   - {fileID: 173474410}
   - {fileID: 18533123}
-  - {fileID: 86788059}
   - {fileID: 1168113567}
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
@@ -1234,7 +1265,7 @@ GameObject:
   - component: {fileID: 1151541768}
   - component: {fileID: 1151541767}
   m_Layer: 0
-  m_Name: BoundingRect
+  m_Name: BoundingVolume
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -1268,7 +1299,7 @@ Transform:
   m_LocalScale: {x: 4, y: 2, z: 4}
   m_ConstrainProportionsScale: 0
   m_Children: []
-  m_Father: {fileID: 1105748082}
+  m_Father: {fileID: 894098144}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &1168113565
 GameObject:
@@ -1540,13 +1571,15 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: db1e237720e7c4b32997b8eea3107c4b, type: 3}
   m_Name: 
   m_EditorClassIdentifier: TSDF::TSDF.TSDFTrailBaker
-  accumulateBody: 0
+  accumulateBody: 1
   boneStep: 0.15
   maxSegmentStep: 0.5
+  pausePlaybackOnStop: 1
   volume: {fileID: 639959844}
   integrator: {fileID: 1289138166}
   skeleton: {fileID: 1180694595}
   playback: {fileID: 0}
+  recorder: {fileID: 0}
   sourceSpace: {fileID: 0}
   radius: 0.015
   minConfidence: 2
@@ -1564,12 +1597,12 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1214840952}
   serializedVersion: 2
-  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
   m_LocalPosition: {x: 0, y: 0, z: 0}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
-  m_Father: {fileID: 0}
+  m_Father: {fileID: 1574009487}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &1238217649
 GameObject:
@@ -1872,6 +1905,7 @@ Transform:
   - {fileID: 398159107}
   - {fileID: 1116646140}
   - {fileID: 2040096811}
+  - {fileID: 1214840954}
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &1796953152
@@ -2172,4 +2206,4 @@ SceneRoots:
   - {fileID: 1574009487}
   - {fileID: 1168916135}
   - {fileID: 836522996}
-  - {fileID: 1214840954}
+  - {fileID: 894098144}
