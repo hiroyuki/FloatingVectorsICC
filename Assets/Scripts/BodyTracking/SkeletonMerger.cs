@@ -59,75 +59,12 @@ namespace BodyTracking
         [Tooltip("Skeleton color. Bones inherit this; joints are slightly brighter.")]
         public Color skeletonColor = new Color(0.2f, 0.9f, 1f, 1f);
 
-        [Header("Trails")]
-        [Tooltip("Attach a TrailRenderer to each merged joint so motion leaves a line in real time.")]
-        public bool showTrails = true;
-
-        [Tooltip("PerJointHue assigns each joint a distinct hue. FlatColor uses trailFlatColor for every joint.")]
-        public BodyTrackingShared.TrailColorMode trailColorMode = BodyTrackingShared.TrailColorMode.PerJointHue;
-
-        [Tooltip("Trail color in FlatColor mode (also tints PerJointHue).")]
-        public Color trailFlatColor = Color.white;
-
-        [Header("Trail FrameHue mode")]
-        [Tooltip("FrameHue mode: hue cycles around this center hue (0..1) as a function of Time.frameCount.")]
-        [Range(0f, 1f)]
-        public float frameHueCenter = 0.5f;
-
-        [Tooltip("FrameHue mode: hue sweep width around the center (0..1). 0 = static hue, 1 = full color wheel.")]
-        [Range(0f, 1f)]
-        public float frameHueRange = 1f;
-
-        [Tooltip("FrameHue mode: HSV Saturation (0..1).")]
-        [Range(0f, 1f)]
-        public float frameHueSaturation = 0.85f;
-
-        [Tooltip("FrameHue mode: HSV Value / brightness (0..1).")]
-        [Range(0f, 1f)]
-        public float frameHueValue = 1f;
-
-        [Tooltip("FrameHue mode: number of frames per full sine cycle of the hue oscillation. " +
-                 "At 60 fps, 120 ≈ a 2-second wave.")]
-        [Min(1f)]
-        public float frameHueCyclePeriodFrames = 120f;
-
-        [Min(0.05f)]
-        [Tooltip("How long (s) each trail segment stays visible before fading out.")]
-        public float trailDuration = 2.0f;
-
-        [Range(0.001f, 0.05f)]
-        [Tooltip("Trail width (m) at the head; tail tapers to ~0.")]
-        public float trailWidth = 0.005f;
-
+        [Header("Bones")]
         [Range(0.001f, 0.05f)]
         [Tooltip("Radius (m) of the tube mesh drawn for each anatomical bone segment. " +
-                 "Independent from trailWidth — joint sphere radius / trail width do not " +
-                 "influence this. Has no effect when Show Anatomical Bones is off.")]
+                 "Independent from the joint sphere radius. Has no effect when Show " +
+                 "Anatomical Bones is off.")]
         public float boneWidth = 0.005f;
-
-        [Range(0f, 0.5f)]
-        [Tooltip("Parametric step for additional interpolation-point trails along each bone. " +
-                 "0 disables them (only joint trails draw). 0.1 → 9 interp points per bone, " +
-                 "0.05 → 19. Uniform spacing along the bone parameter so visual density is " +
-                 "consistent regardless of bone length. Each interp point gets its own trail " +
-                 "fed at the same cadence as joint trails.")]
-        public float boneTrailStep = 0f;
-
-        [Tooltip("Acceleration value (m/s^2) that maps to the cold/base trail color. " +
-                 "Same semantics as MotionLineRenderer.accelMin on the playback side.")]
-        public float accelMin = 0f;
-
-        [Tooltip("Acceleration value (m/s^2) that maps to the hot color. Default 56 " +
-                 "comes from the p95 of the reference recording.")]
-        public float accelMax = 56f;
-
-        [Tooltip("Hot end of the AccelHeatmap. The cold end is trailFlatColor.")]
-        public Color accelHotColor = Color.red;
-
-        [Tooltip("If true, accelMax is replaced every frame by a rolling p95 of |a| " +
-                 "across all joints — same auto behavior as MotionLineRenderer.autoAccelMax. " +
-                 "Avoids having to hand-tune accelMax for each scene/recording.")]
-        public bool autoAccelMax = false;
 
         [Tooltip("If true, when at least one camera reports MED or HIGH confidence for a " +
                  "joint, all other cameras' LOW samples are dropped from the merge. Sounded " +
@@ -216,7 +153,7 @@ namespace BodyTracking
                  "in action.")]
         public bool showPerWorkerSkeletons = false;
 
-        [Tooltip("Joint radius / trail width multiplier applied to per-worker raw " +
+        [Tooltip("Joint radius multiplier applied to per-worker raw " +
                  "skeletons (so they sit visually smaller than the merged skeleton).")]
         [Range(0.1f, 1f)]
         public float perWorkerVisualScale = 0.5f;
@@ -362,16 +299,6 @@ namespace BodyTracking
 
         private PointCloudRecorder _subscribedRecorder;
 
-        // Pause-aware trail clock. JointTrailMesh sample timestamps + DropOldSamples
-        // cutoff both flow off _trailNow, which is Time.timeAsDouble minus the time
-        // we've spent inside PointCloudRecorder pauses. While the recorder is paused
-        // _trailNow stays frozen at the moment of pause-entry, so no trail samples
-        // expire while the user tweaks Inspector values to refine the visual.
-        private bool _wasRecorderPaused;
-        private double _pauseStartTime;
-        private double _pausedAccumDuration;
-        private double _trailNow;
-
         private void OnEnable()
         {
             if (!ResolveDependencies()) { _disabledByGuard = true; enabled = false; return; }
@@ -470,19 +397,6 @@ namespace BodyTracking
         private void OnDestroy() => OnDisable();
         private void OnApplicationQuit() => OnDisable();
 
-        /// <summary>Append the current merged body's windowed trail centerline (world space,
-        /// oldest→newest) for <paramref name="joint"/> to <paramref name="outWorld"/>. Single
-        /// person assumed (first visual in the pool). Returns the number appended; 0 if no body
-        /// or no trail. Exposes the same per-joint ribbon the JointTrailMesh draws so the SDF
-        /// trail baker can bake it as capsules. Trails only accumulate while showBones is on.</summary>
-        public int CopyTrailWorldPoints(k4abt_joint_id_t joint, List<UnityEngine.Vector3> outWorld)
-        {
-            if (_pool == null || outWorld == null) return 0;
-            foreach (var bv in _pool.Visuals.Values)
-                return bv.CopyTrailWorldPoints((int)joint, outWorld);
-            return 0;
-        }
-
         /// <summary>Current merged WORLD position of one joint (single-person: first visual),
         /// read straight from the per-frame smoothed pose — NOT the fading-trail buffer. Returns
         /// false if no body or the joint isn't currently valid. Used by the TSDF trail capture so
@@ -498,17 +412,7 @@ namespace BodyTracking
 
         private void Update()
         {
-            // Pause-aware trail clock. Track entry/exit transitions so the
-            // accumulated paused duration grows only when the recorder is paused.
-            // While paused, _trailNow stays frozen so JointTrailMesh.DropOldSamples
-            // doesn't drop anything (cutoff = frozenNow - duration, sample times
-            // are all <= frozenNow, the in-window subset stays in-window forever).
             bool nowPaused = _subscribedRecorder != null && _subscribedRecorder.IsPaused;
-            double rawNow = Time.timeAsDouble;
-            if (nowPaused && !_wasRecorderPaused) _pauseStartTime = rawNow;
-            else if (!nowPaused && _wasRecorderPaused) _pausedAccumDuration += rawNow - _pauseStartTime;
-            _wasRecorderPaused = nowPaused;
-            _trailNow = (nowPaused ? _pauseStartTime : rawNow) - _pausedAccumDuration;
 
             // Late-binding for renderers spawned mid-Play by PointCloudCameraManager.
             BindNewRenderers();
@@ -530,8 +434,8 @@ namespace BodyTracking
 
             // While paused, no new merged skeleton arrives → ApplyMergedSkeletons
             // skipped the per-visual Apply call that would normally push the latest
-            // Inspector values into geometry + trail Configure. Push them now so
-            // jointRadius / boneWidth / boneTrailStep / color tweaks reflect live.
+            // Inspector values into geometry. Push them now so jointRadius /
+            // boneWidth / color tweaks reflect live.
             if (nowPaused && showBones && _pool != null)
             {
                 var cfg = BuildVisualConfig();
@@ -1018,7 +922,7 @@ namespace BodyTracking
                 var cluster = _clusterPool[c];
                 if (cluster.MemberIndices.Count < requireMinWorkerCount) continue;
                 BuildMergedSkeleton(cluster, ref _mergedSkel);
-                _pool.Apply(cluster.Id, in _mergedSkel, cfg, _trailNow, OnVisualEvicted);
+                _pool.Apply(cluster.Id, in _mergedSkel, cfg, OnVisualEvicted);
                 _diagPersonsOutput++;
             }
         }
@@ -1068,15 +972,6 @@ namespace BodyTracking
                 _priorPelvisById[cluster.Id] = cluster.Seed.PelvisWorld;
                 _priorMaxConfById[cluster.Id] = cluster.Seed.MaxConfidence;
             }
-        }
-
-        private void LateUpdate()
-        {
-            var cam = Camera.main;
-            if (_pool != null) _pool.TickTrails(cam, autoAccelMax, _trailNow);
-            if (_perWorkerPools != null)
-                foreach (var p in _perWorkerPools.Values)
-                    p.TickTrails(cam, autoAccelMax, _trailNow);
         }
 
         /// <summary>
@@ -1346,29 +1241,12 @@ namespace BodyTracking
             JointRadius = jointRadius,
             SkeletonColor = skeletonColor,
             ShowAnatomicalBones = showBones,
-            ShowTrails = showTrails,
-            TrailDuration = trailDuration,
-            TrailWidth = trailWidth,
             BoneWidth = boneWidth,
-            TrailColorMode = trailColorMode,
-            TrailFlatColor = trailFlatColor,
-            FrameHue = new BodyTrackingShared.FrameHueParams
-            {
-                CenterHue = frameHueCenter,
-                HueRange = frameHueRange,
-                Saturation = frameHueSaturation,
-                Value = frameHueValue,
-                CyclePeriodFrames = frameHueCyclePeriodFrames,
-            },
             MaxBodies = maxBodies,
             UseOneEuroFilter = useOneEuroFilter,
             OneEuroMinCutoff = oneEuroMinCutoff,
             OneEuroBeta = oneEuroBeta,
             OneEuroDerivCutoff = oneEuroDerivCutoff,
-            AccelMin = accelMin,
-            AccelMax = accelMax,
-            AccelHotColor = accelHotColor,
-            BoneTrailStep = boneTrailStep,
         };
 
         // --- per-cluster merge (joint-by-joint) ---
@@ -1674,8 +1552,7 @@ namespace BodyTracking
                 cfg.MaxBodies = K4abtWorkerSharedLayout.MaxBodies;
                 float scale = Mathf.Clamp(perWorkerVisualScale, 0.1f, 1f);
                 cfg.JointRadius = baseCfg.JointRadius * scale;
-                cfg.TrailWidth = baseCfg.TrailWidth * scale;
-                pool.Apply((uint)cand.BodyIndex, in _rawScratchSkel, cfg, _trailNow);
+                pool.Apply((uint)cand.BodyIndex, in _rawScratchSkel, cfg);
             }
             // GC stale per-worker visuals on the same threshold as merged — also
             // while paused (held slots keep current bodies fresh; see GcStaleVisuals).

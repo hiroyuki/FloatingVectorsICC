@@ -2,39 +2,25 @@
 // geometry, then lets the existing Marching Cubes pass (TSDFView) re-mesh it —
 // the "feed the BT trail back into the SDF and re-mesh" experiment.
 //
-// Source data: BodyTrackingPlayback.Trajectories — per-(body,joint) time-ordered
-// position samples. IMPORTANT: those samples are in k4a-CAMERA-LOCAL space (mm->m
-// + Y flip, no world transform; see BodyTrackingPlayback.Process). MotionLineRenderer
-// only looks aligned with the point cloud because it parents its line meshes under
-// its own transform, which carries the camera->world placement. So this baker takes
-// the SAME source-space transform and applies TransformPoint to every sample before
-// comparing to the volume's world-space voxels. Leave sourceSpace empty to default
-// to a MotionLineRenderer in the scene (the proven-aligned frame).
+// Two ways to bake:
+//   1. Start/Stop CAPTURE (the main path): accumulate the motion between Start and
+//      Stop into ONE persistent single buffer (never cleared) so it builds up into a
+//      static "motion sculpture", then freeze. Each frame stamps only the NEW segment
+//      each sample site moved through, into just its AABB (BakeTrailBox) — cost is
+//      independent of the total volume size. Sites = points along every bone (endpoints
+//      + boneStep interpolation) read from the merged skeleton's CURRENT pose
+//      (SkeletonMerger.TryGetJointWorld — no dependency on any fading trail). Hand
+//      joints are excluded project-wide (BodyTrackingShared.IsDrawnJoint).
+//      accumulateBody also folds the body TSDF sweep in (via the integrator + the
+//      BeforePublishCompleteBatch hook) so trail + body land in the same buffer.
+//   2. Manual one-shot bakes (ContextMenu) from BodyTrackingPlayback.Trajectories —
+//      the whole-recording per-joint paths. Those samples are k4a-CAMERA-LOCAL
+//      (mm->m + Y flip); sourceSpace (default: a MotionLineRenderer transform) maps
+//      them to world before comparing to the volume's world-space voxels.
 //
-// Each pair of consecutive samples becomes one analytic capsule segment; the
-// kernel (TSDFTrailBake.compute) min-unions sdf = dist(p, segment) - radius into
-// the volume write buffer in TDR-safe batches, then Publish() triggers re-extraction.
-//
-// Compose (manual bake):
-//   clearVolumeFirst = true  -> trail-only sculpture (ClearWrite, then bake).
-//   clearVolumeFirst = false -> fuse: min-union the trail into whatever the volume
-//                               already holds (e.g. an accumulated body TSDF).
-//
-// Live modes (per-frame, follow playback/live integration):
-//   Off           -> only the manual ContextMenu bakes run.
-//   LiveTrailOnly -> every frame: clear the write buffer, bake the trail alone,
-//                    publish. REQUIRES the integrator to be idle (it would otherwise
-//                    clear/publish the body over the trail every frame) — warns if a
-//                    live integrator is still driving the same volume.
-//   LiveFuse      -> subscribe to TSDFIntegrator.BeforePublishCompleteBatch and
-//                    min-union the trail into the just-integrated body WriteBuffer
-//                    right before the integrator publishes it. The baker does NOT
-//                    publish; the integrator's Publish carries the fused result.
-//
-// Multi-camera caveat: Process merges every device track by (bodyId, jointId), so
-// mixing cameras puts conflicting camera-local coords into one trajectory. Set
-// BodyTrackingPlayback.deviceSerialFilter to ONE device and point sourceSpace at
-// that device's frame for a clean trail.
+// Each pair of consecutive samples becomes one analytic capsule segment; the kernel
+// (TSDFTrailBake.compute) min-unions sdf = dist(p, segment) - radius into the volume
+// write buffer, then Publish() triggers re-extraction.
 
 using System.Collections.Generic;
 using BodyTracking;
@@ -45,38 +31,6 @@ namespace TSDF
     [DisallowMultipleComponent]
     public class TSDFTrailBaker : MonoBehaviour
     {
-        /// <summary>Where the per-joint ribbon centerlines come from.</summary>
-        public enum TrailSource
-        {
-            /// <summary>Whole-recording per-joint trajectories from BodyTrackingPlayback (all frames).</summary>
-            OfflineTrajectories,
-            /// <summary>The short windowed trail SkeletonMerger currently draws (~trailDuration s, smoothed).</summary>
-            LiveWindowedTrail,
-        }
-
-        /// <summary>Per-frame live baking mode (Phase 2). Off = manual bakes only.</summary>
-        public enum LiveMode
-        {
-            /// <summary>No per-frame baking; only the manual ContextMenu bakes fire.</summary>
-            Off,
-            /// <summary>Every frame: clear write, bake the trail alone, publish. Integrator must be idle.</summary>
-            LiveTrailOnly,
-            /// <summary>Every completed integrator batch: fuse the trail into the body just before its Publish.</summary>
-            LiveFuse,
-        }
-
-        [Header("Source")]
-        [Tooltip("OfflineTrajectories: whole-recording per-joint paths (BodyTrackingPlayback). " +
-                 "LiveWindowedTrail: the short, smoothed trail SkeletonMerger draws right now " +
-                 "for the joints below — the on-screen ribbon, baked as it follows the motion.")]
-        public TrailSource source = TrailSource.LiveWindowedTrail;
-
-        [Header("Live (follow)")]
-        [Tooltip("Off: manual bakes / capture only. LiveTrailOnly: re-bake the trail alone every " +
-                 "frame (integrator must be idle). LiveFuse: fuse the trail into the body every " +
-                 "completed integrator batch (the animated follow look). Ignored while capturing.")]
-        public LiveMode liveMode = LiveMode.Off;
-
         [Header("Capture (Start/Stop accumulation)")]
         [Tooltip("What the frozen sculpture contains. ON: also accumulate the body TSDF sweep " +
                  "alongside the trail (heavier, ghosted body). OFF: trail only (pure motion " +
@@ -90,6 +44,12 @@ namespace TSDF
                  "bone. 0 = bone endpoints (joints) only. Smaller = denser & heavier.")]
         public float boneStep = 0.15f;
 
+        [Min(0f)]
+        [Tooltip("Capture only: skip (and reseed) a per-frame segment longer than this (metres). " +
+                 "Guards against a joint teleport / low-confidence pop stamping a huge bridge. " +
+                 "0 = no limit.")]
+        public float maxSegmentStep = 0.5f;
+
         /// <summary>True between StartCapture() and StopCapture(): the volume is a single
         /// persistent accumulation buffer that only grows (never per-batch cleared), so the
         /// motion between Start and Stop builds up into one static mesh, then freezes.</summary>
@@ -99,31 +59,18 @@ namespace TSDF
         [Tooltip("Target volume. Leave empty to auto-resolve the first TSDFVolume in the scene.")]
         public TSDFVolume volume;
 
-        [Tooltip("Integrator whose BeforePublishCompleteBatch hook LiveFuse rides. Leave empty " +
-                 "to auto-resolve the first TSDFIntegrator in the scene.")]
+        [Tooltip("Integrator to drive for the body sweep (accumulateBody) and whose " +
+                 "BeforePublishCompleteBatch hook the trail rides. Auto-resolved if empty.")]
         public TSDFIntegrator integrator;
 
-        [Tooltip("OfflineTrajectories source. Leave empty to auto-resolve the first BodyTrackingPlayback.")]
-        public BodyTrackingPlayback playback;
-
-        [Tooltip("LiveWindowedTrail source. Leave empty to auto-resolve the first SkeletonMerger.")]
+        [Tooltip("Skeleton the capture reads current joint positions from. Auto-resolved if empty.")]
         public SkeletonMerger skeleton;
 
-        [Tooltip("Joints baked as ribbons in LiveWindowedTrail mode. Default: wrists, feet, head. " +
-                 "HAND/HANDTIP/THUMB are intentionally excluded — k4abt reports them at NONE " +
-                 "confidence from every camera view (see BodyTrackingShared.IsDrawnJoint), so the " +
-                 "wrist is the reliable arm tip.")]
-        public k4abt_joint_id_t[] ribbonJoints =
-        {
-            k4abt_joint_id_t.K4ABT_JOINT_WRIST_LEFT,
-            k4abt_joint_id_t.K4ABT_JOINT_WRIST_RIGHT,
-            k4abt_joint_id_t.K4ABT_JOINT_FOOT_LEFT,
-            k4abt_joint_id_t.K4ABT_JOINT_FOOT_RIGHT,
-            k4abt_joint_id_t.K4ABT_JOINT_HEAD,
-        };
+        [Tooltip("Manual-bake source: whole-recording per-joint trajectories. Auto-resolved if empty.")]
+        public BodyTrackingPlayback playback;
 
-        [Tooltip("OfflineTrajectories only: transform mapping camera-local trajectory samples " +
-                 "into world. Leave empty to use the first MotionLineRenderer's transform.")]
+        [Tooltip("Manual bake: transform mapping camera-local trajectory samples into world. " +
+                 "Leave empty to use the first MotionLineRenderer's transform.")]
         public Transform sourceSpace;
 
         [Header("Capsule")]
@@ -132,14 +79,13 @@ namespace TSDF
                  "aliases / disappears at the volume resolution.")]
         public float radius = 0.05f;
 
-        [Tooltip("Drop trajectory samples below this confidence before linking segments. " +
-                 "MEDIUM is the SDK ceiling for real observations; LOW lets predicted joints in.")]
+        [Tooltip("Manual bake: drop trajectory samples below this confidence before linking " +
+                 "segments. MEDIUM is the SDK ceiling for real observations.")]
         public k4abt_joint_confidence_level_t minConfidence =
             k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_MEDIUM;
 
         [Min(1)]
-        [Tooltip("Use every Nth trajectory sample as a capsule endpoint. >1 thins the " +
-                 "segment count (cheaper bake) at the cost of a coarser trail.")]
+        [Tooltip("Manual bake: use every Nth trajectory sample as a capsule endpoint.")]
         public int sampleStride = 1;
 
         [Header("Colour")]
@@ -154,19 +100,12 @@ namespace TSDF
 
         [Header("Performance")]
         [Min(1)]
-        [Tooltip("Hard cap on capsule segments. Excess segments past this are dropped (logged).")]
+        [Tooltip("Manual bake: hard cap on capsule segments (excess dropped, logged).")]
         public int maxSegments = 20000;
 
         [Min(1)]
-        [Tooltip("Segments processed per Dispatch. Smaller = more dispatches but each is " +
-                 "shorter, avoiding the ~2s GPU TDR watchdog on dense trails.")]
+        [Tooltip("Manual bake: segments processed per Dispatch (TDR-safe batching).")]
         public int batchSize = 512;
-
-        [Min(0f)]
-        [Tooltip("Capture only: skip (and reseed) a per-frame segment longer than this (metres). " +
-                 "Guards against a joint teleport / low-confidence pop stamping a huge bridge. " +
-                 "0 = no limit.")]
-        public float maxSegmentStep = 0.5f;
 
         public string LastStatus { get; private set; } = "";
 
@@ -185,11 +124,9 @@ namespace TSDF
         private int _kernel = -1;
         private int _boxKernel = -1;
 
-        // Persistent, reused across bakes so a per-frame live bake never allocates
-        // (Codex: GC / buffer churn would skew the perf read). The segment list is
-        // Clear()ed and refilled each build; the ComputeBuffer only grows.
+        // Reused so a per-frame capture bake never allocates. The list is Clear()ed and
+        // refilled each build; the ComputeBuffer only grows.
         private readonly List<TrailSeg> _segScratch = new List<TrailSeg>();
-        private readonly List<Vector3> _trailScratch = new List<Vector3>();
         private ComputeBuffer _segBuf;
 
         // Incremental-accumulate capture state. We sample "sites" = points along every bone
@@ -209,11 +146,8 @@ namespace TSDF
         private Vector3[] _batchVMin;   // voxel-space AABB min per bone
         private Vector3[] _batchVMax;
 
-        // LiveFuse subscription bookkeeping so we hook exactly one integrator and
-        // detach cleanly on mode change / disable.
+        // Integrator hook subscription (used only while capturing with accumulateBody).
         private TSDFIntegrator _subscribedIntegrator;
-        private bool _warnedTrailOnlyConflict;
-        private bool _scannedForOtherBakers;
 
         private void OnDisable()
         {
@@ -231,70 +165,15 @@ namespace TSDF
 
         private void Update()
         {
-            if (IsCapturing) { CaptureTick(); return; }   // capture overrides the follow modes
-
-            switch (liveMode)
-            {
-                case LiveMode.Off:
-                    UnsubscribeFuse();
-                    break;
-
-                case LiveMode.LiveTrailOnly:
-                    UnsubscribeFuse();
-                    WarnIfMultipleBakers();
-                    LiveTrailOnlyTick();
-                    break;
-
-                case LiveMode.LiveFuse:
-                    WarnIfMultipleBakers();
-                    EnsureFuseSubscribed();
-                    break;
-            }
+            if (IsCapturing) CaptureTick();   // capture is the only per-frame path; else button-driven
         }
 
-        // ---- Live: trail-only (baker owns clear/bake/publish) ----------------
-        private void LiveTrailOnlyTick()
-        {
-            if (!ResolveVolume(silent: true)) return;
-
-            // The integrator would clear + publish the body over our trail every
-            // frame. LiveTrailOnly requires it idle; warn once if it is still driving.
-            if (integrator == null) integrator = FindFirstObjectByType<TSDFIntegrator>();
-            if (integrator != null && integrator.isActiveAndEnabled &&
-                integrator.integrationEnabled && integrator.volume == volume)
-            {
-                if (!_warnedTrailOnlyConflict)
-                {
-                    Debug.LogWarning("[TSDFTrailBaker] LiveTrailOnly: a TSDFIntegrator is still " +
-                                     "integrating into this volume — it will fight the trail bake " +
-                                     "(last publish per frame wins → flicker). Disable the integrator " +
-                                     "(or set integrationEnabled=false) for a clean trail-only view.", this);
-                    _warnedTrailOnlyConflict = true;
-                }
-            }
-            else _warnedTrailOnlyConflict = false;
-
-            BakeCore(clearWrite: true, doPublish: true, silent: true);
-        }
-
-        // ---- Live: fuse into the body via the integrator's pre-publish hook -----
+        // ---- Integrator pre-publish hook (body-sweep capture) -------------------
         private void EnsureFuseSubscribed()
         {
             if (integrator == null) integrator = FindFirstObjectByType<TSDFIntegrator>();
-            if (integrator == null)
-            {
-                if (_subscribedIntegrator == null && !_warnedTrailOnlyConflict)
-                {
-                    // reuse the warn flag as a one-shot latch for "no integrator"
-                    Debug.LogWarning("[TSDFTrailBaker] LiveFuse: no TSDFIntegrator found to hook. " +
-                                     "The trail will not appear until an integrator is publishing batches.", this);
-                    _warnedTrailOnlyConflict = true;
-                }
-                return;
-            }
-            _warnedTrailOnlyConflict = false;
-
-            if (_subscribedIntegrator == integrator) return;   // already hooked the right one
+            if (integrator == null) return;
+            if (_subscribedIntegrator == integrator) return;
             UnsubscribeFuse();
             integrator.BeforePublishCompleteBatch += OnBeforePublish;
             _subscribedIntegrator = integrator;
@@ -309,32 +188,26 @@ namespace TSDF
             }
         }
 
-        // Fired by the integrator immediately before it publishes a completed batch:
-        // the just-integrated body is in WriteBuffer, so min-union the trail into it
-        // and return. We must NOT publish — the integrator does that next. Empty trail
-        // is a silent no-op so the body still publishes normally (Codex edge case).
+        // Fired just before the integrator publishes a completed batch: the freshly-folded
+        // body is in WriteBuffer, so min-union the current trail into it (we don't publish —
+        // the integrator does that next). Only active during a body-sweep capture.
         private void OnBeforePublish(TSDFIntegrator integ, TSDFVolume vol)
         {
-            if (vol == null) return;
-            volume = vol;   // fuse into exactly the volume the integrator is about to publish
-            if (IsCapturing)
-                StampNewSegments(doPublish: false);   // accumulate: only NEW segments, local box
-            else
-                BakeCore(clearWrite: false, doPublish: false, silent: true);   // follow: re-bake the window (volume is cleared each batch)
+            if (!IsCapturing || vol == null) return;
+            volume = vol;
+            StampNewSegments(doPublish: false);
         }
 
         // ---- Capture: Start/Stop accumulation into a persistent (frozen) sculpture ----
-        // The motion between Start and Stop accumulates into ONE never-cleared single buffer
-        // (min-union), then Stop freezes it. accumulateBody chooses trail-only vs trail+body.
         [ContextMenu("Start capture")]
         public void StartCapture()
         {
             if (!ResolveVolume(silent: false)) return;
             if (integrator == null) integrator = FindFirstObjectByType<TSDFIntegrator>();
 
-            // Switch the volume to a single persistent accumulation buffer. The integrator
+            // Single persistent accumulation buffer (no ping-pong clear). The integrator
             // forces volume.doubleBuffered = clearVolumeOnNewBatch every Update, so clearing
-            // that flag is what keeps us single-buffered while it runs.
+            // that flag keeps us single-buffered while it runs.
             if (integrator != null)
             {
                 integrator.volume = volume;
@@ -345,17 +218,13 @@ namespace TSDF
 
             if (accumulateBody && integrator != null)
             {
-                // Body sweep accumulates via the integrator's fold path; the trail rides the
-                // fold's pre-publish hook so both land in the same accumulation buffer.
-                integrator.integrationEnabled = true;
+                integrator.integrationEnabled = true;   // fold the body sweep each instant
                 integrator.BeginFreshBatch();
-                EnsureFuseSubscribed();
+                EnsureFuseSubscribed();                 // trail rides the fold's pre-publish hook
             }
             else
             {
-                // Trail only: keep the integrator from touching the volume; the baker
-                // min-unions the current trail into the persistent buffer each frame.
-                if (integrator != null) integrator.integrationEnabled = false;
+                if (integrator != null) integrator.integrationEnabled = false;   // trail only
                 UnsubscribeFuse();
                 volume.ClearWrite();
                 volume.Publish();
@@ -391,9 +260,8 @@ namespace TSDF
 
         // Incremental accumulate: each frame, sample points along every bone (endpoints +
         // boneStep interpolation) and stamp only the NEW segment each site moved through, into
-        // just the voxels inside that bone's AABB. Cost is independent of the total volume size
-        // (unlike the full-volume BakeCore). Never clears — the persistent single buffer
-        // accumulates the whole Start->Stop sweep of the skeleton (joints + along bones).
+        // just the voxels inside that bone's AABB. Cost is independent of the total volume size.
+        // Never clears — the persistent single buffer accumulates the whole Start->Stop sweep.
         private void StampNewSegments(bool doPublish)
         {
             if (volume == null) return;
@@ -513,7 +381,7 @@ namespace TSDF
             }
         }
 
-        // ---- Manual bakes (ContextMenu) — report failures loudly ---------------
+        // ---- Manual one-shot bakes (ContextMenu) from BodyTrackingPlayback ------
         [ContextMenu("Bake BT trail into volume")]
         public void BakeTrailIntoVolume()
         {
@@ -521,65 +389,43 @@ namespace TSDF
             BakeCore(clearWrite: clearVolumeFirst, doPublish: true, silent: false);
         }
 
-        // Phase 1: fuse the trail into the CURRENTLY DISPLAYED body. After the
-        // integrator's last Publish() the body is in FrontBuffer while WriteBuffer holds
-        // stale scratch, so copy Front->Write first, then min-union the trail and publish.
+        // Fuse the trail into the CURRENTLY DISPLAYED body: after the last Publish() the body
+        // is in FrontBuffer while WriteBuffer holds stale scratch, so copy Front->Write first,
+        // then min-union the trail and publish.
         [ContextMenu("Fuse trail into displayed body")]
         public void FuseTrailIntoDisplayedBody()
         {
             if (!ResolveVolume(silent: false)) return;
-            volume.CopyFrontToWrite();   // put the on-screen body back into the write buffer
+            volume.CopyFrontToWrite();
             BakeCore(clearWrite: false, doPublish: true, silent: false);
         }
 
-        // ---- Core bake routine -------------------------------------------------
-        // Writes into volume.WriteBuffer/WriteColorBuffer. clearWrite wipes it first
-        // (trail-only); doPublish swaps/bumps so views pick it up (false = a hook
-        // subscriber that lets the integrator publish); silent suppresses the empty-
-        // trail failure log for the live paths (Codex: live empty trail = quiet no-op).
+        // Full-volume bake of the offline recording trajectories (manual path).
         private bool BakeCore(bool clearWrite, bool doPublish, bool silent)
         {
             if (volume == null) { if (!silent) Fail("no TSDFVolume found"); return false; }
 
             var dim = volume.Dim;
-            if (dim.x <= 0 || dim.y <= 0 || dim.z <= 0)
-            {
-                if (!silent) Fail("volume not initialised (Dim is 0)");
-                return false;
-            }
-            if (volume.WriteBuffer == null || volume.WriteColorBuffer == null)
-            {
-                if (!silent) Fail("volume buffers not allocated");
-                return false;
-            }
+            if (dim.x <= 0 || dim.y <= 0 || dim.z <= 0) { if (!silent) Fail("volume not initialised (Dim is 0)"); return false; }
+            if (volume.WriteBuffer == null || volume.WriteColorBuffer == null) { if (!silent) Fail("volume buffers not allocated"); return false; }
 
             int trajCount; bool capped;
-            if (!BuildSegments(silent, out trajCount, out capped))
-            {
-                // BuildSegments already Failed() with a specific reason for the
-                // manual (non-silent) path; silent live path just bails quietly.
-                return false;
-            }
+            if (!BuildOfflineSegments(silent, out trajCount, out capped)) return false;
             if (_segScratch.Count == 0)
             {
-                if (!silent) Fail(source == TrailSource.LiveWindowedTrail
-                    ? "no windowed trail segments (enable showBones so trails accumulate, and let " +
-                      "the body move a bit / check ribbonJoints)"
-                    : "no segments built (Read+Process the recording first, and check " +
-                      "deviceSerialFilter / confidence)");
-                return false;   // empty trail: leave the volume as-is (never stalls a body publish)
+                if (!silent) Fail("no segments built (Read+Process the recording first, and check " +
+                                  "deviceSerialFilter / confidence)");
+                return false;
             }
 
             if (!EnsureShader()) { if (!silent) Fail("TSDFTrailBake.compute not found in Resources"); return false; }
             if (!EnsureSegBuffer(_segScratch.Count)) return false;
-
             _segBuf.SetData(_segScratch, 0, 0, _segScratch.Count);
 
             if (clearWrite) volume.ClearWrite();
 
             int total = dim.x * dim.y * dim.z;
             DispatchGrid(total, out int gx, out int gy);
-
             _shader.SetInts("_Dim", dim.x, dim.y, dim.z);
             _shader.SetInt("_DispatchWidth", gx * 64);
             _shader.SetFloat("_Tau", volume.Tau);
@@ -607,45 +453,30 @@ namespace TSDF
             return true;
         }
 
-        // Fill _segScratch with the current source's capsule segments. Returns false
-        // only on a hard source-missing failure (which it logs when !silent via Fail);
-        // an empty-but-valid source returns true with _segScratch.Count == 0.
-        private bool BuildSegments(bool silent, out int trajCount, out bool capped)
+        // Fill _segScratch from BodyTrackingPlayback.Trajectories (camera-local -> world).
+        private bool BuildOfflineSegments(bool silent, out int trajCount, out bool capped)
         {
             _segScratch.Clear();
             trajCount = 0;
             capped = false;
 
-            if (source == TrailSource.LiveWindowedTrail)
-            {
-                if (skeleton == null) skeleton = FindFirstObjectByType<SkeletonMerger>();
-                if (skeleton == null) { if (!silent) Fail("no SkeletonMerger found (LiveWindowedTrail source)"); return false; }
-                BuildWindowedSegments(out trajCount, out capped);
-                return true;
-            }
-
             if (playback == null) playback = FindFirstObjectByType<BodyTrackingPlayback>();
-            if (playback == null) { if (!silent) Fail("no BodyTrackingPlayback found (OfflineTrajectories source)"); return false; }
+            if (playback == null) { if (!silent) Fail("no BodyTrackingPlayback found"); return false; }
             Transform space = sourceSpace;
             if (space == null)
             {
                 var mlr = FindFirstObjectByType<MotionLineRenderer>();
                 if (mlr != null) space = mlr.transform;
             }
-            BuildOfflineSegments(space, out trajCount, out capped);
-            return true;
-        }
 
-        private void BuildOfflineSegments(Transform space, out int trajCount, out bool capped)
-        {
-            capped = false;
             var trajectories = playback.Trajectories;
             trajCount = trajectories != null ? trajectories.Count : 0;
-            if (trajectories == null) return;
+            if (trajectories == null) return true;
 
             int stride = Mathf.Max(1, sampleStride);
             foreach (var traj in trajectories)
             {
+                if (!BodyTrackingShared.IsDrawnJoint(traj.JointId)) continue;   // never bake the hand joints
                 var samples = traj.Samples;
                 Color baseCol = perJointHue
                     ? HueFor((int)traj.JointId, K4ABTConsts.K4ABT_JOINT_COUNT) * trailColor
@@ -660,60 +491,16 @@ namespace TSDF
                     {
                         Vector3 a = ToWorld(space, samples[prev].Position);
                         Vector3 b = ToWorld(space, samples[i].Position);
-                        if ((b - a).sqrMagnitude > 1e-10f)   // skip zero-length (still joints)
-                        {
-                            _segScratch.Add(new TrailSeg { a = a, b = b, ra = radius, rb = radius, color = colVec });
-                            if (_segScratch.Count >= maxSegments) { capped = true; return; }
-                        }
-                    }
-                    prev = i;
-                }
-            }
-        }
-
-        // Build capsule segments from the SkeletonMerger's current windowed trail for each
-        // selected joint (the same ribbon centerline it draws). trajCount = joints that
-        // contributed at least one segment.
-        private void BuildWindowedSegments(out int trajCount, out bool capped)
-        {
-            capped = false;
-            trajCount = 0;
-            if (ribbonJoints == null) return;
-
-            int stride = Mathf.Max(1, sampleStride);
-            foreach (var joint in ribbonJoints)
-            {
-                // Enforce the project-wide hand exclusion even if the Inspector list still
-                // contains a hand joint — k4abt gives those NONE confidence (garbage pos).
-                if (!BodyTrackingShared.IsDrawnJoint(joint)) continue;
-                _trailScratch.Clear();
-                int n = skeleton.CopyTrailWorldPoints(joint, _trailScratch);
-                if (n < 2) continue;
-
-                Color baseCol = perJointHue
-                    ? HueFor((int)joint, K4ABTConsts.K4ABT_JOINT_COUNT) * trailColor
-                    : trailColor;
-                Vector3 colVec = new Vector3(baseCol.r, baseCol.g, baseCol.b);
-
-                bool contributed = false;
-                int prev = -1;
-                for (int i = 0; i < n; i += stride)
-                {
-                    if (prev >= 0)
-                    {
-                        Vector3 a = _trailScratch[prev];
-                        Vector3 b = _trailScratch[i];
                         if ((b - a).sqrMagnitude > 1e-10f)
                         {
                             _segScratch.Add(new TrailSeg { a = a, b = b, ra = radius, rb = radius, color = colVec });
-                            contributed = true;
-                            if (_segScratch.Count >= maxSegments) { capped = true; if (contributed) trajCount++; return; }
+                            if (_segScratch.Count >= maxSegments) { capped = true; return true; }
                         }
                     }
                     prev = i;
                 }
-                if (contributed) trajCount++;
             }
+            return true;
         }
 
         private bool ResolveVolume(bool silent)
@@ -723,8 +510,7 @@ namespace TSDF
             return true;
         }
 
-        // Grow-only reusable segment buffer (48-byte TrailSeg). Never shrinks so a
-        // steady-state live bake stops reallocating once it hits its peak count.
+        // Grow-only reusable segment buffer (48-byte TrailSeg).
         private bool EnsureSegBuffer(int count)
         {
             if (count <= 0) return false;
@@ -734,21 +520,6 @@ namespace TSDF
                 _segBuf = new ComputeBuffer(Mathf.Max(count, 256), sizeof(float) * 12);
             }
             return true;
-        }
-
-        // One-shot scan (first live frame): warn if a second baker is also live, since
-        // they would both min-union into the same volume and stack / fight.
-        private void WarnIfMultipleBakers()
-        {
-            if (_scannedForOtherBakers) return;
-            _scannedForOtherBakers = true;
-            var all = FindObjectsByType<TSDFTrailBaker>(FindObjectsSortMode.None);
-            int live = 0;
-            foreach (var b in all) if (b.liveMode != LiveMode.Off) live++;
-            if (live > 1)
-                Debug.LogWarning("[TSDFTrailBaker] More than one baker is in a live mode. Multiple " +
-                                 "bakers min-union into the same volume and will stack / fight. Keep " +
-                                 "one live baker per volume.", this);
         }
 
         private static Vector3 ToWorld(Transform space, Vector3 local)
@@ -770,8 +541,8 @@ namespace TSDF
             return _kernel >= 0 && _boxKernel >= 0;
         }
 
-        // Mirrors TSDFVolume.DispatchGrid: linearise total threads into a 2D grid
-        // (gx, gy) of 64-thread groups, capped at the 65535-per-axis D3D limit.
+        // Linearise total threads into a 2D grid (gx, gy) of 64-thread groups,
+        // capped at the 65535-per-axis D3D limit.
         private static void DispatchGrid(int total, out int gx, out int gy)
         {
             int groups = Mathf.CeilToInt(total / 64f);

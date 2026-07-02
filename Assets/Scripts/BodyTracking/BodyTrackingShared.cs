@@ -9,38 +9,6 @@ namespace BodyTracking
 {
     public static class BodyTrackingShared
     {
-        public enum TrailColorMode { PerJointHue, FlatColor, PerBody, AccelHeatmap, FrameHue }
-
-        // Inputs for TrailColorMode.FrameHue: hue is driven by Time.frameCount,
-        // oscillating sinusoidally around CenterHue with amplitude HueRange/2.
-        // Saturation/Value are constants (HSV mode), CyclePeriodFrames sets the
-        // wavelength of the oscillation. All values clamp to sane ranges in
-        // FrameHueRGB so out-of-range Inspector values stay safe.
-        public struct FrameHueParams
-        {
-            public float CenterHue;        // [0, 1)
-            public float HueRange;         // [0, 1] full sweep width around CenterHue
-            public float Saturation;       // [0, 1]
-            public float Value;            // [0, 1]
-            public float CyclePeriodFrames; // > 0; sin period in frames
-        }
-
-        /// <summary>
-        /// Convert the FrameHue parameters at the given frame index into an RGB color.
-        /// Hue cycles as: h = (CenterHue + HueRange/2 * sin(2π * frame / period)) mod 1.
-        /// </summary>
-        public static UnityEngine.Color FrameHueRGB(in FrameHueParams p, int frame)
-        {
-            float period = p.CyclePeriodFrames > 0f ? p.CyclePeriodFrames : 1f;
-            float phase = 2f * UnityEngine.Mathf.PI * (frame / period);
-            float halfRange = UnityEngine.Mathf.Clamp01(p.HueRange) * 0.5f;
-            float rawHue = p.CenterHue + halfRange * UnityEngine.Mathf.Sin(phase);
-            float h = UnityEngine.Mathf.Repeat(rawHue, 1f);
-            float s = UnityEngine.Mathf.Clamp01(p.Saturation);
-            float v = UnityEngine.Mathf.Clamp01(p.Value);
-            return UnityEngine.Color.HSVToRGB(h, s, v);
-        }
-
         // Convert a K4A camera-frame point (mm, right-handed: +X right, +Y down, +Z forward)
         // into Unity local coordinates (m, left-handed: +Y up).
         public static Vector3 K4AmmToUnity(in k4a_float3_t p)
