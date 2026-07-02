@@ -43,12 +43,27 @@ namespace Shared.EditorTools
                 using (new EditorGUI.DisabledScope(!c.CanStart))
                 {
                     if (GUILayout.Button("● " + c.StartLabel, GUILayout.Height(24)))
+                    {
+                        // In edit mode Start/Stop may mutate serialized fields (e.g.
+                        // PointCloudCumulative.noErase), so make it undoable + dirty
+                        // the scene. In play mode Undo is meaningless — skip it.
+                        if (!Application.isPlaying && target != null)
+                            Undo.RecordObject(target, c.StartLabel);
                         c.StartAccumulate();
+                        if (!Application.isPlaying && target != null)
+                            EditorUtility.SetDirty(target);
+                    }
                 }
                 using (new EditorGUI.DisabledScope(!c.CanStop))
                 {
                     if (GUILayout.Button("■ Stop", GUILayout.Height(24)))
+                    {
+                        if (!Application.isPlaying && target != null)
+                            Undo.RecordObject(target, "Stop accumulation");
                         c.StopAccumulate();
+                        if (!Application.isPlaying && target != null)
+                            EditorUtility.SetDirty(target);
+                    }
                 }
                 if (c.CanClear)
                 {
