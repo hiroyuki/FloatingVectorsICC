@@ -110,6 +110,56 @@ namespace TSDF
         public Vector3Int Dim { get; private set; }
         public float Tau => tauMultiplier * voxelSize;
 
+        // ---- Active-block occupancy (Phase 0 task 0-1) ----
+        /// <summary>Marking rim as a multiple of voxelSize: a written voxel with
+        /// sdf below this × voxelSize (ONE-SIDED — no lower bound) marks its owning
+        /// blocks active. The negative side is unbounded (all sdf&lt;0 marks) so no
+        /// straddling cell is ever dropped; this is just a small positive rim past
+        /// iso. See TSDFBlockActive.hlsl for the completeness argument.</summary>
+        public const float MarkBandVoxels = 1.0f;
+
+        /// <summary>Block-grid dims = ceil((Dim-1)/8) per axis (8³ cells per block).
+        /// One <see cref="FrontBlockActive"/>/<see cref="WriteBlockActive"/> uint per
+        /// block records whether that block currently emits surface.</summary>
+        public Vector3Int BlockDim { get; private set; }
+
+        /// <summary>Per-block occupancy set (uint per block, 1 = active) for the
+        /// DISPLAYED front buffer — active-block Marching Cubes consumes ONLY this.
+        /// Swapped with <see cref="FrontBuffer"/> in <see cref="Publish"/> so it always
+        /// matches the front SDF. Aliases <see cref="WriteBlockActive"/> in single-buffer mode.</summary>
+        public ComputeBuffer FrontBlockActive { get; private set; }
+        /// <summary>Occupancy set for the hidden write buffer — kernels that write
+        /// observable voxels (integrate/fold/trail-bake) mark this. Zeroed by
+        /// <see cref="ClearWrite"/>, swapped to front in <see cref="Publish"/>.</summary>
+        public ComputeBuffer WriteBlockActive { get; private set; }
+        /// <summary>Occupancy scratch paired with the accumulate INSTANCE buffer. The
+        /// integrate kernel always writes _BlockActive, so accumulate-mode integration
+        /// (which fills the instance buffer) marks here; nothing reads it — the real
+        /// accumulation set is marked by TSDFFold into <see cref="WriteBlockActive"/>.</summary>
+        public ComputeBuffer InstanceBlockActive => _baInst;
+
+        /// <summary>Total GPU memory (bytes) currently held by this volume's compute
+        /// buffers — sdf + colour physical backing pair, plus the accumulate instance
+        /// scratch when allocated. Reported by TSDFView's per-second diagnostics so the
+        /// VRAM figure is measured from real <c>count × stride</c>, not hand-estimated.</summary>
+        public long GpuBufferBytes
+        {
+            get
+            {
+                long b = 0;
+                if (_bufA != null) b += (long)_bufA.count * sizeof(float) * 2;
+                if (_bufB != null) b += (long)_bufB.count * sizeof(float) * 2;
+                if (_colA != null) b += (long)_colA.count * sizeof(float) * 4;
+                if (_colB != null) b += (long)_colB.count * sizeof(float) * 4;
+                if (_instSdf != null) b += (long)_instSdf.count * sizeof(float) * 2;
+                if (_instColor != null) b += (long)_instColor.count * sizeof(float) * 4;
+                if (_baA != null) b += (long)_baA.count * sizeof(uint);
+                if (_baB != null) b += (long)_baB.count * sizeof(uint);
+                if (_baInst != null) b += (long)_baInst.count * sizeof(uint);
+                return b;
+            }
+        }
+
         /// <summary>
         /// Maps voxel index space (i+0.5, j+0.5, k+0.5) → world. Use this in the
         /// integrate / MC kernels to recover each voxel's world position without
@@ -123,7 +173,15 @@ namespace TSDF
 
         private ComputeShader _clearShader;
         private int _clearKernel;
+        private int _clearUintKernel;
         private bool _dimsDirty = true;
+
+        // Physical active-block backing buffers, mirroring _bufA/_bufB. _baB is null in
+        // single-buffer mode (WriteBlockActive aliases FrontBlockActive == _baA).
+        private ComputeBuffer _baA;
+        private ComputeBuffer _baB;
+        // Active-block scratch for the accumulate instance buffer (never MC-consumed).
+        private ComputeBuffer _baInst;
 
         [Header("Noise removal (connected-component filter — issue #29)")]
         [Tooltip("On RemoveSmallComponents(), drop solid components smaller than this " +
@@ -217,6 +275,12 @@ namespace TSDF
         public void ClearWrite()
         {
             ClearBuffer(WriteBuffer);
+            // The write set travels with the write SDF buffer: a live-follow batch
+            // clears and fully rebuilds it, so its occupancy must reset too. In
+            // single-buffer mode this aliases the front set — but ClearWrite is only
+            // called by the live-follow path (double-buffered), never in accumulate,
+            // so the persistent accumulate set is not wrongly wiped here.
+            ClearBlockActive(WriteBlockActive);
         }
 
         /// <summary>
@@ -228,6 +292,10 @@ namespace TSDF
         {
             EnsureInstanceBuffers();
             ClearBuffer(_instSdf);
+            // Zero the instance's own occupancy scratch each instant (integrate marks
+            // it while filling the instance buffer). It is never MC-consumed, but must
+            // be a valid, bound buffer for the integrate dispatch.
+            ClearBlockActive(_baInst);
             // Colour scratch never needs clearing: the integrate Average path takes
             // rgb fresh on a voxel's first observation (sdf weight 0), matching the
             // main colour-buffer contract.
@@ -259,6 +327,9 @@ namespace TSDF
             // motion sweep's pose-shells join with organic necks (see TSDFFold.compute).
             _foldShader.SetFloat("_Tau", Tau);
             _foldShader.SetFloat("_SmoothK", Mathf.Max(0f, accumulateSmoothK));
+            // Fold marks the accumulation set (= WriteBlockActive; == front in single-
+            // buffer accumulate). Never cleared per instant, so preserved surfaces stay.
+            BindBlockMarking(_foldShader, _foldKernel, WriteBlockActive);
             _foldShader.Dispatch(_foldKernel, gx, gy, 1);
         }
 
@@ -287,6 +358,19 @@ namespace TSDF
             _copyShader.SetBuffer(_copyKernel, "_DstSdf", WriteBuffer);
             _copyShader.SetBuffer(_copyKernel, "_DstColor", WriteColorBuffer);
             _copyShader.Dispatch(_copyKernel, gx, gy, 1);
+
+            // Copy the occupancy set too, so a subsequent trail-bake into the write
+            // buffer min-unions onto the DISPLAYED body's active blocks (not the stale
+            // set left after the last swap). Block count is tiny and this is a rare
+            // manual fuse path, so a CPU roundtrip is acceptable.
+            if (FrontBlockActive != null && WriteBlockActive != null &&
+                !ReferenceEquals(FrontBlockActive, WriteBlockActive) &&
+                FrontBlockActive.count == WriteBlockActive.count)
+            {
+                var tmp = new uint[FrontBlockActive.count];
+                FrontBlockActive.GetData(tmp);
+                WriteBlockActive.SetData(tmp);
+            }
         }
 
         private bool EnsureCopyShader()
@@ -316,6 +400,12 @@ namespace TSDF
                 _instColor?.Release();
                 _instColor = new ComputeBuffer(total, sizeof(float) * 4);
             }
+            int blocks = Mathf.Max(1, BlockDim.x * BlockDim.y * BlockDim.z);
+            if (_baInst == null || _baInst.count != blocks)
+            {
+                _baInst?.Release();
+                _baInst = new ComputeBuffer(blocks, sizeof(uint));
+            }
         }
 
         private bool EnsureFoldShader()
@@ -341,6 +431,10 @@ namespace TSDF
         {
             ClearBuffer(_bufA);
             if (_bufB != null) ClearBuffer(_bufB);
+            // Both SDF buffers cleared → both occupancy sets must be zeroed too, so
+            // the front active set still matches the cleared front SDF (no swap here).
+            ClearBlockActive(_baA);
+            if (_baB != null) ClearBlockActive(_baB);
             PublishVersion++;
 
             if (verboseLogging)
@@ -388,6 +482,11 @@ namespace TSDF
                 var tmpC = FrontColorBuffer;
                 FrontColorBuffer = WriteColorBuffer;
                 WriteColorBuffer = tmpC;
+                // Swap the occupancy sets IN LOCKSTEP so the front set always
+                // describes the front SDF (a partial swap desyncs mesh from volume).
+                var tmpB = FrontBlockActive;
+                FrontBlockActive = WriteBlockActive;
+                WriteBlockActive = tmpB;
             }
             PublishVersion++;
         }
@@ -514,6 +613,45 @@ namespace TSDF
                 return;
             }
             _clearKernel = _clearShader.FindKernel("Clear");
+            _clearUintKernel = _clearShader.FindKernel("ClearUint");
+        }
+
+        /// <summary>Zero a uint occupancy buffer (block-active set) via the ClearUint
+        /// kernel, linearising the dispatch the same way as the voxel Clear.</summary>
+        private void ClearBlockActive(ComputeBuffer buf)
+        {
+            if (buf == null) return;
+            if (_clearShader == null) EnsureClearShader();
+            if (_clearShader == null) return;
+
+            int count = buf.count;
+            int groups = Mathf.CeilToInt(count / 64f);
+            int gx = Mathf.Max(1, Mathf.Min(groups, 65535));
+            int gy = Mathf.Max(1, Mathf.CeilToInt(groups / (float)gx));
+            _clearShader.SetBuffer(_clearUintKernel, "_UintBuf", buf);
+            _clearShader.SetInt("_UintCount", count);
+            _clearShader.SetInt("_DispatchWidth", gx * 64);
+            _clearShader.Dispatch(_clearUintKernel, gx, gy, 1);
+        }
+
+        /// <summary>Zero ONLY the write buffer's occupancy set, without touching the
+        /// write SDF. For full-volume recompose kernels (e.g. TSDFSmoothUnion) that
+        /// overwrite every voxel and re-mark from scratch: call this before dispatch so
+        /// the active set reflects only the composed result, not stale bits from a
+        /// prior compose. (ClearWrite also wipes the SDF, which those kernels don't want.)</summary>
+        public void ClearWriteBlockActive() => ClearBlockActive(WriteBlockActive);
+
+        /// <summary>Bind the shared active-block marking uniforms
+        /// (_BlockActive/_BDim/_MarkBand from TSDFBlockActive.hlsl) so a write-time
+        /// kernel marks <paramref name="blockActive"/>. Every dispatch of a kernel that
+        /// includes TSDFBlockActive.hlsl (integrate/fold/trail-bake) MUST call this, or
+        /// the unbound RWStructuredBuffer trips a dispatch error on some backends.</summary>
+        public void BindBlockMarking(ComputeShader shader, int kernel, ComputeBuffer blockActive)
+        {
+            if (shader == null || blockActive == null) return;
+            shader.SetBuffer(kernel, "_BlockActive", blockActive);
+            shader.SetInts("_BDim", BlockDim.x, BlockDim.y, BlockDim.z);
+            shader.SetFloat("_MarkBand", MarkBandVoxels * voxelSize);
         }
 
         /// <summary>Force a (re)build of the backing buffers now — used after toggling
@@ -563,6 +701,11 @@ namespace TSDF
                 voxelSize = v;
             }
             Dim = new Vector3Int(dx, dy, dz);
+            // Block grid = ceil(cells/8) where cells = dim-1 per axis (8³ cells/block).
+            BlockDim = new Vector3Int(
+                Mathf.Max(1, Mathf.CeilToInt((dx - 1) / 8f)),
+                Mathf.Max(1, Mathf.CeilToInt((dy - 1) / 8f)),
+                Mathf.Max(1, Mathf.CeilToInt((dz - 1) / 8f)));
 
             // World-from-voxel: place voxel index (i+0.5, j+0.5, k+0.5) at the
             // world position of voxel center i,j,k. Anchor is the bbox's
@@ -575,7 +718,13 @@ namespace TSDF
             VoxelFromWorld = WorldFromVoxel.inverse;
 
             int total = dx * dy * dz;
-            bool realloc = _bufA == null || _bufA.count != total || _lastDoubleBuffered != doubleBuffered;
+            int blocks = Mathf.Max(1, BlockDim.x * BlockDim.y * BlockDim.z);
+            // Reallocate on voxel-count OR block-count change: a bbox reshape can keep
+            // dx*dy*dz constant while BlockDim (and _BDim used by the kernels) changes,
+            // which would leave the active-block buffers sized for the old grid and let
+            // CompactBlocks / MarkVoxelActive index out of bounds.
+            bool realloc = _bufA == null || _bufA.count != total || _lastDoubleBuffered != doubleBuffered
+                           || _baA == null || _baA.count != blocks;
             if (realloc)
             {
                 ReleaseBuffer();
@@ -591,6 +740,12 @@ namespace TSDF
                 _colB = doubleBuffered ? new ComputeBuffer(total, sizeof(float) * 4) : null;
                 FrontColorBuffer = _colA;
                 WriteColorBuffer = doubleBuffered ? _colB : _colA;
+                // Active-block occupancy pair, mirroring the SDF front/write pairing
+                // (single-buffer mode → one aliased set, no swap in Publish).
+                _baA = new ComputeBuffer(blocks, sizeof(uint));
+                _baB = doubleBuffered ? new ComputeBuffer(blocks, sizeof(uint)) : null;
+                FrontBlockActive = _baA;
+                WriteBlockActive = doubleBuffered ? _baB : _baA;
                 if (verboseLogging)
                     Debug.Log($"[TSDFVolume] allocated {(doubleBuffered ? 2 : 1)}x {total} voxels = " +
                               $"{total * 8 / (1024 * 1024) * (doubleBuffered ? 2 : 1)} MB " +
@@ -613,6 +768,14 @@ namespace TSDF
             _bufB?.Release();
             _colA?.Release();
             _colB?.Release();
+            _baA?.Release();
+            _baB?.Release();
+            _baInst?.Release();
+            _baA = null;
+            _baB = null;
+            _baInst = null;
+            FrontBlockActive = null;
+            WriteBlockActive = null;
             _instSdf?.Release();
             _instColor?.Release();
             _instSdf = null;

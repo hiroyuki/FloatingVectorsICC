@@ -14,6 +14,7 @@
 // All three modes read the SAME ComputeBuffer owned by TSDFVolume — no CPU
 // readback, no buffer duplication.
 
+using Unity.Profiling;
 using UnityEngine;
 using UnityEngine.Rendering;
 
@@ -94,7 +95,10 @@ namespace TSDF
         [Tooltip("Max triangles the MC output buffer can hold. 333k tris = 1 M " +
                  "vertices, ~12 MB at 36 bytes per triangle (= 3 × float3).")]
         [Min(1024)] public int meshMaxTriangles = 333_333;
-        [Tooltip("Iso-level for MC. 0 = surface where SDF changes sign.")]
+        [Tooltip("Iso-level for MC. 0 = surface where SDF changes sign. NOTE: the " +
+                 "active-block path (useFullGridMC = false) assumes iso ~ 0 — a large " +
+                 "positive iso can drop blocks (active-block marking is one-sided around " +
+                 "0); use full-grid MC if you need a non-trivial nonzero iso.")]
         public float meshIsoLevel = 0f;
         [Tooltip("Minimum corner weight for MC to consider a cell. Matches the " +
                  "Cell view's weight gate so the two views show the same set of cells.")]
@@ -103,8 +107,20 @@ namespace TSDF
                  "last extracted vertex buffer on skip frames.")]
         [Min(1)] public int mcEveryNFrames = 1;
 
+        [Header("Perf / A-B (Phase 0)")]
+        [Tooltip("Reference path: force the OLD full-grid Marching Cubes dispatch over " +
+                 "every (dim-1)^3 cell. ON = full grid (always correct, the pre-0-1 " +
+                 "behaviour); OFF = active-block MC (surface-proportional, added in task " +
+                 "0-1). Flip between the two on the SAME published volume to check the " +
+                 "active-block mesh matches the full-grid mesh (triangle count + visual " +
+                 "parity). Until 0-1 lands this only ever runs the full-grid path.")]
+        public bool useFullGridMC = true;
 
         [Header("Diagnostics")]
+        [Tooltip("Log a per-second summary (voxelSize, dim, tris, VRAM MB, frame ms/fps, " +
+                 "and — once 0-1 lands — active/total blocks). Drives the Phase 0 baseline " +
+                 "table and exit gate. Also wraps MC passes in ProfilerMarkers so the Unity " +
+                 "Profiler shows reliable per-pass GPU/CPU ms on any backend (incl. Metal).")]
         public bool diagnosticLogging = false;
 
         // ---- shared state ----
@@ -112,6 +128,9 @@ namespace TSDF
         private Mesh _cubeMesh;
         private ComputeShader _mcShader;
         private int _mcKernel;
+        private int _mcActiveKernel;
+        private int _compactKernel;
+        private int _buildArgsKernel;
         private int _scaleArgsKernel;
         // Last volume PublishVersion for which we dispatched MC. The mesh on
         // screen therefore corresponds to the last PUBLISHED front buffer — the
@@ -124,6 +143,9 @@ namespace TSDF
         private ComputeBuffer _cellArgsBuffer;
         private ComputeBuffer _meshTrianglesBuffer;  // AppendStructuredBuffer<Tri> (= 3 float3)
         private ComputeBuffer _meshArgsBuffer;       // IndirectArguments [vertCount, 1, 0, 0]
+        private ComputeBuffer _activeBlocksBuffer;   // Append<uint>: compacted active block indices
+        private ComputeBuffer _dispatchArgsBuffer;   // IndirectArguments [blockCount, 1, 1]
+        private int _lastBlockCount = -1;            // for per-second diag (active blocks)
         private int _frameCounter;
 
         private bool _ownsVoxelMat;
@@ -132,6 +154,13 @@ namespace TSDF
 
         private float _diagWindowStart;
         private int _diagMcDispatchesThisWindow;
+
+        // Per-pass CPU markers. Wrapping the Dispatch calls makes each TSDF pass show
+        // up as a named sample in the Unity Profiler, which is the reliable way to read
+        // per-pass GPU/CPU ms on Metal (CPU stopwatches around an async Dispatch only
+        // measure enqueue cost). Named so they group under "TSDF." in the profiler.
+        private static readonly ProfilerMarker s_markMarch = new ProfilerMarker("TSDF.MC.March");
+        private static readonly ProfilerMarker s_markCompact = new ProfilerMarker("TSDF.MC.Compact");
 
         // ---------------------------------------------------------------
         private void OnEnable()
@@ -231,6 +260,23 @@ namespace TSDF
                 _meshArgsBuffer = new ComputeBuffer(4, sizeof(uint), ComputeBufferType.IndirectArguments);
                 _meshArgsBuffer.SetData(new uint[] { 0, 1, 0, 0 });
             }
+
+            // Active-block MC buffers (task 0-1). _activeBlocksBuffer holds the
+            // compacted list of active block indices (capacity = worst-case all blocks);
+            // reallocated when the block grid changes (voxelSize / bbox edit).
+            // _dispatchArgsBuffer is the 3-uint DispatchIndirect args (distinct from the
+            // 4-uint DRAW args above).
+            int blockCount = volume != null ? Mathf.Max(1, volume.BlockDim.x * volume.BlockDim.y * volume.BlockDim.z) : 1;
+            if (_activeBlocksBuffer == null || _activeBlocksBuffer.count != blockCount)
+            {
+                _activeBlocksBuffer?.Release();
+                _activeBlocksBuffer = new ComputeBuffer(blockCount, sizeof(uint), ComputeBufferType.Append);
+            }
+            if (_dispatchArgsBuffer == null)
+            {
+                _dispatchArgsBuffer = new ComputeBuffer(3, sizeof(uint), ComputeBufferType.IndirectArguments);
+                _dispatchArgsBuffer.SetData(new uint[] { 0, 1, 1 });
+            }
         }
 
         private void ReleaseBuffers()
@@ -239,6 +285,8 @@ namespace TSDF
             _cellArgsBuffer?.Release();      _cellArgsBuffer = null;
             _meshTrianglesBuffer?.Release(); _meshTrianglesBuffer = null;
             _meshArgsBuffer?.Release();      _meshArgsBuffer = null;
+            _activeBlocksBuffer?.Release();  _activeBlocksBuffer = null;
+            _dispatchArgsBuffer?.Release();  _dispatchArgsBuffer = null;
         }
 
         private void EnsureMcShader()
@@ -252,6 +300,9 @@ namespace TSDF
                 return;
             }
             _mcKernel = _mcShader.FindKernel("MarchCubes");
+            _mcActiveKernel = _mcShader.FindKernel("MarchCubesActive");
+            _compactKernel = _mcShader.FindKernel("CompactBlocks");
+            _buildArgsKernel = _mcShader.FindKernel("BuildDispatchArgs");
             _scaleArgsKernel = _mcShader.FindKernel("ScaleArgs");
         }
 
@@ -360,18 +411,17 @@ namespace TSDF
         {
             _meshTrianglesBuffer.SetCounterValue(0);
 
-            _mcShader.SetBuffer(_mcKernel, "_Voxels", volume.FrontBuffer);
-            _mcShader.SetBuffer(_mcKernel, "_Colors", volume.FrontColorBuffer);
+            // Iso / weight gates + geometry transform are global shader uniforms shared
+            // by both the full-grid and active-block MC kernels.
             _mcShader.SetInts("_Dim", volume.Dim.x, volume.Dim.y, volume.Dim.z);
             _mcShader.SetMatrix("_WorldFromVoxel", volume.WorldFromVoxel);
             _mcShader.SetFloat("_IsoLevel", meshIsoLevel);
             _mcShader.SetFloat("_MinWeight", meshMinWeight);
-            _mcShader.SetBuffer(_mcKernel, "_Triangles", _meshTrianglesBuffer);
 
-            int gx = Mathf.CeilToInt((volume.Dim.x - 1) / 4f);
-            int gy = Mathf.CeilToInt((volume.Dim.y - 1) / 4f);
-            int gz = Mathf.CeilToInt((volume.Dim.z - 1) / 4f);
-            _mcShader.Dispatch(_mcKernel, Mathf.Max(1, gx), Mathf.Max(1, gy), Mathf.Max(1, gz));
+            if (useFullGridMC)
+                DispatchFullGridMC();
+            else
+                DispatchActiveBlockMC();
 
             // Triangle count -> args[0]. Then the ScaleArgs kernel multiplies
             // args[0] by 3 so DrawProceduralIndirect sees a vertex count.
@@ -381,6 +431,54 @@ namespace TSDF
             _mcShader.Dispatch(_scaleArgsKernel, 1, 1, 1);
 
             _diagMcDispatchesThisWindow++;
+        }
+
+        // Reference path: one thread per cell over the whole (dim-1)^3 grid.
+        private void DispatchFullGridMC()
+        {
+            _mcShader.SetBuffer(_mcKernel, "_Voxels", volume.FrontBuffer);
+            _mcShader.SetBuffer(_mcKernel, "_Colors", volume.FrontColorBuffer);
+            _mcShader.SetBuffer(_mcKernel, "_Triangles", _meshTrianglesBuffer);
+
+            int gx = Mathf.CeilToInt((volume.Dim.x - 1) / 4f);
+            int gy = Mathf.CeilToInt((volume.Dim.y - 1) / 4f);
+            int gz = Mathf.CeilToInt((volume.Dim.z - 1) / 4f);
+            using (s_markMarch.Auto())
+                _mcShader.Dispatch(_mcKernel, Mathf.Max(1, gx), Mathf.Max(1, gy), Mathf.Max(1, gz));
+            _lastBlockCount = -1;   // N/A on the full-grid path
+        }
+
+        // Active-block path (task 0-1): compact the front occupancy set into a block
+        // list, then indirect-dispatch one thread-group per active block. Meshes the
+        // SAME published front buffer as the full-grid path, so the two are comparable
+        // via the useFullGridMC A/B toggle.
+        private void DispatchActiveBlockMC()
+        {
+            // 1) Compact set-bit front blocks into the append list.
+            _activeBlocksBuffer.SetCounterValue(0);
+            _mcShader.SetInts("_BDim", volume.BlockDim.x, volume.BlockDim.y, volume.BlockDim.z);
+            _mcShader.SetBuffer(_compactKernel, "_BlockActiveFront", volume.FrontBlockActive);
+            _mcShader.SetBuffer(_compactKernel, "_ActiveBlocksAppend", _activeBlocksBuffer);
+            int totalBlocks = volume.BlockDim.x * volume.BlockDim.y * volume.BlockDim.z;
+            int cgx = Mathf.Max(1, Mathf.CeilToInt(totalBlocks / 64f));
+            using (s_markCompact.Auto())
+                _mcShader.Dispatch(_compactKernel, cgx, 1, 1);
+
+            // 2) active-block count -> _dispatchArgs[0]; the kernel fills [1]=[2]=1.
+            ComputeBuffer.CopyCount(_activeBlocksBuffer, _dispatchArgsBuffer, 0);
+            _mcShader.SetBuffer(_buildArgsKernel, "_DispatchArgs", _dispatchArgsBuffer);
+            _mcShader.Dispatch(_buildArgsKernel, 1, 1, 1);
+
+            // 3) one group per active block over the front volume. Zero active blocks
+            //    => [0,1,1] => a no-op dispatch (the tri counter stays 0 => nothing drawn).
+            _mcShader.SetBuffer(_mcActiveKernel, "_Voxels", volume.FrontBuffer);
+            _mcShader.SetBuffer(_mcActiveKernel, "_Colors", volume.FrontColorBuffer);
+            _mcShader.SetBuffer(_mcActiveKernel, "_ActiveBlocks", _activeBlocksBuffer);
+            _mcShader.SetBuffer(_mcActiveKernel, "_Triangles", _meshTrianglesBuffer);
+            using (s_markMarch.Auto())
+                _mcShader.DispatchIndirect(_mcActiveKernel, _dispatchArgsBuffer);
+
+            _lastBlockCount = totalBlocks;
         }
 
         // ---------- shared ----------
@@ -408,16 +506,37 @@ namespace TSDF
             if (_diagWindowStart == 0f) _diagWindowStart = now;
             if (now - _diagWindowStart < 1f) return;
 
+            // VRAM = volume backing buffers + this view's own GPU buffers, from real
+            // count×stride (Phase 0 task 0-0: measured, not hand-estimated).
+            long viewBytes = 0;
+            if (_meshTrianglesBuffer != null) viewBytes += (long)_meshTrianglesBuffer.count * _meshTrianglesBuffer.stride;
+            long totalBytes = volume.GpuBufferBytes + viewBytes;
+            float vramMb = totalBytes / (1024f * 1024f);
+            float frameMs = Time.smoothDeltaTime * 1000f;
+            float fps = frameMs > 0f ? 1000f / frameMs : 0f;
+            Vector3Int d = volume.Dim;
+            string path = useFullGridMC ? "full-grid" : "active-block";
+
             if (mode == ViewMode.Mesh)
             {
                 var args = new uint[4];
                 _meshArgsBuffer.GetData(args);
                 int verts = (int)args[0];
-                Debug.Log($"[TSDFView Mesh] mcDispatches={_diagMcDispatchesThisWindow}/s vertices={verts} tris={verts / 3}", this);
+                string blocks = "";
+                if (!useFullGridMC && _dispatchArgsBuffer != null && _lastBlockCount > 0)
+                {
+                    var da = new uint[3];
+                    _dispatchArgsBuffer.GetData(da);
+                    blocks = $" activeBlocks={da[0]}/{_lastBlockCount}";
+                }
+                Debug.Log($"[TSDFView Mesh] path={path} voxelSize={volume.voxelSize:F3}m " +
+                          $"dim={d.x}x{d.y}x{d.z} mcDispatches={_diagMcDispatchesThisWindow}/s " +
+                          $"tris={verts / 3}{blocks} vram={vramMb:F1}MB frame={frameMs:F1}ms ({fps:F0}fps)", this);
             }
             else
             {
-                Debug.Log($"[TSDFView] mode={mode}", this);
+                Debug.Log($"[TSDFView] mode={mode} voxelSize={volume.voxelSize:F3}m " +
+                          $"dim={d.x}x{d.y}x{d.z} vram={vramMb:F1}MB frame={frameMs:F1}ms ({fps:F0}fps)", this);
             }
             _diagMcDispatchesThisWindow = 0;
             _diagWindowStart = now;

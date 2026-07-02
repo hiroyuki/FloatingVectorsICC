@@ -55,6 +55,11 @@ int _BoxDispatchWidth;       // = groupsX * 64 for the box linearisation
 RWStructuredBuffer<float2> _VoxelsOut;  // x = sdf (m), y = weight
 RWStructuredBuffer<float4> _ColorsOut;  // rgb + colour weight (parallel to _VoxelsOut)
 
+// Write-time active-block marking (task 0-1): trail geometry is baked into the
+// displayed buffer and re-meshed, so it must mark its blocks or active-block MC
+// drops the sculpture. TSDFTrailBaker binds _BlockActive to WriteBlockActive.
+#include "TSDFBlockActive.hlsl"
+
 // Distance from p to segment a->b, plus the clamped axial parameter h in [0,1]
 // (0 = at a, 1 = at b) so the radius can taper along the capsule.
 float DistPointSeg(float3 p, float3 a, float3 b, out float h)
@@ -101,6 +106,9 @@ void StampVoxel(uint gLin, float3 p)
     {
         _VoxelsOut[gLin] = float2(sdf, 1.0);
         _ColorsOut[gLin] = float4(col, 1.0);
+        uint dx = (uint)_Dim.x, dy = (uint)_Dim.y;
+        int3 vc = int3((int)(gLin % dx), (int)((gLin / dx) % dy), (int)(gLin / (dx * dy)));
+        MarkVoxelActive(vc, _Dim, sdf, 1.0);
     }
 }
 

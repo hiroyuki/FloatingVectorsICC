@@ -109,6 +109,11 @@ uint LoadDepthU16(int u, int v)
 // voxels → >100k groups in 1D).
 int _DispatchWidth;
 
+// Write-time active-block marking (task 0-1). Declares _BlockActive/_BDim/_MarkBand;
+// TSDFIntegrator binds these each dispatch (write-buffer set in live-follow, an
+// unread instance-scratch set in accumulate mode — MarkVoxelActive runs either way).
+#include "TSDFBlockActive.hlsl"
+
 [numthreads(64, 1, 1)]
 void Integrate(uint3 id : SV_DispatchThreadID)
 {
@@ -202,4 +207,9 @@ void Integrate(uint3 id : SV_DispatchThreadID)
             _Colors[lin] = float4(rgb, max(prev.y, wObs));
         }
     }
+
+    // Mark this voxel's owning blocks active if it now holds a near-surface
+    // observation. Re-read so both accumulation modes use the final stored value.
+    float2 fin = _Voxels[lin];
+    MarkVoxelActive(int3((int)i, (int)j, (int)k), _Dim, fin.x, fin.y);
 }

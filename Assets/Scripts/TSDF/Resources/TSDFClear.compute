@@ -4,6 +4,7 @@
 // this initial value and Marching Cubes will skip them (weight == 0 gate).
 
 #pragma kernel Clear
+#pragma kernel ClearUint
 
 RWStructuredBuffer<float2> _Voxels;   // x = tsdf, y = weight
 int3 _Dim;                            // grid dimensions
@@ -20,4 +21,19 @@ void Clear(uint3 id : SV_DispatchThreadID)
     if (linearIdx >= total) return;
 
     _Voxels[linearIdx] = float2(_InitTsdf, 0.0);
+}
+
+// Zero an arbitrary uint buffer. Used by TSDFVolume to reset the per-buffer
+// active-block occupancy sets (see TSDFBlockActive.hlsl) with the same lifecycle
+// as the SDF buffer they describe. _UintCount is the element count; the 2D
+// dispatch is linearised via _DispatchWidth exactly like Clear.
+RWStructuredBuffer<uint> _UintBuf;
+int _UintCount;
+
+[numthreads(64, 1, 1)]
+void ClearUint(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.y * (uint)_DispatchWidth + id.x;
+    if (idx >= (uint)_UintCount) return;
+    _UintBuf[idx] = 0u;
 }
