@@ -11,12 +11,12 @@ using UnityEngine;
 
 namespace PointCloud
 {
-    public class PointCloudCameraManager : MonoBehaviour
+    public class SensorManager : MonoBehaviour
     {
         [Header("Mode")]
         [Tooltip("When ON, Start() does NOT enumerate Femto Bolt devices or spawn live " +
-                 "PointCloudRenderers — Play simply drives PointCloudRecorder playback of " +
-                 "whatever recording PointCloudRecorder.folderPath points at. Use to test " +
+                 "PointCloudRenderers — Play simply drives SensorRecorder playback of " +
+                 "whatever recording SensorRecorder.folderPath points at. Use to test " +
                  "scenes without the camera rig plugged in. When OFF the original live " +
                  "capture path runs.")]
         public bool playbackOnly = false;
@@ -39,7 +39,7 @@ namespace PointCloud
         public ObStreamType alignTargetStream = ObStreamType.Color;
 
         [Tooltip("Optional shared bounding box applied to every spawned renderer.")]
-        public PointCloudBoundingBox defaultBoundingBox;
+        public BoundingVolume defaultBoundingBox;
 
         [Tooltip("Optional shared decimater applied to every spawned renderer.")]
         public PointCloudDecimater defaultDecimater;
@@ -110,7 +110,7 @@ namespace PointCloud
                  "local origin (legacy behavior).")]
         public bool applyExtrinsics = false;
         [Tooltip("Root directory for extrinsics.yaml lookup. Same root convention as " +
-                 "PointCloudRecorder.folderPath. Empty → Application.persistentDataPath/Recordings/recording.")]
+                 "SensorRecorder.folderPath. Empty → Application.persistentDataPath/Recordings/recording.")]
         public string extrinsicsRoot = string.Empty;
 
         [Header("Diagnostics")]
@@ -148,14 +148,14 @@ namespace PointCloud
             if (playbackOnly)
             {
                 if (verboseLogging)
-                    Debug.Log($"[{nameof(PointCloudCameraManager)}] playbackOnly=true; skipping device enumeration. " +
-                              "PointCloudRecorder will drive playback from its folderPath.");
+                    Debug.Log($"[{nameof(SensorManager)}] playbackOnly=true; skipping device enumeration. " +
+                              "SensorRecorder will drive playback from its folderPath.");
                 return;
             }
             var ctx = OrbbecRuntime.Context;
             var devices = ctx.QueryDevices();
             if (verboseLogging)
-                Debug.Log($"[{nameof(PointCloudCameraManager)}] Found {devices.Count} device(s).");
+                Debug.Log($"[{nameof(SensorManager)}] Found {devices.Count} device(s).");
 
             for (int i = 0; i < devices.Count; i++)
             {
@@ -186,7 +186,7 @@ namespace PointCloud
         /// <summary>
         /// Destroy every spawned PointCloudRenderer GameObject so its capture
         /// thread / OrbbecSDK pipeline tears down and releases the USB device.
-        /// Called by PointCloudRecorder.Read so playback runs without the live
+        /// Called by SensorRecorder.Read so playback runs without the live
         /// cameras competing for USB bandwidth / GPU. Manager itself stays alive
         /// but won't re-spawn (Start only ran once). Re-connecting requires
         /// reloading the scene (or re-entering Play mode).
@@ -258,7 +258,7 @@ namespace PointCloud
             if (!File.Exists(path))
             {
                 if (verboseLogging)
-                    Debug.Log($"[{nameof(PointCloudCameraManager)}] applyExtrinsics: no file at {path}, skipping.");
+                    Debug.Log($"[{nameof(SensorManager)}] applyExtrinsics: no file at {path}, skipping.");
                 return;
             }
 
@@ -270,7 +270,7 @@ namespace PointCloud
             catch (Exception e)
             {
                 Debug.LogWarning(
-                    $"[{nameof(PointCloudCameraManager)}] applyExtrinsics: parse failed for {path}: {e.Message}",
+                    $"[{nameof(SensorManager)}] applyExtrinsics: parse failed for {path}: {e.Message}",
                     this);
                 return;
             }
@@ -286,14 +286,14 @@ namespace PointCloud
             }
             if (verboseLogging)
                 Debug.Log(
-                    $"[{nameof(PointCloudCameraManager)}] applyExtrinsics: applied to {applied}/{_renderers.Count} renderer(s) from {path}.");
+                    $"[{nameof(SensorManager)}] applyExtrinsics: applied to {applied}/{_renderers.Count} renderer(s) from {path}.");
         }
 
         /// <summary>
         /// Resolves <see cref="extrinsicsRoot"/> to an absolute path: empty string
         /// defaults to <c>&lt;persistentDataPath&gt;/Recordings/recording</c>;
         /// non-empty relative paths are taken under <c>persistentDataPath</c>.
-        /// Exposed so PointCloudRecorder.Save/Read can inherit the same calibration
+        /// Exposed so SensorRecorder.Save/Read can inherit the same calibration
         /// the live renderers used — recordings inherit the rig's current setup
         /// rather than starting from identity in a fresh folder.
         /// </summary>

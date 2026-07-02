@@ -1,4 +1,4 @@
-// Builds per-joint trajectories from a PointCloudRecorder's loaded body track
+// Builds per-joint trajectories from a SensorRecorder's loaded body track
 // (bodies_main RCSV). MotionLineRenderer consumes these to draw the static line
 // meshes after Read finishes.
 //
@@ -21,7 +21,7 @@ namespace BodyTracking
     {
         [Header("Source")]
         [Tooltip("Recorder providing recorded body tracks. Auto-found if left blank.")]
-        public PointCloudRecorder recorder;
+        public SensorRecorder recorder;
 
         [Tooltip("Limit trajectories to one device's recording. Empty = include every loaded track that has bodies.")]
         public string deviceSerialFilter = "";
@@ -70,7 +70,7 @@ namespace BodyTracking
 
         private void OnEnable()
         {
-            if (recorder == null) recorder = FindFirstObjectByType<PointCloudRecorder>();
+            if (recorder == null) recorder = FindFirstObjectByType<SensorRecorder>();
             if (recorder != null) recorder.OnTracksLoaded += HandleTracksLoaded;
         }
 
@@ -95,7 +95,7 @@ namespace BodyTracking
             }
             if (recorder == null)
             {
-                Debug.LogWarning("[BodyTrackingPlayback] no PointCloudRecorder bound; nothing to process.");
+                Debug.LogWarning("[BodyTrackingPlayback] no SensorRecorder bound; nothing to process.");
                 return;
             }
             _processing = StartCoroutine(ProcessCoroutine());

@@ -4,7 +4,7 @@
 // are applied). The apex sits at the origin and the square base opens out along +Z,
 // so each camera's position AND aim are visible inside the merged point cloud.
 //
-// Rendering mirrors PointCloudBoundingBox: a runtime line-mesh (so it shows in the
+// Rendering mirrors BoundingVolume: a runtime line-mesh (so it shows in the
 // Game view / builds, not just the Editor) plus a Scene-view Gizmo.
 
 using UnityEngine;
@@ -49,7 +49,7 @@ namespace PointCloud
         private void OnValidate()
         {
             // Defer to Update(): Unity forbids DestroyImmediate during OnValidate, and
-            // rebuilding here would be illegal. Same pattern as PointCloudBoundingBox.
+            // rebuilding here would be illegal. Same pattern as BoundingVolume.
         }
 
         private void SyncVisualization()

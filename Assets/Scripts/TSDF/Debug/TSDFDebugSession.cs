@@ -22,7 +22,7 @@ namespace TSDF.DebugTools
         [Header("References (auto-located on enable)")]
         public TSDFVolume volume;
         public TSDFIntegrator integrator;
-        public PointCloudRecorder recorder;
+        public SensorRecorder recorder;
 
         [Header("Keyboard shortcuts (Game View must have focus)")]
         [Tooltip("Number keys 1..4 select the indexed camera from cameraKeys. " +
@@ -150,7 +150,7 @@ namespace TSDF.DebugTools
         }
         private readonly Dictionary<string, Snapshot> _cache = new Dictionary<string, Snapshot>();
 
-        private PointCloudRecorder _subscribedRecorder;
+        private SensorRecorder _subscribedRecorder;
         private System.Action<string, ObCameraParam?, Transform, RawFrameData> _handler;
 
         // --- Smooth-union (issue #27): two instants held as separate SDFs ---
@@ -178,8 +178,8 @@ namespace TSDF.DebugTools
         {
             if (volume == null)     volume = FindAnyObjectByType<TSDFVolume>(FindObjectsInactive.Include);
             if (integrator == null) integrator = FindAnyObjectByType<TSDFIntegrator>(FindObjectsInactive.Include);
-            if (recorder == null)   recorder = FindAnyObjectByType<PointCloudRecorder>(FindObjectsInactive.Include);
-            if (recorder == null) { Debug.LogWarning("[TSDFDebugSession] No PointCloudRecorder.", this); return; }
+            if (recorder == null)   recorder = FindAnyObjectByType<SensorRecorder>(FindObjectsInactive.Include);
+            if (recorder == null) { Debug.LogWarning("[TSDFDebugSession] No SensorRecorder.", this); return; }
 
             _handler = HandlePlaybackRawFrame;
             recorder.OnPlaybackRawFrame += _handler;
@@ -323,7 +323,7 @@ namespace TSDF.DebugTools
         private void UpdateCursorReadout()
         {
             if (recorder == null) { currentCursors = System.Array.Empty<string>(); currentPlayheadSec = "(no recorder)"; return; }
-            currentPlayheadSec = recorder.CurrentState == PointCloudRecorder.State.Playing
+            currentPlayheadSec = recorder.CurrentState == SensorRecorder.State.Playing
                 ? recorder.CurrentPlayheadSeconds.ToString("0.000")
                 : "(not playing)";
             if (cameraKeys == null || cameraKeys.Length == 0) AutoPopulateCameraKeys();
@@ -385,7 +385,7 @@ namespace TSDF.DebugTools
         /// </summary>
         private void EnsureRecorderPlaying()
         {
-            if (recorder == null || recorder.CurrentState == PointCloudRecorder.State.Playing) return;
+            if (recorder == null || recorder.CurrentState == SensorRecorder.State.Playing) return;
             var tracks = recorder.GetRecordedDepthTracks();
             if (tracks == null || tracks.Count == 0) recorder.Load();   // "Read"
             recorder.TogglePlay();                                      // Idle -> Playing
@@ -418,10 +418,10 @@ namespace TSDF.DebugTools
             // accumulate run is live, end it first so the two features never fight over
             // the volume or leave both "Accumulating" and "Comparing" lit at once.
             if (IsAccumulating) StopAccumulate();
-            if (recorder.CurrentState != PointCloudRecorder.State.Playing)
+            if (recorder.CurrentState != SensorRecorder.State.Playing)
             {
                 EnsureRecorderPlaying();
-                if (recorder.CurrentState != PointCloudRecorder.State.Playing)
+                if (recorder.CurrentState != SensorRecorder.State.Playing)
                 {
                     Debug.LogWarning("[TSDFDebugSession] Could not start playback — is a recording set/loaded " +
                                      "(recorder folderPath)? Press Read manually if needed.", this);
@@ -564,10 +564,10 @@ namespace TSDF.DebugTools
                 Debug.LogWarning("[TSDFDebugSession] Accumulate needs recorder + volume + integrator.", this);
                 return;
             }
-            if (recorder.CurrentState != PointCloudRecorder.State.Playing)
+            if (recorder.CurrentState != SensorRecorder.State.Playing)
             {
                 EnsureRecorderPlaying();
-                if (recorder.CurrentState != PointCloudRecorder.State.Playing)
+                if (recorder.CurrentState != SensorRecorder.State.Playing)
                 {
                     Debug.LogWarning("[TSDFDebugSession] Could not start playback — is a recording loaded?", this);
                     return;
@@ -890,7 +890,7 @@ namespace TSDF.DebugTools
         private void PauseRecorder()
         {
             if (recorder != null
-                && recorder.CurrentState == PointCloudRecorder.State.Playing
+                && recorder.CurrentState == SensorRecorder.State.Playing
                 && !recorder.IsPaused)
             {
                 recorder.PausePlayback();

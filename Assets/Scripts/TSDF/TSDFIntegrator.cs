@@ -1,5 +1,5 @@
 // Drives the per-camera TSDF integration kernel. Subscribes to both the live
-// (PointCloudRenderer.OnRawFramesReady) and playback (PointCloudRecorder
+// (PointCloudRenderer.OnRawFramesReady) and playback (SensorRecorder
 // .OnPlaybackRawFrame) raw-frame events so the same component works in both
 // modes without scene re-wiring.
 //
@@ -45,7 +45,7 @@ namespace TSDF
                  "is attached.")]
         public bool subscribeLive = true;
 
-        [Tooltip("Subscribe to every PointCloudRecorder.OnPlaybackRawFrame in " +
+        [Tooltip("Subscribe to every SensorRecorder.OnPlaybackRawFrame in " +
                  "the scene. On Mac dev without live cameras this is the only " +
                  "feed.")]
         public bool subscribePlayback = true;
@@ -142,9 +142,9 @@ namespace TSDF
                                    System.Action<PointCloudRenderer, RawFrameData>> _liveHandlers
             = new Dictionary<PointCloudRenderer,
                               System.Action<PointCloudRenderer, RawFrameData>>();
-        private readonly Dictionary<PointCloudRecorder,
+        private readonly Dictionary<SensorRecorder,
                                    System.Action<string, ObCameraParam?, Transform, RawFrameData>> _playbackHandlers
-            = new Dictionary<PointCloudRecorder,
+            = new Dictionary<SensorRecorder,
                               System.Action<string, ObCameraParam?, Transform, RawFrameData>>();
 
         private float _diagWindowStart;
@@ -200,7 +200,7 @@ namespace TSDF
             }
             if (subscribePlayback)
             {
-                foreach (var rec in FindObjectsByType<PointCloudRecorder>(FindObjectsInactive.Exclude, FindObjectsSortMode.None))
+                foreach (var rec in FindObjectsByType<SensorRecorder>(FindObjectsInactive.Exclude, FindObjectsSortMode.None))
                     BindPlayback(rec);
             }
         }
@@ -213,7 +213,7 @@ namespace TSDF
             _liveHandlers[r] = h;
         }
 
-        private void BindPlayback(PointCloudRecorder rec)
+        private void BindPlayback(SensorRecorder rec)
         {
             if (rec == null || _playbackHandlers.ContainsKey(rec)) return;
             System.Action<string, ObCameraParam?, Transform, RawFrameData> h = HandlePlaybackRawFrame;
@@ -520,7 +520,7 @@ namespace TSDF
 
         private void Update()
         {
-            // Late-binding: PointCloudCameraManager may spawn renderers / the
+            // Late-binding: SensorManager may spawn renderers / the
             // recorder may rebuild its _Playback_ GOs mid-Play, so re-scan and
             // bind anything new. Existing entries are short-circuited by the
             // Dictionary.ContainsKey guards.

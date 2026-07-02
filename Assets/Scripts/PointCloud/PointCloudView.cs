@@ -1,5 +1,5 @@
 // Single point of control for point cloud visibility. Previously,
-// PointCloudCameraManager and PointCloudRecorder each carried their own
+// SensorManager and SensorRecorder each carried their own
 // showPointClouds bool — Live and Playback meshes were toggled separately,
 // and there was no central place to "hide all clouds while keeping the
 // pipeline running".

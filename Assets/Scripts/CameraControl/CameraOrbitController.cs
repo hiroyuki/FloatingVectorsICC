@@ -16,7 +16,7 @@ namespace CameraControl
         [Tooltip("Bounding box whose world-space center is used as the orbit pivot. " +
                  "When assigned, it takes priority over 'pivot' each frame. The box " +
                  "itself is never moved; panning accumulates into an internal offset.")]
-        public PointCloudBoundingBox boundingBox;
+        public BoundingVolume boundingBox;
 
         [Tooltip("Fallback pivot transform. Used only when boundingBox is null. " +
                  "If both are null, the pivot is initialized to the point \"distance\" " +

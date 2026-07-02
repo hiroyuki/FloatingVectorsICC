@@ -38,9 +38,9 @@ namespace BodyTracking
     public class SkeletonMerger : MonoBehaviour
     {
         [Header("Sources")]
-        [Tooltip("PointCloudCameraManager whose Renderers we drive workers off. " +
+        [Tooltip("SensorManager whose Renderers we drive workers off. " +
                  "Spawned at Play time; this script binds when the list becomes non-empty.")]
-        public PointCloudCameraManager cameraManager;
+        public SensorManager cameraManager;
 
         [Tooltip("K4abtWorkerHost used to spawn one worker per camera. Auto-found at " +
                  "OnEnable if left null. Required.")]
@@ -193,7 +193,7 @@ namespace BodyTracking
         {
             // Transform used for world-space conversion. For live frames this is the
             // PointCloudRenderer.transform; for recorded playback it is the
-            // PointCloudRecorder's `_Playback_<serial>` GO transform. Both have the
+            // SensorRecorder's `_Playback_<serial>` GO transform. Both have the
             // same convention (localPosition / localRotation from extrinsics, plus
             // the per-mesh localScale.y = -1 that SkeletonWorldTransform ignores).
             public Transform SourceTransform;
@@ -297,7 +297,7 @@ namespace BodyTracking
         private bool _alertActive;
         private GUIStyle _alertStyleCache;
 
-        private PointCloudRecorder _subscribedRecorder;
+        private SensorRecorder _subscribedRecorder;
 
         private void OnEnable()
         {
@@ -310,13 +310,13 @@ namespace BodyTracking
                 _hostSubscribed = true;
             }
 
-            // Wire recorded-playback source if a PointCloudRecorder is present in the
+            // Wire recorded-playback source if a SensorRecorder is present in the
             // scene. Live and playback can coexist: HandleRawFrame and the
             // OnPlaybackRawFrame handler both funnel into DispatchRawFrame.
             // OnPlaybackBodies feeds the per-serial slot directly when the recording
             // includes saved BT (bodies_main); the worker spawn is skipped in that
             // case so playback works on platforms without k4abt (Mac).
-            _subscribedRecorder = FindFirstObjectByType<PointCloudRecorder>();
+            _subscribedRecorder = FindFirstObjectByType<SensorRecorder>();
             if (_subscribedRecorder != null)
             {
                 _subscribedRecorder.OnPlaybackRawFrame += OnPlaybackRawFrame;
@@ -414,7 +414,7 @@ namespace BodyTracking
         {
             bool nowPaused = _subscribedRecorder != null && _subscribedRecorder.IsPaused;
 
-            // Late-binding for renderers spawned mid-Play by PointCloudCameraManager.
+            // Late-binding for renderers spawned mid-Play by SensorManager.
             BindNewRenderers();
 
             if (showBones)
@@ -579,10 +579,10 @@ namespace BodyTracking
 
         private bool ResolveDependencies()
         {
-            if (cameraManager == null) cameraManager = FindFirstObjectByType<PointCloudCameraManager>();
+            if (cameraManager == null) cameraManager = FindFirstObjectByType<SensorManager>();
             if (cameraManager == null)
             {
-                Debug.LogError("[SkeletonMerger] PointCloudCameraManager not found in scene; disabling.", this);
+                Debug.LogError("[SkeletonMerger] SensorManager not found in scene; disabling.", this);
                 return false;
             }
             if (workerHost == null) workerHost = FindFirstObjectByType<K4abtWorkerHost>();
@@ -634,7 +634,7 @@ namespace BodyTracking
         }
 
         /// <summary>
-        /// Adapter for the offline / recorded playback path. PointCloudRecorder fires
+        /// Adapter for the offline / recorded playback path. SensorRecorder fires
         /// this with the same payload we'd build from a live PointCloudRenderer so
         /// the merge pipeline runs without caring about the source.
         /// </summary>
@@ -662,7 +662,7 @@ namespace BodyTracking
             // serial. State.Idle similarly must not skip (live capture w/o
             // recorder running is the default).
             if (_subscribedRecorder != null
-                && _subscribedRecorder.CurrentState == PointCloudRecorder.State.Playing
+                && _subscribedRecorder.CurrentState == SensorRecorder.State.Playing
                 && _subscribedRecorder.HasRecordedBodies(serial))
                 return;
 
@@ -679,7 +679,7 @@ namespace BodyTracking
                 {
                     Debug.LogError(
                         "[SkeletonMerger] applyExtrinsics is false but multi-camera mode " +
-                        "needs world-aligned transforms. Enable PointCloudCameraManager.applyExtrinsics " +
+                        "needs world-aligned transforms. Enable SensorManager.applyExtrinsics " +
                         "and load extrinsics.yaml. Disabling.", this);
                     enabled = false;
                     _disabledByGuard = true;
@@ -773,7 +773,7 @@ namespace BodyTracking
             // can skip k4abt entirely (and run on Mac). Encode here so the byte buffer
             // crossing into PointCloud asmdef carries no BodyTracking-namespace types.
             if (_subscribedRecorder != null
-                && _subscribedRecorder.CurrentState == PointCloudRecorder.State.Recording)
+                && _subscribedRecorder.CurrentState == SensorRecorder.State.Recording)
             {
                 int needed = RecordedBodySerializer.FrameSize(n);
                 if (_bodyEncodeScratch == null || _bodyEncodeScratch.Length < needed)

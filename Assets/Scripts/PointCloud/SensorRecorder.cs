@@ -24,22 +24,22 @@ using UnityEngine.Rendering;
 namespace PointCloud
 {
     [DisallowMultipleComponent]
-    public class PointCloudRecorder : MonoBehaviour
+    public class SensorRecorder : MonoBehaviour
     {
         public enum State { Idle, Recording, Playing }
 
         [Header("Source")]
         [Tooltip("Camera manager whose spawned PointCloudRenderers will be recorded. " +
                  "If null, all PointCloudRenderers in the scene are used.")]
-        public PointCloudCameraManager cameraManager;
+        public SensorManager cameraManager;
 
         [Tooltip("Material used for playback meshes. If null, falls back to each source renderer's pointMaterial.")]
         public Material playbackMaterial;
 
         [Tooltip("Optional bounding box used to cull playback points the same way live PointCloudRenderers do. " +
-                 "If null, the first PointCloudBoundingBox referenced by any live PointCloudRenderer in the " +
+                 "If null, the first BoundingVolume referenced by any live PointCloudRenderer in the " +
                  "scene is used. Set filterMode=Disabled to disable culling without unassigning the reference.")]
-        public PointCloudBoundingBox boundingBox;
+        public BoundingVolume boundingBox;
 
         [Tooltip("Optional random decimater applied to playback points (mirrors the live PointCloudRenderer.decimater path). " +
                  "If null, the first PointCloudDecimater in the scene is used.")]
@@ -189,7 +189,7 @@ namespace PointCloud
             public IReadOnlyList<PointCloudRecording.Frame> IRFrames;
             // Body-tracker results recorded alongside the sensor frames (one frame per
             // worker output). Empty when bodies_main was absent at record time (older
-            // recordings) or when no PointCloudRecorder.bodyWorkerHost was bound. Each
+            // recordings) or when no SensorRecorder.bodyWorkerHost was bound. Each
             // Frame's Bytes payload is the bodies_main RCSV payload — decode with
             // BodyTracking.RecordedBodySerializer.
             public IReadOnlyList<PointCloudRecording.Frame> BodyFrames;
@@ -863,7 +863,7 @@ namespace PointCloud
             // entries below. Sources, with precedence decided by liveCalibrationWins:
             //   - Existing recording-local yaml with non-identity values
             //     (= prior calibration session for THIS recording).
-            //   - The live PointCloudCameraManager's yaml (= the rig calibration
+            //   - The live SensorManager's yaml (= the rig calibration
             //     Live is using right now; at record time this IS the record-time
             //     calibration).
             //   - Identity (nothing else available).
@@ -887,7 +887,7 @@ namespace PointCloud
             catch (Exception preserveEx)
             {
                 Debug.LogWarning(
-                    $"[{nameof(PointCloudRecorder)}] could not read existing extrinsics.yaml " +
+                    $"[{nameof(SensorRecorder)}] could not read existing extrinsics.yaml " +
                     $"to preserve global_tr_colorCamera: {preserveEx.Message}", this);
             }
             if (cameraManager != null)
@@ -926,7 +926,7 @@ namespace PointCloud
                 catch (Exception liveEx)
                 {
                     Debug.LogWarning(
-                        $"[{nameof(PointCloudRecorder)}] could not read live manager's extrinsics.yaml: {liveEx.Message}", this);
+                        $"[{nameof(SensorRecorder)}] could not read live manager's extrinsics.yaml: {liveEx.Message}", this);
                 }
             }
 
@@ -1127,7 +1127,7 @@ namespace PointCloud
                 try { calibrations = PointCloudRecording.ReadExtrinsicsYaml(root); }
                 catch (Exception e)
                 {
-                    Debug.LogWarning($"[{nameof(PointCloudRecorder)}] extrinsics.yaml present but failed to parse: {e.Message}", this);
+                    Debug.LogWarning($"[{nameof(SensorRecorder)}] extrinsics.yaml present but failed to parse: {e.Message}", this);
                 }
             }
 
@@ -1157,7 +1157,7 @@ namespace PointCloud
 
             // Fallback for old recordings whose yaml is missing entirely or has
             // only identity values: pull the missing per-serial transform from the
-            // live PointCloudCameraManager's yaml. Same "Live and Playback share
+            // live SensorManager's yaml. Same "Live and Playback share
             // one rig calibration" principle as the Save side.
             if (cameraManager != null)
             {
@@ -1184,7 +1184,7 @@ namespace PointCloud
                 }
                 catch (Exception liveEx)
                 {
-                    Debug.LogWarning($"[{nameof(PointCloudRecorder)}] live manager extrinsics fallback failed: {liveEx.Message}", this);
+                    Debug.LogWarning($"[{nameof(SensorRecorder)}] live manager extrinsics fallback failed: {liveEx.Message}", this);
                 }
             }
             return withGlobal;
@@ -1289,7 +1289,7 @@ namespace PointCloud
             try { WriteRecordingMetadata(_recordRoot, _recordHost, liveCalibrationWins: true); }
             catch (Exception e)
             {
-                Debug.LogWarning($"[{nameof(PointCloudRecorder)}] metadata write after StopRecording failed: {e}", this);
+                Debug.LogWarning($"[{nameof(SensorRecorder)}] metadata write after StopRecording failed: {e}", this);
             }
 
             // _tracks still has per-track DepthFrames entries with TimestampNs
@@ -1721,10 +1721,10 @@ namespace PointCloud
                 long monoNow = UnityEngine.Profiling.Profiler.GetMonoUsedSizeLong();
                 long monoDeltaKB = (monoNow - _diagMonoMemStart) / 1024;
 
-                Debug.Log($"[PointCloudRecorder REC] {string.Join(" | ", parts)} || " +
+                Debug.Log($"[SensorRecorder REC] {string.Join(" | ", parts)} || " +
                           $"gc=g0:{gc0},g1:{gc1},g2:{gc2} mono+={monoDeltaKB}KB " +
                           $"maxTick={_diagMaxUpdateDtMs:F0}ms@{_diagMaxUpdateDtAtSec - _diagWindowStart:F2}s", this);
-                Debug.Log($"[PointCloudRecorder REC writes] {string.Join(" || ", writeParts)}", this);
+                Debug.Log($"[SensorRecorder REC writes] {string.Join(" || ", writeParts)}", this);
 
                 foreach (var key in new List<string>(_diagRecordPerSerial.Keys))
                 {
@@ -1748,7 +1748,7 @@ namespace PointCloud
                 int gc2 = System.GC.CollectionCount(2) - _diagGc2Start;
                 long monoNow = UnityEngine.Profiling.Profiler.GetMonoUsedSizeLong();
                 long monoDeltaKB = (monoNow - _diagMonoMemStart) / 1024;
-                Debug.Log($"[PointCloudRecorder PLAY] playback_fires {string.Join(" ", parts)} || " +
+                Debug.Log($"[SensorRecorder PLAY] playback_fires {string.Join(" ", parts)} || " +
                           $"gc=g0:{gc0},g1:{gc1},g2:{gc2} mono+={monoDeltaKB}KB " +
                           $"maxTick={_diagMaxUpdateDtMs:F0}ms@{_diagMaxUpdateDtAtSec - _diagWindowStart:F2}s", this);
                 foreach (var key in new List<string>(_diagFiresPerSerial.Keys)) _diagFiresPerSerial[key] = 0;
@@ -1781,7 +1781,7 @@ namespace PointCloud
         // playback path stays bit-for-bit identical with the live PointCloudRenderer.
         private MaterialPropertyBlock _filterMpb;
 
-        private PointCloudBoundingBox ResolveBoundingBox()
+        private BoundingVolume ResolveBoundingBox()
         {
             if (boundingBox != null) return boundingBox;
             // Late-bind from any live PointCloudRenderer that already references one
@@ -1796,7 +1796,7 @@ namespace PointCloud
                     return boundingBox;
                 }
             }
-            boundingBox = FindFirstObjectByType<PointCloudBoundingBox>();
+            boundingBox = FindFirstObjectByType<BoundingVolume>();
             return boundingBox;
         }
 
@@ -2020,7 +2020,7 @@ namespace PointCloud
                     track.CameraParam.Value))
             {
                 Debug.LogError(
-                    $"[{nameof(PointCloudRecorder)}] PointCloudReconstruct compute shader not found in Resources/", this);
+                    $"[{nameof(SensorRecorder)}] PointCloudReconstruct compute shader not found in Resources/", this);
                 return;
             }
 
@@ -2069,10 +2069,10 @@ namespace PointCloud
             if (_streamWriters.Count == 0) return;
             foreach (var sw in _streamWriters.Values)
             {
-                try { sw.Depth?.Dispose();  } catch (Exception e) { Debug.LogWarning($"[{nameof(PointCloudRecorder)}] depth writer dispose failed: {e.Message}",  this); }
-                try { sw.Color?.Dispose();  } catch (Exception e) { Debug.LogWarning($"[{nameof(PointCloudRecorder)}] color writer dispose failed: {e.Message}",  this); }
-                try { sw.IR?.Dispose();     } catch (Exception e) { Debug.LogWarning($"[{nameof(PointCloudRecorder)}] IR writer dispose failed: {e.Message}",     this); }
-                try { sw.Bodies?.Dispose(); } catch (Exception e) { Debug.LogWarning($"[{nameof(PointCloudRecorder)}] bodies writer dispose failed: {e.Message}", this); }
+                try { sw.Depth?.Dispose();  } catch (Exception e) { Debug.LogWarning($"[{nameof(SensorRecorder)}] depth writer dispose failed: {e.Message}",  this); }
+                try { sw.Color?.Dispose();  } catch (Exception e) { Debug.LogWarning($"[{nameof(SensorRecorder)}] color writer dispose failed: {e.Message}",  this); }
+                try { sw.IR?.Dispose();     } catch (Exception e) { Debug.LogWarning($"[{nameof(SensorRecorder)}] IR writer dispose failed: {e.Message}",     this); }
+                try { sw.Bodies?.Dispose(); } catch (Exception e) { Debug.LogWarning($"[{nameof(SensorRecorder)}] bodies writer dispose failed: {e.Message}", this); }
                 sw.Depth = sw.Color = sw.IR = sw.Bodies = null;
             }
             _streamWriters.Clear();
@@ -2210,8 +2210,8 @@ namespace PointCloud
         private void SetStatus(string msg, bool warn = false)
         {
             StatusMessage = msg;
-            if (warn) Debug.LogWarning($"[{nameof(PointCloudRecorder)}] {msg}", this);
-            else Debug.Log($"[{nameof(PointCloudRecorder)}] {msg}", this);
+            if (warn) Debug.LogWarning($"[{nameof(SensorRecorder)}] {msg}", this);
+            else Debug.Log($"[{nameof(SensorRecorder)}] {msg}", this);
         }
     }
 

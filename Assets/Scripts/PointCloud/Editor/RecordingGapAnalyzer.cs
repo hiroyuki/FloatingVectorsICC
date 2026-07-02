@@ -2,11 +2,11 @@
 // summarize timestamp gaps. Used to decide whether intermittent playback
 // stuttering is rooted at capture time (gaps already baked into the RCSV
 // timestamps = device or USB dropped that frame) or at playback time
-// (handled separately by the per-Update skip log in PointCloudRecorder).
+// (handled separately by the per-Update skip log in SensorRecorder).
 //
 // Menu: Window > Diag > Analyze Recording Gaps
 //
-// Picks a recording root folder (defaulting to the active PointCloudRecorder's
+// Picks a recording root folder (defaulting to the active SensorRecorder's
 // folderPath, then Application.persistentDataPath/Recordings) and walks
 // EnumerateDevices to find every FemtoBolt_<serial>. For each device's
 // depth_main RCSV it prints frame count, duration, mean fps, an interval
@@ -38,7 +38,7 @@ namespace PointCloud.EditorTools
         {
             // Prefer the active recorder's currently-loaded folder so the operator
             // usually just hits Enter on the picker.
-            var rec = Object.FindFirstObjectByType<PointCloudRecorder>();
+            var rec = Object.FindFirstObjectByType<SensorRecorder>();
             if (rec != null && !string.IsNullOrWhiteSpace(rec.folderPath))
             {
                 string p = rec.folderPath;

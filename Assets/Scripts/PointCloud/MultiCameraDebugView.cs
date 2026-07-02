@@ -3,7 +3,7 @@
 // (F1 is taken by macOS system keys, so backquote is the cross-platform default.)
 //
 // Subscribes to PointCloudRenderer.OnRawFramesReady (live, keyed by deviceSerial)
-// and PointCloudRecorder.OnPlaybackRawFrame (playback, keyed by serial). Both fire
+// and SensorRecorder.OnPlaybackRawFrame (playback, keyed by serial). Both fire
 // on the main thread, so texture uploads here are safe. Raw byte arrays are pooled
 // and reused next frame — we copy them straight into Texture2Ds during the callback.
 
@@ -48,7 +48,7 @@ namespace PointCloud
         private bool _visible;
         private readonly Dictionary<string, CamTextures> _cams = new Dictionary<string, CamTextures>();
         private readonly HashSet<PointCloudRenderer> _subRenderers = new HashSet<PointCloudRenderer>();
-        private readonly HashSet<PointCloudRecorder> _subRecorders = new HashSet<PointCloudRecorder>();
+        private readonly HashSet<SensorRecorder> _subRecorders = new HashSet<SensorRecorder>();
         private GUIStyle _labelStyle;
         private float _nextScan;
 
@@ -73,7 +73,7 @@ namespace PointCloud
         {
             if (Input.GetKeyDown(toggleKey)) _visible = !_visible;
 
-            // Renderers are spawned by PointCloudCameraManager on Start, and playback
+            // Renderers are spawned by SensorManager on Start, and playback
             // recorders may appear/disappear, so re-scan periodically for new sources.
             if (Time.unscaledTime >= _nextScan)
             {
@@ -92,7 +92,7 @@ namespace PointCloud
                 _subRenderers.Add(r);
             }
 
-            var recorders = FindObjectsByType<PointCloudRecorder>(FindObjectsSortMode.None);
+            var recorders = FindObjectsByType<SensorRecorder>(FindObjectsSortMode.None);
             foreach (var rec in recorders)
             {
                 if (rec == null || _subRecorders.Contains(rec)) continue;

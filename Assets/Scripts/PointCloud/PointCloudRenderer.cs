@@ -1,5 +1,5 @@
 // Real-time per-device point cloud capture + Mesh rendering for one Femto Bolt.
-// One GameObject per device. PointCloudCameraManager spawns these on enumeration.
+// One GameObject per device. SensorManager spawns these on enumeration.
 
 using System;
 using System.Runtime.InteropServices;
@@ -63,7 +63,7 @@ namespace PointCloud
     public class PointCloudRenderer : MonoBehaviour
     {
         [Header("Device")]
-        [Tooltip("Serial number of the Femto Bolt to open. Set by PointCloudCameraManager.")]
+        [Tooltip("Serial number of the Femto Bolt to open. Set by SensorManager.")]
         public string deviceSerial = string.Empty;
 
         [Header("Streams")]
@@ -81,7 +81,7 @@ namespace PointCloud
 
         [Tooltip("Enable the Femto Bolt's passive IR stream. k4abt body tracking uses it as the " +
                  "real IR cue instead of the depth-as-IR fallback (which makes detections stop " +
-                 "after the first frame). Requires PointCloudCameraManager.syncTopology = " +
+                 "after the first frame). Requires SensorManager.syncTopology = " +
                  "Standalone — multi-device sync modes drop framesets when IR is added to the " +
                  "aggregate. Turn OFF if you only need depth + color.")]
         public bool enableIRStream = true;
@@ -95,7 +95,7 @@ namespace PointCloud
         public bool enableFrameSync = true;
 
         [Header("Multi-device sync")]
-        [Tooltip("Hardware-level sync role for this device. Set by PointCloudCameraManager based " +
+        [Tooltip("Hardware-level sync role for this device. Set by SensorManager based " +
                  "on its SyncTopology field (SyncHubPro -> Secondary, DaisyChain -> Primary or " +
                  "Secondary by index). Femto Bolt firmware exposes Secondary, not SecondarySynced. " +
                  "Run the 'Log Supported Sync Modes' context menu after the device is open to see " +
@@ -154,7 +154,7 @@ namespace PointCloud
         [Header("Bounding box filter")]
         [Tooltip("Optional oriented bounding box. When assigned and its filterMode is not Disabled, " +
                  "points falling outside/inside the box (per mode) are culled in the vertex shader.")]
-        public PointCloudBoundingBox boundingBox;
+        public BoundingVolume boundingBox;
 
         [Header("Decimater")]
         [Tooltip("Optional random decimater. When assigned and its reductionPercent is > 0, " +
@@ -234,7 +234,7 @@ namespace PointCloud
         private MeshRenderer _meshRenderer;
         private Mesh _mesh;
 
-        // GPU reconstruction: shared with PointCloudRecorder via PointCloudReconstructor.
+        // GPU reconstruction: shared with SensorRecorder via PointCloudReconstructor.
         // Owns the reconstructed Mesh, GPU buffers, and ComputeShader dispatch.
         private PointCloudReconstructor _reconstructor;
 
@@ -615,7 +615,7 @@ namespace PointCloud
         private void BuildMesh()
         {
             // GPU recon mode: delegate Mesh + vertex buffer ownership to
-            // PointCloudReconstructor (shared with PointCloudRecorder's playback
+            // PointCloudReconstructor (shared with SensorRecorder's playback
             // path). We just plug the reconstructor's Mesh into MeshFilter.
             //
             // CPU mode: PointCloudFilter outputs one vertex per *color* pixel up
@@ -796,7 +796,7 @@ namespace PointCloud
                 throw new InvalidOperationException(
                     $"Device {deviceSerial} does not support sync mode {syncMode} " +
                     $"(supported bitmap = 0x{supported:X4}). " +
-                    "Choose a supported mode in the PointCloudCameraManager / PointCloudRenderer Inspector.");
+                    "Choose a supported mode in the SensorManager / PointCloudRenderer Inspector.");
             }
 
             // PRIMARY emits the pulse, SECONDARY forwards it down a daisy chain. For Sync Hub Pro

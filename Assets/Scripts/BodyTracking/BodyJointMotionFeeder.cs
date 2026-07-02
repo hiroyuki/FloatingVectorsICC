@@ -1,7 +1,7 @@
 // Feeds per-joint world-space position + velocity samples into a
 // PointCloud.PointCloudJointMotionField every LateUpdate. The field is then
 // consumed by PointCloudRenderer (live shader nearest-joint sampling) and
-// PointCloudRecorder (playback shader), mirroring the BodyTubeCapsuleFeeder
+// SensorRecorder (playback shader), mirroring the BodyTubeCapsuleFeeder
 // path. This is what gives each point in the cloud its "nearest joint
 // motion" attribute the way issue #24 asks for.
 //

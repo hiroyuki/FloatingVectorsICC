@@ -9,7 +9,7 @@ namespace PointCloud
     //   _MotionColorMode, _MotionMaxDist, _MotionDisplace, _MotionDisplaceScale,
     //   _MotionSpeedMax, _MotionHotColor, _MotionPos[], _MotionVel[].
     //
-    // PointCloudRenderer (live) and PointCloudRecorder (playback) both push
+    // PointCloudRenderer (live) and SensorRecorder (playback) both push
     // the same set every frame, so the actual MPB-fill logic lives here to
     // keep them in lock-step. Add a new shader filter? Edit one place.
     internal static class PointCloudShaderFilters
@@ -45,7 +45,7 @@ namespace PointCloud
         // `mpb` is a caller-owned scratch instance reused across frames.
         public static void Apply(MeshRenderer mr, MaterialPropertyBlock mpb,
                                   Transform meshTransform,
-                                  PointCloudBoundingBox boundingBox,
+                                  BoundingVolume boundingBox,
                                   PointCloudDecimater decimater,
                                   PointCloudCapsuleFilter capsuleFilter,
                                   PointCloudJointMotionField jointMotionField = null)
@@ -53,9 +53,9 @@ namespace PointCloud
             mr.GetPropertyBlock(mpb);
 
             float obbMode = 0f;
-            if (boundingBox != null && boundingBox.Mode != PointCloudBoundingBox.FilterMode.Disabled)
+            if (boundingBox != null && boundingBox.Mode != BoundingVolume.FilterMode.Disabled)
             {
-                obbMode = boundingBox.Mode == PointCloudBoundingBox.FilterMode.KeepInside ? 1f : 2f;
+                obbMode = boundingBox.Mode == BoundingVolume.FilterMode.KeepInside ? 1f : 2f;
                 var m = boundingBox.transform.worldToLocalMatrix * meshTransform.localToWorldMatrix;
                 mpb.SetMatrix(_ObbObjToBox, m);
             }

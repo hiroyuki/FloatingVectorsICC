@@ -1,6 +1,6 @@
 // Authoritative TSDF voxel grid for the v2 motion-to-mesh pipeline. Holds a
 // single RWStructuredBuffer<float2> (x = signed distance, y = weight) covering
-// the working volume defined by a PointCloudBoundingBox. The grid is axis-
+// the working volume defined by a BoundingVolume. The grid is axis-
 // aligned in the bounding box's LOCAL frame so rotating the bbox rotates the
 // grid with it.
 //
@@ -38,7 +38,7 @@ namespace TSDF
         [Tooltip("Defines the world-space extent and orientation of the TSDF grid. " +
                  "Local scale (x,y,z) becomes the box edge lengths; rotation is " +
                  "honored so the voxel axes follow the bbox. Mandatory.")]
-        public PointCloudBoundingBox boundingBox;
+        public BoundingVolume boundingBox;
 
         [Header("Grid resolution")]
         [Tooltip("Edge length of one (cubic) voxel in metres — drag to tune the mesh " +

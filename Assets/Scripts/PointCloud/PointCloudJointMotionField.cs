@@ -8,7 +8,7 @@
 //
 // Producers (BodyTracking.BodyJointMotionFeeder) call Clear + TryAdd each
 // LateUpdate. Consumers (PointCloudShaderFilters writing into the
-// PointCloudRenderer / PointCloudRecorder material property block) read
+// PointCloudRenderer / SensorRecorder material property block) read
 // JointPos / JointVel / JointCount / Mode at render time.
 
 using UnityEngine;

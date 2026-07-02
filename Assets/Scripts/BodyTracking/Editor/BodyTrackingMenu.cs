@@ -33,7 +33,7 @@ namespace BodyTracking.EditorTools
             if (liveComp == null) liveComp = Undo.AddComponent<SkeletonMerger>(live);
             if (liveComp.cameraManager == null)
             {
-                liveComp.cameraManager = Object.FindFirstObjectByType<PointCloudCameraManager>();
+                liveComp.cameraManager = Object.FindFirstObjectByType<SensorManager>();
                 EditorUtility.SetDirty(liveComp);
             }
             if (liveComp.workerHost == null)
@@ -54,7 +54,7 @@ namespace BodyTracking.EditorTools
             if (pbComp == null) pbComp = Undo.AddComponent<BodyTrackingPlayback>(pb);
             if (pbComp.recorder == null)
             {
-                pbComp.recorder = Object.FindFirstObjectByType<PointCloudRecorder>();
+                pbComp.recorder = Object.FindFirstObjectByType<SensorRecorder>();
                 EditorUtility.SetDirty(pbComp);
             }
             if (pb.GetComponent<MotionLineRenderer>() == null)

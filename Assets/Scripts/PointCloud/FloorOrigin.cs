@@ -1,6 +1,6 @@
 // Defines the installation's floor plane and renders helper geometry on it.
 //
-// Convention (issue #22): the bottom-center of the assigned PointCloudBoundingBox
+// Convention (issue #22): the bottom-center of the assigned BoundingVolume
 // is the floor; treat that point as the origin (y=0). FloorOrigin tracks the
 // bounding box every frame and renders:
 //
@@ -32,7 +32,7 @@ namespace PointCloud
                  "When assigned, FloorOrigin moves to that point every frame so the grid " +
                  "and drop-shadow plane track the box. Leave empty to use this GameObject's " +
                  "Transform position directly.")]
-        public PointCloudBoundingBox boundingBox;
+        public BoundingVolume boundingBox;
 
         [Header("Grid")]
         [Tooltip("Draw a wireframe grid at the floor plane.")]
@@ -308,10 +308,10 @@ namespace PointCloud
             }
 
             // 2) Playback meshes — `_Playback_<serial>` children of every active
-            // PointCloudRecorder. The recorder owns the bbox / decimater used by
+            // SensorRecorder. The recorder owns the bbox / decimater used by
             // PointCloudShaderFilters on the live cloud, so mirror them here so
             // the shadow matches what the live mesh actually draws.
-            var recorders = FindObjectsByType<PointCloudRecorder>(FindObjectsSortMode.None);
+            var recorders = FindObjectsByType<SensorRecorder>(FindObjectsSortMode.None);
             for (int r = 0; r < recorders.Length; r++)
             {
                 var rec = recorders[r];
@@ -372,7 +372,7 @@ namespace PointCloud
         // matches a single hard-shadow tap. doBlur=false collapses to one draw
         // with offset (0,0) and full alpha.
         private void DrawWithBlurTaps(Mesh mesh, Matrix4x4 modelMatrix,
-                                      PointCloudBoundingBox bb, PointCloudDecimater dec,
+                                      BoundingVolume bb, PointCloudDecimater dec,
                                       Transform meshTransform, float floorY,
                                       int blurSamples, bool doBlur)
         {
@@ -393,15 +393,15 @@ namespace PointCloud
 
         // Mirrors PointCloudShaderFilters.Apply so the shadow sees the same culled
         // points the live (or playback) cloud does.
-        private void BuildShadowMpb(PointCloudBoundingBox bb, PointCloudDecimater decim,
+        private void BuildShadowMpb(BoundingVolume bb, PointCloudDecimater decim,
                                     Transform meshTransform, float floorY)
         {
             _shadowMpb.Clear();
 
             float obbMode = 0f;
-            if (bb != null && bb.Mode != PointCloudBoundingBox.FilterMode.Disabled)
+            if (bb != null && bb.Mode != BoundingVolume.FilterMode.Disabled)
             {
-                obbMode = bb.Mode == PointCloudBoundingBox.FilterMode.KeepInside ? 1f : 2f;
+                obbMode = bb.Mode == BoundingVolume.FilterMode.KeepInside ? 1f : 2f;
                 var m = bb.transform.worldToLocalMatrix * meshTransform.localToWorldMatrix;
                 _shadowMpb.SetMatrix(kObbObjToBox, m);
             }

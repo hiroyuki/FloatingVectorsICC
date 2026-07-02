@@ -74,7 +74,7 @@ namespace TSDF
         public BodyTrackingPlayback playback;
 
         [Tooltip("Recorder paused on Stop capture / resumed on Resume live. Auto-resolved if empty.")]
-        public PointCloud.PointCloudRecorder recorder;
+        public PointCloud.SensorRecorder recorder;
 
         [Tooltip("Manual bake: transform mapping camera-local trajectory samples into world. " +
                  "Leave empty to use the first MotionLineRenderer's transform.")]
@@ -257,8 +257,8 @@ namespace TSDF
             // Freeze the recording playback too, so the whole scene holds with the sculpture.
             if (pausePlaybackOnStop)
             {
-                if (recorder == null) recorder = FindFirstObjectByType<PointCloud.PointCloudRecorder>();
-                if (recorder != null && recorder.CurrentState == PointCloud.PointCloudRecorder.State.Playing && !recorder.IsPaused)
+                if (recorder == null) recorder = FindFirstObjectByType<PointCloud.SensorRecorder>();
+                if (recorder != null && recorder.CurrentState == PointCloud.SensorRecorder.State.Playing && !recorder.IsPaused)
                     recorder.PausePlayback();
             }
 
@@ -287,8 +287,8 @@ namespace TSDF
             if (integrator != null) integrator.BeginFreshBatch();
 
             // Un-pause the playback that Stop capture froze, so the live body actually updates.
-            if (recorder == null) recorder = FindFirstObjectByType<PointCloud.PointCloudRecorder>();
-            if (recorder != null && recorder.CurrentState == PointCloud.PointCloudRecorder.State.Playing && recorder.IsPaused)
+            if (recorder == null) recorder = FindFirstObjectByType<PointCloud.SensorRecorder>();
+            if (recorder != null && recorder.CurrentState == PointCloud.SensorRecorder.State.Playing && recorder.IsPaused)
                 recorder.ResumePlayback();
 
             LastStatus = "Resumed live — body follows the current frame again.";

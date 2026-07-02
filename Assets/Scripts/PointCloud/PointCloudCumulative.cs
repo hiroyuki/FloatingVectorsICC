@@ -12,7 +12,7 @@
 //     with the SDK's CPU-side point buffer (renderer.useGpuReconstruction must be
 //     false; the GPU-reconstruct live path warns and skips, per the Renderer's
 //     _warnedCumulative gate). CPU FilterForCapture compacts on the main thread.
-//   - OnPlaybackFrame(Mesh, ...)  — playback path. PointCloudRecorder calls this
+//   - OnPlaybackFrame(Mesh, ...)  — playback path. SensorRecorder calls this
 //     after ReconstructAndUpload writes the playback mesh on GPU. We never read
 //     the vertex buffer back: a compute shader (PointCloudCumulativeFilter)
 //     reads it directly, runs the same filter chain on GPU, atomic-appends
@@ -65,7 +65,7 @@ namespace PointCloud
         // Whether accumulated snapshots are currently rendered. Toggling this
         // off disables the MeshRenderer on every snapshot GO without destroying
         // them, so flipping back on restores the accumulation instantly. New
-        // captures inherit this state. PointCloudRecorder pushes its
+        // captures inherit this state. SensorRecorder pushes its
         // showPointClouds toggle into here so the single "point cloud visual
         // on/off" lever covers both the live playback mesh and the snapshots.
         public bool SnapshotsVisible
@@ -123,7 +123,7 @@ namespace PointCloud
         // The snapshot GO's world transform is frozen to rendererTransform's current
         // world transform so snapshots stay put if the renderer later moves.
         public void OnFrame(NativeArray<ObColorPoint> buffer, int count, Transform rendererTransform,
-                            Material fallbackMaterial, PointCloudBoundingBox boundingBox,
+                            Material fallbackMaterial, BoundingVolume boundingBox,
                             PointCloudDecimater decimater)
         {
             if (!noErase || count <= 0 || rendererTransform == null) return;
@@ -144,7 +144,7 @@ namespace PointCloud
         }
 
         // Playback variant: source data lives in `playbackMesh`'s GPU vertex buffer
-        // (filled by PointCloudReconstruct.compute in PointCloudRecorder, which
+        // (filled by PointCloudReconstruct.compute in SensorRecorder, which
         // sets Raw target so we can re-read it as ByteAddressBuffer here). We
         // dispatch PointCloudCumulativeFilter.compute to apply sanity / decim /
         // bbox / capsule filters directly on GPU and atomic-append survivors to
@@ -154,7 +154,7 @@ namespace PointCloud
         // The mesh layout must match ObColorPoint (6 floats = 24 bytes); the
         // playback reconstruct shader and the snapshot mesh both use this layout.
         public void OnPlaybackFrame(Mesh playbackMesh, int count, Transform playbackTransform,
-                                    Material fallbackMaterial, PointCloudBoundingBox boundingBox,
+                                    Material fallbackMaterial, BoundingVolume boundingBox,
                                     PointCloudDecimater decimater)
         {
             if (!noErase || count <= 0 || playbackMesh == null || playbackTransform == null) return;
@@ -257,7 +257,7 @@ namespace PointCloud
 
         private void CaptureSnapshotGpu(GraphicsBuffer srcBuf, int count,
                                         Transform rendererTransform, Material fallbackMaterial,
-                                        PointCloudBoundingBox boundingBox,
+                                        BoundingVolume boundingBox,
                                         PointCloudDecimater decimater)
         {
             if (!TryLoadFilterShader())
@@ -287,7 +287,7 @@ namespace PointCloud
             // leaves the underlying vertex GPU buffer in an uncommitted state
             // and the compute's _Dst.Store3 writes go nowhere — confirmed by
             // GetData readback showing all-zeros despite a non-zero atomic
-            // counter. This mirrors PointCloudRecorder.EnsurePlaybackMesh which
+            // counter. This mirrors SensorRecorder.EnsurePlaybackMesh which
             // sets index params + index data at mesh-creation time and works.
             if (diagnosticLogging) _diagSw.Restart();
             var mesh = new Mesh
@@ -339,11 +339,11 @@ namespace PointCloud
             shader.SetMatrix(kId_ObjToWorld, rendererTransform.localToWorldMatrix);
 
             bool bboxActive = boundingBox != null
-                && boundingBox.Mode != PointCloudBoundingBox.FilterMode.Disabled;
+                && boundingBox.Mode != BoundingVolume.FilterMode.Disabled;
             int bboxMode = 0;
             if (bboxActive)
             {
-                bboxMode = boundingBox.Mode == PointCloudBoundingBox.FilterMode.KeepInside ? 1 : 2;
+                bboxMode = boundingBox.Mode == BoundingVolume.FilterMode.KeepInside ? 1 : 2;
                 shader.SetMatrix(kId_WorldToBbox, boundingBox.transform.worldToLocalMatrix);
             }
             shader.SetInt(kId_BboxMode, bboxMode);
@@ -465,7 +465,7 @@ namespace PointCloud
         private NativeArray<ObColorPoint> _filterScratch;
 
         private void CaptureSnapshot(NativeArray<ObColorPoint> buffer, int count, Transform rendererTransform,
-                                     Material fallbackMaterial, PointCloudBoundingBox boundingBox,
+                                     Material fallbackMaterial, BoundingVolume boundingBox,
                                      PointCloudDecimater decimater)
         {
             // Points stay in renderer-local space; the snapshot GO's world transform is
@@ -477,13 +477,13 @@ namespace PointCloud
             // snapshot then renders only those frozen points — both filters are
             // baked at capture (matches the existing capsule "freeze the trail"
             // semantic). The bbox reference is passed in from the caller
-            // (PointCloudRenderer / PointCloudRecorder) — cumulative does not
+            // (PointCloudRenderer / SensorRecorder) — cumulative does not
             // duplicate the field, so a single scene-wide bbox flows through.
             NativeArray<ObColorPoint> srcBuffer = buffer;
             int srcCount = count;
 
             bool bboxActive = boundingBox != null
-                && boundingBox.Mode != PointCloudBoundingBox.FilterMode.Disabled;
+                && boundingBox.Mode != BoundingVolume.FilterMode.Disabled;
             bool capsuleAssigned = capsuleFilter != null
                 && capsuleFilter.Mode != PointCloudCapsuleFilter.FilterMode.Disabled;
             bool decimActive = decimater != null && decimater.Enabled;
@@ -619,7 +619,7 @@ namespace PointCloud
         //      than bbox so it goes last.
         private int FilterForCapture(NativeArray<ObColorPoint> src, int count,
                                      NativeArray<ObColorPoint> dst, Transform rendererTransform,
-                                     PointCloudBoundingBox boundingBox, bool useCapsule,
+                                     BoundingVolume boundingBox, bool useCapsule,
                                      float keepRatio, float sanityRangeM)
         {
             bool useBbox = boundingBox != null;
@@ -627,7 +627,7 @@ namespace PointCloud
             var l2w = rendererTransform.localToWorldMatrix;
             Matrix4x4 bboxW2L = useBbox ? boundingBox.transform.worldToLocalMatrix : Matrix4x4.identity;
             bool bboxKeepInside = useBbox
-                && boundingBox.Mode == PointCloudBoundingBox.FilterMode.KeepInside;
+                && boundingBox.Mode == BoundingVolume.FilterMode.KeepInside;
             bool capsKeepInside = useCapsule
                 && capsuleFilter.Mode == PointCloudCapsuleFilter.FilterMode.KeepInside;
 

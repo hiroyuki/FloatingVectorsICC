@@ -9,7 +9,7 @@ using UnityEngine;
 namespace PointCloud
 {
     [DisallowMultipleComponent]
-    public class PointCloudBoundingBox : MonoBehaviour
+    public class BoundingVolume : MonoBehaviour
     {
         public enum FilterMode
         {

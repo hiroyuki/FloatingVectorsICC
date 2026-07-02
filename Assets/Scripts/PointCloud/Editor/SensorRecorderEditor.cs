@@ -1,4 +1,4 @@
-// Inspector for PointCloudRecorder: default fields plus Rec/Play/Read buttons
+// Inspector for SensorRecorder: default fields plus Rec/Play/Read buttons
 // wired to the matching public methods on the target component (per issue #5).
 //
 // Recording streams straight to disk during Rec and finalizes on Stop Rec, so
@@ -14,14 +14,14 @@ using UnityEngine;
 
 namespace PointCloud.EditorTools
 {
-    [CustomEditor(typeof(PointCloudRecorder))]
-    public class PointCloudRecorderEditor : Editor
+    [CustomEditor(typeof(SensorRecorder))]
+    public class SensorRecorderEditor : Editor
     {
         public override void OnInspectorGUI()
         {
             DrawDefaultInspector();
 
-            var t = (PointCloudRecorder)target;
+            var t = (SensorRecorder)target;
 
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("State", t.CurrentState.ToString());
@@ -37,16 +37,16 @@ namespace PointCloud.EditorTools
             {
                 using (new EditorGUI.DisabledScope(!Application.isPlaying))
                 {
-                    string recLabel = t.CurrentState == PointCloudRecorder.State.Recording ? "Stop Rec" : "Rec";
+                    string recLabel = t.CurrentState == SensorRecorder.State.Recording ? "Stop Rec" : "Rec";
                     if (GUILayout.Button(recLabel)) t.ToggleRecord();
 
-                    string playLabel = t.CurrentState == PointCloudRecorder.State.Playing ? "Stop Play" : "Play";
+                    string playLabel = t.CurrentState == SensorRecorder.State.Playing ? "Stop Play" : "Play";
                     // Play auto-Reads the configured folder if nothing is loaded, so it's
                     // clickable without a separate Read step.
                     if (GUILayout.Button(playLabel)) t.TogglePlay();
 
                     string pauseLabel = t.IsPaused ? "Resume" : "Pause";
-                    using (new EditorGUI.DisabledScope(t.CurrentState != PointCloudRecorder.State.Playing))
+                    using (new EditorGUI.DisabledScope(t.CurrentState != SensorRecorder.State.Playing))
                     {
                         if (GUILayout.Button(pauseLabel)) t.TogglePause();
                     }
@@ -58,7 +58,7 @@ namespace PointCloud.EditorTools
             // without a separate Pause click.
             using (new EditorGUILayout.HorizontalScope())
             {
-                using (new EditorGUI.DisabledScope(t.CurrentState != PointCloudRecorder.State.Playing))
+                using (new EditorGUI.DisabledScope(t.CurrentState != SensorRecorder.State.Playing))
                 {
                     if (GUILayout.Button("◀ Step")) t.StepBackward();
                     if (GUILayout.Button("Step ▶")) t.StepForward();
@@ -71,7 +71,7 @@ namespace PointCloud.EditorTools
             // Rec finalizes the files.
             using (new EditorGUILayout.HorizontalScope())
             {
-                using (new EditorGUI.DisabledScope(!Application.isPlaying || t.CurrentState != PointCloudRecorder.State.Idle))
+                using (new EditorGUI.DisabledScope(!Application.isPlaying || t.CurrentState != SensorRecorder.State.Idle))
                 {
                     if (GUILayout.Button("Reload (optional)")) t.Load();
                 }

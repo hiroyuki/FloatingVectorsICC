@@ -32,7 +32,7 @@ namespace Calibration.EditorTools
         [SerializeField] private string _extrinsicsRoot = string.Empty;
 
         // -------- Runtime state --------
-        private PointCloudCameraManager _manager;
+        private SensorManager _manager;
         private readonly Dictionary<PointCloudRenderer, LatestFrame> _latest = new Dictionary<PointCloudRenderer, LatestFrame>();
         private readonly Dictionary<PointCloudRenderer, Action<PointCloudRenderer, RawFrameData>> _handlers = new Dictionary<PointCloudRenderer, Action<PointCloudRenderer, RawFrameData>>();
         private MarkerPoseEstimator _estimator;
@@ -186,7 +186,7 @@ namespace Calibration.EditorTools
             if (!Application.isPlaying) return;
             if (_manager == null || _manager.Renderers == null || _manager.Renderers.Count == 0)
             {
-                _manager = FindFirstObjectByType<PointCloudCameraManager>();
+                _manager = FindFirstObjectByType<SensorManager>();
                 if (_manager != null) Subscribe();
             }
             else
@@ -221,7 +221,7 @@ namespace Calibration.EditorTools
             _extrinsicsRoot = EditorGUILayout.TextField(
                 new GUIContent("Extrinsics root",
                     "Root for calibration/extrinsics.yaml. Empty = Application.persistentDataPath/Recordings/recording. " +
-                    "Same convention as PointCloudRecorder.folderPath / PointCloudCameraManager.extrinsicsRoot."),
+                    "Same convention as SensorRecorder.folderPath / SensorManager.extrinsicsRoot."),
                 _extrinsicsRoot);
 
             EditorGUILayout.Space();
@@ -231,7 +231,7 @@ namespace Calibration.EditorTools
                 if (_manager == null)
                 {
                     EditorGUILayout.HelpBox(
-                        "Enter Play mode and ensure a PointCloudCameraManager is in the scene.",
+                        "Enter Play mode and ensure a SensorManager is in the scene.",
                         MessageType.Info);
                 }
                 else
@@ -540,7 +540,7 @@ namespace Calibration.EditorTools
                 PointCloudRecording.WriteExtrinsicsYaml(root, calibrations);
                 string outPath = Path.Combine(PointCloudRecording.CalibrationDir(root), "extrinsics.yaml");
 
-                // Auto-apply to the live scene. PointCloudCameraManager.ApplyExtrinsicsToLive
+                // Auto-apply to the live scene. SensorManager.ApplyExtrinsicsToLive
                 // only runs once at Start, so without this the renderers keep showing the
                 // PREVIOUS calibration until the user re-enters Play. We only apply when the
                 // manager reads from the same root we just wrote to — otherwise we'd push a

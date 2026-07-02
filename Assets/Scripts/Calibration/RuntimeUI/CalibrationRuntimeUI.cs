@@ -33,7 +33,7 @@ namespace Calibration.RuntimeUI
                  "rest by more than this, the whole Capture set is rejected.")]
         public float maxSkewMs = 50f;
         [Tooltip("Root for calibration/extrinsics.yaml. Empty = same default as " +
-                 "PointCloudCameraManager (persistentDataPath/Recordings/recording).")]
+                 "SensorManager (persistentDataPath/Recordings/recording).")]
         public string extrinsicsRoot = string.Empty;
 
         [Header("Preview")]
@@ -78,7 +78,7 @@ namespace Calibration.RuntimeUI
         };
 
         // -------- Runtime state --------
-        private PointCloudCameraManager _manager;
+        private SensorManager _manager;
         private MarkerPoseEstimator _estimator;
         private CharucoBoardSpec _estimatorSpecCache;
         private string _status = "";
@@ -187,7 +187,7 @@ namespace Calibration.RuntimeUI
             // the renderer set (manager spawns renderers in its own Start()).
             if (_manager == null || _manager.Renderers == null || _manager.Renderers.Count == 0)
             {
-                var found = FindFirstObjectByType<PointCloudCameraManager>();
+                var found = FindFirstObjectByType<SensorManager>();
                 if (found != _manager) { _manager = found; Subscribe(); }
             }
             else if (_handlers.Count != _manager.Renderers.Count)
@@ -553,7 +553,7 @@ namespace Calibration.RuntimeUI
             if (_manager == null || _manager.Renderers.Count == 0)
             {
                 GUI.Label(new Rect(10, 10, 800, 30),
-                    "Calibration: waiting for PointCloudCameraManager / renderers...", _hud);
+                    "Calibration: waiting for SensorManager / renderers...", _hud);
                 return;
             }
 

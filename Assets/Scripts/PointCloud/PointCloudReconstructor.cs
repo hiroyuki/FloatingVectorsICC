@@ -1,7 +1,7 @@
 // GPU depth -> color point cloud reconstruction. One ComputeShader.Dispatch
 // per call writes vertex positions + colors directly into the owned Mesh's
 // vertex buffer. Used by both live capture (PointCloudRenderer) and recorded
-// playback (PointCloudRecorder) — previously this logic was duplicated
+// playback (SensorRecorder) — previously this logic was duplicated
 // verbatim between those two callers.
 //
 // Lifecycle: caller `new`s one per renderer/track, plugs the Mesh property

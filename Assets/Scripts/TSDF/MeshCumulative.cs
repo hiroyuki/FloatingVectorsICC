@@ -7,7 +7,7 @@
 //
 // Source-agnostic: the integration it drives (TSDFIntegrator) subscribes to BOTH
 // live (PointCloudRenderer.OnRawFramesReady) and playback
-// (PointCloudRecorder.OnPlaybackRawFrame), so it works identically on a live
+// (SensorRecorder.OnPlaybackRawFrame), so it works identically on a live
 // Femto Bolt rig OR on an already-recorded RCSV played back. Nothing here touches
 // the record path — recording stays a separate concern.
 //

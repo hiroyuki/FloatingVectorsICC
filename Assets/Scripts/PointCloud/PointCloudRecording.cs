@@ -261,7 +261,7 @@ namespace PointCloud
             // whose ByteCount marks the valid prefix; callers MUST treat the
             // tail bytes (ByteCount..Length) as undefined and MUST consume
             // the Frame before the next indexer call on this stream.
-            // Playback paths (PointCloudRecorder.Update, BodyTrackingPlayback.
+            // Playback paths (SensorRecorder.Update, BodyTrackingPlayback.
             // ProcessCoroutine) read each Frame synchronously within one tick,
             // so the reuse is safe; the contract is documented on Frame.ByteCount.
             private byte[] _scratch = Array.Empty<byte>();

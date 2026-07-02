@@ -5,7 +5,7 @@ namespace Orbbec
 {
     /// <summary>
     /// IDisposable wrapper around ob_context. One per process is recommended;
-    /// PointCloudCameraManager owns the lifecycle.
+    /// SensorManager owns the lifecycle.
     /// </summary>
     public sealed class OrbbecContext : IDisposable
     {

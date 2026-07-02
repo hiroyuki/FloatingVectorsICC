@@ -1,7 +1,7 @@
 // Feeds the body's anatomical bones (as world-space capsules with a configurable
 // radius) into a PointCloud.PointCloudCapsuleFilter every LateUpdate. The
 // filter is then consumed by PointCloudRenderer (live shader cull),
-// PointCloudRecorder (playback shader cull), and optionally PointCloudCumulative
+// SensorRecorder (playback shader cull), and optionally PointCloudCumulative
 // (CPU pre-filter for snapshot freezing). End-to-end this lets the renderer
 // keep only the point cloud lying inside the BT tube volume, with the
 // cumulative snapshot pattern accumulating those frozen points as a body

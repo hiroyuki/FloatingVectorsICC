@@ -1,5 +1,5 @@
 // Process-wide OrbbecContext singleton with explicit shutdown.
-// PointCloudCameraManager owns the lifecycle for a scene; renderers
+// SensorManager owns the lifecycle for a scene; renderers
 // reference the shared context.
 
 using System.IO;
