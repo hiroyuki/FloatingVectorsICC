@@ -246,7 +246,30 @@ namespace TSDF
             if (integrator != null) integrator.integrationEnabled = false;   // freeze the body sweep
             UnsubscribeFuse();                                               // stop adding trail
             if (volume != null) volume.Publish();                           // show the final accumulated mesh
-            LastStatus = "CAPTURE stopped — frozen sculpture on screen.";
+            LastStatus = "CAPTURE stopped — frozen sculpture on screen. (Resume live to get the body back.)";
+            Debug.Log($"[TSDFTrailBaker] {LastStatus}", this);
+        }
+
+        // Exit capture and return to normal live-follow: the frozen sculpture is cleared and
+        // the body TSDF mesh follows the current frame again. A trail-only capture disables the
+        // body integrator, so the surface mesh stays gone until you resume — this brings it back.
+        [ContextMenu("Resume live (exit capture)")]
+        public void ResumeLive()
+        {
+            if (!ResolveVolume(silent: false)) return;
+            if (integrator == null) integrator = FindFirstObjectByType<TSDFIntegrator>();
+            IsCapturing = false;
+            UnsubscribeFuse();
+            volume.doubleBuffered = true;
+            if (integrator != null)
+            {
+                integrator.volume = volume;
+                integrator.clearVolumeOnNewBatch = true;   // live-follow (clears each batch)
+                integrator.integrationEnabled = true;      // integrate the current body again
+            }
+            volume.ForceRebuild();                         // drop the frozen sculpture, rebuild double-buffered
+            if (integrator != null) integrator.BeginFreshBatch();
+            LastStatus = "Resumed live — body follows the current frame again.";
             Debug.Log($"[TSDFTrailBaker] {LastStatus}", this);
         }
 

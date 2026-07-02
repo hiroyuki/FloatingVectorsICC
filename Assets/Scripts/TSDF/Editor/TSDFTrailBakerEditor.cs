@@ -38,6 +38,11 @@ namespace TSDF.EditorTools
                 EditorGUILayout.HelpBox("Capturing… motion is accumulating into the frozen buffer.",
                                         MessageType.Warning);
 
+            // After a capture the body integrator is left frozen (trail-only capture disables it),
+            // so the live surface mesh stays gone. This one-click restores live-follow.
+            if (GUILayout.Button("Resume live (exit capture → body back)", GUILayout.Height(24)))
+                t.ResumeLive();
+
             if (!string.IsNullOrEmpty(t.LastStatus))
                 EditorGUILayout.HelpBox(t.LastStatus, MessageType.Info);
         }
