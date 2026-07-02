@@ -24,7 +24,7 @@ using UnityEngine.Rendering;
 namespace PointCloud
 {
     [DisallowMultipleComponent]
-    public class SensorRecorder : MonoBehaviour
+    public class SensorRecorder : MonoBehaviour, Shared.IRecorderTransport
     {
         public enum State { Idle, Recording, Playing }
 
@@ -130,6 +130,17 @@ namespace PointCloud
         /// shifts the wall-clock origin so the playhead picks up where it left off.
         /// </summary>
         public bool IsPaused { get; private set; }
+
+        // ---- Shared.IRecorderTransport (Control Panel) ----
+        // ToggleRecord / TogglePlay / TogglePause below already satisfy the interface;
+        // these readouts complete it so the panel can drive the transport centrally.
+        public bool IsRecording => CurrentState == State.Recording;
+        public bool IsPlaying => CurrentState == State.Playing;
+        public string TransportStatus =>
+            CurrentState + (IsPaused ? " (paused)" : "")
+            + (CurrentState == State.Playing ? $" @ {CurrentPlayheadSeconds:0.00}s" : "")
+            + (string.IsNullOrEmpty(StatusMessage) ? "" : " — " + StatusMessage);
+
         public int RecordedFrameCount
         {
             get
