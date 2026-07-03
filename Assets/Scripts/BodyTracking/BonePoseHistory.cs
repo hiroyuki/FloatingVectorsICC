@@ -14,6 +14,7 @@
 // On tracking loss / staleness a bone's history is reset so trails don't freeze or jump.
 
 using UnityEngine;
+using PointCloud;
 
 namespace BodyTracking
 {
@@ -22,6 +23,15 @@ namespace BodyTracking
     {
         [Tooltip("Body-tracking source. Leave empty to auto-resolve the first SkeletonMerger at OnEnable.")]
         public SkeletonMerger bodyTracking;
+
+        [Tooltip("Hold the pose history (stop updating) while playback is paused, so downstream curves " +
+                 "stay put and can be rebuilt with new parameters on the frozen pose. Uses the resolved " +
+                 "SensorRecorder.")]
+        public bool freezeOnPause = true;
+
+        [Tooltip("Playback source whose pause state drives freezeOnPause. Auto-resolves the first " +
+                 "SensorRecorder at OnEnable.")]
+        public SensorRecorder recorder;
 
         [Min(2)]
         [Tooltip("Ring-buffer length K: how many past frames form each bone's curve.")]
@@ -83,6 +93,7 @@ namespace BodyTracking
         private void OnEnable()
         {
             if (bodyTracking == null) bodyTracking = FindFirstObjectByType<SkeletonMerger>();
+            if (recorder == null) recorder = FindFirstObjectByType<SensorRecorder>();
             EnsureBuffers();
         }
 
@@ -141,6 +152,9 @@ namespace BodyTracking
         private void LateUpdate()
         {
             EnsureBuffers();
+            // While paused, hold the ring + GPU buffer at their pre-pause state so the pose (and the
+            // curves built from it) stays fixed and downstream params can be re-evaluated on it.
+            if (freezeOnPause && recorder != null && recorder.IsPaused) return;
             UpdateHistory();
             PublishGpu();
         }

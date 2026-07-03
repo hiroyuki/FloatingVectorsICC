@@ -18,7 +18,6 @@
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
-using PointCloud;
 
 namespace BodyTracking
 {
@@ -50,21 +49,25 @@ namespace BodyTracking
         [Tooltip("Cull a seed as background if its nearest bone surface distance exceeds this (m).")]
         public float surfaceMargin = 0.05f;
 
+        [Range(1, 4)]
+        [Tooltip("How many nearest bones each seed blends (skinning-style). 1 = hard nearest-bone " +
+                 "assignment (sharp boundaries); 3 smooths bone joints.")]
+        public int boneBlendCount = 3;
+
+        [Range(0.005f, 0.2f)]
+        [Tooltip("Blend falloff sigma (m). Smaller = sharper (closer to nearest-bone); larger = softer, " +
+                 "wider blend across the boundary.")]
+        public float blendSharpness = 0.02f;
+
         [Range(0f, 3f)]
         public float brightness = 1f;
 
         [Header("Freeze")]
-        [Tooltip("Stop rebuilding and keep drawing the last curves. Turn on to hold the motion " +
-                 "sculpture in place (e.g. to inspect a frozen pose).")]
+        [Tooltip("Hard hold: stop rebuilding and keep drawing the last curves, ignoring parameter and " +
+                 "pose changes. For holding the sculpture during live play. NOTE: pausing playback " +
+                 "already holds the pose (via BonePoseHistory) while still letting you retune params — " +
+                 "leave this off if you want to compare blend settings on a paused frame.")]
         public bool freeze = false;
-
-        [Tooltip("Automatically freeze while playback is paused, so the curves are kept instead of " +
-                 "decaying as the bone history goes stale. Uses the resolved SensorRecorder.")]
-        public bool freezeOnPause = true;
-
-        [Tooltip("Playback source whose pause state drives freezeOnPause. Auto-resolves the first " +
-                 "SensorRecorder at OnEnable.")]
-        public SensorRecorder recorder;
 
         [Tooltip("Coordinate magnitude (m) above which a source vertex is treated as an invalid-depth " +
                  "dummy and skipped (playback reconstruct emits 1e10 for holes).")]
@@ -102,13 +105,14 @@ namespace BodyTracking
         private static readonly int kRadiusScale = Shader.PropertyToID("_RadiusScale");
         private static readonly int kSurfaceMargin = Shader.PropertyToID("_SurfaceMargin");
         private static readonly int kSanityRange = Shader.PropertyToID("_SanityRange");
+        private static readonly int kBlendCount = Shader.PropertyToID("_BlendCount");
+        private static readonly int kBlendSigma = Shader.PropertyToID("_BlendSigma");
         private static readonly int kVerts = Shader.PropertyToID("_Verts");
         private static readonly int kBrightness = Shader.PropertyToID("_Brightness");
 
         private void OnEnable()
         {
             if (history == null) history = FindFirstObjectByType<BonePoseHistory>();
-            if (recorder == null) recorder = FindFirstObjectByType<SensorRecorder>();
             if (_shader == null)
             {
                 _shader = Resources.Load<ComputeShader>("MotionCurvesBuild");
@@ -143,10 +147,10 @@ namespace BodyTracking
         {
             if (_shader == null || _kernel < 0 || _mat == null) return;
 
-            // Frozen: keep drawing the last built curves without rebuilding. This holds the sculpture
-            // in place while playback is paused (the bone history would otherwise go stale and reset).
-            bool frozen = freeze || (freezeOnPause && recorder != null && recorder.IsPaused);
-            if (frozen)
+            // Manual hard hold: keep drawing the last built curves without rebuilding (ignores params).
+            // Pausing playback does NOT take this path — BonePoseHistory holds the pose while paused, so
+            // rebuilding stays stable yet still responds to parameter tweaks.
+            if (freeze)
             {
                 if (_outBuf != null && _hasBuilt) DrawCurves();
                 return;
@@ -182,6 +186,8 @@ namespace BodyTracking
             _shader.SetFloat(kRadiusScale, radiusScale);
             _shader.SetFloat(kSurfaceMargin, surfaceMargin);
             _shader.SetFloat(kSanityRange, sanityRange);
+            _shader.SetInt(kBlendCount, Mathf.Clamp(boneBlendCount, 1, 4));
+            _shader.SetFloat(kBlendSigma, blendSharpness);
 
             var borrowed = new List<GraphicsBuffer>(nSrc);
             for (int i = 0; i < nSrc; i++)

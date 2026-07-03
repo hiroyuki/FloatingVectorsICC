@@ -34,6 +34,8 @@ uint  _RingLen;       // K
 float _RadiusScale;
 float _SurfaceMargin; // cull seed if nearest surface distance exceeds this (background)
 float _SanityRange;   // |coord| above this => invalid-depth dummy, cull
+uint  _BlendCount;    // number of nearest bones to blend (1 = hard argmax)
+float _BlendSigma;    // rank falloff (m) for blend weights; smaller = sharper boundaries
 
 // Fill a seed's whole output slot with zero-length (invisible) segments.
 void WriteDegenerate(uint slotBase, uint segs)
@@ -68,9 +70,15 @@ void CSBuild(uint3 id : SV_DispatchThreadID)
     if (abs(p.x) > _SanityRange || abs(p.y) > _SanityRange || abs(p.z) > _SanityRange)
     { WriteDegenerate(slotBase, segsPerSeed); return; }
 
-    // --- classify to nearest bone on the CURRENT (newest) frame ---
-    int  bestBone = -1;
-    float bestRank = 1e9, bestD = 1e9, bestSurf = 1e9, bestT = 0.0;
+    // --- classify: soft-assign to the nearest few bones (skinning-style blend) ---
+    // Select the top-N bones ordered by rank = max(surf,0) (tie-broken by centerline d),
+    // then weight them by exp(-rank / sigma). A hard argmax switches the driving bone at a
+    // boundary (visible discontinuity); blending the nearest few smooths it. N=1 reproduces
+    // the old single-bone behaviour exactly.
+    const uint MAXN = 4u;
+    uint blendCount = min(max(_BlendCount, 1u), MAXN);
+    uint  selN = 0u;
+    int   selIdx[4]; float selKey[4]; float selSurf[4]; float selT[4];
     for (uint b = 0; b < _BoneCount; b++)
     {
         uint cnt = _BoneCounts[b];
@@ -83,36 +91,60 @@ void CSBuild(uint3 id : SV_DispatchThreadID)
         float d = length(p - closest);
         float radius = lerp(_BoneRadiusA[b], _BoneRadiusB[b], t) * _RadiusScale;
         float surf = d - radius;
-        float rank = max(surf, 0.0);
-        // min rank; tie-break (interior overlaps, rank==0) by smaller centerline d.
-        bool better = (rank < bestRank - 1e-6) ||
-                      (abs(rank - bestRank) <= 1e-6 && d < bestD);
-        if (better) { bestRank = rank; bestD = d; bestSurf = surf; bestT = t; bestBone = (int)b; }
+        float key = max(surf, 0.0) * 1000.0 + d; // order: rank first, centerline d tie-break
+
+        // Insert into the ascending-key top-N list.
+        uint i = 0u;
+        if (selN < blendCount) { i = selN; selN++; }
+        else if (key < selKey[blendCount - 1u]) { i = blendCount - 1u; }
+        else continue;
+        selIdx[i] = (int)b; selKey[i] = key; selSurf[i] = surf; selT[i] = t;
+        for (; i > 0u && selKey[i] < selKey[i - 1u]; i--)
+        {
+            int ti = selIdx[i]; selIdx[i] = selIdx[i - 1u]; selIdx[i - 1u] = ti;
+            float tk = selKey[i]; selKey[i] = selKey[i - 1u]; selKey[i - 1u] = tk;
+            float ts = selSurf[i]; selSurf[i] = selSurf[i - 1u]; selSurf[i - 1u] = ts;
+            float tt = selT[i]; selT[i] = selT[i - 1u]; selT[i - 1u] = tt;
+        }
     }
 
-    if (bestBone < 0 || bestSurf > _SurfaceMargin)
+    // Background cull on the nearest bone's surface distance.
+    if (selN == 0u || selSurf[0] > _SurfaceMargin)
     { WriteDegenerate(slotBase, segsPerSeed); return; }
 
-    uint bone = (uint)bestBone;
-    uint cnt = _BoneCounts[bone];
-    uint baseIdx = bone * _RingLen;
-
-    // (t, cv, cw) in the newest stable frame.
-    Sample sn = _History[baseIdx + (cnt - 1u)];
-    float t = bestT;
-    float3 center = lerp(sn.A, sn.B, t);
-    float3 rel = p - center;
-    float cv = dot(rel, sn.V);
-    float cw = dot(rel, sn.W);
-    float3 col = _BoneColor[bone];
-
-    // Reproject through history -> control points x_k, emit line strip.
-    float3 prev = float3(0, 0, 0);
-    uint segs = cnt - 1u;
-    for (uint k = 0; k < cnt; k++)
+    // Per-selected-bone weight + (t, cv, cw) in that bone's newest frame.
+    float w[4]; float tb[4]; float cvb[4]; float cwb[4]; uint baseB[4];
+    float wsum = 0.0; uint minCnt = 0xffffffffu;
+    for (uint j = 0; j < selN; j++)
     {
-        Sample sk = _History[baseIdx + k];
-        float3 xk = lerp(sk.A, sk.B, t) + cv * sk.V + cw * sk.W;
+        uint bb = (uint)selIdx[j];
+        uint cnt = _BoneCounts[bb];
+        minCnt = min(minCnt, cnt);
+        baseB[j] = bb * _RingLen;
+        Sample sn = _History[baseB[j] + (cnt - 1u)];
+        float t = selT[j];
+        float3 rel = p - lerp(sn.A, sn.B, t);
+        tb[j] = t; cvb[j] = dot(rel, sn.V); cwb[j] = dot(rel, sn.W);
+        w[j] = exp(-max(selSurf[j], 0.0) / max(_BlendSigma, 1e-4));
+        wsum += w[j];
+    }
+    float invW = (wsum > 1e-8) ? (1.0 / wsum) : 0.0;
+
+    // Blended colour (constant along the curve).
+    float3 col = float3(0, 0, 0);
+    for (uint jc = 0; jc < selN; jc++) col += (w[jc] * invW) * _BoneColor[(uint)selIdx[jc]];
+
+    // Reproject: each control point is the weighted blend of every selected bone's reprojection.
+    float3 prev = float3(0, 0, 0);
+    uint segs = (minCnt >= 1u) ? (minCnt - 1u) : 0u;
+    for (uint k = 0; k < minCnt; k++)
+    {
+        float3 xk = float3(0, 0, 0);
+        for (uint jb = 0; jb < selN; jb++)
+        {
+            Sample sk = _History[baseB[jb] + k];
+            xk += (w[jb] * invW) * (lerp(sk.A, sk.B, tb[jb]) + cvb[jb] * sk.V + cwb[jb] * sk.W);
+        }
         if (k > 0u)
         {
             uint seg = k - 1u;
@@ -123,7 +155,7 @@ void CSBuild(uint3 id : SV_DispatchThreadID)
         }
         prev = xk;
     }
-    // Zero-fill the unused tail (this bone had < K samples).
+    // Zero-fill the unused tail.
     LineVert z; z.p = float3(0, 0, 0); z.c = float3(0, 0, 0);
     for (uint s = segs; s < segsPerSeed; s++)
     {
