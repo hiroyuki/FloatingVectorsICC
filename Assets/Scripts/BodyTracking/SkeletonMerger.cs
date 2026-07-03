@@ -56,6 +56,13 @@ namespace BodyTracking
         public string ViewLabel => "BT skeleton";
         public bool Visible { get => showBones; set => showBones = value; }
 
+        // Increments whenever a new body frame is ingested (playback or live worker). Consumers like
+        // BonePoseHistory watch it to know a genuinely new pose arrived — so they update on play AND on
+        // paused frame-stepping, but hold steady when the playhead is truly static (no repeated-sample
+        // collapse). Independent of IsPaused, which stays true while stepping.
+        private ulong _poseVersion;
+        public ulong PoseVersion => _poseVersion;
+
         [Tooltip("Joint marker radius (m). Set to 0 to hide the joint spheres entirely " +
                  "(the bone lines stay visible while showBones is on).")]
         [Range(0f, 0.2f)] public float jointRadius = 0.05f;
@@ -366,6 +373,7 @@ namespace BodyTracking
             slot.CapturedTsNs = tsNs;
             slot.CapturedAtRealtime = Time.realtimeSinceStartup;
             _diagSnapshotsRecv += count;
+            _poseVersion++;
         }
 
         private void OnDisable()
@@ -775,6 +783,7 @@ namespace BodyTracking
             slot.CapturedAtRealtime = Time.realtimeSinceStartup;
             slot.CapturedTsNs = tsNs;
             _diagSnapshotsRecv += n;
+            _poseVersion++;
 
             // While recording, persist this worker's output to bodies_main so playback
             // can skip k4abt entirely (and run on Mac). Encode here so the byte buffer
