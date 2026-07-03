@@ -1,0 +1,165 @@
+// Point-cloud "motion curves" builder (Phase 2, fused classify + reproject).
+//
+// One thread per seed slot. Each seed samples a source point-cloud vertex,
+// classifies it to the nearest bone (surface-distance rank = max(d - radius, 0),
+// tie-broken by centerline distance then bone index), parameterises it in that
+// bone's CURRENT stable frame as (t, cv, cw), then reprojects (t, cv, cw)
+// through the bone's WORLD pose history to trace an arc. The arc is emitted as a
+// line strip (K-1 segments, 2 verts each) into a fixed per-seed slot; unused /
+// culled slots are filled with zero-length segments (invisible).
+//
+// Layouts are shared with BonePoseHistory.Sample (5 float3, 60B, oldest->newest
+// at [bone*K + sample]) and the source mesh vertex layout (ObColorPoint: pos12 +
+// col12, 24B raw). See PointCloudMotionCurves.cs for the host side.
+
+#pragma kernel CSBuild
+
+struct Sample { float3 A; float3 B; float3 U; float3 V; float3 W; };
+struct LineVert { float3 p; float3 c; };
+
+ByteAddressBuffer          _Src;          // source vertices, 24B stride (pos12 + col12)
+StructuredBuffer<Sample>   _History;      // bone*K, oldest->newest
+StructuredBuffer<uint>     _BoneCounts;   // valid samples per bone
+StructuredBuffer<float>    _BoneRadiusA;  // radius at bone.a (parent side), m
+StructuredBuffer<float>    _BoneRadiusB;  // radius at bone.b (child side), m
+StructuredBuffer<float3>   _BoneColor;    // per-bone RGB
+RWStructuredBuffer<LineVert> _Out;
+
+float4x4 _SrcLocalToWorld;
+uint  _SrcCount;      // source vertex count
+uint  _SeedBase;      // output seed-slot offset for this source dispatch
+uint  _SeedCount;     // seeds produced by this dispatch
+uint  _BoneCount;
+uint  _RingLen;       // K
+float _RadiusScale;
+float _SurfaceMargin; // cull seed if nearest surface distance exceeds this (background)
+float _SanityRange;   // |coord| above this => invalid-depth dummy, cull
+uint  _BlendCount;    // number of nearest bones to blend (1 = hard argmax)
+float _BlendSigma;    // rank falloff (m) for blend weights; smaller = sharper boundaries
+
+// Fill a seed's whole output slot with zero-length (invisible) segments.
+void WriteDegenerate(uint slotBase, uint segs)
+{
+    LineVert z; z.p = float3(0, 0, 0); z.c = float3(0, 0, 0);
+    for (uint s = 0; s < segs; s++)
+    {
+        _Out[slotBase + s * 2u]      = z;
+        _Out[slotBase + s * 2u + 1u] = z;
+    }
+}
+
+[numthreads(64, 1, 1)]
+void CSBuild(uint3 id : SV_DispatchThreadID)
+{
+    uint seedLocal = id.x;
+    if (seedLocal >= _SeedCount) return;
+
+    uint segsPerSeed = _RingLen - 1u;
+    uint slotBase = (_SeedBase + seedLocal) * segsPerSeed * 2u;
+
+    // Spread seeds evenly across the source cloud. Float mapping keeps SM5.0
+    // (no 64-bit ints); counts here are well within float's exact-int range.
+    if (_SrcCount == 0u) { WriteDegenerate(slotBase, segsPerSeed); return; }
+    uint srcIdx = (uint)(((float)seedLocal / (float)_SeedCount) * (float)_SrcCount);
+    if (srcIdx >= _SrcCount) srcIdx = _SrcCount - 1u;
+
+    float3 pl = asfloat(_Src.Load3(srcIdx * 24u));
+    float3 p  = mul(_SrcLocalToWorld, float4(pl, 1.0)).xyz;
+
+    // Invalid-depth dummy cull (reconstruct emits 1e10 for holes).
+    if (abs(p.x) > _SanityRange || abs(p.y) > _SanityRange || abs(p.z) > _SanityRange)
+    { WriteDegenerate(slotBase, segsPerSeed); return; }
+
+    // --- classify: soft-assign to the nearest few bones (skinning-style blend) ---
+    // Select the top-N bones ordered by rank = max(surf,0) (tie-broken by centerline d),
+    // then weight them by exp(-rank / sigma). A hard argmax switches the driving bone at a
+    // boundary (visible discontinuity); blending the nearest few smooths it. N=1 reproduces
+    // the old single-bone behaviour exactly.
+    const uint MAXN = 4u;
+    uint blendCount = min(max(_BlendCount, 1u), MAXN);
+    uint  selN = 0u;
+    int   selIdx[4]; float selKey[4]; float selSurf[4]; float selT[4];
+    for (uint b = 0; b < _BoneCount; b++)
+    {
+        uint cnt = min(_BoneCounts[b], _RingLen); // clamp defends against an unpublished/garbage count
+        if (cnt == 0u) continue;
+        Sample s = _History[b * _RingLen + (cnt - 1u)]; // newest
+        float3 ab = s.B - s.A;
+        float ab2 = dot(ab, ab);
+        float t = (ab2 < 1e-12) ? 0.0 : saturate(dot(p - s.A, ab) / ab2);
+        float3 closest = s.A + t * ab;
+        float d = length(p - closest);
+        float radius = lerp(_BoneRadiusA[b], _BoneRadiusB[b], t) * _RadiusScale;
+        float surf = d - radius;
+        float key = max(surf, 0.0) * 1000.0 + d; // order: rank first, centerline d tie-break
+
+        // Insert into the ascending-key top-N list.
+        uint i = 0u;
+        if (selN < blendCount) { i = selN; selN++; }
+        else if (key < selKey[blendCount - 1u]) { i = blendCount - 1u; }
+        else continue;
+        selIdx[i] = (int)b; selKey[i] = key; selSurf[i] = surf; selT[i] = t;
+        for (; i > 0u && selKey[i] < selKey[i - 1u]; i--)
+        {
+            int ti = selIdx[i]; selIdx[i] = selIdx[i - 1u]; selIdx[i - 1u] = ti;
+            float tk = selKey[i]; selKey[i] = selKey[i - 1u]; selKey[i - 1u] = tk;
+            float ts = selSurf[i]; selSurf[i] = selSurf[i - 1u]; selSurf[i - 1u] = ts;
+            float tt = selT[i]; selT[i] = selT[i - 1u]; selT[i - 1u] = tt;
+        }
+    }
+
+    // Background cull on the nearest bone's surface distance.
+    if (selN == 0u || selSurf[0] > _SurfaceMargin)
+    { WriteDegenerate(slotBase, segsPerSeed); return; }
+
+    // Per-selected-bone weight + (t, cv, cw) in that bone's newest frame.
+    float w[4]; float tb[4]; float cvb[4]; float cwb[4]; uint baseB[4];
+    float wsum = 0.0; uint minCnt = 0xffffffffu;
+    for (uint j = 0; j < selN; j++)
+    {
+        uint bb = (uint)selIdx[j];
+        uint cnt = min(_BoneCounts[bb], _RingLen);
+        minCnt = min(minCnt, cnt);
+        baseB[j] = bb * _RingLen;
+        Sample sn = _History[baseB[j] + (cnt - 1u)];
+        float t = selT[j];
+        float3 rel = p - lerp(sn.A, sn.B, t);
+        tb[j] = t; cvb[j] = dot(rel, sn.V); cwb[j] = dot(rel, sn.W);
+        w[j] = exp(-max(selSurf[j], 0.0) / max(_BlendSigma, 1e-4));
+        wsum += w[j];
+    }
+    float invW = (wsum > 1e-8) ? (1.0 / wsum) : 0.0;
+
+    // Blended colour (constant along the curve).
+    float3 col = float3(0, 0, 0);
+    for (uint jc = 0; jc < selN; jc++) col += (w[jc] * invW) * _BoneColor[(uint)selIdx[jc]];
+
+    // Reproject: each control point is the weighted blend of every selected bone's reprojection.
+    float3 prev = float3(0, 0, 0);
+    uint segs = (minCnt >= 1u) ? (minCnt - 1u) : 0u;
+    for (uint k = 0; k < minCnt; k++)
+    {
+        float3 xk = float3(0, 0, 0);
+        for (uint jb = 0; jb < selN; jb++)
+        {
+            Sample sk = _History[baseB[jb] + k];
+            xk += (w[jb] * invW) * (lerp(sk.A, sk.B, tb[jb]) + cvb[jb] * sk.V + cwb[jb] * sk.W);
+        }
+        if (k > 0u)
+        {
+            uint seg = k - 1u;
+            LineVert v0; v0.p = prev; v0.c = col;
+            LineVert v1; v1.p = xk;   v1.c = col;
+            _Out[slotBase + seg * 2u]      = v0;
+            _Out[slotBase + seg * 2u + 1u] = v1;
+        }
+        prev = xk;
+    }
+    // Zero-fill the unused tail.
+    LineVert z; z.p = float3(0, 0, 0); z.c = float3(0, 0, 0);
+    for (uint s = segs; s < segsPerSeed; s++)
+    {
+        _Out[slotBase + s * 2u]      = z;
+        _Out[slotBase + s * 2u + 1u] = z;
+    }
+}

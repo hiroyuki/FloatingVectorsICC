@@ -1123,6 +1123,60 @@ namespace BodyTracking
             return written;
         }
 
+        /// <summary>World endpoints of one bone for the primary (single-person) body, with
+        /// validity + freshness. Consumed by <see cref="BonePoseHistory"/> to build per-point
+        /// curved motion trails. Unlike raw k4abt joint orientations (which the merge path does
+        /// not preserve), endpoints are stable, so the curve's stable frame is rebuilt from
+        /// these each frame.</summary>
+        public struct BoneEndpoints
+        {
+            public Vector3 A;   // world position of bone.a (parent side)
+            public Vector3 B;   // world position of bone.b (child side)
+            public bool Valid;  // both endpoints currently valid
+            public bool Fresh;  // both endpoints freshly observed (>=LOW confidence, recent)
+        }
+
+        /// <summary>Fill <paramref name="dst"/> (index = <see cref="BodyTrackingShared.Bones"/>
+        /// index) with the primary body's per-bone world endpoints + valid/fresh flags. Mirrors
+        /// <see cref="PublishBoneCapsulesWorld"/> but single-body and CPU-side. Freshness = both
+        /// endpoints have &gt;=LOW confidence and were refreshed within <paramref name="freshWindowFrames"/>
+        /// frames, so history can reset on tracking loss instead of dragging stale joints.
+        /// Returns true if a primary body existed (all Bones.Length entries written).</summary>
+        public bool TryReadBonePosesWorld(BoneEndpoints[] dst, int freshWindowFrames)
+        {
+            var bones = BodyTrackingShared.Bones;
+            if (dst == null || dst.Length < bones.Length) return false;
+            for (int b = 0; b < bones.Length; b++) dst[b] = default;
+            if (_pool == null) return false;
+
+            BodyVisual bv = null;
+            foreach (var kv in _pool.Visuals)
+            {
+                if (kv.Value != null && kv.Value.IsActive) { bv = kv.Value; break; }
+            }
+            if (bv == null) return false;
+
+            int curFrame = Time.frameCount;
+            for (int b = 0; b < bones.Length; b++)
+            {
+                int ia = (int)bones[b].a, ic = (int)bones[b].b;
+                bool valid = bv.JointValid(ia) && bv.JointValid(ic);
+                var e = new BoneEndpoints { Valid = valid };
+                if (valid)
+                {
+                    e.A = bv.WorldOf(bv.JointPosition(ia));
+                    e.B = bv.WorldOf(bv.JointPosition(ic));
+                    bool freshA = bv.LastConfidence(ia) >= k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW
+                                  && (curFrame - bv.LastFreshFrame(ia)) <= freshWindowFrames;
+                    bool freshC = bv.LastConfidence(ic) >= k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW
+                                  && (curFrame - bv.LastFreshFrame(ic)) <= freshWindowFrames;
+                    e.Fresh = freshA && freshC;
+                }
+                dst[b] = e;
+            }
+            return true;
+        }
+
         // Per-body finite-difference state for PublishJointMotionsWorld. Holds
         // each joint's previous world position + smoothed velocity. To avoid
         // velocity spikes when k4abt loses sight of a joint for N publishes
