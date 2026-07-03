@@ -22,8 +22,16 @@ using UnityEngine.Rendering;
 namespace BodyTracking
 {
     [DisallowMultipleComponent]
-    public class PointCloudMotionCurves : MonoBehaviour
+    public class PointCloudMotionCurves : MonoBehaviour, global::Shared.IViewToggle
     {
+        [Tooltip("Show/hide the motion curves. Exposed in the unified Views panel as \"Motion lines\", " +
+                 "independent of the BT skeleton toggle.")]
+        public bool visible = true;
+
+        // ---- Shared.IViewToggle (unified Views panel) ----
+        public string ViewLabel => "Motion lines";
+        public bool Visible { get => visible; set => visible = value; }
+
         [Tooltip("Bone pose history source. Auto-resolves the first BonePoseHistory at OnEnable.")]
         public BonePoseHistory history;
 
@@ -66,6 +74,7 @@ namespace BodyTracking
         public float blendSharpness = 0.02f;
 
         [Range(0f, 3f)]
+        [Tooltip("Overall brightness multiplier on the curves' original point-cloud colour.")]
         public float brightness = 1f;
 
         [Header("Freeze")]
@@ -88,8 +97,7 @@ namespace BodyTracking
         private GraphicsBuffer _argsBuf;     // 4-uint indirect args
         private GraphicsBuffer _radiusABuf;  // float[boneCount]
         private GraphicsBuffer _radiusBBuf;
-        private GraphicsBuffer _colorBuf;    // float3[boneCount]
-        private GraphicsBuffer _collectBuf;      // float3[totalSourceVerts] compacted in-bbox points
+        private GraphicsBuffer _collectBuf;      // SeedPoint[totalSourceVerts] compacted in-bbox points
         private GraphicsBuffer _collectCounter;  // uint[1]
         private int _collectCap;                 // _collectBuf capacity (total source verts sized)
         private static readonly uint[] s_counterReset = { 0u };
@@ -105,7 +113,6 @@ namespace BodyTracking
         private static readonly int kBoneCounts = Shader.PropertyToID("_BoneCounts");
         private static readonly int kRadiusA = Shader.PropertyToID("_BoneRadiusA");
         private static readonly int kRadiusB = Shader.PropertyToID("_BoneRadiusB");
-        private static readonly int kBoneColor = Shader.PropertyToID("_BoneColor");
         private static readonly int kOut = Shader.PropertyToID("_Out");
         private static readonly int kSrcL2W = Shader.PropertyToID("_SrcLocalToWorld");
         private static readonly int kSrcCount = Shader.PropertyToID("_SrcCount");
@@ -161,7 +168,6 @@ namespace BodyTracking
             _argsBuf?.Release(); _argsBuf = null;
             _radiusABuf?.Release(); _radiusABuf = null;
             _radiusBBuf?.Release(); _radiusBBuf = null;
-            _colorBuf?.Release(); _colorBuf = null;
             _collectBuf?.Release(); _collectBuf = null;
             _collectCounter?.Release(); _collectCounter = null;
             _capacity = 0; _ringLen = 0; _collectCap = 0;
@@ -171,6 +177,7 @@ namespace BodyTracking
         private void Update()
         {
             if (_shader == null || _collectKernel < 0 || _buildKernel < 0 || _mat == null) return;
+            if (!visible) return; // hidden via the Views panel -> don't build or draw this frame
 
             // Manual hard hold: keep drawing the last built curves without rebuilding (ignores params).
             // Pausing playback does NOT take this path — BonePoseHistory holds the pose while paused, so
@@ -240,7 +247,6 @@ namespace BodyTracking
             _shader.SetBuffer(_buildKernel, kBoneCounts, countBuf);
             _shader.SetBuffer(_buildKernel, kRadiusA, _radiusABuf);
             _shader.SetBuffer(_buildKernel, kRadiusB, _radiusBBuf);
-            _shader.SetBuffer(_buildKernel, kBoneColor, _colorBuf);
             _shader.SetBuffer(_buildKernel, kOut, _outBuf);
             _shader.SetInt(kBoneCount, boneCount);
             _shader.SetInt(kRingLen, ringLen);
@@ -310,7 +316,7 @@ namespace BodyTracking
             if (seedStale)
             {
                 _outBuf?.Release(); _argsBuf?.Release();
-                _radiusABuf?.Release(); _radiusBBuf?.Release(); _colorBuf?.Release();
+                _radiusABuf?.Release(); _radiusBBuf?.Release();
                 _hasBuilt = false;
                 _boneCount = boneCount;
                 _ringLen = ringLen;
@@ -325,27 +331,21 @@ namespace BodyTracking
                 var bones = BodyTrackingShared.Bones;
                 var rA = new float[boneCount];
                 var rB = new float[boneCount];
-                var col = new Vector3[boneCount];
                 for (int b = 0; b < boneCount; b++)
-                {
                     DefaultRadius(bones[b].a, bones[b].b, out rA[b], out rB[b]);
-                    Color c = HueFor(b, boneCount);
-                    col[b] = new Vector3(c.r, c.g, c.b);
-                }
                 _radiusABuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, boneCount, sizeof(float));
                 _radiusBBuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, boneCount, sizeof(float));
-                _colorBuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, boneCount, sizeof(float) * 3);
                 _radiusABuf.SetData(rA);
                 _radiusBBuf.SetData(rB);
-                _colorBuf.SetData(col);
             }
 
-            // Collect buffer holds the compacted in-bbox points; sized (grow-only) to the source total.
+            // Collect buffer holds the compacted in-bbox points (SeedPoint = pos + colour, 24B);
+            // sized (grow-only) to the source total.
             int need = Mathf.Max(64, totalSrcVerts);
             if (_collectBuf == null || _collectCap < need)
             {
                 _collectBuf?.Release();
-                _collectBuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, need, sizeof(float) * 3);
+                _collectBuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, need, sizeof(float) * 6);
                 _collectCap = need;
             }
             if (_collectCounter == null)
@@ -389,13 +389,6 @@ namespace BodyTracking
                     return true;
                 default: return false;
             }
-        }
-
-        // Golden-ratio hue, matching TSDFTrailBaker.HueFor's look.
-        private static Color HueFor(int index, int total)
-        {
-            float h = total > 0 ? Mathf.Repeat(index * 0.61803398875f, 1f) : 0f;
-            return Color.HSVToRGB(h, 0.85f, 1f);
         }
     }
 }

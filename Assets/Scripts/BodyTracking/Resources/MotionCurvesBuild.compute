@@ -17,18 +17,18 @@
 
 struct Sample { float3 A; float3 B; float3 U; float3 V; float3 W; };
 struct LineVert { float3 p; float3 c; };
+struct SeedPoint { float3 pos; float3 col; }; // compacted in-bbox point: world pos + original RGB
 
-ByteAddressBuffer          _Src;          // source vertices, 24B stride (pos12 + col12)
-RWStructuredBuffer<float3> _CollectOut;   // compacted world positions of in-bbox valid points
-RWStructuredBuffer<uint>   _CollectCounter;
-uint  _CollectCap;                        // capacity of _CollectOut
-float3 _BboxMin;                          // seed bbox (bone extent + padding), world
+ByteAddressBuffer            _Src;          // source vertices, 24B stride (pos12 + col12)
+RWStructuredBuffer<SeedPoint> _CollectOut;  // compacted in-bbox valid points (pos + original colour)
+RWStructuredBuffer<uint>     _CollectCounter;
+uint  _CollectCap;                          // capacity of _CollectOut
+float3 _BboxMin;                            // seed bbox (bone extent + padding), world
 float3 _BboxMax;
 StructuredBuffer<Sample>   _History;      // bone*K, oldest->newest
 StructuredBuffer<uint>     _BoneCounts;   // valid samples per bone
 StructuredBuffer<float>    _BoneRadiusA;  // radius at bone.a (parent side), m
 StructuredBuffer<float>    _BoneRadiusB;  // radius at bone.b (child side), m
-StructuredBuffer<float3>   _BoneColor;    // per-bone RGB
 RWStructuredBuffer<LineVert> _Out;
 
 float4x4 _SrcLocalToWorld;
@@ -67,9 +67,10 @@ void CSCollect(uint3 id : SV_DispatchThreadID)
     if (abs(p.x) > _SanityRange || abs(p.y) > _SanityRange || abs(p.z) > _SanityRange) return;
     if (p.x < _BboxMin.x || p.y < _BboxMin.y || p.z < _BboxMin.z ||
         p.x > _BboxMax.x || p.y > _BboxMax.y || p.z > _BboxMax.z) return;
+    float3 col = asfloat(_Src.Load3(id.x * 24u + 12u)); // original point-cloud RGB
     uint idx;
     InterlockedAdd(_CollectCounter[0], 1u, idx);
-    if (idx < _CollectCap) _CollectOut[idx] = p;
+    if (idx < _CollectCap) { SeedPoint sp; sp.pos = p; sp.col = col; _CollectOut[idx] = sp; }
 }
 
 [numthreads(64, 1, 1)]
@@ -87,7 +88,9 @@ void CSBuild(uint3 id : SV_DispatchThreadID)
     if (collectCount == 0u) { WriteDegenerate(slotBase, segsPerSeed); return; }
     uint srcIdx = (uint)(((float)seedLocal / (float)_SeedCount) * (float)collectCount);
     if (srcIdx >= collectCount) srcIdx = collectCount - 1u;
-    float3 p = _CollectOut[srcIdx];
+    SeedPoint sp = _CollectOut[srcIdx];
+    float3 p = sp.pos;
+    float3 col = sp.col; // the curve keeps this seed point's original point-cloud colour
 
     // --- classify: soft-assign to the nearest few bones (skinning-style blend) ---
     // Select the top-N bones ordered by rank = max(surf,0) (tie-broken by centerline d),
@@ -148,10 +151,6 @@ void CSBuild(uint3 id : SV_DispatchThreadID)
         wsum += w[j];
     }
     float invW = (wsum > 1e-8) ? (1.0 / wsum) : 0.0;
-
-    // Blended colour (constant along the curve).
-    float3 col = float3(0, 0, 0);
-    for (uint jc = 0; jc < selN; jc++) col += (w[jc] * invW) * _BoneColor[(uint)selIdx[jc]];
 
     // Reproject: each control point is the weighted blend of every selected bone's reprojection.
     float3 prev = float3(0, 0, 0);

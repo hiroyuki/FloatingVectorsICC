@@ -340,7 +340,9 @@ namespace BodyTracking
         private void OnPlaybackBodies(string serial, ulong tsNs, byte[] bytes, int byteCount,
                                       Transform sourceTransform, ObCameraParam? cameraParam)
         {
-            if (!showBones) return;
+            // Data ingestion is independent of showBones now — that toggle only controls whether the
+            // skeleton is DRAWN (bones + joints), so consumers like BonePoseHistory keep getting poses
+            // while the skeleton is hidden.
             if (string.IsNullOrEmpty(serial)) return;
             if (!_latestBySerial.TryGetValue(serial, out var slot))
             {
@@ -421,25 +423,17 @@ namespace BodyTracking
             // Late-binding for renderers spawned mid-Play by SensorManager.
             BindNewRenderers();
 
-            if (showBones)
-            {
-                CollectCandidates();
-                BuildClusters();
-                ApplyMergedSkeletons();
-                GcStaleVisuals();
-                StashPriorState();
-                if (showPerWorkerSkeletons) ApplyPerWorkerSkeletons();
-                else ClearPerWorkerSkeletons();
-            }
-            else
-            {
-                // showBones OFF must actually hide the skeleton: without this the last
-                // merged visual stayed frozen on screen (the block above just stops
-                // updating it). Destroy the pool; it respawns from the next pop when
-                // the toggle comes back on.
-                if (_pool != null && _pool.Count > 0) _pool.DestroyAll();
-                if (_perWorkerPools.Count > 0) ClearPerWorkerSkeletons();
-            }
+            // Always merge/update the skeleton so data consumers (BonePoseHistory / TSDF trail) keep
+            // getting current poses. showBones no longer gates the compute — it flows into the visual
+            // config (ShowAnatomicalBones) so BodyVisual hides the bones + joint spheres when it is off,
+            // while positions keep updating underneath (IsActive stays true, data stays readable).
+            CollectCandidates();
+            BuildClusters();
+            ApplyMergedSkeletons();
+            GcStaleVisuals();
+            StashPriorState();
+            if (showBones && showPerWorkerSkeletons) ApplyPerWorkerSkeletons();
+            else ClearPerWorkerSkeletons();
 
             // While paused, no new merged skeleton arrives → ApplyMergedSkeletons
             // skipped the per-visual Apply call that would normally push the latest
@@ -655,7 +649,9 @@ namespace BodyTracking
 
         private void DispatchRawFrame(string serial, ObCameraParam? cameraParam, Transform sourceTransform, in RawFrameData frame)
         {
-            if (!showBones) return;
+            // Data ingestion is independent of showBones now — that toggle only controls whether the
+            // skeleton is DRAWN (bones + joints), so consumers like BonePoseHistory keep getting poses
+            // while the skeleton is hidden.
 
             // Recorded BT short-circuit: when the recorder is in Playing state AND
             // has a bodies_main track for this serial, skeletons flow in through
@@ -765,7 +761,9 @@ namespace BodyTracking
         // from its input slot).
         private void OnWorkerSkeletons(string serial, ulong tsNs, BodySnapshot[] bodies, int count)
         {
-            if (!showBones) return;
+            // Data ingestion is independent of showBones now — that toggle only controls whether the
+            // skeleton is DRAWN (bones + joints), so consumers like BonePoseHistory keep getting poses
+            // while the skeleton is hidden.
             if (!_latestBySerial.TryGetValue(serial, out var slot)) return;
             int n = Mathf.Min(count, slot.Bodies.Length);
             for (int i = 0; i < n; i++)
