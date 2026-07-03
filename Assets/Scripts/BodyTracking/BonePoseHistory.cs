@@ -111,7 +111,11 @@ namespace BodyTracking
             var bones = BodyTrackingShared.Bones;
             int n = bones.Length;
             int k = Mathf.Max(2, historySamples);
-            if (_ring != null && _boneCount == n && _ringLen == k) return;
+            // Must also require live GPU buffers: OnDisable releases them (nulling _histBuf/_countBuf)
+            // without touching the CPU ring, so on re-enable the shape still matches — without this
+            // check EnsureBuffers would early-return and leave HistoryBuffer/CountBuffer null forever,
+            // silently killing every downstream consumer.
+            if (_ring != null && _boneCount == n && _ringLen == k && _histBuf != null) return;
 
             _boneCount = n;
             _ringLen = k;
@@ -147,6 +151,12 @@ namespace BodyTracking
             _countScratch = new int[n];
             _histBuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, n * k, System.Runtime.InteropServices.Marshal.SizeOf<Sample>());
             _countBuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, n, sizeof(int));
+            // Zero-initialise: a fresh GraphicsBuffer holds undefined data, and a consumer can dispatch
+            // before our first PublishGpu (Update runs before our LateUpdate; or we start paused and the
+            // LateUpdate pause early-return skips PublishGpu). Publishing the all-zero scratch now means
+            // counts read as 0 (empty bones) instead of garbage that would drive out-of-bounds indexing.
+            _countBuf.SetData(_countScratch);
+            _histBuf.SetData(_histScratch);
         }
 
         private void LateUpdate()

@@ -81,7 +81,7 @@ void CSBuild(uint3 id : SV_DispatchThreadID)
     int   selIdx[4]; float selKey[4]; float selSurf[4]; float selT[4];
     for (uint b = 0; b < _BoneCount; b++)
     {
-        uint cnt = _BoneCounts[b];
+        uint cnt = min(_BoneCounts[b], _RingLen); // clamp defends against an unpublished/garbage count
         if (cnt == 0u) continue;
         Sample s = _History[b * _RingLen + (cnt - 1u)]; // newest
         float3 ab = s.B - s.A;
@@ -118,7 +118,7 @@ void CSBuild(uint3 id : SV_DispatchThreadID)
     for (uint j = 0; j < selN; j++)
     {
         uint bb = (uint)selIdx[j];
-        uint cnt = _BoneCounts[bb];
+        uint cnt = min(_BoneCounts[bb], _RingLen);
         minCnt = min(minCnt, cnt);
         baseB[j] = bb * _RingLen;
         Sample sn = _History[baseB[j] + (cnt - 1u)];

@@ -120,7 +120,10 @@ namespace BodyTracking
             }
             if (_mat == null)
             {
-                var sh = Shader.Find("Orbbec/MotionCurves");
+                // Load from Resources so the shader survives player-build stripping (nothing else
+                // references it); fall back to Shader.Find in case it is registered another way.
+                var sh = Resources.Load<Shader>("MotionCurves");
+                if (sh == null) sh = Shader.Find("Orbbec/MotionCurves");
                 if (sh != null) _mat = new Material(sh) { name = "MotionCurves (auto)", hideFlags = HideFlags.DontSave };
             }
         }
@@ -236,20 +239,35 @@ namespace BodyTracking
             if (sourceMeshes != null && sourceMeshes.Count > 0)
             {
                 foreach (var mf in sourceMeshes)
-                    if (mf != null && mf.sharedMesh != null && mf.sharedMesh.vertexCount > 0)
-                        _srcScratch.Add(mf);
+                    if (IsUsableSource(mf)) _srcScratch.Add(mf);
                 return _srcScratch;
             }
             // Auto: per-device playback meshes.
             var all = FindObjectsByType<MeshFilter>(FindObjectsSortMode.None);
             foreach (var mf in all)
             {
-                if (mf == null || mf.sharedMesh == null || mf.sharedMesh.vertexCount == 0) continue;
+                if (!IsUsableSource(mf)) continue;
                 if (!string.IsNullOrEmpty(autoSourcePrefix) && !mf.gameObject.name.StartsWith(autoSourcePrefix)) continue;
                 _srcScratch.Add(mf);
             }
             return _srcScratch;
         }
+
+        // The compute reads vertex buffer 0 as a Raw ByteAddressBuffer of ObColorPoint (pos12 + col12,
+        // 24B). Only meshes whose vertex buffer was created with the Raw target can be bound that way,
+        // and the stride must match. Reject anything else (e.g. a CPU/live mesh without Raw, or an
+        // unrelated mesh that happens to match autoSourcePrefix) to avoid GPU binding errors / garbage.
+        private static bool IsUsableSource(MeshFilter mf)
+        {
+            if (mf == null) return false;
+            var m = mf.sharedMesh;
+            if (m == null || m.vertexCount == 0) return false;
+            if ((m.vertexBufferTarget & GraphicsBuffer.Target.Raw) == 0) return false;
+            if (m.GetVertexBufferStride(0) != kObColorPointStride) return false;
+            return true;
+        }
+
+        private const int kObColorPointStride = 24; // ObColorPoint: 3 floats pos + 3 floats colour
 
         private void EnsureBuffers(int boneCount, int ringLen)
         {
