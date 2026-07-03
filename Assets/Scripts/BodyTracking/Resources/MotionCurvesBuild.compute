@@ -12,12 +12,18 @@
 // at [bone*K + sample]) and the source mesh vertex layout (ObColorPoint: pos12 +
 // col12, 24B raw). See PointCloudMotionCurves.cs for the host side.
 
+#pragma kernel CSCollect
 #pragma kernel CSBuild
 
 struct Sample { float3 A; float3 B; float3 U; float3 V; float3 W; };
 struct LineVert { float3 p; float3 c; };
 
 ByteAddressBuffer          _Src;          // source vertices, 24B stride (pos12 + col12)
+RWStructuredBuffer<float3> _CollectOut;   // compacted world positions of in-bbox valid points
+RWStructuredBuffer<uint>   _CollectCounter;
+uint  _CollectCap;                        // capacity of _CollectOut
+float3 _BboxMin;                          // seed bbox (bone extent + padding), world
+float3 _BboxMax;
 StructuredBuffer<Sample>   _History;      // bone*K, oldest->newest
 StructuredBuffer<uint>     _BoneCounts;   // valid samples per bone
 StructuredBuffer<float>    _BoneRadiusA;  // radius at bone.a (parent side), m
@@ -48,6 +54,24 @@ void WriteDegenerate(uint slotBase, uint segs)
     }
 }
 
+// Prepass: one thread per source vertex. Transform to world, drop invalid-depth dummies and
+// anything outside the body bbox, and append survivors' world positions to _CollectOut. CSBuild then
+// seeds only from this compacted list, so the whole seed budget lands on the body instead of the
+// (mostly background) full cloud. Dispatched once per source mesh, accumulating into one buffer.
+[numthreads(64, 1, 1)]
+void CSCollect(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _SrcCount) return;
+    float3 pl = asfloat(_Src.Load3(id.x * 24u));
+    float3 p  = mul(_SrcLocalToWorld, float4(pl, 1.0)).xyz;
+    if (abs(p.x) > _SanityRange || abs(p.y) > _SanityRange || abs(p.z) > _SanityRange) return;
+    if (p.x < _BboxMin.x || p.y < _BboxMin.y || p.z < _BboxMin.z ||
+        p.x > _BboxMax.x || p.y > _BboxMax.y || p.z > _BboxMax.z) return;
+    uint idx;
+    InterlockedAdd(_CollectCounter[0], 1u, idx);
+    if (idx < _CollectCap) _CollectOut[idx] = p;
+}
+
 [numthreads(64, 1, 1)]
 void CSBuild(uint3 id : SV_DispatchThreadID)
 {
@@ -57,18 +81,13 @@ void CSBuild(uint3 id : SV_DispatchThreadID)
     uint segsPerSeed = _RingLen - 1u;
     uint slotBase = (_SeedBase + seedLocal) * segsPerSeed * 2u;
 
-    // Spread seeds evenly across the source cloud. Float mapping keeps SM5.0
-    // (no 64-bit ints); counts here are well within float's exact-int range.
-    if (_SrcCount == 0u) { WriteDegenerate(slotBase, segsPerSeed); return; }
-    uint srcIdx = (uint)(((float)seedLocal / (float)_SeedCount) * (float)_SrcCount);
-    if (srcIdx >= _SrcCount) srcIdx = _SrcCount - 1u;
-
-    float3 pl = asfloat(_Src.Load3(srcIdx * 24u));
-    float3 p  = mul(_SrcLocalToWorld, float4(pl, 1.0)).xyz;
-
-    // Invalid-depth dummy cull (reconstruct emits 1e10 for holes).
-    if (abs(p.x) > _SanityRange || abs(p.y) > _SanityRange || abs(p.z) > _SanityRange)
-    { WriteDegenerate(slotBase, segsPerSeed); return; }
+    // Seed from the compacted in-bbox points (already world-space, valid). Stride evenly so the seed
+    // budget spreads across the whole collected set. Float mapping keeps SM5.0 (no 64-bit ints).
+    uint collectCount = min(_CollectCounter[0], _CollectCap);
+    if (collectCount == 0u) { WriteDegenerate(slotBase, segsPerSeed); return; }
+    uint srcIdx = (uint)(((float)seedLocal / (float)_SeedCount) * (float)collectCount);
+    if (srcIdx >= collectCount) srcIdx = collectCount - 1u;
+    float3 p = _CollectOut[srcIdx];
 
     // --- classify: soft-assign to the nearest few bones (skinning-style blend) ---
     // Select the top-N bones ordered by rank = max(surf,0) (tie-broken by centerline d),

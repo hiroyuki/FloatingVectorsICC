@@ -49,6 +49,12 @@ namespace BodyTracking
         [Tooltip("Cull a seed as background if its nearest bone surface distance exceeds this (m).")]
         public float surfaceMargin = 0.05f;
 
+        [Range(0f, 0.6f)]
+        [Tooltip("Padding (m) added around the bone AABB when collecting seed candidates. Seeds are " +
+                 "restricted to this box so the whole budget lands on the body, not the background. " +
+                 "Should comfortably exceed the thickest bone radius + surfaceMargin.")]
+        public float bboxPadding = 0.25f;
+
         [Range(1, 4)]
         [Tooltip("How many nearest bones each seed blends (skinning-style). 1 = hard nearest-bone " +
                  "assignment (sharp boundaries); 3 smooths bone joints.")]
@@ -75,13 +81,18 @@ namespace BodyTracking
 
         // --- GPU ---
         private ComputeShader _shader;
-        private int _kernel = -1;
+        private int _collectKernel = -1;
+        private int _buildKernel = -1;
         private Material _mat;
         private GraphicsBuffer _outBuf;      // LineVert[seedCount*(K-1)*2]
         private GraphicsBuffer _argsBuf;     // 4-uint indirect args
         private GraphicsBuffer _radiusABuf;  // float[boneCount]
         private GraphicsBuffer _radiusBBuf;
         private GraphicsBuffer _colorBuf;    // float3[boneCount]
+        private GraphicsBuffer _collectBuf;      // float3[totalSourceVerts] compacted in-bbox points
+        private GraphicsBuffer _collectCounter;  // uint[1]
+        private int _collectCap;                 // _collectBuf capacity (total source verts sized)
+        private static readonly uint[] s_counterReset = { 0u };
         private int _boneCount;
         private int _ringLen;
         private int _capacity;               // seedCount the buffers were sized for
@@ -107,6 +118,11 @@ namespace BodyTracking
         private static readonly int kSanityRange = Shader.PropertyToID("_SanityRange");
         private static readonly int kBlendCount = Shader.PropertyToID("_BlendCount");
         private static readonly int kBlendSigma = Shader.PropertyToID("_BlendSigma");
+        private static readonly int kCollectOut = Shader.PropertyToID("_CollectOut");
+        private static readonly int kCollectCounter = Shader.PropertyToID("_CollectCounter");
+        private static readonly int kCollectCap = Shader.PropertyToID("_CollectCap");
+        private static readonly int kBboxMin = Shader.PropertyToID("_BboxMin");
+        private static readonly int kBboxMax = Shader.PropertyToID("_BboxMax");
         private static readonly int kVerts = Shader.PropertyToID("_Verts");
         private static readonly int kBrightness = Shader.PropertyToID("_Brightness");
 
@@ -116,7 +132,11 @@ namespace BodyTracking
             if (_shader == null)
             {
                 _shader = Resources.Load<ComputeShader>("MotionCurvesBuild");
-                if (_shader != null) _kernel = _shader.FindKernel("CSBuild");
+                if (_shader != null)
+                {
+                    _collectKernel = _shader.FindKernel("CSCollect");
+                    _buildKernel = _shader.FindKernel("CSBuild");
+                }
             }
             if (_mat == null)
             {
@@ -142,13 +162,15 @@ namespace BodyTracking
             _radiusABuf?.Release(); _radiusABuf = null;
             _radiusBBuf?.Release(); _radiusBBuf = null;
             _colorBuf?.Release(); _colorBuf = null;
-            _capacity = 0; _ringLen = 0;
+            _collectBuf?.Release(); _collectBuf = null;
+            _collectCounter?.Release(); _collectCounter = null;
+            _capacity = 0; _ringLen = 0; _collectCap = 0;
             _hasBuilt = false;
         }
 
         private void Update()
         {
-            if (_shader == null || _kernel < 0 || _mat == null) return;
+            if (_shader == null || _collectKernel < 0 || _buildKernel < 0 || _mat == null) return;
 
             // Manual hard hold: keep drawing the last built curves without rebuilding (ignores params).
             // Pausing playback does NOT take this path — BonePoseHistory holds the pose while paused, so
@@ -168,55 +190,67 @@ namespace BodyTracking
             int ringLen = history.RingLength;
             if (boneCount <= 0 || ringLen < 2) return;
 
-            EnsureBuffers(boneCount, ringLen);
-
-            // Resolve source meshes for this frame.
+            // Resolve source meshes and size the collect buffer to their total vertex count.
             var sources = ResolveSources();
             if (sources.Count == 0) return; // nothing to seed from -> draw nothing
+            int totalSrcVerts = 0;
+            foreach (var mf in sources) totalSrcVerts += mf.sharedMesh.vertexCount;
 
-            int cap = _capacity;
-            int nSrc = sources.Count;
-            int seedBase = 0;
+            EnsureBuffers(boneCount, ringLen, totalSrcVerts);
 
-            _shader.SetBuffer(_kernel, kHistory, histBuf);
-            _shader.SetBuffer(_kernel, kBoneCounts, countBuf);
-            _shader.SetBuffer(_kernel, kRadiusA, _radiusABuf);
-            _shader.SetBuffer(_kernel, kRadiusB, _radiusBBuf);
-            _shader.SetBuffer(_kernel, kBoneColor, _colorBuf);
-            _shader.SetBuffer(_kernel, kOut, _outBuf);
-            _shader.SetInt(kBoneCount, boneCount);
-            _shader.SetInt(kRingLen, ringLen);
-            _shader.SetFloat(kRadiusScale, radiusScale);
-            _shader.SetFloat(kSurfaceMargin, surfaceMargin);
-            _shader.SetFloat(kSanityRange, sanityRange);
-            _shader.SetInt(kBlendCount, Mathf.Clamp(boneBlendCount, 1, 4));
-            _shader.SetFloat(kBlendSigma, blendSharpness);
-
-            var borrowed = new List<GraphicsBuffer>(nSrc);
-            for (int i = 0; i < nSrc; i++)
+            // Seed bounding box: the bone AABB grown by padding, so the prepass keeps only body points.
+            // No pose yet -> fall back to an all-encompassing box (behaves like the old whole-cloud seed).
+            Vector3 bmin, bmax;
+            if (history.TryGetWorldBounds(out var bb))
             {
-                var mf = sources[i];
+                Vector3 pad = Vector3.one * bboxPadding;
+                bmin = bb.min - pad; bmax = bb.max + pad;
+            }
+            else { bmin = Vector3.one * -1e9f; bmax = Vector3.one * 1e9f; }
+
+            // --- prepass: compact in-bbox valid points from every source into _collectBuf ---
+            _collectCounter.SetData(s_counterReset);
+            _shader.SetBuffer(_collectKernel, kCollectOut, _collectBuf);
+            _shader.SetBuffer(_collectKernel, kCollectCounter, _collectCounter);
+            _shader.SetInt(kCollectCap, _collectCap);
+            _shader.SetVector(kBboxMin, bmin);
+            _shader.SetVector(kBboxMax, bmax);
+            _shader.SetFloat(kSanityRange, sanityRange);
+            var borrowed = new List<GraphicsBuffer>(sources.Count);
+            foreach (var mf in sources)
+            {
                 var mesh = mf.sharedMesh;
                 var vb = mesh.GetVertexBuffer(0);
                 if (vb == null) continue;
                 borrowed.Add(vb);
-
-                // Last source takes the remainder so every slot [0,cap) is written.
-                int seedsForThis = (i == nSrc - 1) ? (cap - seedBase) : (cap / nSrc);
-                if (seedsForThis <= 0) { vb.Dispose(); borrowed.RemoveAt(borrowed.Count - 1); continue; }
-
-                _shader.SetBuffer(_kernel, kSrc, vb);
+                _shader.SetBuffer(_collectKernel, kSrc, vb);
                 _shader.SetMatrix(kSrcL2W, mf.transform.localToWorldMatrix);
                 _shader.SetInt(kSrcCount, mesh.vertexCount);
-                _shader.SetInt(kSeedBase, seedBase);
-                _shader.SetInt(kSeedCount, seedsForThis);
-                int groups = (seedsForThis + 63) / 64;
-                _shader.Dispatch(_kernel, groups, 1, 1);
-                seedBase += seedsForThis;
+                _shader.Dispatch(_collectKernel, (mesh.vertexCount + 63) / 64, 1, 1);
             }
-
             foreach (var vb in borrowed) vb.Dispose();
             if (borrowed.Count == 0) return;
+
+            // --- build: one dispatch, seeds strided over the compacted points ---
+            int cap = _capacity;
+            _shader.SetBuffer(_buildKernel, kCollectOut, _collectBuf);
+            _shader.SetBuffer(_buildKernel, kCollectCounter, _collectCounter);
+            _shader.SetInt(kCollectCap, _collectCap);
+            _shader.SetBuffer(_buildKernel, kHistory, histBuf);
+            _shader.SetBuffer(_buildKernel, kBoneCounts, countBuf);
+            _shader.SetBuffer(_buildKernel, kRadiusA, _radiusABuf);
+            _shader.SetBuffer(_buildKernel, kRadiusB, _radiusBBuf);
+            _shader.SetBuffer(_buildKernel, kBoneColor, _colorBuf);
+            _shader.SetBuffer(_buildKernel, kOut, _outBuf);
+            _shader.SetInt(kBoneCount, boneCount);
+            _shader.SetInt(kRingLen, ringLen);
+            _shader.SetFloat(kRadiusScale, radiusScale);
+            _shader.SetFloat(kSurfaceMargin, surfaceMargin);
+            _shader.SetInt(kBlendCount, Mathf.Clamp(boneBlendCount, 1, 4));
+            _shader.SetFloat(kBlendSigma, blendSharpness);
+            _shader.SetInt(kSeedBase, 0);
+            _shader.SetInt(kSeedCount, cap);
+            _shader.Dispatch(_buildKernel, (cap + 63) / 64, 1, 1);
 
             _hasBuilt = true;
             DrawCurves();
@@ -269,38 +303,53 @@ namespace BodyTracking
 
         private const int kObColorPointStride = 24; // ObColorPoint: 3 floats pos + 3 floats colour
 
-        private void EnsureBuffers(int boneCount, int ringLen)
+        private void EnsureBuffers(int boneCount, int ringLen, int totalSrcVerts)
         {
             int cap = Mathf.Max(64, seedCount);
-            if (_outBuf != null && _capacity == cap && _ringLen == ringLen && _boneCount == boneCount) return;
-
-            ReleaseBuffers();
-            _boneCount = boneCount;
-            _ringLen = ringLen;
-            _capacity = cap;
-
-            int lineVerts = cap * (ringLen - 1) * 2;
-            _outBuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, lineVerts, sizeof(float) * 6); // LineVert
-            _argsBuf = new GraphicsBuffer(GraphicsBuffer.Target.IndirectArguments, 4, sizeof(uint));
-            _argsBuf.SetData(new uint[] { (uint)lineVerts, 1, 0, 0 });
-
-            // Standard per-bone radii (absolute m) + endpoint taper; static, scaled at runtime.
-            var bones = BodyTrackingShared.Bones;
-            var rA = new float[boneCount];
-            var rB = new float[boneCount];
-            var col = new Vector3[boneCount];
-            for (int b = 0; b < boneCount; b++)
+            bool seedStale = _outBuf == null || _capacity != cap || _ringLen != ringLen || _boneCount != boneCount;
+            if (seedStale)
             {
-                DefaultRadius(bones[b].a, bones[b].b, out rA[b], out rB[b]);
-                Color c = HueFor(b, boneCount);
-                col[b] = new Vector3(c.r, c.g, c.b);
+                _outBuf?.Release(); _argsBuf?.Release();
+                _radiusABuf?.Release(); _radiusBBuf?.Release(); _colorBuf?.Release();
+                _hasBuilt = false;
+                _boneCount = boneCount;
+                _ringLen = ringLen;
+                _capacity = cap;
+
+                int lineVerts = cap * (ringLen - 1) * 2;
+                _outBuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, lineVerts, sizeof(float) * 6); // LineVert
+                _argsBuf = new GraphicsBuffer(GraphicsBuffer.Target.IndirectArguments, 4, sizeof(uint));
+                _argsBuf.SetData(new uint[] { (uint)lineVerts, 1, 0, 0 });
+
+                // Standard per-bone radii (absolute m) + endpoint taper; static, scaled at runtime.
+                var bones = BodyTrackingShared.Bones;
+                var rA = new float[boneCount];
+                var rB = new float[boneCount];
+                var col = new Vector3[boneCount];
+                for (int b = 0; b < boneCount; b++)
+                {
+                    DefaultRadius(bones[b].a, bones[b].b, out rA[b], out rB[b]);
+                    Color c = HueFor(b, boneCount);
+                    col[b] = new Vector3(c.r, c.g, c.b);
+                }
+                _radiusABuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, boneCount, sizeof(float));
+                _radiusBBuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, boneCount, sizeof(float));
+                _colorBuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, boneCount, sizeof(float) * 3);
+                _radiusABuf.SetData(rA);
+                _radiusBBuf.SetData(rB);
+                _colorBuf.SetData(col);
             }
-            _radiusABuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, boneCount, sizeof(float));
-            _radiusBBuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, boneCount, sizeof(float));
-            _colorBuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, boneCount, sizeof(float) * 3);
-            _radiusABuf.SetData(rA);
-            _radiusBBuf.SetData(rB);
-            _colorBuf.SetData(col);
+
+            // Collect buffer holds the compacted in-bbox points; sized (grow-only) to the source total.
+            int need = Mathf.Max(64, totalSrcVerts);
+            if (_collectBuf == null || _collectCap < need)
+            {
+                _collectBuf?.Release();
+                _collectBuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, need, sizeof(float) * 3);
+                _collectCap = need;
+            }
+            if (_collectCounter == null)
+                _collectCounter = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 1, sizeof(uint));
         }
 
         // Standard bone radii (m), parent side (a) -> child side (b). Categorised by the joint pair.

@@ -361,6 +361,27 @@ namespace BodyTracking
         public int SampleCount(int bone)
             => (_count != null && bone >= 0 && bone < _boneCount) ? _count[bone] : 0;
 
+        /// <summary>World-space AABB over every bone's newest endpoints (the current pose extent).
+        /// Returns false if no bone has history. Used to concentrate point-cloud seeds on the body.</summary>
+        public bool TryGetWorldBounds(out Bounds bounds)
+        {
+            bounds = default;
+            if (_ring == null) return false;
+            Vector3 mn = new Vector3(1e9f, 1e9f, 1e9f), mx = -mn;
+            bool any = false;
+            for (int b = 0; b < _boneCount; b++)
+            {
+                if (_count[b] == 0) continue;
+                Sample s = _ring[b][_head[b]]; // newest
+                mn = Vector3.Min(mn, Vector3.Min(s.A, s.B));
+                mx = Vector3.Max(mx, Vector3.Max(s.A, s.B));
+                any = true;
+            }
+            if (!any) return false;
+            bounds = new Bounds((mn + mx) * 0.5f, mx - mn);
+            return true;
+        }
+
         public int BoneCount => _boneCount;
 
         private Vector3[] _gizmoBuf;
