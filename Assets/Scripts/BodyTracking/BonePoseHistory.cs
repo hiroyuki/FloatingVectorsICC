@@ -61,6 +61,22 @@ namespace BodyTracking
         private int _boneCount;
         private int _ringLen;
 
+        // GPU mirror of the ring, consumed by the motion-curves compute. Sample is 5 * Vector3 = 60
+        // bytes, tightly packed, matching an HLSL struct of 5 float3. Per bone b, samples are written
+        // oldest->newest into _histBuf[b*K .. b*K + count-1]; _countBuf[b] holds that count so the
+        // compute never touches stale slots and needs no ring-index math. Rebuilt each LateUpdate.
+        private GraphicsBuffer _histBuf;   // StructuredBuffer<Sample>, length boneCount*K
+        private GraphicsBuffer _countBuf;  // StructuredBuffer<uint>, length boneCount
+        private Sample[] _histScratch;
+        private int[] _countScratch;
+
+        /// <summary>Per-bone stabilized pose history, laid out [bone*RingLength + sample], oldest first.</summary>
+        public GraphicsBuffer HistoryBuffer => _histBuf;
+        /// <summary>Valid sample count per bone (uint), length <see cref="BoneCount"/>.</summary>
+        public GraphicsBuffer CountBuffer => _countBuf;
+        /// <summary>Ring length K: the per-bone stride into <see cref="HistoryBuffer"/>.</summary>
+        public int RingLength => _ringLen;
+
         private const float Eps = 1e-4f;
         private const float MinPerpSin = 0.34f; // sin(~20deg): reject references too near the bone axis
 
@@ -68,6 +84,15 @@ namespace BodyTracking
         {
             if (bodyTracking == null) bodyTracking = FindFirstObjectByType<SkeletonMerger>();
             EnsureBuffers();
+        }
+
+        private void OnDisable() => ReleaseGpu();
+        private void OnDestroy() => ReleaseGpu();
+
+        private void ReleaseGpu()
+        {
+            _histBuf?.Release(); _histBuf = null;
+            _countBuf?.Release(); _countBuf = null;
         }
 
         private void EnsureBuffers()
@@ -104,11 +129,24 @@ namespace BodyTracking
                     if (p != b && bones[p].b == aJoint) { _parentBone[b] = p; break; }
                 }
             }
+
+            // GPU mirror sized to the current layout; reallocated only when boneCount/K change.
+            ReleaseGpu();
+            _histScratch = new Sample[n * k];
+            _countScratch = new int[n];
+            _histBuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, n * k, System.Runtime.InteropServices.Marshal.SizeOf<Sample>());
+            _countBuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, n, sizeof(int));
         }
 
         private void LateUpdate()
         {
             EnsureBuffers();
+            UpdateHistory();
+            PublishGpu();
+        }
+
+        private void UpdateHistory()
+        {
             if (bodyTracking == null) { ResetAll(); return; }
             if (!bodyTracking.TryReadBonePosesWorld(_scratch, freshWindowFrames)) { ResetAll(); return; }
 
@@ -244,6 +282,32 @@ namespace BodyTracking
         {
             if (_ring == null) return;
             for (int b = 0; b < _boneCount; b++) ResetBone(b);
+        }
+
+        // Mirror the CPU ring to the GPU: per bone, copy its valid samples oldest->newest into the
+        // contiguous [bone*K ..] slice and record the count. Called every LateUpdate (including reset
+        // frames, so the compute sees empty bones as count 0 rather than stale data).
+        private void PublishGpu()
+        {
+            if (_histBuf == null || _countBuf == null || _histScratch == null) return;
+            for (int b = 0; b < _boneCount; b++)
+            {
+                int cnt = _count[b];
+                _countScratch[b] = cnt;
+                if (cnt == 0) continue;
+                int baseIdx = b * _ringLen;
+                int idx = _head[b] - (cnt - 1);
+                idx %= _ringLen;
+                if (idx < 0) idx += _ringLen;
+                for (int i = 0; i < cnt; i++)
+                {
+                    _histScratch[baseIdx + i] = _ring[b][idx];
+                    idx++;
+                    if (idx >= _ringLen) idx = 0;
+                }
+            }
+            _histBuf.SetData(_histScratch);
+            _countBuf.SetData(_countScratch);
         }
 
         /// <summary>Reproject a point given in bone <paramref name="bone"/>'s CURRENT stable frame

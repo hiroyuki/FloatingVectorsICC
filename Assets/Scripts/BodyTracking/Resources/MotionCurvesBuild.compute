@@ -1,0 +1,133 @@
+// Point-cloud "motion curves" builder (Phase 2, fused classify + reproject).
+//
+// One thread per seed slot. Each seed samples a source point-cloud vertex,
+// classifies it to the nearest bone (surface-distance rank = max(d - radius, 0),
+// tie-broken by centerline distance then bone index), parameterises it in that
+// bone's CURRENT stable frame as (t, cv, cw), then reprojects (t, cv, cw)
+// through the bone's WORLD pose history to trace an arc. The arc is emitted as a
+// line strip (K-1 segments, 2 verts each) into a fixed per-seed slot; unused /
+// culled slots are filled with zero-length segments (invisible).
+//
+// Layouts are shared with BonePoseHistory.Sample (5 float3, 60B, oldest->newest
+// at [bone*K + sample]) and the source mesh vertex layout (ObColorPoint: pos12 +
+// col12, 24B raw). See PointCloudMotionCurves.cs for the host side.
+
+#pragma kernel CSBuild
+
+struct Sample { float3 A; float3 B; float3 U; float3 V; float3 W; };
+struct LineVert { float3 p; float3 c; };
+
+ByteAddressBuffer          _Src;          // source vertices, 24B stride (pos12 + col12)
+StructuredBuffer<Sample>   _History;      // bone*K, oldest->newest
+StructuredBuffer<uint>     _BoneCounts;   // valid samples per bone
+StructuredBuffer<float>    _BoneRadiusA;  // radius at bone.a (parent side), m
+StructuredBuffer<float>    _BoneRadiusB;  // radius at bone.b (child side), m
+StructuredBuffer<float3>   _BoneColor;    // per-bone RGB
+RWStructuredBuffer<LineVert> _Out;
+
+float4x4 _SrcLocalToWorld;
+uint  _SrcCount;      // source vertex count
+uint  _SeedBase;      // output seed-slot offset for this source dispatch
+uint  _SeedCount;     // seeds produced by this dispatch
+uint  _BoneCount;
+uint  _RingLen;       // K
+float _RadiusScale;
+float _SurfaceMargin; // cull seed if nearest surface distance exceeds this (background)
+float _SanityRange;   // |coord| above this => invalid-depth dummy, cull
+
+// Fill a seed's whole output slot with zero-length (invisible) segments.
+void WriteDegenerate(uint slotBase, uint segs)
+{
+    LineVert z; z.p = float3(0, 0, 0); z.c = float3(0, 0, 0);
+    for (uint s = 0; s < segs; s++)
+    {
+        _Out[slotBase + s * 2u]      = z;
+        _Out[slotBase + s * 2u + 1u] = z;
+    }
+}
+
+[numthreads(64, 1, 1)]
+void CSBuild(uint3 id : SV_DispatchThreadID)
+{
+    uint seedLocal = id.x;
+    if (seedLocal >= _SeedCount) return;
+
+    uint segsPerSeed = _RingLen - 1u;
+    uint slotBase = (_SeedBase + seedLocal) * segsPerSeed * 2u;
+
+    // Spread seeds evenly across the source cloud. Float mapping keeps SM5.0
+    // (no 64-bit ints); counts here are well within float's exact-int range.
+    if (_SrcCount == 0u) { WriteDegenerate(slotBase, segsPerSeed); return; }
+    uint srcIdx = (uint)(((float)seedLocal / (float)_SeedCount) * (float)_SrcCount);
+    if (srcIdx >= _SrcCount) srcIdx = _SrcCount - 1u;
+
+    float3 pl = asfloat(_Src.Load3(srcIdx * 24u));
+    float3 p  = mul(_SrcLocalToWorld, float4(pl, 1.0)).xyz;
+
+    // Invalid-depth dummy cull (reconstruct emits 1e10 for holes).
+    if (abs(p.x) > _SanityRange || abs(p.y) > _SanityRange || abs(p.z) > _SanityRange)
+    { WriteDegenerate(slotBase, segsPerSeed); return; }
+
+    // --- classify to nearest bone on the CURRENT (newest) frame ---
+    int  bestBone = -1;
+    float bestRank = 1e9, bestD = 1e9, bestSurf = 1e9, bestT = 0.0;
+    for (uint b = 0; b < _BoneCount; b++)
+    {
+        uint cnt = _BoneCounts[b];
+        if (cnt == 0u) continue;
+        Sample s = _History[b * _RingLen + (cnt - 1u)]; // newest
+        float3 ab = s.B - s.A;
+        float ab2 = dot(ab, ab);
+        float t = (ab2 < 1e-12) ? 0.0 : saturate(dot(p - s.A, ab) / ab2);
+        float3 closest = s.A + t * ab;
+        float d = length(p - closest);
+        float radius = lerp(_BoneRadiusA[b], _BoneRadiusB[b], t) * _RadiusScale;
+        float surf = d - radius;
+        float rank = max(surf, 0.0);
+        // min rank; tie-break (interior overlaps, rank==0) by smaller centerline d.
+        bool better = (rank < bestRank - 1e-6) ||
+                      (abs(rank - bestRank) <= 1e-6 && d < bestD);
+        if (better) { bestRank = rank; bestD = d; bestSurf = surf; bestT = t; bestBone = (int)b; }
+    }
+
+    if (bestBone < 0 || bestSurf > _SurfaceMargin)
+    { WriteDegenerate(slotBase, segsPerSeed); return; }
+
+    uint bone = (uint)bestBone;
+    uint cnt = _BoneCounts[bone];
+    uint baseIdx = bone * _RingLen;
+
+    // (t, cv, cw) in the newest stable frame.
+    Sample sn = _History[baseIdx + (cnt - 1u)];
+    float t = bestT;
+    float3 center = lerp(sn.A, sn.B, t);
+    float3 rel = p - center;
+    float cv = dot(rel, sn.V);
+    float cw = dot(rel, sn.W);
+    float3 col = _BoneColor[bone];
+
+    // Reproject through history -> control points x_k, emit line strip.
+    float3 prev = float3(0, 0, 0);
+    uint segs = cnt - 1u;
+    for (uint k = 0; k < cnt; k++)
+    {
+        Sample sk = _History[baseIdx + k];
+        float3 xk = lerp(sk.A, sk.B, t) + cv * sk.V + cw * sk.W;
+        if (k > 0u)
+        {
+            uint seg = k - 1u;
+            LineVert v0; v0.p = prev; v0.c = col;
+            LineVert v1; v1.p = xk;   v1.c = col;
+            _Out[slotBase + seg * 2u]      = v0;
+            _Out[slotBase + seg * 2u + 1u] = v1;
+        }
+        prev = xk;
+    }
+    // Zero-fill the unused tail (this bone had < K samples).
+    LineVert z; z.p = float3(0, 0, 0); z.c = float3(0, 0, 0);
+    for (uint s = segs; s < segsPerSeed; s++)
+    {
+        _Out[slotBase + s * 2u]      = z;
+        _Out[slotBase + s * 2u + 1u] = z;
+    }
+}
