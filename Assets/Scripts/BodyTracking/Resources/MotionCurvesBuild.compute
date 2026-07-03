@@ -44,16 +44,23 @@ uint  _BlendCount;    // number of nearest bones to blend (1 = hard argmax)
 float _BlendSigma;    // rank falloff (m) for blend weights; smaller = sharper boundaries
 uint  _Subdiv;        // Catmull-Rom subdivisions per control-point interval (1 = straight polyline)
 
-// Catmull-Rom interpolation of P1..P2 at u in [0,1]; P0/P3 are the neighbours that set the tangents.
-// Passes through P1 (u=0) and P2 (u=1), so consecutive intervals join smoothly.
+// Centripetal Catmull-Rom (alpha = 0.5): interpolates P1..P2 at u in [0,1] with knot spacing
+// sqrt(distance), which prevents the overshoot / self-intersection that the uniform version
+// produces on sharp turns or unevenly spaced control points. Passes through P1 (u=0) and P2 (u=1).
+// The 1e-6 floor on each knot gap guards coincident points (no division by zero at the clamped ends).
 float3 CatmullRom(float3 p0, float3 p1, float3 p2, float3 p3, float u)
 {
-    float u2 = u * u;
-    float u3 = u2 * u;
-    return 0.5 * ((2.0 * p1)
-        + (-p0 + p2) * u
-        + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * u2
-        + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * u3);
+    float t0 = 0.0;
+    float t1 = t0 + sqrt(max(length(p1 - p0), 1e-6));
+    float t2 = t1 + sqrt(max(length(p2 - p1), 1e-6));
+    float t3 = t2 + sqrt(max(length(p3 - p2), 1e-6));
+    float t = lerp(t1, t2, u);
+    float3 a1 = ((t1 - t) * p0 + (t - t0) * p1) / (t1 - t0);
+    float3 a2 = ((t2 - t) * p1 + (t - t1) * p2) / (t2 - t1);
+    float3 a3 = ((t3 - t) * p2 + (t - t2) * p3) / (t3 - t2);
+    float3 b1 = ((t2 - t) * a1 + (t - t0) * a2) / (t2 - t0);
+    float3 b2 = ((t3 - t) * a2 + (t - t1) * a3) / (t3 - t1);
+    return ((t2 - t) * b1 + (t - t1) * b2) / (t2 - t1);
 }
 
 // Fill a seed's whole output slot with zero-length (invisible) segments.

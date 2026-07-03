@@ -82,6 +82,11 @@ namespace BodyTracking
         [Tooltip("Overall brightness multiplier on the curves' original point-cloud colour.")]
         public float brightness = 1f;
 
+        [Range(0f, 0.05f)]
+        [Tooltip("Ribbon width (m). Each curve is drawn as a camera-facing ribbon of this width; " +
+                 "0 collapses to a thin line. Wider ribbons make the smoothing / colour read clearly.")]
+        public float ribbonWidth = 0.006f;
+
         [Header("Freeze")]
         [Tooltip("Hard hold: stop rebuilding and keep drawing the last curves, ignoring parameter and " +
                  "pose changes. For holding the sculpture during live play. NOTE: pausing playback " +
@@ -139,6 +144,7 @@ namespace BodyTracking
         private static readonly int kBboxMax = Shader.PropertyToID("_BboxMax");
         private static readonly int kVerts = Shader.PropertyToID("_Verts");
         private static readonly int kBrightness = Shader.PropertyToID("_Brightness");
+        private static readonly int kWidth = Shader.PropertyToID("_Width");
 
         private void OnEnable()
         {
@@ -275,8 +281,9 @@ namespace BodyTracking
         {
             _mat.SetBuffer(kVerts, _outBuf);
             _mat.SetFloat(kBrightness, brightness);
+            _mat.SetFloat(kWidth, ribbonWidth);
             var bounds = new Bounds(Vector3.zero, Vector3.one * 50f);
-            Graphics.DrawProceduralIndirect(_mat, bounds, MeshTopology.Lines, _argsBuf, 0,
+            Graphics.DrawProceduralIndirect(_mat, bounds, MeshTopology.Triangles, _argsBuf, 0,
                 camera: null, properties: null,
                 castShadows: ShadowCastingMode.Off, receiveShadows: false,
                 layer: gameObject.layer);
@@ -333,10 +340,12 @@ namespace BodyTracking
                 _subdiv = subdiv;
                 _capacity = cap;
 
-                int lineVerts = cap * (ringLen - 1) * subdiv * 2;
+                int segments = cap * (ringLen - 1) * subdiv;
+                int lineVerts = segments * 2;                   // _Verts entries (segment endpoint pairs)
                 _outBuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, lineVerts, sizeof(float) * 6); // LineVert
                 _argsBuf = new GraphicsBuffer(GraphicsBuffer.Target.IndirectArguments, 4, sizeof(uint));
-                _argsBuf.SetData(new uint[] { (uint)lineVerts, 1, 0, 0 });
+                // Ribbon: each segment is expanded to a quad (2 tris = 6 verts) in the shader.
+                _argsBuf.SetData(new uint[] { (uint)(segments * 6), 1, 0, 0 });
 
                 // Standard per-bone radii (absolute m) + endpoint taper; static, scaled at runtime.
                 var bones = BodyTrackingShared.Bones;
