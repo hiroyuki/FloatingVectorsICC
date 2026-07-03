@@ -62,6 +62,7 @@ namespace BodyTracking
         private int _ringLen;
 
         private const float Eps = 1e-4f;
+        private const float MinPerpSin = 0.34f; // sin(~20deg): reject references too near the bone axis
 
         private void OnEnable()
         {
@@ -112,6 +113,10 @@ namespace BodyTracking
             if (!bodyTracking.TryReadBonePosesWorld(_scratch, freshWindowFrames)) { ResetAll(); return; }
 
             Vector3 torsoUp = ComputeTorsoUp();
+            Vector3 torsoRight = ComputeTorsoRight(torsoUp);
+            Vector3 torsoFwd = Vector3.Cross(torsoRight, torsoUp);
+            if (torsoFwd.sqrMagnitude < Eps * Eps) torsoFwd = Vector3.forward;
+            torsoFwd.Normalize();
 
             for (int b = 0; b < _boneCount; b++)
             {
@@ -122,12 +127,18 @@ namespace BodyTracking
                 if (ab.sqrMagnitude < Eps * Eps) { ResetBone(b); continue; }
                 Vector3 u = ab.normalized;
 
-                // Secondary axis: reference direction projected onto the plane perpendicular to u,
-                // with a fallback chain that keeps roll continuous (Codex-approved).
+                // Secondary axis: a reference direction projected onto the plane perpendicular to u.
+                // The reference MUST be well off the bone axis, otherwise the perpendicular residual is
+                // noise and V rolls arbitrarily frame to frame (spine bones run parallel to torso-up and
+                // did exactly this). PickPerp rejects any reference within ~20deg of u; we then fall
+                // through body axes that are guaranteed transverse to the spine (left/right, then fwd)
+                // BEFORE ever reusing prevV/world axes (which reintroduce the roll).
                 Vector3 refDir = ReferenceAxis(b, torsoUp);
-                Vector3 v = ProjectPerp(refDir, u);
-                if (v.sqrMagnitude < Eps * Eps) v = ProjectPerp(_prevV[b], u);
-                if (v.sqrMagnitude < Eps * Eps) v = ProjectPerp(Vector3.up, u);
+                Vector3 v = PickPerp(refDir, u);
+                if (v == Vector3.zero) v = PickPerp(torsoRight, u);
+                if (v == Vector3.zero) v = PickPerp(torsoFwd, u);
+                if (v == Vector3.zero) v = PickPerp(_prevV[b], u);
+                if (v == Vector3.zero) v = ProjectPerp(Vector3.up, u);
                 if (v.sqrMagnitude < Eps * Eps) v = ProjectPerp(Vector3.right, u);
                 v.Normalize();
                 Vector3 w = Vector3.Cross(u, v).normalized;
@@ -149,6 +160,39 @@ namespace BodyTracking
             return Vector3.up;
         }
 
+        // Transverse body axis (person's left<->right), used as the well-conditioned reference for
+        // bones that run parallel to torso-up (the whole spine). Shoulders preferred, hips as backup;
+        // projected perpendicular to torsoUp so it is a clean horizontal. World fallback if neither pair
+        // is available.
+        private Vector3 ComputeTorsoRight(Vector3 torsoUp)
+        {
+            Vector3 span;
+            if (TryJointSpan(k4abt_joint_id_t.K4ABT_JOINT_SHOULDER_LEFT,
+                             k4abt_joint_id_t.K4ABT_JOINT_SHOULDER_RIGHT, out span)
+             || TryJointSpan(k4abt_joint_id_t.K4ABT_JOINT_HIP_LEFT,
+                             k4abt_joint_id_t.K4ABT_JOINT_HIP_RIGHT, out span))
+            {
+                Vector3 p = span - torsoUp * Vector3.Dot(span, torsoUp);
+                if (p.sqrMagnitude > Eps * Eps) return p.normalized;
+            }
+            Vector3 f = Vector3.Cross(torsoUp, Vector3.forward);
+            if (f.sqrMagnitude < Eps * Eps) f = Vector3.Cross(torsoUp, Vector3.right);
+            return f.sqrMagnitude > Eps * Eps ? f.normalized : Vector3.right;
+        }
+
+        private bool TryJointSpan(k4abt_joint_id_t a, k4abt_joint_id_t b, out Vector3 span)
+        {
+            span = Vector3.zero;
+            if (bodyTracking != null
+                && bodyTracking.TryGetJointWorld(a, out var pa)
+                && bodyTracking.TryGetJointWorld(b, out var pb))
+            {
+                span = pb - pa;
+                return span.sqrMagnitude > Eps * Eps;
+            }
+            return false;
+        }
+
         private Vector3 ReferenceAxis(int bone, Vector3 torsoUp)
         {
             int p = _parentBone[bone];
@@ -167,6 +211,17 @@ namespace BodyTracking
         private static Vector3 ProjectPerp(Vector3 dir, Vector3 u)
         {
             return dir - u * Vector3.Dot(dir, u);
+        }
+
+        // Project dir perpendicular to the unit vector u, but reject it (return zero) when dir sits
+        // within ~MinPerpSin of the bone axis. |dir - u*(dir.u)| == |dir|*sin(angle), so the residual
+        // must exceed MinPerpSin*|dir| for the direction to be a stable, non-noise-dominated reference.
+        private static Vector3 PickPerp(Vector3 dir, Vector3 u)
+        {
+            if (dir.sqrMagnitude < Eps * Eps) return Vector3.zero;
+            Vector3 p = dir - u * Vector3.Dot(dir, u);
+            if (p.sqrMagnitude < MinPerpSin * MinPerpSin * dir.sqrMagnitude) return Vector3.zero;
+            return p;
         }
 
         private void Push(int bone, Sample s)
