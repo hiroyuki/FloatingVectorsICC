@@ -42,6 +42,19 @@ float _SurfaceMargin; // cull seed if nearest surface distance exceeds this (bac
 float _SanityRange;   // |coord| above this => invalid-depth dummy, cull
 uint  _BlendCount;    // number of nearest bones to blend (1 = hard argmax)
 float _BlendSigma;    // rank falloff (m) for blend weights; smaller = sharper boundaries
+uint  _Subdiv;        // Catmull-Rom subdivisions per control-point interval (1 = straight polyline)
+
+// Catmull-Rom interpolation of P1..P2 at u in [0,1]; P0/P3 are the neighbours that set the tangents.
+// Passes through P1 (u=0) and P2 (u=1), so consecutive intervals join smoothly.
+float3 CatmullRom(float3 p0, float3 p1, float3 p2, float3 p3, float u)
+{
+    float u2 = u * u;
+    float u3 = u2 * u;
+    return 0.5 * ((2.0 * p1)
+        + (-p0 + p2) * u
+        + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * u2
+        + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * u3);
+}
 
 // Fill a seed's whole output slot with zero-length (invisible) segments.
 void WriteDegenerate(uint slotBase, uint segs)
@@ -79,7 +92,7 @@ void CSBuild(uint3 id : SV_DispatchThreadID)
     uint seedLocal = id.x;
     if (seedLocal >= _SeedCount) return;
 
-    uint segsPerSeed = _RingLen - 1u;
+    uint segsPerSeed = (_RingLen - 1u) * _Subdiv;
     uint slotBase = (_SeedBase + seedLocal) * segsPerSeed * 2u;
 
     // Seed from the compacted in-bbox points (already world-space, valid). Stride evenly so the seed
@@ -152,10 +165,11 @@ void CSBuild(uint3 id : SV_DispatchThreadID)
     }
     float invW = (wsum > 1e-8) ? (1.0 / wsum) : 0.0;
 
-    // Reproject: each control point is the weighted blend of every selected bone's reprojection.
-    float3 prev = float3(0, 0, 0);
-    uint segs = (minCnt >= 1u) ? (minCnt - 1u) : 0u;
-    for (uint k = 0; k < minCnt; k++)
+    // Reproject every control point (weighted blend of the selected bones) into a local array.
+    const uint MAXK = 32u;
+    uint m = min(minCnt, MAXK);
+    float3 pts[32];
+    for (uint k = 0; k < m; k++)
     {
         float3 xk = float3(0, 0, 0);
         for (uint jb = 0; jb < selN; jb++)
@@ -163,19 +177,40 @@ void CSBuild(uint3 id : SV_DispatchThreadID)
             Sample sk = _History[baseB[jb] + k];
             xk += (w[jb] * invW) * (lerp(sk.A, sk.B, tb[jb]) + cvb[jb] * sk.V + cwb[jb] * sk.W);
         }
-        if (k > 0u)
+        pts[k] = xk;
+    }
+
+    // Emit a Catmull-Rom subdivided line strip through pts[0..m-1]. Sample j maps to interval
+    // i = j / subdiv at u = (j % subdiv) / subdiv; the final sample is exactly pts[m-1].
+    uint totalSegs = (m >= 2u) ? (m - 1u) * _Subdiv : 0u;
+    float3 prev = float3(0, 0, 0);
+    for (uint si = 0; si <= totalSegs; si++)
+    {
+        float3 pt;
+        if (si >= totalSegs) pt = pts[m - 1u];
+        else
         {
-            uint seg = k - 1u;
+            uint iv = si / _Subdiv;
+            uint ss = si - iv * _Subdiv;
+            float3 p0 = pts[(iv == 0u) ? 0u : (iv - 1u)];
+            float3 p1 = pts[iv];
+            float3 p2 = pts[iv + 1u];
+            float3 p3 = pts[min(iv + 2u, m - 1u)];
+            pt = CatmullRom(p0, p1, p2, p3, (float)ss / (float)_Subdiv);
+        }
+        if (si > 0u)
+        {
+            uint seg = si - 1u;
             LineVert v0; v0.p = prev; v0.c = col;
-            LineVert v1; v1.p = xk;   v1.c = col;
+            LineVert v1; v1.p = pt;   v1.c = col;
             _Out[slotBase + seg * 2u]      = v0;
             _Out[slotBase + seg * 2u + 1u] = v1;
         }
-        prev = xk;
+        prev = pt;
     }
     // Zero-fill the unused tail.
     LineVert z; z.p = float3(0, 0, 0); z.c = float3(0, 0, 0);
-    for (uint s = segs; s < segsPerSeed; s++)
+    for (uint s = totalSegs; s < segsPerSeed; s++)
     {
         _Out[slotBase + s * 2u]      = z;
         _Out[slotBase + s * 2u + 1u] = z;

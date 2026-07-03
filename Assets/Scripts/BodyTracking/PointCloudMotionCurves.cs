@@ -73,6 +73,11 @@ namespace BodyTracking
                  "wider blend across the boundary.")]
         public float blendSharpness = 0.02f;
 
+        [Range(1, 8)]
+        [Tooltip("Catmull-Rom subdivisions per control-point interval. 1 = straight polyline; higher = " +
+                 "smoother curves (multiplies the vertex count / VRAM by this factor).")]
+        public int smoothSubdiv = 4;
+
         [Range(0f, 3f)]
         [Tooltip("Overall brightness multiplier on the curves' original point-cloud colour.")]
         public float brightness = 1f;
@@ -103,6 +108,7 @@ namespace BodyTracking
         private static readonly uint[] s_counterReset = { 0u };
         private int _boneCount;
         private int _ringLen;
+        private int _subdiv;                  // Catmull-Rom subdiv the output buffer was sized for
         private int _capacity;               // seedCount the buffers were sized for
         private bool _hasBuilt;              // _outBuf holds at least one real (non-empty) build
         private readonly List<MeshFilter> _srcScratch = new List<MeshFilter>();
@@ -125,6 +131,7 @@ namespace BodyTracking
         private static readonly int kSanityRange = Shader.PropertyToID("_SanityRange");
         private static readonly int kBlendCount = Shader.PropertyToID("_BlendCount");
         private static readonly int kBlendSigma = Shader.PropertyToID("_BlendSigma");
+        private static readonly int kSubdiv = Shader.PropertyToID("_Subdiv");
         private static readonly int kCollectOut = Shader.PropertyToID("_CollectOut");
         private static readonly int kCollectCounter = Shader.PropertyToID("_CollectCounter");
         private static readonly int kCollectCap = Shader.PropertyToID("_CollectCap");
@@ -170,7 +177,7 @@ namespace BodyTracking
             _radiusBBuf?.Release(); _radiusBBuf = null;
             _collectBuf?.Release(); _collectBuf = null;
             _collectCounter?.Release(); _collectCounter = null;
-            _capacity = 0; _ringLen = 0; _collectCap = 0;
+            _capacity = 0; _ringLen = 0; _subdiv = 0; _collectCap = 0;
             _hasBuilt = false;
         }
 
@@ -196,6 +203,7 @@ namespace BodyTracking
             int boneCount = history.BoneCount;
             int ringLen = history.RingLength;
             if (boneCount <= 0 || ringLen < 2) return;
+            int subdiv = Mathf.Clamp(smoothSubdiv, 1, 8);
 
             // Resolve source meshes and size the collect buffer to their total vertex count.
             var sources = ResolveSources();
@@ -203,7 +211,7 @@ namespace BodyTracking
             int totalSrcVerts = 0;
             foreach (var mf in sources) totalSrcVerts += mf.sharedMesh.vertexCount;
 
-            EnsureBuffers(boneCount, ringLen, totalSrcVerts);
+            EnsureBuffers(boneCount, ringLen, subdiv, totalSrcVerts);
 
             // Seed bounding box: the bone AABB grown by padding, so the prepass keeps only body points.
             // No pose yet -> fall back to an all-encompassing box (behaves like the old whole-cloud seed).
@@ -254,6 +262,7 @@ namespace BodyTracking
             _shader.SetFloat(kSurfaceMargin, surfaceMargin);
             _shader.SetInt(kBlendCount, Mathf.Clamp(boneBlendCount, 1, 4));
             _shader.SetFloat(kBlendSigma, blendSharpness);
+            _shader.SetInt(kSubdiv, subdiv);
             _shader.SetInt(kSeedBase, 0);
             _shader.SetInt(kSeedCount, cap);
             _shader.Dispatch(_buildKernel, (cap + 63) / 64, 1, 1);
@@ -309,10 +318,11 @@ namespace BodyTracking
 
         private const int kObColorPointStride = 24; // ObColorPoint: 3 floats pos + 3 floats colour
 
-        private void EnsureBuffers(int boneCount, int ringLen, int totalSrcVerts)
+        private void EnsureBuffers(int boneCount, int ringLen, int subdiv, int totalSrcVerts)
         {
             int cap = Mathf.Max(64, seedCount);
-            bool seedStale = _outBuf == null || _capacity != cap || _ringLen != ringLen || _boneCount != boneCount;
+            bool seedStale = _outBuf == null || _capacity != cap || _ringLen != ringLen
+                             || _boneCount != boneCount || _subdiv != subdiv;
             if (seedStale)
             {
                 _outBuf?.Release(); _argsBuf?.Release();
@@ -320,9 +330,10 @@ namespace BodyTracking
                 _hasBuilt = false;
                 _boneCount = boneCount;
                 _ringLen = ringLen;
+                _subdiv = subdiv;
                 _capacity = cap;
 
-                int lineVerts = cap * (ringLen - 1) * 2;
+                int lineVerts = cap * (ringLen - 1) * subdiv * 2;
                 _outBuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, lineVerts, sizeof(float) * 6); // LineVert
                 _argsBuf = new GraphicsBuffer(GraphicsBuffer.Target.IndirectArguments, 4, sizeof(uint));
                 _argsBuf.SetData(new uint[] { (uint)lineVerts, 1, 0, 0 });
