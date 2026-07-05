@@ -58,9 +58,9 @@ namespace BodyTracking
         public int TunableCount => 1;
         public string TunableName(int i) => "History (frames)";
         public float TunableValue(int i) => historySamples;
-        public void SetTunableValue(int i, float value) => historySamples = Mathf.Clamp(Mathf.RoundToInt(value), 2, 96);
+        public void SetTunableValue(int i, float value) => historySamples = Mathf.Clamp(Mathf.RoundToInt(value), 2, MaxK);
         public float TunableMin(int i) => 4f;
-        public float TunableMax(int i) => 32f; // matches MAXK in MotionCurvesBuild.compute (curve control-point cap)
+        public float TunableMax(int i) => MaxK; // curve length caps at the ring size / compute MAXK
         public bool TunableIsInt(int i) => true;
 
         /// <summary>One stored frame of a bone: world endpoints + stabilized orthonormal frame.</summary>
@@ -99,6 +99,12 @@ namespace BodyTracking
 
         private const float Eps = 1e-4f;
         private const float MinPerpSin = 0.34f; // sin(~20deg): reject references too near the bone axis
+        private const int MaxK = 32;            // ring length; also the per-curve cap (MAXK) in the compute
+
+        /// <summary>How many of the newest captured frames the curve should span (the draw-time length,
+        /// 2..MaxK). The ring always holds MaxK, so this can be raised or lowered — even while paused —
+        /// to lengthen/shorten the curves out of the already-captured history.</summary>
+        public int CurveSamples => Mathf.Clamp(historySamples, 2, MaxK);
 
         private void OnEnable()
         {
@@ -120,10 +126,11 @@ namespace BodyTracking
         {
             var bones = BodyTrackingShared.Bones;
             int n = bones.Length;
-            // Cap the ring at MAXK (32) — the per-curve control-point limit in MotionCurvesBuild.compute.
-            // A longer ring would leave the compute reading only the oldest 32 samples (never reaching the
-            // current pose), so clamp here instead of silently mis-drawing.
-            int k = Mathf.Clamp(historySamples, 2, 32);
+            // The ring is ALWAYS MAXK frames. historySamples doesn't size it — it selects, at draw time,
+            // how many of the newest captured frames the curve uses (see CurveSamples). So tuning the
+            // length (even while paused) shortens OR lengthens the curves instantly out of the already-
+            // captured 32 frames, with no reallocation and no clearing.
+            int k = MaxK;
             // Must also require live GPU buffers: OnDisable releases them (nulling _histBuf/_countBuf)
             // without touching the CPU ring, so on re-enable the shape still matches — without this
             // check EnsureBuffers would early-return and leave HistoryBuffer/CountBuffer null forever,
@@ -158,7 +165,7 @@ namespace BodyTracking
                 }
             }
 
-            // GPU mirror sized to the current layout; reallocated only when boneCount/K change.
+            // GPU mirror sized to the current layout; reallocated only when boneCount changes.
             ReleaseGpu();
             _histScratch = new Sample[n * k];
             _countScratch = new int[n];
