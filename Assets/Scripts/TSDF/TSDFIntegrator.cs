@@ -19,7 +19,7 @@ namespace TSDF
     /// to GPU, and dispatches the Integrate kernel once per cam per frame.
     /// </summary>
     [DefaultExecutionOrder(0)]
-    public sealed class TSDFIntegrator : MonoBehaviour
+    public sealed class TSDFIntegrator : MonoBehaviour, global::Shared.IPanelTunable
     {
         [Tooltip("Debug A/B switch: when on, skip the forward depth-lens distortion " +
                  "and project voxels with the bare pinhole model, so a TSDF mesh can " +
@@ -33,6 +33,19 @@ namespace TSDF
         [Tooltip("Base observation weight per frame per camera. Spec §3.1: " +
                  "scaled by view-angle / range later — start at 1.0.")]
         [Min(0f)] public float observationWeight = 1f;
+
+        [Tooltip("Silhouette-edge rejection radius in depth pixels (0 = off). " +
+                 "Depth pixels whose (2r+1)^2 neighbourhood contains an invalid " +
+                 "pixel or a depth jump larger than edgeRejectDepthMm are skipped, " +
+                 "so D2C misalignment at the person's rim can't bake background " +
+                 "(white wall) colour into the TSDF.")]
+        [Range(0, 4)] public int edgeRejectRadius = 2;
+
+        [Tooltip("Depth discontinuity threshold (mm) for the edge rejection. " +
+                 "Neighbour depths differing more than this mark the pixel as a " +
+                 "silhouette edge. Keep well above the per-pixel gradient of " +
+                 "steeply slanted real surfaces (~100 mm is a safe start).")]
+        [Range(10f, 500f)] public float edgeRejectDepthMm = 100f;
 
         [Tooltip("Dev colour override: when alpha > 0, bake this flat colour into " +
                  "integrated voxels instead of the camera RGB (debug tooling uses it " +
@@ -110,6 +123,23 @@ namespace TSDF
 
         [Tooltip("Log a per-second summary of integrated frames per serial.")]
         public bool diagnosticLogging = false;
+
+        // ---- Shared.IPanelTunable (one-stop Control Panel) ----
+        // Silhouette-edge rejection knobs: radius 0 turns the test off live, so
+        // the white-rim bleed can be A/B'd from the panel without touching the
+        // Inspector. Values are read per dispatch — effective next frame.
+        public string TuningLabel => "TSDF edge reject";
+        public int TunableCount => 2;
+        public string TunableName(int i) => i == 0 ? "Reject radius (px, 0=off)" : "Depth jump (mm)";
+        public float TunableValue(int i) => i == 0 ? edgeRejectRadius : edgeRejectDepthMm;
+        public void SetTunableValue(int i, float value)
+        {
+            if (i == 0) edgeRejectRadius = Mathf.Clamp(Mathf.RoundToInt(value), 0, 4);
+            else edgeRejectDepthMm = Mathf.Clamp(value, 10f, 500f);
+        }
+        public float TunableMin(int i) => i == 0 ? 0f : 10f;
+        public float TunableMax(int i) => i == 0 ? 4f : 500f;
+        public bool TunableIsInt(int i) => i == 0;
 
         private ComputeShader _shader;
         private int _kernel;
@@ -450,6 +480,8 @@ namespace TSDF
             _shader.SetFloat("_DP2", ddist.P2);
             _shader.SetMatrix("_DepthFromWorld", depthFromWorld);
             _shader.SetFloat("_WObs", observationWeight);
+            _shader.SetInt("_EdgeRejectRadius", edgeRejectRadius);
+            _shader.SetFloat("_EdgeRejectDepthMm", edgeRejectDepthMm);
 
             // Colour buffer + colour-camera projection. world->colour-mm is the
             // renderer-transform half of depthFromWorld (the source GO transform

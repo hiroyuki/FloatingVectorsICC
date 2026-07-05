@@ -54,6 +54,15 @@ int _HasDepthDist;
 // Optional weight modulators. _WObs is the base observation weight.
 float _WObs;
 
+// Silhouette-edge rejection. D2C misalignment at depth discontinuities makes
+// edge pixels sample the BACKGROUND colour (e.g. white wall bleeding into the
+// person's rim), so any depth pixel whose (2r+1)^2 neighbourhood contains an
+// invalid pixel or a depth jump larger than _EdgeRejectDepthMm is skipped
+// entirely — neither its surface nor its colour enters the volume.
+// _EdgeRejectRadius = 0 disables the test.
+int _EdgeRejectRadius;                // pixels
+float _EdgeRejectDepthMm;             // discontinuity threshold (mm)
+
 // --- per-camera colour image (RGB8, row-major) + colour-camera projection ---
 ByteAddressBuffer _ColorImg;          // 3 bytes per pixel, R,G,B
 int _ColorW;
@@ -159,6 +168,23 @@ void Integrate(uint3 id : SV_DispatchThreadID)
 
     uint dRaw = LoadDepthU16(iu, iv);
     if (dRaw == 0u) return; // invalid depth pixel
+
+    // Reject silhouette-edge pixels: a depth discontinuity (or invalid hole)
+    // anywhere in the neighbourhood means this pixel sits on a foreground/
+    // background boundary where the colour reprojection is unreliable.
+    // Out-of-image neighbours are ignored (frame border != depth edge).
+    if (_EdgeRejectRadius > 0)
+    {
+        for (int nv = iv - _EdgeRejectRadius; nv <= iv + _EdgeRejectRadius; nv++)
+        {
+            for (int nu = iu - _EdgeRejectRadius; nu <= iu + _EdgeRejectRadius; nu++)
+            {
+                if (nu < 0 || nv < 0 || nu >= _DepthW || nv >= _DepthH) continue;
+                uint dn = LoadDepthU16(nu, nv);
+                if (dn == 0u || abs((float)dn - (float)dRaw) > _EdgeRejectDepthMm) return;
+            }
+        }
+    }
 
     // sdf along the depth Z axis. Both terms in metres.
     float dM = (float)dRaw * 0.001;
