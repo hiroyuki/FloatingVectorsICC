@@ -58,9 +58,9 @@ namespace BodyTracking
         public int TunableCount => 1;
         public string TunableName(int i) => "History (frames)";
         public float TunableValue(int i) => historySamples;
-        public void SetTunableValue(int i, float value) => historySamples = Mathf.Clamp(Mathf.RoundToInt(value), 2, 96);
+        public void SetTunableValue(int i, float value) => historySamples = Mathf.Clamp(Mathf.RoundToInt(value), 2, MaxK);
         public float TunableMin(int i) => 4f;
-        public float TunableMax(int i) => 32f; // matches MAXK in MotionCurvesBuild.compute (curve control-point cap)
+        public float TunableMax(int i) => MaxK; // curve length caps at the ring size / compute MAXK
         public bool TunableIsInt(int i) => true;
 
         /// <summary>One stored frame of a bone: world endpoints + stabilized orthonormal frame.</summary>
@@ -99,6 +99,12 @@ namespace BodyTracking
 
         private const float Eps = 1e-4f;
         private const float MinPerpSin = 0.34f; // sin(~20deg): reject references too near the bone axis
+        private const int MaxK = 32;            // ring length; also the per-curve cap (MAXK) in the compute
+
+        /// <summary>How many of the newest captured frames the curve should span (the draw-time length,
+        /// 2..MaxK). The ring always holds MaxK, so this can be raised or lowered — even while paused —
+        /// to lengthen/shorten the curves out of the already-captured history.</summary>
+        public int CurveSamples => Mathf.Clamp(historySamples, 2, MaxK);
 
         private void OnEnable()
         {
@@ -120,77 +126,46 @@ namespace BodyTracking
         {
             var bones = BodyTrackingShared.Bones;
             int n = bones.Length;
-            // Cap the ring at MAXK (32) — the per-curve control-point limit in MotionCurvesBuild.compute.
-            // A longer ring would leave the compute reading only the oldest 32 samples (never reaching the
-            // current pose), so clamp here instead of silently mis-drawing.
-            int k = Mathf.Clamp(historySamples, 2, 32);
+            // The ring is ALWAYS MAXK frames. historySamples doesn't size it — it selects, at draw time,
+            // how many of the newest captured frames the curve uses (see CurveSamples). So tuning the
+            // length (even while paused) shortens OR lengthens the curves instantly out of the already-
+            // captured 32 frames, with no reallocation and no clearing.
+            int k = MaxK;
             // Must also require live GPU buffers: OnDisable releases them (nulling _histBuf/_countBuf)
             // without touching the CPU ring, so on re-enable the shape still matches — without this
             // check EnsureBuffers would early-return and leave HistoryBuffer/CountBuffer null forever,
             // silently killing every downstream consumer.
             if (_ring != null && _boneCount == n && _ringLen == k && _histBuf != null) return;
 
-            // K changed but the bone layout is otherwise built: resize each ring PRESERVING its newest
-            // samples instead of clearing. Tuning K while paused sends no new frames to refill a cleared
-            // ring, so a naive realloc would make the curves vanish; preserving keeps them (shorter when
-            // K drops; unchanged, then growing on resume, when K rises).
-            bool resizeInPlace = _ring != null && _boneCount == n && _ringLen != k;
-            if (resizeInPlace)
+            _boneCount = n;
+            _ringLen = k;
+            _ring = new Sample[n][];
+            _head = new int[n];
+            _count = new int[n];
+            _prevV = new Vector3[n];
+            _scratch = new SkeletonMerger.BoneEndpoints[n];
+            for (int b = 0; b < n; b++)
             {
-                for (int b = 0; b < n; b++)
-                {
-                    int copyCount = Mathf.Min(_count[b], k);
-                    var newRingB = new Sample[k];
-                    if (copyCount > 0)
-                    {
-                        int idx = _head[b] - (copyCount - 1);
-                        idx %= _ringLen;
-                        if (idx < 0) idx += _ringLen;
-                        for (int i = 0; i < copyCount; i++)
-                        {
-                            newRingB[i] = _ring[b][idx];
-                            idx++;
-                            if (idx >= _ringLen) idx = 0;
-                        }
-                    }
-                    _ring[b] = newRingB;
-                    _count[b] = copyCount;
-                    _head[b] = copyCount - 1; // newest at copyCount-1 (or -1 if empty)
-                }
-                _ringLen = k;
+                _ring[b] = new Sample[k];
+                _head[b] = -1;
+                _count[b] = 0;
+                _prevV[b] = Vector3.zero;
             }
-            else
-            {
-                _boneCount = n;
-                _ringLen = k;
-                _ring = new Sample[n][];
-                _head = new int[n];
-                _count = new int[n];
-                _prevV = new Vector3[n];
-                _scratch = new SkeletonMerger.BoneEndpoints[n];
-                for (int b = 0; b < n; b++)
-                {
-                    _ring[b] = new Sample[k];
-                    _head[b] = -1;
-                    _count[b] = 0;
-                    _prevV[b] = Vector3.zero;
-                }
 
-                // Parent-bone table: for bone (a,b), find the bone whose child joint (.b) == a.
-                // Its direction is the stable-frame reference axis; degenerate/absent -> torso-up.
-                _parentBone = new int[n];
-                for (int b = 0; b < n; b++)
+            // Parent-bone table: for bone (a,b), find the bone whose child joint (.b) == a.
+            // Its direction is the stable-frame reference axis; degenerate/absent -> torso-up.
+            _parentBone = new int[n];
+            for (int b = 0; b < n; b++)
+            {
+                _parentBone[b] = -1;
+                var aJoint = bones[b].a;
+                for (int p = 0; p < n; p++)
                 {
-                    _parentBone[b] = -1;
-                    var aJoint = bones[b].a;
-                    for (int p = 0; p < n; p++)
-                    {
-                        if (p != b && bones[p].b == aJoint) { _parentBone[b] = p; break; }
-                    }
+                    if (p != b && bones[p].b == aJoint) { _parentBone[b] = p; break; }
                 }
             }
 
-            // GPU mirror (re)sized to the current layout.
+            // GPU mirror sized to the current layout; reallocated only when boneCount changes.
             ReleaseGpu();
             _histScratch = new Sample[n * k];
             _countScratch = new int[n];
@@ -202,9 +177,6 @@ namespace BodyTracking
             // counts read as 0 (empty bones) instead of garbage that would drive out-of-bounds indexing.
             _countBuf.SetData(_countScratch);
             _histBuf.SetData(_histScratch);
-            // On a resize, immediately publish the preserved ring so the curves reflect the new K even
-            // while paused (the LateUpdate hold branch won't republish).
-            if (resizeInPlace) PublishGpu();
         }
 
         private void LateUpdate()

@@ -42,6 +42,7 @@ float _SurfaceMargin; // cull seed if nearest surface distance exceeds this (bac
 float _SanityRange;   // |coord| above this => invalid-depth dummy, cull
 uint  _BlendCount;    // number of nearest bones to blend (1 = hard argmax)
 float _BlendSigma;    // rank falloff (m) for blend weights; smaller = sharper boundaries
+uint  _CurveSamples;  // how many of the newest ring frames the curve spans (<= ring length / MAXK)
 uint  _Subdiv;        // Catmull-Rom subdivisions per control-point interval (1 = straight polyline)
 
 // Centripetal Catmull-Rom (alpha = 0.5): interpolates P1..P2 at u in [0,1] with knot spacing
@@ -155,12 +156,13 @@ void CSBuild(uint3 id : SV_DispatchThreadID)
     { WriteDegenerate(slotBase, segsPerSeed); return; }
 
     // Per-selected-bone weight + (t, cv, cw) in that bone's newest frame.
-    float w[4]; float tb[4]; float cvb[4]; float cwb[4]; uint baseB[4];
+    float w[4]; float tb[4]; float cvb[4]; float cwb[4]; uint baseB[4]; uint cntB[4];
     float wsum = 0.0; uint minCnt = 0xffffffffu;
     for (uint j = 0; j < selN; j++)
     {
         uint bb = (uint)selIdx[j];
         uint cnt = min(_BoneCounts[bb], _RingLen);
+        cntB[j] = cnt;
         minCnt = min(minCnt, cnt);
         baseB[j] = bb * _RingLen;
         Sample sn = _History[baseB[j] + (cnt - 1u)];
@@ -172,16 +174,20 @@ void CSBuild(uint3 id : SV_DispatchThreadID)
     }
     float invW = (wsum > 1e-8) ? (1.0 / wsum) : 0.0;
 
-    // Reproject every control point (weighted blend of the selected bones) into a local array.
+    // Curve length: the newest _CurveSamples frames (clamped to what's available and the MAXK cap). The
+    // ring always holds up to MAXK, so raising _CurveSamples lengthens the curve out of already-captured
+    // history — even while paused.
     const uint MAXK = 32u;
-    uint m = min(minCnt, MAXK);
+    uint m = min(min(minCnt, _CurveSamples), MAXK);
+    // Reproject the newest m control points (weighted blend of the selected bones) into a local array.
     float3 pts[32];
     for (uint k = 0; k < m; k++)
     {
         float3 xk = float3(0, 0, 0);
         for (uint jb = 0; jb < selN; jb++)
         {
-            Sample sk = _History[baseB[jb] + k];
+            // Read the newest m samples of this bone: offset by (cnt - m).
+            Sample sk = _History[baseB[jb] + (cntB[jb] - m) + k];
             xk += (w[jb] * invW) * (lerp(sk.A, sk.B, tb[jb]) + cvb[jb] * sk.V + cwb[jb] * sk.W);
         }
         pts[k] = xk;

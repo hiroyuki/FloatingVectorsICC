@@ -136,6 +136,7 @@ namespace BodyTracking
         private static readonly int kSanityRange = Shader.PropertyToID("_SanityRange");
         private static readonly int kBlendCount = Shader.PropertyToID("_BlendCount");
         private static readonly int kBlendSigma = Shader.PropertyToID("_BlendSigma");
+        private static readonly int kCurveSamples = Shader.PropertyToID("_CurveSamples");
         private static readonly int kSubdiv = Shader.PropertyToID("_Subdiv");
         private static readonly int kCollectOut = Shader.PropertyToID("_CollectOut");
         private static readonly int kCollectCounter = Shader.PropertyToID("_CollectCounter");
@@ -268,6 +269,7 @@ namespace BodyTracking
             _shader.SetFloat(kSurfaceMargin, surfaceMargin);
             _shader.SetInt(kBlendCount, Mathf.Clamp(boneBlendCount, 1, 4));
             _shader.SetFloat(kBlendSigma, blendSharpness);
+            _shader.SetInt(kCurveSamples, history.CurveSamples);
             _shader.SetInt(kSubdiv, subdiv);
             _shader.SetInt(kSeedBase, 0);
             _shader.SetInt(kSeedCount, cap);
