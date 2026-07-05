@@ -69,7 +69,15 @@ Shader "Orbbec/MotionCurves"
                 float3 tang = axis / len;
                 float3 mid  = (a + b) * 0.5;
                 float3 view = normalize(_WorldSpaceCameraPos.xyz - mid);
-                float3 side = normalize(cross(tang, view)) * (_Width * 0.5);
+                // Guard the degenerate case where the segment points at the camera (cross -> ~0):
+                // fall back to a world axis that isn't parallel to the tangent so the ribbon keeps a width.
+                float3 sideRaw = cross(tang, view);
+                if (dot(sideRaw, sideRaw) < 1e-10)
+                {
+                    sideRaw = cross(tang, float3(0, 1, 0));
+                    if (dot(sideRaw, sideRaw) < 1e-10) sideRaw = cross(tang, float3(1, 0, 0));
+                }
+                float3 side = normalize(sideRaw) * (_Width * 0.5);
 
                 float3 a0 = a - side, a1 = a + side;
                 float3 b0 = b - side, b1 = b + side;

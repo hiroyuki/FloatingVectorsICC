@@ -114,7 +114,10 @@ namespace BodyTracking
         {
             var bones = BodyTrackingShared.Bones;
             int n = bones.Length;
-            int k = Mathf.Max(2, historySamples);
+            // Cap the ring at MAXK (32) — the per-curve control-point limit in MotionCurvesBuild.compute.
+            // A longer ring would leave the compute reading only the oldest 32 samples (never reaching the
+            // current pose), so clamp here instead of silently mis-drawing.
+            int k = Mathf.Clamp(historySamples, 2, 32);
             // Must also require live GPU buffers: OnDisable releases them (nulling _histBuf/_countBuf)
             // without touching the CPU ring, so on re-enable the shape still matches — without this
             // check EnsureBuffers would early-return and leave HistoryBuffer/CountBuffer null forever,
@@ -166,19 +169,35 @@ namespace BodyTracking
         private void LateUpdate()
         {
             EnsureBuffers();
-            // Only ingest a sample when a genuinely new body frame arrived (PoseVersion changed). This
+            // Ingest a sample only when a genuinely new body frame arrived (PoseVersion changed). This
             // holds the ring steady while the playhead is static (paused, no stepping) — avoiding the
             // repeated-identical-sample collapse — yet still updates on live playback AND on paused
             // frame-stepping (each step ingests one new frame), so the curves follow the stepped pose.
+            bool newFrame = true;
             if (bodyTracking != null)
             {
                 ulong v = bodyTracking.PoseVersion;
-                if (_havePoseVersion && v == _lastPoseVersion) return; // no new frame -> hold
+                newFrame = !_havePoseVersion || v != _lastPoseVersion;
                 _lastPoseVersion = v;
                 _havePoseVersion = true;
             }
-            UpdateHistory();
-            PublishGpu();
+
+            if (newFrame)
+            {
+                // UpdateHistory pushes fresh samples, and resets bones that went invalid/stale.
+                UpdateHistory();
+                PublishGpu();
+            }
+            else if (bodyTracking == null
+                     || !bodyTracking.TryReadBonePosesWorld(_scratch, freshWindowFrames))
+            {
+                // Static frame with NO active body (person left / playback stopped): the version never
+                // advances, so without this the last pose would stay published and the curves would keep
+                // drawing a ghost. Clear. A paused-but-present body keeps its ring held (TryRead == true).
+                ResetAll();
+                PublishGpu();
+            }
+            // else: static frame, body still present -> hold the ring (no collapse, no ghost).
         }
 
         private void UpdateHistory()
