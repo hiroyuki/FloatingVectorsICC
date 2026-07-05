@@ -80,10 +80,10 @@ namespace TSDF.EditorTools
 
             EditorGUILayout.LabelField("Curve tubes (curved line)", EditorStyles.miniBoldLabel);
             int stride = EditorGUILayout.IntSlider(
-                new GUIContent("Seed stride (間引き)", "何本置きに1本エクスポートするか。40 → 20000本中約500本。"),
+                new GUIContent("Print Seed Stride", "間引き：何本置きに1本エクスポートするか。40 → 20000本中約500本。"),
                 pe.printSeedStride, 1, 400);
             float radius = EditorGUILayout.Slider(
-                new GUIContent("Tube radius (m)", "チューブ半径。直径 3 voxel 以上でないと MC がガタガタになる。"),
+                new GUIContent("Print Radius (m)", "カーブチューブの半径。直径 3 voxel 以上でないと MC がガタガタになる。"),
                 pe.printRadius, 0.002f, 0.05f);
             if (voxel > 1e-6f)
             {
@@ -94,31 +94,31 @@ namespace TSDF.EditorTools
                     diaVox < 3f ? MessageType.Warning : MessageType.None);
             }
             float bridgeScale = EditorGUILayout.Slider(
-                new GUIContent("Bridge root scale", "体との接続部の根元の太らせ倍率（フィレット）。"),
+                new GUIContent("Bridge Radius Scale", "体との接続部の根元の太らせ倍率（フィレット）。"),
                 pe.bridgeRadiusScale, 1f, 3f);
             float maxBridge = EditorGUILayout.Slider(
-                new GUIContent("Max bridge length (m)", "これより長い接続支柱は作らない（誤分類ガード）。"),
+                new GUIContent("Max Bridge Length (m)", "これより長い接続支柱は作らない（誤分類ガード）。"),
                 pe.maxBridgeLength, 0.05f, 1f);
 
             EditorGUILayout.Space(4);
             EditorGUILayout.LabelField("Hole closing (穴塞ぎ)", EditorStyles.miniBoldLabel);
             int closeR = EditorGUILayout.IntSlider(
-                new GUIContent("Close radius (voxels)", "2×この幅までの開口を塞ぐ。大きいと凹みも丸まる。"),
+                new GUIContent("Close Radius Voxels", "2×この幅までの開口を塞ぐ。大きいと凹みも丸まる。"),
                 pe.closeRadiusVoxels, 1, 16);
             if (voxel > 1e-6f)
                 EditorGUILayout.HelpBox($"塞げる開口 ≈ {2 * closeR * voxel * 100f:0.0} cm まで", MessageType.None);
             bool keepLargest = EditorGUILayout.ToggleLeft(
-                new GUIContent("Keep largest only (浮遊物を削除)",
+                new GUIContent("Keep Largest Only (浮遊物を削除)",
                     "本体に接続していない成分を削除。削除量はログに出る（接続漏れ検出を兼ねる）。"),
                 pe.keepLargestOnly);
 
             EditorGUILayout.Space(4);
             EditorGUILayout.LabelField("Export", EditorStyles.miniBoldLabel);
             float heightMm = EditorGUILayout.Slider(
-                new GUIContent("Target height (mm)", "プリント時の高さ。STL は mm 単位で書き出される。"),
+                new GUIContent("Target Height Mm", "プリント時の高さ。STL は mm 単位で書き出される。"),
                 pe.targetHeightMm, 50f, 1000f);
             bool ply = EditorGUILayout.ToggleLeft(
-                new GUIContent("Also write colour PLY", "フルカラー印刷サービス用の頂点色付き PLY も出力。"),
+                new GUIContent("Export Ply With Color", "フルカラー印刷サービス用の頂点色付き PLY も出力。"),
                 pe.exportPlyWithColor);
 
             if (EditorGUI.EndChangeCheck())
