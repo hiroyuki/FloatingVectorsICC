@@ -19,19 +19,17 @@ using PointCloud;
 namespace BodyTracking
 {
     [DisallowMultipleComponent]
-    public class BonePoseHistory : MonoBehaviour
+    public class BonePoseHistory : MonoBehaviour, global::Shared.IPanelTunable
     {
         [Tooltip("Body-tracking source. Leave empty to auto-resolve the first SkeletonMerger at OnEnable.")]
         public SkeletonMerger bodyTracking;
 
-        [Tooltip("Hold the pose history (stop updating) while playback is paused, so downstream curves " +
-                 "stay put and can be rebuilt with new parameters on the frozen pose. Uses the resolved " +
-                 "SensorRecorder.")]
-        public bool freezeOnPause = true;
-
-        [Tooltip("Playback source whose pause state drives freezeOnPause. Auto-resolves the first " +
-                 "SensorRecorder at OnEnable.")]
+        [Tooltip("Playback source. Used only to tell an intentional pause (hold the sculpture) apart " +
+                 "from a body that stopped/left (clear it). Auto-resolves the first SensorRecorder at OnEnable.")]
         public SensorRecorder recorder;
+
+        private ulong _lastPoseVersion;
+        private bool _havePoseVersion;
 
         [Min(2)]
         [Tooltip("Ring-buffer length K: how many past frames form each bone's curve.")]
@@ -52,6 +50,18 @@ namespace BodyTracking
         public float gizmoOffset = 0.12f;
 
         public Color gizmoColor = new Color(1f, 0.55f, 0.1f, 1f);
+
+        // ---- Shared.IPanelTunable (one-stop Control Panel) ----
+        // Exposes the time-window length (K = historySamples): how many past frames each motion curve
+        // spans. EnsureBuffers reallocates the ring when this changes, so live edits take effect next frame.
+        public string TuningLabel => "Motion history";
+        public int TunableCount => 1;
+        public string TunableName(int i) => "History (frames)";
+        public float TunableValue(int i) => historySamples;
+        public void SetTunableValue(int i, float value) => historySamples = Mathf.Clamp(Mathf.RoundToInt(value), 2, 96);
+        public float TunableMin(int i) => 4f;
+        public float TunableMax(int i) => 32f; // matches MAXK in MotionCurvesBuild.compute (curve control-point cap)
+        public bool TunableIsInt(int i) => true;
 
         /// <summary>One stored frame of a bone: world endpoints + stabilized orthonormal frame.</summary>
         public struct Sample
@@ -110,7 +120,10 @@ namespace BodyTracking
         {
             var bones = BodyTrackingShared.Bones;
             int n = bones.Length;
-            int k = Mathf.Max(2, historySamples);
+            // Cap the ring at MAXK (32) — the per-curve control-point limit in MotionCurvesBuild.compute.
+            // A longer ring would leave the compute reading only the oldest 32 samples (never reaching the
+            // current pose), so clamp here instead of silently mis-drawing.
+            int k = Mathf.Clamp(historySamples, 2, 32);
             // Must also require live GPU buffers: OnDisable releases them (nulling _histBuf/_countBuf)
             // without touching the CPU ring, so on re-enable the shape still matches — without this
             // check EnsureBuffers would early-return and leave HistoryBuffer/CountBuffer null forever,
@@ -162,11 +175,37 @@ namespace BodyTracking
         private void LateUpdate()
         {
             EnsureBuffers();
-            // While paused, hold the ring + GPU buffer at their pre-pause state so the pose (and the
-            // curves built from it) stays fixed and downstream params can be re-evaluated on it.
-            if (freezeOnPause && recorder != null && recorder.IsPaused) return;
-            UpdateHistory();
-            PublishGpu();
+            // Ingest a sample only when a genuinely new body frame arrived (PoseVersion changed). This
+            // holds the ring steady while the playhead is static (paused, no stepping) — avoiding the
+            // repeated-identical-sample collapse — yet still updates on live playback AND on paused
+            // frame-stepping (each step ingests one new frame), so the curves follow the stepped pose.
+            bool newFrame = true;
+            if (bodyTracking != null)
+            {
+                ulong v = bodyTracking.PoseVersion;
+                newFrame = !_havePoseVersion || v != _lastPoseVersion;
+                _lastPoseVersion = v;
+                _havePoseVersion = true;
+            }
+
+            if (newFrame)
+            {
+                // New pose (play / frame-step): push fresh samples, reset bones that went invalid/stale.
+                UpdateHistory();
+                PublishGpu();
+            }
+            else if (recorder == null || !recorder.IsPaused)
+            {
+                // Static version but NOT an intentional pause => the body stalled or left. Clear bones
+                // whose freshness expired (or all, if no active visual) WITHOUT appending duplicate
+                // samples, so a ghost can't linger past freshWindowFrames while the stale BodyVisual is
+                // still alive. (TryReadBonePosesWorld stays true for a live-but-stale visual, so a
+                // freshness check — not just its bool — is what clears here.)
+                ClearStale();
+                PublishGpu();
+            }
+            // else: intentional pause (recorder.IsPaused) with no new frame -> hold the ring so the
+            // frozen sculpture stays put even after the joints age out (no collapse, no premature clear).
         }
 
         private void UpdateHistory()
@@ -308,6 +347,23 @@ namespace BodyTracking
             for (int b = 0; b < _boneCount; b++) ResetBone(b);
         }
 
+        // Reset bones no longer valid/fresh WITHOUT appending a sample. Called on a non-paused static
+        // frame so a stalled/lost body clears at freshWindowFrames rather than lingering as a ghost
+        // until its BodyVisual is destroyed. Fresh bones are left held (they clear once they too age out).
+        private void ClearStale()
+        {
+            if (bodyTracking == null || !bodyTracking.TryReadBonePosesWorld(_scratch, freshWindowFrames))
+            {
+                ResetAll();
+                return;
+            }
+            for (int b = 0; b < _boneCount; b++)
+            {
+                var e = _scratch[b];
+                if (!e.Valid || !e.Fresh) ResetBone(b);
+            }
+        }
+
         // Mirror the CPU ring to the GPU: per bone, copy its valid samples oldest->newest into the
         // contiguous [bone*K ..] slice and record the count. Called every LateUpdate (including reset
         // frames, so the compute sees empty bones as count 0 rather than stale data).
@@ -360,6 +416,27 @@ namespace BodyTracking
         /// <summary>Number of stored samples for a bone (0..K).</summary>
         public int SampleCount(int bone)
             => (_count != null && bone >= 0 && bone < _boneCount) ? _count[bone] : 0;
+
+        /// <summary>World-space AABB over every bone's newest endpoints (the current pose extent).
+        /// Returns false if no bone has history. Used to concentrate point-cloud seeds on the body.</summary>
+        public bool TryGetWorldBounds(out Bounds bounds)
+        {
+            bounds = default;
+            if (_ring == null) return false;
+            Vector3 mn = new Vector3(1e9f, 1e9f, 1e9f), mx = -mn;
+            bool any = false;
+            for (int b = 0; b < _boneCount; b++)
+            {
+                if (_count[b] == 0) continue;
+                Sample s = _ring[b][_head[b]]; // newest
+                mn = Vector3.Min(mn, Vector3.Min(s.A, s.B));
+                mx = Vector3.Max(mx, Vector3.Max(s.A, s.B));
+                any = true;
+            }
+            if (!any) return false;
+            bounds = new Bounds((mn + mx) * 0.5f, mx - mn);
+            return true;
+        }
 
         public int BoneCount => _boneCount;
 

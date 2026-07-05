@@ -12,17 +12,23 @@
 // at [bone*K + sample]) and the source mesh vertex layout (ObColorPoint: pos12 +
 // col12, 24B raw). See PointCloudMotionCurves.cs for the host side.
 
+#pragma kernel CSCollect
 #pragma kernel CSBuild
 
 struct Sample { float3 A; float3 B; float3 U; float3 V; float3 W; };
 struct LineVert { float3 p; float3 c; };
+struct SeedPoint { float3 pos; float3 col; }; // compacted in-bbox point: world pos + original RGB
 
-ByteAddressBuffer          _Src;          // source vertices, 24B stride (pos12 + col12)
+ByteAddressBuffer            _Src;          // source vertices, 24B stride (pos12 + col12)
+RWStructuredBuffer<SeedPoint> _CollectOut;  // compacted in-bbox valid points (pos + original colour)
+RWStructuredBuffer<uint>     _CollectCounter;
+uint  _CollectCap;                          // capacity of _CollectOut
+float3 _BboxMin;                            // seed bbox (bone extent + padding), world
+float3 _BboxMax;
 StructuredBuffer<Sample>   _History;      // bone*K, oldest->newest
 StructuredBuffer<uint>     _BoneCounts;   // valid samples per bone
 StructuredBuffer<float>    _BoneRadiusA;  // radius at bone.a (parent side), m
 StructuredBuffer<float>    _BoneRadiusB;  // radius at bone.b (child side), m
-StructuredBuffer<float3>   _BoneColor;    // per-bone RGB
 RWStructuredBuffer<LineVert> _Out;
 
 float4x4 _SrcLocalToWorld;
@@ -36,6 +42,26 @@ float _SurfaceMargin; // cull seed if nearest surface distance exceeds this (bac
 float _SanityRange;   // |coord| above this => invalid-depth dummy, cull
 uint  _BlendCount;    // number of nearest bones to blend (1 = hard argmax)
 float _BlendSigma;    // rank falloff (m) for blend weights; smaller = sharper boundaries
+uint  _Subdiv;        // Catmull-Rom subdivisions per control-point interval (1 = straight polyline)
+
+// Centripetal Catmull-Rom (alpha = 0.5): interpolates P1..P2 at u in [0,1] with knot spacing
+// sqrt(distance), which prevents the overshoot / self-intersection that the uniform version
+// produces on sharp turns or unevenly spaced control points. Passes through P1 (u=0) and P2 (u=1).
+// The 1e-6 floor on each knot gap guards coincident points (no division by zero at the clamped ends).
+float3 CatmullRom(float3 p0, float3 p1, float3 p2, float3 p3, float u)
+{
+    float t0 = 0.0;
+    float t1 = t0 + sqrt(max(length(p1 - p0), 1e-6));
+    float t2 = t1 + sqrt(max(length(p2 - p1), 1e-6));
+    float t3 = t2 + sqrt(max(length(p3 - p2), 1e-6));
+    float t = lerp(t1, t2, u);
+    float3 a1 = ((t1 - t) * p0 + (t - t0) * p1) / (t1 - t0);
+    float3 a2 = ((t2 - t) * p1 + (t - t1) * p2) / (t2 - t1);
+    float3 a3 = ((t3 - t) * p2 + (t - t2) * p3) / (t3 - t2);
+    float3 b1 = ((t2 - t) * a1 + (t - t0) * a2) / (t2 - t0);
+    float3 b2 = ((t3 - t) * a2 + (t - t1) * a3) / (t3 - t1);
+    return ((t2 - t) * b1 + (t - t1) * b2) / (t2 - t1);
+}
 
 // Fill a seed's whole output slot with zero-length (invisible) segments.
 void WriteDegenerate(uint slotBase, uint segs)
@@ -48,27 +74,43 @@ void WriteDegenerate(uint slotBase, uint segs)
     }
 }
 
+// Prepass: one thread per source vertex. Transform to world, drop invalid-depth dummies and
+// anything outside the body bbox, and append survivors' world positions to _CollectOut. CSBuild then
+// seeds only from this compacted list, so the whole seed budget lands on the body instead of the
+// (mostly background) full cloud. Dispatched once per source mesh, accumulating into one buffer.
+[numthreads(64, 1, 1)]
+void CSCollect(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _SrcCount) return;
+    float3 pl = asfloat(_Src.Load3(id.x * 24u));
+    float3 p  = mul(_SrcLocalToWorld, float4(pl, 1.0)).xyz;
+    if (abs(p.x) > _SanityRange || abs(p.y) > _SanityRange || abs(p.z) > _SanityRange) return;
+    if (p.x < _BboxMin.x || p.y < _BboxMin.y || p.z < _BboxMin.z ||
+        p.x > _BboxMax.x || p.y > _BboxMax.y || p.z > _BboxMax.z) return;
+    float3 col = asfloat(_Src.Load3(id.x * 24u + 12u)); // original point-cloud RGB
+    uint idx;
+    InterlockedAdd(_CollectCounter[0], 1u, idx);
+    if (idx < _CollectCap) { SeedPoint sp; sp.pos = p; sp.col = col; _CollectOut[idx] = sp; }
+}
+
 [numthreads(64, 1, 1)]
 void CSBuild(uint3 id : SV_DispatchThreadID)
 {
     uint seedLocal = id.x;
     if (seedLocal >= _SeedCount) return;
 
-    uint segsPerSeed = _RingLen - 1u;
+    uint segsPerSeed = (_RingLen - 1u) * _Subdiv;
     uint slotBase = (_SeedBase + seedLocal) * segsPerSeed * 2u;
 
-    // Spread seeds evenly across the source cloud. Float mapping keeps SM5.0
-    // (no 64-bit ints); counts here are well within float's exact-int range.
-    if (_SrcCount == 0u) { WriteDegenerate(slotBase, segsPerSeed); return; }
-    uint srcIdx = (uint)(((float)seedLocal / (float)_SeedCount) * (float)_SrcCount);
-    if (srcIdx >= _SrcCount) srcIdx = _SrcCount - 1u;
-
-    float3 pl = asfloat(_Src.Load3(srcIdx * 24u));
-    float3 p  = mul(_SrcLocalToWorld, float4(pl, 1.0)).xyz;
-
-    // Invalid-depth dummy cull (reconstruct emits 1e10 for holes).
-    if (abs(p.x) > _SanityRange || abs(p.y) > _SanityRange || abs(p.z) > _SanityRange)
-    { WriteDegenerate(slotBase, segsPerSeed); return; }
+    // Seed from the compacted in-bbox points (already world-space, valid). Stride evenly so the seed
+    // budget spreads across the whole collected set. Float mapping keeps SM5.0 (no 64-bit ints).
+    uint collectCount = min(_CollectCounter[0], _CollectCap);
+    if (collectCount == 0u) { WriteDegenerate(slotBase, segsPerSeed); return; }
+    uint srcIdx = (uint)(((float)seedLocal / (float)_SeedCount) * (float)collectCount);
+    if (srcIdx >= collectCount) srcIdx = collectCount - 1u;
+    SeedPoint sp = _CollectOut[srcIdx];
+    float3 p = sp.pos;
+    float3 col = sp.col; // the curve keeps this seed point's original point-cloud colour
 
     // --- classify: soft-assign to the nearest few bones (skinning-style blend) ---
     // Select the top-N bones ordered by rank = max(surf,0) (tie-broken by centerline d),
@@ -130,14 +172,11 @@ void CSBuild(uint3 id : SV_DispatchThreadID)
     }
     float invW = (wsum > 1e-8) ? (1.0 / wsum) : 0.0;
 
-    // Blended colour (constant along the curve).
-    float3 col = float3(0, 0, 0);
-    for (uint jc = 0; jc < selN; jc++) col += (w[jc] * invW) * _BoneColor[(uint)selIdx[jc]];
-
-    // Reproject: each control point is the weighted blend of every selected bone's reprojection.
-    float3 prev = float3(0, 0, 0);
-    uint segs = (minCnt >= 1u) ? (minCnt - 1u) : 0u;
-    for (uint k = 0; k < minCnt; k++)
+    // Reproject every control point (weighted blend of the selected bones) into a local array.
+    const uint MAXK = 32u;
+    uint m = min(minCnt, MAXK);
+    float3 pts[32];
+    for (uint k = 0; k < m; k++)
     {
         float3 xk = float3(0, 0, 0);
         for (uint jb = 0; jb < selN; jb++)
@@ -145,19 +184,40 @@ void CSBuild(uint3 id : SV_DispatchThreadID)
             Sample sk = _History[baseB[jb] + k];
             xk += (w[jb] * invW) * (lerp(sk.A, sk.B, tb[jb]) + cvb[jb] * sk.V + cwb[jb] * sk.W);
         }
-        if (k > 0u)
+        pts[k] = xk;
+    }
+
+    // Emit a Catmull-Rom subdivided line strip through pts[0..m-1]. Sample j maps to interval
+    // i = j / subdiv at u = (j % subdiv) / subdiv; the final sample is exactly pts[m-1].
+    uint totalSegs = (m >= 2u) ? (m - 1u) * _Subdiv : 0u;
+    float3 prev = float3(0, 0, 0);
+    for (uint si = 0; si <= totalSegs; si++)
+    {
+        float3 pt;
+        if (si >= totalSegs) pt = pts[m - 1u];
+        else
         {
-            uint seg = k - 1u;
+            uint iv = si / _Subdiv;
+            uint ss = si - iv * _Subdiv;
+            float3 p0 = pts[(iv == 0u) ? 0u : (iv - 1u)];
+            float3 p1 = pts[iv];
+            float3 p2 = pts[iv + 1u];
+            float3 p3 = pts[min(iv + 2u, m - 1u)];
+            pt = CatmullRom(p0, p1, p2, p3, (float)ss / (float)_Subdiv);
+        }
+        if (si > 0u)
+        {
+            uint seg = si - 1u;
             LineVert v0; v0.p = prev; v0.c = col;
-            LineVert v1; v1.p = xk;   v1.c = col;
+            LineVert v1; v1.p = pt;   v1.c = col;
             _Out[slotBase + seg * 2u]      = v0;
             _Out[slotBase + seg * 2u + 1u] = v1;
         }
-        prev = xk;
+        prev = pt;
     }
     // Zero-fill the unused tail.
     LineVert z; z.p = float3(0, 0, 0); z.c = float3(0, 0, 0);
-    for (uint s = segs; s < segsPerSeed; s++)
+    for (uint s = totalSegs; s < segsPerSeed; s++)
     {
         _Out[slotBase + s * 2u]      = z;
         _Out[slotBase + s * 2u + 1u] = z;

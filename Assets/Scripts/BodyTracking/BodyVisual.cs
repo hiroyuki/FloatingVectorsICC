@@ -208,7 +208,9 @@ namespace BodyTracking
                         _joints[i].localPosition = rawPos;
                         if (_jointEverValid != null) _jointEverValid[i] = true;
                         _joints[i].localScale = Vector3.one * (jointRadius * 2f);
-                        if (!_joints[i].gameObject.activeSelf) _joints[i].gameObject.SetActive(true);
+                        // showBones gates DRAWING only; the position above is always updated so hidden
+                        // consumers still read live poses.
+                        if (_joints[i].gameObject.activeSelf != showBones) _joints[i].gameObject.SetActive(showBones);
                         continue;
                     }
 
@@ -224,10 +226,10 @@ namespace BodyTracking
                 // else: leave _jointPositions[i] / _jointValid[i] from previous pop.
                 _joints[i].localPosition = _jointPositions[i];
                 _joints[i].localScale = Vector3.one * (jointRadius * 2f);
-                if (!_joints[i].gameObject.activeSelf && _jointValid[i])
-                {
-                    _joints[i].gameObject.SetActive(true);
-                }
+                // Draw the sphere only when the skeleton is shown AND the joint is valid; positions are
+                // updated above regardless, so hiding the skeleton doesn't stop data flowing to consumers.
+                bool wantActive = showBones && _jointValid[i];
+                if (_joints[i].gameObject.activeSelf != wantActive) _joints[i].gameObject.SetActive(wantActive);
             }
 
             if (showBones)

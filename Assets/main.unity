@@ -427,6 +427,63 @@ Transform:
   m_Children: []
   m_Father: {fileID: 1105748082}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!1 &333033382
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 333033384}
+  - component: {fileID: 333033383}
+  m_Layer: 0
+  m_Name: MotionCurves
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!114 &333033383
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 333033382}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: c0c9deb6dc0884342af8c8e8c4073279, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: BodyTracking::BodyTracking.PointCloudMotionCurves
+  visible: 1
+  history: {fileID: 1180694596}
+  sourceMeshes: []
+  autoSourcePrefix: _Playback_
+  seedCount: 60000
+  radiusScale: 1
+  surfaceMargin: 0.07
+  bboxPadding: 0.25
+  boneBlendCount: 3
+  blendSharpness: 0.02
+  brightness: 1
+  freeze: 0
+  sanityRange: 100
+--- !u!4 &333033384
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 333033382}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &398159106
 GameObject:
   m_ObjectHideFlags: 0
@@ -1479,6 +1536,7 @@ GameObject:
   m_Component:
   - component: {fileID: 1180694594}
   - component: {fileID: 1180694595}
+  - component: {fileID: 1180694596}
   m_Layer: 0
   m_Name: '[SkeletonMerger]'
   m_TagString: Untagged
@@ -1542,6 +1600,26 @@ MonoBehaviour:
   alertMessage: "\u8907\u6570\u4EBA\u691C\u51FA: 1\u4EBA\u306E\u307F\u3054\u5229\u7528\u304F\u3060\u3055\u3044\nMultiple
     people detected \u2014 please use solo"
   diagnosticLogging: 0
+--- !u!114 &1180694596
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1180694593}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: cd75df0bd626143a4b5bb37fc60f168c, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: BodyTracking::BodyTracking.BonePoseHistory
+  bodyTracking: {fileID: 1180694595}
+  freezeOnPause: 1
+  recorder: {fileID: 86788058}
+  historySamples: 24
+  freshWindowFrames: 30
+  drawGizmos: 0
+  gizmoOffset: 0.12
+  gizmoColor: {r: 1, g: 0.55, b: 0.1, a: 1}
 --- !u!1 &1214840952
 GameObject:
   m_ObjectHideFlags: 0
@@ -2207,3 +2285,4 @@ SceneRoots:
   - {fileID: 1168916135}
   - {fileID: 836522996}
   - {fileID: 894098144}
+  - {fileID: 333033384}
