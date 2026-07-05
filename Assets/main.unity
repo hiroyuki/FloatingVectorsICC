@@ -239,7 +239,7 @@ GameObject:
   - component: {fileID: 86788059}
   - component: {fileID: 86788058}
   m_Layer: 0
-  m_Name: SensorRecorder
+  m_Name: SensorRecorder&Player
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -264,7 +264,7 @@ MonoBehaviour:
   capsuleFilter: {fileID: 0}
   jointMotionField: {fileID: 0}
   cumulative: {fileID: 18533122}
-  folderPath: D:\FloatingVectorsICC\Rec2_jump
+  folderPath: D:\FloatingVectorsICC\rec2_turn
   folderPathMacOverride: /Volumes/horristicSSD2T/Dropbox/projects/ICC/Recordings/Rec2_jump
   datasetName: 
   loop: 1
@@ -1580,7 +1580,7 @@ MonoBehaviour:
   ignoreRecordedBodies: 1
   btInferenceFps: 30
   loopSeamBlackoutSeconds: 0.4
-  showBones: 1
+  showBones: 0
   jointRadius: 0.03
   skeletonColor: {r: 0.094645746, g: 0.22020026, b: 0.23773581, a: 1}
   boneWidth: 0.03
@@ -1755,6 +1755,8 @@ MonoBehaviour:
   forcePinhole: 0
   volume: {fileID: 639959844}
   observationWeight: 1
+  edgeRejectRadius: 2
+  edgeRejectDepthMm: 100
   colorOverride: {r: 0, g: 0, b: 0, a: 0}
   subscribeLive: 1
   subscribePlayback: 1
