@@ -14,6 +14,7 @@
 // On tracking loss / staleness a bone's history is reset so trails don't freeze or jump.
 
 using UnityEngine;
+using PointCloud;
 
 namespace BodyTracking
 {
@@ -22,6 +23,10 @@ namespace BodyTracking
     {
         [Tooltip("Body-tracking source. Leave empty to auto-resolve the first SkeletonMerger at OnEnable.")]
         public SkeletonMerger bodyTracking;
+
+        [Tooltip("Playback source. Used only to tell an intentional pause (hold the sculpture) apart " +
+                 "from a body that stopped/left (clear it). Auto-resolves the first SensorRecorder at OnEnable.")]
+        public SensorRecorder recorder;
 
         private ulong _lastPoseVersion;
         private bool _havePoseVersion;
@@ -98,6 +103,7 @@ namespace BodyTracking
         private void OnEnable()
         {
             if (bodyTracking == null) bodyTracking = FindFirstObjectByType<SkeletonMerger>();
+            if (recorder == null) recorder = FindFirstObjectByType<SensorRecorder>();
             EnsureBuffers();
         }
 
@@ -184,20 +190,22 @@ namespace BodyTracking
 
             if (newFrame)
             {
-                // UpdateHistory pushes fresh samples, and resets bones that went invalid/stale.
+                // New pose (play / frame-step): push fresh samples, reset bones that went invalid/stale.
                 UpdateHistory();
                 PublishGpu();
             }
-            else if (bodyTracking == null
-                     || !bodyTracking.TryReadBonePosesWorld(_scratch, freshWindowFrames))
+            else if (recorder == null || !recorder.IsPaused)
             {
-                // Static frame with NO active body (person left / playback stopped): the version never
-                // advances, so without this the last pose would stay published and the curves would keep
-                // drawing a ghost. Clear. A paused-but-present body keeps its ring held (TryRead == true).
-                ResetAll();
+                // Static version but NOT an intentional pause => the body stalled or left. Clear bones
+                // whose freshness expired (or all, if no active visual) WITHOUT appending duplicate
+                // samples, so a ghost can't linger past freshWindowFrames while the stale BodyVisual is
+                // still alive. (TryReadBonePosesWorld stays true for a live-but-stale visual, so a
+                // freshness check — not just its bool — is what clears here.)
+                ClearStale();
                 PublishGpu();
             }
-            // else: static frame, body still present -> hold the ring (no collapse, no ghost).
+            // else: intentional pause (recorder.IsPaused) with no new frame -> hold the ring so the
+            // frozen sculpture stays put even after the joints age out (no collapse, no premature clear).
         }
 
         private void UpdateHistory()
@@ -337,6 +345,23 @@ namespace BodyTracking
         {
             if (_ring == null) return;
             for (int b = 0; b < _boneCount; b++) ResetBone(b);
+        }
+
+        // Reset bones no longer valid/fresh WITHOUT appending a sample. Called on a non-paused static
+        // frame so a stalled/lost body clears at freshWindowFrames rather than lingering as a ghost
+        // until its BodyVisual is destroyed. Fresh bones are left held (they clear once they too age out).
+        private void ClearStale()
+        {
+            if (bodyTracking == null || !bodyTracking.TryReadBonePosesWorld(_scratch, freshWindowFrames))
+            {
+                ResetAll();
+                return;
+            }
+            for (int b = 0; b < _boneCount; b++)
+            {
+                var e = _scratch[b];
+                if (!e.Valid || !e.Fresh) ResetBone(b);
+            }
         }
 
         // Mirror the CPU ring to the GPU: per bone, copy its valid samples oldest->newest into the
