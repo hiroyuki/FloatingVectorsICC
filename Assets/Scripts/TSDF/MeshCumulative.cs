@@ -37,6 +37,13 @@ namespace TSDF
                  "from Begin; on real-time playback this matches the played span.")]
         [FormerlySerializedAs("captureDuration")]
         [Min(0.1f)] public float duration = 10f;
+        [Min(0f)]
+        [Tooltip("Seconds between accumulation stamps. 0 = continuous (every complete camera " +
+                 "batch folds in — the historical behaviour). > 0 = stroboscopic: after each " +
+                 "fold the integrator is gated closed until the interval elapses, so the " +
+                 "sculpture is built from discrete body poses. Gating happens only at batch " +
+                 "boundaries — no partial/mixed instants.")]
+        public float intervalSeconds = 0f;
         [Tooltip("Wipe the volume at start so each run begins empty. Note: starting from " +
                  "live-follow (clearVolumeOnNewBatch=true) flips the volume to " +
                  "single-buffer, which rebuilds + clears it on the next TSDFVolume update " +
@@ -72,6 +79,11 @@ namespace TSDF
         // Stop=Freeze, Clear=Release (clears the fused mesh AND returns to live-follow —
         // the label states that so the side effect isn't hidden).
         public bool IsAccumulating => State == CumulativeState.Accumulating;
+        public float IntervalSeconds
+        {
+            get => intervalSeconds;
+            set => intervalSeconds = Mathf.Max(0f, value);
+        }
         public string StatusText => State == CumulativeState.Accumulating
             ? $"Accumulating — {Remaining:0.0}s / {duration:0.0}s remaining"
             : State.ToString();
@@ -90,6 +102,39 @@ namespace TSDF
         // restore exactly what the integrator/volume were doing before this run.
         private bool _priorClearOnBatch = true;
         private TSDFVolume.AccumulationMode _priorAccumMode = TSDFVolume.AccumulationMode.StandardWeightedAvg;
+
+        // Interval gating (intervalSeconds > 0). The integrator's fold happens inside
+        // DispatchIntegrate when the last camera of a batch lands, so the only safe
+        // place to close the gate is its BeforePublishCompleteBatch hook: the batch
+        // that just completed still publishes, then integrationEnabled=false drops
+        // whole frames until Update() re-opens the gate after the interval. Because
+        // frames are rejected at DispatchIntegrate entry, no partial instant can mix.
+        private bool _subscribedFold;
+        private bool _intervalGated;
+        private double _lastFoldTime;
+
+        private void SubscribeFold()
+        {
+            if (_subscribedFold || integrator == null) return;
+            integrator.BeforePublishCompleteBatch += OnBatchFold;
+            _subscribedFold = true;
+        }
+
+        private void UnsubscribeFold()
+        {
+            if (_subscribedFold && integrator != null)
+                integrator.BeforePublishCompleteBatch -= OnBatchFold;
+            _subscribedFold = false;
+            _intervalGated = false;
+        }
+
+        private void OnBatchFold(TSDFIntegrator integ, TSDFVolume vol)
+        {
+            if (State != CumulativeState.Accumulating || intervalSeconds <= 0f) return;
+            _lastFoldTime = Time.timeAsDouble;
+            integ.integrationEnabled = false;   // this batch still publishes; next frames wait
+            _intervalGated = true;
+        }
 
         private void OnEnable()
         {
@@ -143,6 +188,8 @@ namespace TSDF
 
             _startTime = Time.timeAsDouble;
             Elapsed = 0f;
+            _intervalGated = false;   // gate open — first batch folds immediately
+            SubscribeFold();
             State = CumulativeState.Accumulating;
         }
 
@@ -156,6 +203,7 @@ namespace TSDF
         [ContextMenu("Freeze")]
         public void Freeze()
         {
+            UnsubscribeFold();
             if (integrator != null) integrator.integrationEnabled = false;
             State = CumulativeState.Frozen;
             Elapsed = duration;
@@ -170,6 +218,7 @@ namespace TSDF
         [ContextMenu("Release")]
         public void Release()
         {
+            UnsubscribeFold();
             if (volume == null || integrator == null) { State = CumulativeState.Idle; return; }
 
             volume.accumulationMode = _priorAccumMode;
@@ -188,6 +237,15 @@ namespace TSDF
             if (Input.GetKeyDown(releaseKey)) Release();
 
             if (State != CumulativeState.Accumulating) return;
+
+            // Re-open the interval gate once the wait has elapsed (or the user set
+            // the interval back to 0 mid-run).
+            if (_intervalGated
+                && (intervalSeconds <= 0f || Time.timeAsDouble - _lastFoldTime >= intervalSeconds))
+            {
+                _intervalGated = false;
+                if (integrator != null) integrator.integrationEnabled = true;
+            }
 
             Elapsed = (float)(Time.timeAsDouble - _startTime);
             if (Elapsed >= duration)

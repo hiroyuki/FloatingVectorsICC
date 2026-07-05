@@ -22,6 +22,12 @@ namespace Shared
         /// <summary>True while the component is actively accumulating.</summary>
         bool IsAccumulating { get; }
 
+        /// <summary>Seconds between accumulation stamps / snapshots while
+        /// accumulating. 0 = continuous (every frame / every complete batch —
+        /// each component's historical behaviour). Editable from the shared UI
+        /// rows; setters clamp to >= 0.</summary>
+        float IntervalSeconds { get; set; }
+
         /// <summary>One-line state readout for the Inspector (e.g. "34 snapshots",
         /// "Accumulating 3.2s / 10s", the last capture status).</summary>
         string StatusText { get; }

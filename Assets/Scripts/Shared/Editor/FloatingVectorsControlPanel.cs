@@ -164,6 +164,20 @@ namespace Shared.EditorTools
                     bool now = EditorGUILayout.ToggleLeft(DisplayName(c), was);
                     if (now != was) SetChecked(comp, now);
 
+                    // Stamp interval in seconds (0 = every frame / every batch =
+                    // continuous). Delayed field so Undo records once per commit,
+                    // not per keystroke.
+                    GUILayout.Label(new GUIContent("Interval(s)",
+                        "累積スタンプの間隔（秒）。0 = 毎フレーム/毎バッチ（連続）。"),
+                        GUILayout.Width(62));
+                    float iv = EditorGUILayout.DelayedFloatField(c.IntervalSeconds, GUILayout.Width(44));
+                    if (!Mathf.Approximately(iv, c.IntervalSeconds))
+                    {
+                        if (comp != null) Undo.RecordObject(comp, "Accumulation interval");
+                        c.IntervalSeconds = iv;
+                        if (comp != null) EditorUtility.SetDirty(comp);
+                    }
+
                     // Per-row auxiliary actions stay inline (they are component-specific).
                     if (c.CanClear && GUILayout.Button(c.ClearLabel, GUILayout.Width(150)))
                     {

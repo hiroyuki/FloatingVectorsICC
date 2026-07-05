@@ -1,6 +1,6 @@
-// Cumulative point cloud snapshotter. When "No Erase" is on, every `interval`
-// frames the current point cloud is copied into its own Mesh and kept visible,
-// so snapshots accumulate over time. Vertices are stored untransformed
+// Cumulative point cloud snapshotter. When "No Erase" is on, every
+// `intervalSeconds` seconds (0 = every frame) the current point cloud is copied
+// into its own Mesh and kept visible, so snapshots accumulate over time. Vertices are stored untransformed
 // (renderer-local); the snapshot GameObject's world transform is frozen to the
 // renderer's world transform at capture time, then reparented to this
 // GameObject so future renderer motion is ignored but cumulative motion moves
@@ -31,14 +31,16 @@ namespace PointCloud
     [DisallowMultipleComponent]
     public class PointCloudCumulative : MonoBehaviour, Shared.IAccumulationController
     {
-        [Tooltip("When enabled, every 'interval' frames the current point cloud is " +
+        [Tooltip("When enabled, every 'intervalSeconds' seconds the current point cloud is " +
                  "snapshotted and kept visible, accumulating over time. When disabled, " +
                  "no new snapshots are captured (existing snapshots remain until cleared).")]
         public bool noErase = false;
 
-        [Min(1)]
-        [Tooltip("Frame interval between snapshots. 1 = every frame; 30 = roughly once per second at 30 FPS.")]
-        public int interval = 30;
+        [Min(0f)]
+        [Tooltip("Seconds between snapshots (wall clock, per renderer). 0 = capture every frame. " +
+                 "Replaces the old frame-count interval — seconds stay consistent whether the " +
+                 "editor runs at 30 or 120 FPS.")]
+        public float intervalSeconds = 1f;
 
         [Tooltip("Material used for snapshot meshes. If null, falls back to the renderer's pointMaterial.")]
         public Material snapshotMaterial;
@@ -66,6 +68,11 @@ namespace PointCloud
         // Start/Stop decompose the noErase toggle; Clear deletes all snapshots
         // (destroys child GOs — the shared editor uses FullHierarchy undo).
         public bool IsAccumulating => noErase;
+        public float IntervalSeconds
+        {
+            get => intervalSeconds;
+            set => intervalSeconds = Mathf.Max(0f, value);
+        }
         public string StatusText => SnapshotCount + " snapshot(s)" + (noErase ? " — accumulating" : "");
         public bool CanStart => !noErase;
         public string StartLabel => "Start (no erase)";
@@ -114,11 +121,26 @@ namespace PointCloud
 
         private readonly List<GameObject> _snapshots = new List<GameObject>();
 
-        // Per-renderer frame counters, keyed by the renderer Transform's InstanceID.
-        // A single cumulative component can legitimately be referenced by multiple
-        // renderers; each must be paced independently so `interval` means
-        // "every N frames per renderer", not "every N total OnFrame calls".
-        private readonly Dictionary<int, int> _frameCounters = new Dictionary<int, int>();
+        // Per-renderer last-capture times, keyed by the renderer Transform's
+        // InstanceID. A single cumulative component can legitimately be referenced
+        // by multiple renderers; each must be paced independently so
+        // `intervalSeconds` means "every N seconds per renderer", not "every N
+        // seconds across all OnFrame calls combined".
+        private readonly Dictionary<int, double> _lastCaptureTimes = new Dictionary<int, double>();
+
+        // Time gate shared by the live and playback entry points. Returns true (and
+        // stamps the clock) when this renderer is due for a capture. Playback pause
+        // stops the OnPlaybackFrame calls themselves, so wall-clock time is safe
+        // here — a paused recording can't burn through the interval.
+        private bool IntervalElapsed(int rendererId)
+        {
+            if (intervalSeconds <= 0f) return true;   // every frame
+            double now = Time.timeAsDouble;
+            if (_lastCaptureTimes.TryGetValue(rendererId, out double last)
+                && now - last < intervalSeconds) return false;
+            _lastCaptureTimes[rendererId] = now;
+            return true;
+        }
 
         // Shared identity index buffer. Lazily grown so every snapshot mesh can
         // memcpy the first `count` entries instead of re-filling `0..N-1` each time.
@@ -142,17 +164,7 @@ namespace PointCloud
         {
             if (!noErase || count <= 0 || rendererTransform == null) return;
             if (diagnosticLogging) _diagAttempts++;
-            int iv = Mathf.Max(1, interval);
-
-            int id = rendererTransform.GetInstanceID();
-            _frameCounters.TryGetValue(id, out int c);
-            c++;
-            if (c < iv)
-            {
-                _frameCounters[id] = c;
-                return;
-            }
-            _frameCounters[id] = 0;
+            if (!IntervalElapsed(rendererTransform.GetInstanceID())) return;
             if (diagnosticLogging) _diagCaptures++;
             CaptureSnapshot(buffer, count, rendererTransform, fallbackMaterial, boundingBox, decimater);
         }
@@ -173,17 +185,7 @@ namespace PointCloud
         {
             if (!noErase || count <= 0 || playbackMesh == null || playbackTransform == null) return;
             if (diagnosticLogging) _diagAttempts++;
-            int iv = Mathf.Max(1, interval);
-
-            int id = playbackTransform.GetInstanceID();
-            _frameCounters.TryGetValue(id, out int c);
-            c++;
-            if (c < iv)
-            {
-                _frameCounters[id] = c;
-                return;
-            }
-            _frameCounters[id] = 0;
+            if (!IntervalElapsed(playbackTransform.GetInstanceID())) return;
             if (diagnosticLogging) _diagCaptures++;
 
             // KeepInside + empty-capsule: mirror live shader behavior and skip
@@ -214,7 +216,7 @@ namespace PointCloud
             {
                 DestroySnapshotAt(i);
             }
-            _frameCounters.Clear();
+            _lastCaptureTimes.Clear();
         }
 
         private void OnDestroy()
@@ -460,7 +462,7 @@ namespace PointCloud
 
             Debug.Log(
                 $"[Cumulative] attempts={_diagAttempts}/s captures={_diagCaptures}/s " +
-                $"interval={Mathf.Max(1, interval)} " +
+                $"interval={intervalSeconds:0.##}s " +
                 $"avg/cap: rb={rbMs / caps:F2}ms fl={flMs / caps:F2}ms me={meMs / caps:F2}ms " +
                 $"(={(rbMs + flMs + meMs) / caps:F2}ms total) " +
                 $"wallclock={totalMs / (elapsed * 1000.0) * 100.0:F1}% " +

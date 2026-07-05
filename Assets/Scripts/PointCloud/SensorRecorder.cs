@@ -56,7 +56,7 @@ namespace PointCloud
         public PointCloudJointMotionField jointMotionField;
 
         [Tooltip("Optional cumulative snapshotter for playback. When assigned and its No Erase toggle is on, the playback " +
-                 "mesh's vertex buffer is read back from GPU and snapshotted every 'interval' advanced playback frames. " +
+                 "mesh's vertex buffer is read back from GPU and snapshotted every 'intervalSeconds' seconds. " +
                  "If null, the first PointCloudCumulative in the scene is used. Snapshots include all reconstructed " +
                  "vertices (invalid depth pixels are written far off-screen by the reconstruct shader and clip-culled " +
                  "at draw time, same as the live playback mesh).")]

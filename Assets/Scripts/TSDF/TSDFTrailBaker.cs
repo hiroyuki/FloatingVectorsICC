@@ -50,6 +50,14 @@ namespace TSDF
                  "0 = no limit.")]
         public float maxSegmentStep = 0.5f;
 
+        [Min(0f)]
+        [Tooltip("Seconds between capture stamps. 0 = continuous (trail: every frame; body sweep: " +
+                 "every complete batch — the historical behaviour). > 0 = discrete stamps: the " +
+                 "trail becomes a coarser polyline connecting the stamped poses, and with " +
+                 "accumulateBody the body is folded in stroboscopically. NOTE: fast motion over " +
+                 "a long interval can exceed Max Segment Step and leave trail gaps (reseeds).")]
+        public float intervalSeconds = 0f;
+
         [Tooltip("On Stop capture, also PAUSE the recording playback so the whole scene freezes " +
                  "with the sculpture. Resume live un-pauses it.")]
         public bool pausePlaybackOnStop = true;
@@ -65,6 +73,11 @@ namespace TSDF
         // buffered + re-enable integration + resume playback), so it keeps its own
         // dedicated "Resume live" button instead of riding the shared Clear slot.
         public bool IsAccumulating => IsCapturing;
+        public float IntervalSeconds
+        {
+            get => intervalSeconds;
+            set => intervalSeconds = Mathf.Max(0f, value);
+        }
         public string StatusText => LastStatus;
         public bool CanStart => !IsCapturing;
         public string StartLabel => "Start capture";
@@ -179,9 +192,20 @@ namespace TSDF
         // Integrator hook subscription (used only while capturing with accumulateBody).
         private TSDFIntegrator _subscribedIntegrator;
 
+        // Interval gating (intervalSeconds > 0). Trail-only mode gates the per-frame
+        // StampNewSegments call directly; _lastSite then connects the last STAMPED
+        // pose to the current one, so the polyline just gets coarser. Body-sweep mode
+        // instead closes the integrator gate right after each complete-batch fold
+        // (inside OnBeforePublish — the only race-free batch boundary) and CaptureTick
+        // re-opens it once the interval elapses; the trail rides those folds so both
+        // stamp on the same clock.
+        private double _lastStampTime = double.NegativeInfinity;
+        private bool _intervalGated;
+
         private void OnDisable()
         {
             IsCapturing = false;
+            _intervalGated = false;
             UnsubscribeFuse();
             _segBuf?.Release();
             _segBuf = null;
@@ -226,6 +250,15 @@ namespace TSDF
             if (!IsCapturing || vol == null) return;
             volume = vol;
             StampNewSegments(doPublish: false);
+            if (intervalSeconds > 0f)
+            {
+                // Close the gate at this batch boundary: the fold that just happened
+                // still publishes, then whole frames are dropped until CaptureTick
+                // re-opens the gate after the interval. No partial instants can mix.
+                _lastStampTime = Time.timeAsDouble;
+                integ.integrationEnabled = false;
+                _intervalGated = true;
+            }
         }
 
         // ---- Capture: Start/Stop accumulation into a persistent (frozen) sculpture ----
@@ -263,6 +296,8 @@ namespace TSDF
             _accumDim = volume.Dim;
             SetupAccumSites();         // fresh sweep: size per-site state + clear "seen" flags
 
+            _lastStampTime = double.NegativeInfinity;   // first stamp fires immediately
+            _intervalGated = false;
             IsCapturing = true;
             LastStatus = $"CAPTURING ({(accumulateBody ? "trail + body sweep" : "trail only")})…";
             Debug.Log($"[TSDFTrailBaker] {LastStatus}", this);
@@ -273,6 +308,7 @@ namespace TSDF
         {
             if (!IsCapturing) return;
             IsCapturing = false;
+            _intervalGated = false;
             if (integrator != null) integrator.integrationEnabled = false;   // freeze the body sweep
             UnsubscribeFuse();                                               // stop adding trail
             if (volume != null) volume.Publish();                           // show the final accumulated mesh
@@ -298,6 +334,7 @@ namespace TSDF
             if (!ResolveVolume(silent: false)) return;
             if (integrator == null) integrator = FindFirstObjectByType<TSDFIntegrator>();
             IsCapturing = false;
+            _intervalGated = false;
             UnsubscribeFuse();
             volume.doubleBuffered = true;
             if (integrator != null)
@@ -322,7 +359,21 @@ namespace TSDF
         // so only trail-only mode needs to bake here (min-union into the never-cleared buffer).
         private void CaptureTick()
         {
-            if (accumulateBody) return;   // body sweep + trail ride the integrator's pre-publish hook
+            if (accumulateBody)
+            {
+                // Body sweep + trail ride the integrator's pre-publish hook; here we
+                // only re-open the interval gate that OnBeforePublish closed (also
+                // when the user sets the interval back to 0 mid-capture).
+                if (_intervalGated
+                    && (intervalSeconds <= 0f || Time.timeAsDouble - _lastStampTime >= intervalSeconds))
+                {
+                    _intervalGated = false;
+                    if (integrator != null) integrator.integrationEnabled = true;
+                }
+                return;
+            }
+            if (intervalSeconds > 0f && Time.timeAsDouble - _lastStampTime < intervalSeconds) return;
+            _lastStampTime = Time.timeAsDouble;
             StampNewSegments(doPublish: true);
         }
 

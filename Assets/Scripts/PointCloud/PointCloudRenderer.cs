@@ -178,7 +178,7 @@ namespace PointCloud
 
         [Header("Cumulative")]
         [Tooltip("Optional cumulative snapshotter. When assigned and its No Erase toggle is on, " +
-                 "snapshots are captured every 'interval' frames and kept visible until cleared.")]
+                 "snapshots are captured every 'intervalSeconds' seconds and kept visible until cleared.")]
         public PointCloudCumulative cumulative;
 
         [Header("Diagnostics")]
