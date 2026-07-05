@@ -56,7 +56,9 @@ namespace BodyTracking
         // spans. EnsureBuffers reallocates the ring when this changes, so live edits take effect next frame.
         public string TuningLabel => "Motion history";
         public int TunableCount => 1;
-        public string TunableName(int i) => "History (frames)";
+        // Label must match the Inspector field name (History Samples) so the
+        // two UIs are recognisably the same knob.
+        public string TunableName(int i) => "History Samples (frames)";
         public float TunableValue(int i) => historySamples;
         public void SetTunableValue(int i, float value) => historySamples = Mathf.Clamp(Mathf.RoundToInt(value), 2, MaxK);
         public float TunableMin(int i) => 4f;

@@ -130,7 +130,9 @@ namespace TSDF
         // Inspector. Values are read per dispatch — effective next frame.
         public string TuningLabel => "TSDF edge reject";
         public int TunableCount => 2;
-        public string TunableName(int i) => i == 0 ? "Reject radius (px, 0=off)" : "Depth jump (mm)";
+        // Labels must match the Inspector field names (Edge Reject Radius /
+        // Edge Reject Depth Mm) so the two UIs are recognisably the same knob.
+        public string TunableName(int i) => i == 0 ? "Edge Reject Radius (0=off)" : "Edge Reject Depth Mm";
         public float TunableValue(int i) => i == 0 ? edgeRejectRadius : edgeRejectDepthMm;
         public void SetTunableValue(int i, float value)
         {
