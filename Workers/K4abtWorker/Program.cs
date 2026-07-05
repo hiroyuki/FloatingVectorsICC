@@ -7,6 +7,7 @@
 // contract and lifecycle (parent watchdog, shutdown event, ready event).
 
 using System;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
 using BodyTracking;
@@ -69,12 +70,32 @@ namespace K4abtWorker
                 calibration = mmf.AllocAndCopyCalibration();
 
                 // 4. Create the BT tracker (5–10 s for ONNX model load on first run).
+                // --lite selects the SDK's lite DNN (dnn_model_2_0_lite_op11.onnx): ~2-3x
+                // faster inference for a modest accuracy cost. With several workers sharing
+                // one GPU alongside Unity's own rendering, that headroom is what keeps the
+                // host frame rate usable. ModelPath=null keeps the SDK's default full model.
+                string modelPath = null;
+                if (parsed.Lite)
+                {
+                    string btBin = string.IsNullOrEmpty(parsed.BtSdkBin)
+                        ? WorkerBootstrap.BodyTrackingBinDefault : parsed.BtSdkBin;
+                    string lite = Path.Combine(btBin, "dnn_model_2_0_lite_op11.onnx");
+                    if (File.Exists(lite))
+                    {
+                        modelPath = lite;
+                        WorkerLog.Info($"[k4abt] using lite model: {lite}");
+                    }
+                    else
+                    {
+                        WorkerLog.Warning($"[k4abt] --lite=1 but lite model not found at {lite}; using default model");
+                    }
+                }
                 var trackerCfg = new k4abt_tracker_configuration_t
                 {
                     SensorOrientation = k4abt_sensor_orientation_t.K4ABT_SENSOR_ORIENTATION_DEFAULT,
                     ProcessingMode = k4abt_tracker_processing_mode_t.K4ABT_TRACKER_PROCESSING_MODE_GPU_DIRECTML,
                     GpuDeviceId = 0,
-                    ModelPath = null,
+                    ModelPath = modelPath,
                 };
                 var rc = K4ABTNative.k4abt_tracker_create(calibration, trackerCfg, out tracker);
                 if (rc != k4a_result_t.K4A_RESULT_SUCCEEDED)

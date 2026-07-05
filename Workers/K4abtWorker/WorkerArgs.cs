@@ -18,6 +18,7 @@ namespace K4abtWorker
         public int IrH;
         public string K4aWrapperBin;
         public string BtSdkBin;
+        public bool Lite;
 
         public static bool TryParse(string[] args, out WorkerArgs parsed, out string error)
         {
@@ -86,6 +87,15 @@ namespace K4abtWorker
                     case "--bt-sdk-bin":
                         parsed.BtSdkBin = val;
                         break;
+                    case "--lite":
+                        // "1"/"0" (host sends 1); anything else is an error to keep the surface strict.
+                        if (val != "1" && val != "0")
+                        {
+                            error = $"--lite: '{val}' must be 1 or 0";
+                            return false;
+                        }
+                        parsed.Lite = val == "1";
+                        break;
                     default:
                         error = $"unknown option: {key}";
                         return false;
@@ -120,6 +130,6 @@ namespace K4abtWorker
         public static string Usage =>
             "Usage: k4abt_worker --session=<GUID> --serial=<S> --parent-pid=<PID> " +
             "--depth-w=<W> --depth-h=<H> --ir-w=<W> --ir-h=<H> " +
-            "[--k4a-wrapper-bin=<path>] [--bt-sdk-bin=<path>]";
+            "[--k4a-wrapper-bin=<path>] [--bt-sdk-bin=<path>] [--lite=1|0]";
     }
 }

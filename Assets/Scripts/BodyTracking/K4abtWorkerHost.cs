@@ -51,6 +51,12 @@ namespace BodyTracking
                  "no worker process is spawned and no skeletons are produced.")]
         public bool useWorker = false;
 
+        [Tooltip("Use the BT SDK's lite DNN model (~2-3x faster inference, modest accuracy cost). " +
+                 "Strongly recommended when several workers share one GPU with Unity rendering — " +
+                 "the full model saturates the GPU and drags the Editor frame rate down. " +
+                 "Change takes effect on the next worker spawn.")]
+        public bool useLiteModel = true;
+
         [Tooltip("Log per-second host-side counters (produced/dropped/consumed) to the Unity console.")]
         public bool diagnosticLogging = false;
 
@@ -429,6 +435,7 @@ namespace BodyTracking
             AppendArg(psi, $"--ir-h={session.IrH}");
             if (!string.IsNullOrEmpty(k4aWrapperBinOverride)) AppendArg(psi, $"--k4a-wrapper-bin={k4aWrapperBinOverride}");
             if (!string.IsNullOrEmpty(btSdkBinOverride)) AppendArg(psi, $"--bt-sdk-bin={btSdkBinOverride}");
+            if (useLiteModel) AppendArg(psi, "--lite=1");
 
             try
             {
@@ -445,6 +452,13 @@ namespace BodyTracking
                     Debug.LogError($"[k4abt_worker {serial}] {args.Data}");
                 };
                 if (!p.Start()) return null;
+                // Deprioritise the worker's CPU threads (onnxruntime pre/post-processing) so
+                // they yield to Unity's main thread instead of contending for cores — with 4
+                // workers the contention alone was costing the Editor ~20 ms/frame. Inference
+                // itself runs on the GPU and is unaffected; the workers just lose the CPU
+                // scheduling fight, which is exactly what we want.
+                try { p.PriorityClass = ProcessPriorityClass.BelowNormal; }
+                catch (Exception ex) { Debug.LogWarning($"[K4abtWorkerHost] could not lower worker priority: {ex.Message}"); }
                 p.BeginOutputReadLine();
                 p.BeginErrorReadLine();
                 return p;

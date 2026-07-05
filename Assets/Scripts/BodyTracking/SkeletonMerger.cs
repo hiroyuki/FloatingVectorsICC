@@ -46,6 +46,43 @@ namespace BodyTracking
                  "OnEnable if left null. Required.")]
         public K4abtWorkerHost workerHost;
 
+        [Tooltip("During playback, ignore any recorded bodies_main and run live k4abt on the " +
+                 "played-back depth/IR instead (spawns a worker per camera, same as live capture). " +
+                 "Only takes effect on Windows (Editor or player) — on other platforms the BT SDK " +
+                 "is unavailable, so recorded bodies_main stays the playback skeleton source and " +
+                 "this flag is inert. Also the escape hatch for recordings whose bodies_main is " +
+                 "mismatched with the depth (wrong session -> stale/misaligned skeletons).")]
+        public bool ignoreRecordedBodies = false;
+
+        // ignoreRecordedBodies, platform-gated: live k4abt exists only on Windows, so on any
+        // other platform the flag must read as false or playback would have no skeleton source.
+        private bool IgnoreRecordedActive =>
+#if UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN
+            ignoreRecordedBodies;
+#else
+            false;
+#endif
+
+        [Range(0f, 30f)]
+        [Tooltip("Cap on how many frames per second are sent to each k4abt worker (0 = every frame). " +
+                 "BT inference is the dominant GPU cost with multiple workers; lowering this trades " +
+                 "skeleton update rate for host frame rate (the merger holds the latest pose between " +
+                 "results). 30 = full sensor rate. Applies to live capture and live-k4abt-on-playback.")]
+        public float btInferenceFps = 30f;
+
+        [Range(0f, 1.5f)]
+        [Tooltip("Live-k4abt-on-playback only: after a loop wrap, drop skeletons sourced from the " +
+                 "first N seconds of the new loop. The playhead teleports backward at the seam, and " +
+                 "each worker's k4abt tracker keeps PREDICTING the previous loop's last body for a " +
+                 "few frames while processing the new loop's first frames — ingesting that burst " +
+                 "re-seeds the old pose as a ghost person that squats for the whole loop. Judged on " +
+                 "the SOURCE frame timestamp (not wall time), so worker latency doesn't matter.")]
+        public float loopSeamBlackoutSeconds = 0.4f;
+
+        // Set on the first loop wrap; the seam blackout only applies after a wrap (the very
+        // first pass from 0 starts with clean trackers and needs no suppression).
+        private bool _playbackLoopedOnce;
+
         [Header("Display")]
         [Tooltip("Master switch for skeleton rendering: ON draws the bone lines between " +
                  "joints (and the joint spheres). OFF hides everything.")]
@@ -221,6 +258,7 @@ namespace BodyTracking
             public ulong CapturedTsNs; // raw frame ts from the worker
             public float CapturedAtRealtime; // host-side wall clock at receipt
             public BodySnapshot[] Bodies = new BodySnapshot[K4abtWorkerSharedLayout.MaxBodies];
+            public float LastEnqueueRealtime = -1f; // btInferenceFps throttle bookkeeping
             public WorkerLatest()
             {
                 for (int i = 0; i < Bodies.Length; i++) Bodies[i] = new BodySnapshot();
@@ -332,7 +370,22 @@ namespace BodyTracking
             {
                 _subscribedRecorder.OnPlaybackRawFrame += OnPlaybackRawFrame;
                 _subscribedRecorder.OnPlaybackBodies += OnPlaybackBodies;
+                _subscribedRecorder.OnPlaybackLooped += HandlePlaybackLooped;
             }
+        }
+
+        // Playback wrapped to the start: the playhead — and every live k4abt worker's
+        // tracked pose — jumps discontinuously backward. Drop all carried-over
+        // continuity, stale visuals, and per-slot bodies so the next loop starts from a
+        // clean slate instead of stranding the previous loop's last person as a ghost
+        // cluster (workers are left running; they re-lock within a frame or two).
+        private void HandlePlaybackLooped()
+        {
+            _playbackLoopedOnce = true;
+            _priorPelvisById.Clear();
+            _priorMaxConfById.Clear();
+            _pool.DestroyAll();
+            foreach (var kv in _latestBySerial) kv.Value.BodyCount = 0;
         }
 
         private void OnPlaybackRawFrame(string serial, ObCameraParam? camParam, Transform sourceTransform, RawFrameData frame)
@@ -351,6 +404,9 @@ namespace BodyTracking
             // skeleton is DRAWN (bones + joints), so consumers like BonePoseHistory keep getting poses
             // while the skeleton is hidden.
             if (string.IsNullOrEmpty(serial)) return;
+            // Forcing live k4abt on playback: drop the recorded bodies_main entirely so stale /
+            // mismatched recorded skeletons don't fill the slot and fight the worker output.
+            if (IgnoreRecordedActive) return;
             if (!_latestBySerial.TryGetValue(serial, out var slot))
             {
                 slot = new WorkerLatest { Serial = serial, SourceTransform = sourceTransform };
@@ -388,6 +444,7 @@ namespace BodyTracking
             {
                 _subscribedRecorder.OnPlaybackRawFrame -= OnPlaybackRawFrame;
                 _subscribedRecorder.OnPlaybackBodies -= OnPlaybackBodies;
+                _subscribedRecorder.OnPlaybackLooped -= HandlePlaybackLooped;
                 _subscribedRecorder = null;
             }
 
@@ -674,7 +731,8 @@ namespace BodyTracking
             // the live enqueue path, capping every recording at 1 body frame per
             // serial. State.Idle similarly must not skip (live capture w/o
             // recorder running is the default).
-            if (_subscribedRecorder != null
+            if (!IgnoreRecordedActive
+                && _subscribedRecorder != null
                 && _subscribedRecorder.CurrentState == SensorRecorder.State.Playing
                 && _subscribedRecorder.HasRecordedBodies(serial))
                 return;
@@ -733,6 +791,16 @@ namespace BodyTracking
 
             if (!workerHost.IsReady(serial)) return;
 
+            // Inference throttle: skip the enqueue if this camera got a frame too recently.
+            // The worker keeps only the latest slot anyway, so the skipped frames were mostly
+            // wasted GPU inference competing with rendering.
+            var throttleSlot = _latestBySerial[serial];
+            if (btInferenceFps > 0f
+                && throttleSlot.LastEnqueueRealtime >= 0f
+                && Time.realtimeSinceStartup - throttleSlot.LastEnqueueRealtime < 1f / btInferenceFps)
+                return;
+            throttleSlot.LastEnqueueRealtime = Time.realtimeSinceStartup;
+
             int depthBytes = frame.DepthByteCount;
             byte[] ir = frame.IRBytes;
             int irBytes = frame.IRByteCount;
@@ -773,6 +841,34 @@ namespace BodyTracking
             // skeleton is DRAWN (bones + joints), so consumers like BonePoseHistory keep getting poses
             // while the skeleton is hidden.
             if (!_latestBySerial.TryGetValue(serial, out var slot)) return;
+
+            // Loop-seam / backward-seek guard (live-k4abt-on-playback): BT inference lags
+            // the enqueue by up to ~1s, so right after the playhead wraps backward the
+            // workers still deliver skeletons tracked from PRE-seam frames. Legitimate
+            // output can only lag the playhead — a result mapping AHEAD of it is a
+            // previous-loop leftover; ingesting it would re-seed the previous loop's last
+            // pose as a ghost person that the continuity pass then keeps alive. Drop it.
+            if (_subscribedRecorder != null
+                && _subscribedRecorder.CurrentState == SensorRecorder.State.Playing)
+            {
+                double snapSec = _subscribedRecorder.PlayheadSecondsOf(tsNs);
+                if (snapSec > _subscribedRecorder.CurrentPlayheadSeconds + 0.25)
+                {
+                    _diagDroppedStaleSnapshots += count;
+                    return;
+                }
+                // Seam blackout: right after a wrap the workers' trackers still hold the
+                // previous loop's body and emit it as a PREDICTION against the new loop's
+                // first frames (post-seam ts, so the leftover guard above passes it).
+                // Suppress everything sourced from the first blackout window of the loop
+                // so that burst can't re-seed a ghost.
+                if (_playbackLoopedOnce && snapSec < loopSeamBlackoutSeconds)
+                {
+                    _diagDroppedStaleSnapshots += count;
+                    return;
+                }
+            }
+
             int n = Mathf.Min(count, slot.Bodies.Length);
             for (int i = 0; i < n; i++)
             {

@@ -111,10 +111,28 @@ namespace BodyTracking
             if (bodyTracking == null) bodyTracking = FindFirstObjectByType<SkeletonMerger>();
             if (recorder == null) recorder = FindFirstObjectByType<SensorRecorder>();
             EnsureBuffers();
+            if (recorder != null) recorder.OnPlaybackLooped += HandlePlaybackLooped;
         }
 
-        private void OnDisable() => ReleaseGpu();
-        private void OnDestroy() => ReleaseGpu();
+        private void OnDisable()
+        {
+            if (recorder != null) recorder.OnPlaybackLooped -= HandlePlaybackLooped;
+            ReleaseGpu();
+        }
+        private void OnDestroy()
+        {
+            if (recorder != null) recorder.OnPlaybackLooped -= HandlePlaybackLooped;
+            ReleaseGpu();
+        }
+
+        // Playback wrapped to the start: the pose jumps discontinuously backward. Reset
+        // every bone's ring so a curve can't span the loop seam (which would draw a long
+        // garbage streak from the last loop-1 pose to the first loop-2 pose).
+        private void HandlePlaybackLooped()
+        {
+            ResetAll();
+            PublishGpu();
+        }
 
         private void ReleaseGpu()
         {

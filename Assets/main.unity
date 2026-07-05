@@ -208,7 +208,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::PointCloud.PointCloudCumulative
   noErase: 0
-  interval: 1
+  intervalSeconds: 1
   snapshotMaterial: {fileID: 0}
   maxSnapshots: 30
   capsuleFilter: {fileID: 0}
@@ -264,7 +264,7 @@ MonoBehaviour:
   capsuleFilter: {fileID: 0}
   jointMotionField: {fileID: 0}
   cumulative: {fileID: 18533122}
-  folderPath: D:\FloatingVectorsICC\Recordings_jump2
+  folderPath: D:\FloatingVectorsICC\Rec2_jump
   folderPathMacOverride: /Volumes/horristicSSD2T/Dropbox/projects/ICC/Recordings/Rec2_jump
   datasetName: 
   loop: 1
@@ -340,6 +340,7 @@ MonoBehaviour:
   k4aWrapperBinOverride: 
   btSdkBinOverride: 
   useWorker: 1
+  useLiteModel: 1
   diagnosticLogging: 0
 --- !u!21 &127532729
 Material:
@@ -466,7 +467,9 @@ MonoBehaviour:
   bboxPadding: 0.25
   boneBlendCount: 3
   blendSharpness: 0.02
+  smoothSubdiv: 4
   brightness: 1
+  ribbonWidth: 0.006
   freeze: 0
   sanityRange: 100
 --- !u!4 &333033384
@@ -699,7 +702,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!114 &836522995
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -1008,6 +1011,7 @@ MonoBehaviour:
   volume: {fileID: 0}
   integrator: {fileID: 0}
   duration: 10
+  intervalSeconds: 0
   clearOnStart: 1
   forceRetainGhost: 1
   autoStartOnEnable: 0
@@ -1573,6 +1577,9 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::BodyTracking.BodyTrackingMultiLive
   cameraManager: {fileID: 925702423}
   workerHost: {fileID: 100997492}
+  ignoreRecordedBodies: 1
+  btInferenceFps: 30
+  loopSeamBlackoutSeconds: 0.4
   showBones: 1
   jointRadius: 0.03
   skeletonColor: {r: 0.094645746, g: 0.22020026, b: 0.23773581, a: 1}
@@ -1613,7 +1620,6 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: BodyTracking::BodyTracking.BonePoseHistory
   bodyTracking: {fileID: 1180694595}
-  freezeOnPause: 1
   recorder: {fileID: 86788058}
   historySamples: 24
   freshWindowFrames: 30
@@ -1652,6 +1658,7 @@ MonoBehaviour:
   accumulateBody: 1
   boneStep: 0.15
   maxSegmentStep: 0.5
+  intervalSeconds: 0
   pausePlaybackOnStop: 1
   volume: {fileID: 639959844}
   integrator: {fileID: 1289138166}

@@ -122,6 +122,16 @@ namespace PointCloud
         /// </summary>
         public event System.Action<string, ulong, byte[], int, Transform, ObCameraParam?> OnPlaybackBodies;
 
+        /// <summary>
+        /// Fires once each time looping playback wraps from the end back to the start
+        /// (every track's cursor reset to -1). The playhead — and therefore any
+        /// stateful downstream consumer that tracks pose over time (live k4abt workers'
+        /// trackers, SkeletonMerger continuity, BonePoseHistory ring) — jumps
+        /// discontinuously backward here, so subscribers should flush their carried-over
+        /// state to avoid stranding the previous loop's last body as a ghost.
+        /// </summary>
+        public event System.Action OnPlaybackLooped;
+
         // --- Runtime state ---
         public State CurrentState { get; private set; } = State.Idle;
 
@@ -608,6 +618,17 @@ namespace PointCloud
             CurrentState != State.Playing ? 0.0
             : (_lastPlayheadNs > _playbackTrackStartNs ? _lastPlayheadNs - _playbackTrackStartNs : 0UL)
               / 1_000_000_000.0;
+
+        /// <summary>
+        /// Playhead position (seconds from the recording start) that a recorded
+        /// absolute timestamp corresponds to. Lets consumers of async results
+        /// (e.g. live k4abt worker output during playback) compare a result's
+        /// source-frame time against <see cref="CurrentPlayheadSeconds"/> — a
+        /// result mapping AHEAD of the playhead can only be a leftover from
+        /// before a loop wrap / backward seek and should be dropped.
+        /// </summary>
+        public double PlayheadSecondsOf(ulong tsNs) =>
+            tsNs > _playbackTrackStartNs ? (tsNs - _playbackTrackStartNs) / 1e9 : 0.0;
 
         /// <summary>
         /// Seek to a playhead given in SECONDS from the recording start and land
@@ -1663,6 +1684,19 @@ namespace PointCloud
                         kv.Value.PlaybackCursor = -1;
                         kv.Value.BodyPlaybackCursor = -1;
                     }
+                    // Snap the readable playhead to the start NOW, not at the next
+                    // Update. K4abtWorkerHost pumps at execution order -100 — before
+                    // our next Update recomputes _lastPlayheadNs — so for that one
+                    // frame CurrentPlayheadSeconds would still read the pre-wrap end
+                    // value, and SkeletonMerger's ahead-of-playhead leftover guard
+                    // would wave a previous-loop worker result straight through
+                    // (re-seeding the ghost this event exists to prevent).
+                    _lastPlayheadNs = _playbackTrackStartNs;
+                    // Notify stateful consumers (live k4abt path, merger continuity,
+                    // pose-history ring) that the playhead jumped back to the start so
+                    // they can flush loop-1 residue instead of leaving a ghost body.
+                    try { OnPlaybackLooped?.Invoke(); }
+                    catch (System.Exception e) { Debug.LogException(e, this); }
                 }
                 else
                 {
