@@ -4,6 +4,7 @@
     "references": [
         "TSDF",
         "PointCloud",
+        "BodyTracking",
         "Shared",
         "Shared.Editor"
     ],

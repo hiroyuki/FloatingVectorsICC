@@ -238,14 +238,12 @@ namespace Shared.EditorTools
         // ---------------- Actions ----------------
         // One-shot operation buttons (IPanelActions) — no accumulate state
         // machine, just "press to run" with per-action enable gating.
+        // Drawn only when implementers exist (the print exporter moved to its own
+        // Window > Print Export panel, so this is usually empty).
         private void DrawActionsSection()
         {
+            if (_actions.Count == 0) return;
             EditorGUILayout.LabelField("Actions (操作)", EditorStyles.boldLabel);
-            if (_actions.Count == 0)
-            {
-                EditorGUILayout.HelpBox("No IPanelActions components in the open scene(s).", MessageType.Info);
-                return;
-            }
 
             foreach (var pa in _actions)
             {

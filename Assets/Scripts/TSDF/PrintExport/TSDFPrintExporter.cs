@@ -1,5 +1,6 @@
 // 3D-print export: turn the displayed TSDF mesh + the motion curves into a
-// watertight binary STL. Operated from Window > Control Panel (Actions section):
+// watertight binary STL. Operated from its own panel, Window > Print Export
+// (Shared.EditorTools.PrintExportPanel — settings + the four operations):
 //
 //   [Fuse curves]  snapshot the front volume (first time), then bake the current
 //                  curves as capsule tubes + body bridges into the DISPLAYED
@@ -26,7 +27,7 @@ using UnityEngine;
 namespace TSDF
 {
     [DisallowMultipleComponent]
-    public class TSDFPrintExporter : MonoBehaviour, global::Shared.IPanelActions
+    public class TSDFPrintExporter : MonoBehaviour
     {
         [Tooltip("Volume to export. Auto-resolves the first TSDFVolume at OnEnable.")]
         public TSDFVolume volume;
@@ -106,41 +107,10 @@ namespace TSDF
 
         private static readonly Vector3 kFillColor = new Vector3(0.5f, 0.5f, 0.5f);
 
-        // ---------------- Shared.IPanelActions ----------------
-        public string ActionsLabel => "3D Print Export";
-        public int ActionCount => 4;
-
-        public string ActionLabel(int index) => index switch
-        {
-            0 => "Fuse curves",
-            1 => "Close holes",
-            2 => "Export STL",
-            _ => "Restore",
-        };
-
-        public bool ActionEnabled(int index)
-        {
-            if (!Application.isPlaying || !VolumeReady) return false;
-            return index switch
-            {
-                0 => curves != null,
-                3 => HasSnapshot,
-                _ => true,
-            };
-        }
-
-        public void RunAction(int index)
-        {
-            switch (index)
-            {
-                case 0: FuseCurves(); break;
-                case 1: CloseHoles(); break;
-                case 2: ExportStl(); break;
-                case 3: RestoreSnapshot(); break;
-            }
-        }
-
-        public string ActionsStatusText =>
+        // ---------------- panel surface (PrintExportPanel) ----------------
+        /// <summary>One-line state readout for the panel: last op result, prefixed
+        /// while the displayed volume carries print modifications.</summary>
+        public string StatusText =>
             (HasSnapshot ? "print-modified (Restore available) — " : "") + _status;
 
         // ---------------- lifecycle ----------------
@@ -157,10 +127,10 @@ namespace TSDF
             _snapSdf = null; _snapColor = null; _snapBlocks = null; _snapTotal = 0;
         }
 
-        private bool VolumeReady =>
+        public bool VolumeReady =>
             volume != null && volume.Dim.x > 0 && volume.FrontBuffer != null;
 
-        private bool HasSnapshot => _snapSdf != null;
+        public bool HasSnapshot => _snapSdf != null;
 
         private bool SnapshotFresh => HasSnapshot && _snapVersion == volume.PublishVersion;
 
