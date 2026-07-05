@@ -18,7 +18,7 @@ using UnityEngine;
 namespace BodyTracking
 {
     [DisallowMultipleComponent]
-    public class BonePoseHistory : MonoBehaviour
+    public class BonePoseHistory : MonoBehaviour, global::Shared.IPanelTunable
     {
         [Tooltip("Body-tracking source. Leave empty to auto-resolve the first SkeletonMerger at OnEnable.")]
         public SkeletonMerger bodyTracking;
@@ -45,6 +45,18 @@ namespace BodyTracking
         public float gizmoOffset = 0.12f;
 
         public Color gizmoColor = new Color(1f, 0.55f, 0.1f, 1f);
+
+        // ---- Shared.IPanelTunable (one-stop Control Panel) ----
+        // Exposes the time-window length (K = historySamples): how many past frames each motion curve
+        // spans. EnsureBuffers reallocates the ring when this changes, so live edits take effect next frame.
+        public string TuningLabel => "Motion history";
+        public int TunableCount => 1;
+        public string TunableName(int i) => "History (frames)";
+        public float TunableValue(int i) => historySamples;
+        public void SetTunableValue(int i, float value) => historySamples = Mathf.Clamp(Mathf.RoundToInt(value), 2, 96);
+        public float TunableMin(int i) => 4f;
+        public float TunableMax(int i) => 32f; // matches MAXK in MotionCurvesBuild.compute (curve control-point cap)
+        public bool TunableIsInt(int i) => true;
 
         /// <summary>One stored frame of a bone: world endpoints + stabilized orthonormal frame.</summary>
         public struct Sample

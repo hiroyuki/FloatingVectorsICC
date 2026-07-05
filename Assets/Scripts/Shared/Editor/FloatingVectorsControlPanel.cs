@@ -30,6 +30,7 @@ namespace Shared.EditorTools
         private readonly List<IRecorderTransport> _transports = new List<IRecorderTransport>();
         private readonly List<IViewToggle> _views = new List<IViewToggle>();
         private readonly List<IAccumulationController> _accums = new List<IAccumulationController>();
+        private readonly List<IPanelTunable> _tunables = new List<IPanelTunable>();
         private Vector2 _scroll;
 
         private void OnGUI()
@@ -39,11 +40,13 @@ namespace Shared.EditorTools
             _transports.Clear();
             _views.Clear();
             _accums.Clear();
+            _tunables.Clear();
             foreach (var mb in FindObjectsByType<MonoBehaviour>(FindObjectsInactive.Include, FindObjectsSortMode.None))
             {
                 if (mb is IRecorderTransport rt) _transports.Add(rt);
                 if (mb is IViewToggle vt) _views.Add(vt);
                 if (mb is IAccumulationController ac) _accums.Add(ac);
+                if (mb is IPanelTunable tn) _tunables.Add(tn);
             }
             _views.Sort((a, b) => string.CompareOrdinal(a.ViewLabel, b.ViewLabel));
             _accums.Sort((a, b) => string.CompareOrdinal(DisplayName(a), DisplayName(b)));
@@ -55,6 +58,8 @@ namespace Shared.EditorTools
             DrawViewsSection();
             EditorGUILayout.Space(12);
             DrawAccumulationSection();
+            EditorGUILayout.Space(12);
+            DrawTuningSection();
 
             EditorGUILayout.EndScrollView();
         }
@@ -210,6 +215,46 @@ namespace Shared.EditorTools
         private static string CheckKey(Component comp) => "FVCP.accum." + (comp != null ? comp.GetInstanceID() : 0);
         private static bool IsChecked(Component comp) => SessionState.GetBool(CheckKey(comp), true);
         private static void SetChecked(Component comp, bool v) => SessionState.SetBool(CheckKey(comp), v);
+
+        // ---------------- Tuning ----------------
+        private void DrawTuningSection()
+        {
+            EditorGUILayout.LabelField("Tuning (調整)", EditorStyles.boldLabel);
+            if (_tunables.Count == 0)
+            {
+                EditorGUILayout.HelpBox("No IPanelTunable components in the open scene(s).", MessageType.Info);
+                return;
+            }
+
+            foreach (var tn in _tunables)
+            {
+                var comp = tn as Component;
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    EditorGUILayout.LabelField(tn.TuningLabel, EditorStyles.miniBoldLabel);
+                    DrawSelectButton(comp);
+                }
+
+                for (int i = 0; i < tn.TunableCount; i++)
+                {
+                    using (new EditorGUILayout.HorizontalScope())
+                    {
+                        GUILayout.Label(tn.TunableName(i), GUILayout.Width(150));
+                        float v = tn.TunableValue(i);
+                        float nv = tn.TunableIsInt(i)
+                            ? EditorGUILayout.IntSlider(Mathf.RoundToInt(v),
+                                Mathf.RoundToInt(tn.TunableMin(i)), Mathf.RoundToInt(tn.TunableMax(i)))
+                            : EditorGUILayout.Slider(v, tn.TunableMin(i), tn.TunableMax(i));
+                        if (!Mathf.Approximately(nv, v))
+                        {
+                            if (comp != null) Undo.RecordObject(comp, "Tune " + tn.TunableName(i));
+                            tn.SetTunableValue(i, nv);
+                            if (comp != null) EditorUtility.SetDirty(comp);
+                        }
+                    }
+                }
+            }
+        }
 
         // ---------------- shared bits ----------------
         private static string DisplayName(IAccumulationController c)
