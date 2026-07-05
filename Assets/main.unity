@@ -1592,11 +1592,11 @@ MonoBehaviour:
   logBigJumps: 0
   bigJumpLogThresholdMeters: 0.3
   maxBodies: 4
-  unseenFramesBeforeDestroy: 60
-  mergeRadiusMeters: 0.3
+  unseenFramesBeforeDestroy: 12
+  mergeRadiusMeters: 0.5
   continuityRadiusMeters: 0.5
   maxSkewMs: 500
-  requireMinWorkerCount: 1
+  requireMinWorkerCount: 2
   weightStrategy: 0
   showPerWorkerSkeletons: 0
   perWorkerVisualScale: 0.5
