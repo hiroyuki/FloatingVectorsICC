@@ -417,6 +417,9 @@ namespace TSDF
 
             // Iso / weight gates + geometry transform are global shader uniforms shared
             // by both the full-grid and active-block MC kernels.
+            // _CellZBase persists on the shared ComputeShader asset — the print exporter
+            // dispatches Z-slabs with non-zero bases, so normal rendering must reset it.
+            _mcShader.SetInt("_CellZBase", 0);
             _mcShader.SetInts("_Dim", volume.Dim.x, volume.Dim.y, volume.Dim.z);
             _mcShader.SetMatrix("_WorldFromVoxel", volume.WorldFromVoxel);
             _mcShader.SetFloat("_IsoLevel", meshIsoLevel);

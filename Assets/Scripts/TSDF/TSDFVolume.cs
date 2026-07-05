@@ -491,6 +491,11 @@ namespace TSDF
             PublishVersion++;
         }
 
+        /// <summary>Bump PublishVersion WITHOUT swapping buffers — for in-place edits
+        /// of the FRONT buffer (print exporter's snapshot restore) so views re-extract.
+        /// Publish() would swap in double-buffer mode and display the stale write side.</summary>
+        public void MarkFrontDirty() => PublishVersion++;
+
         private void EnsureCcShader()
         {
             if (_ccShader != null) return;

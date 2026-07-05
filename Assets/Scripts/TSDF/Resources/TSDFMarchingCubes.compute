@@ -23,6 +23,10 @@ int3 _Dim;
 float4x4 _WorldFromVoxel;
 float _IsoLevel;                     // = 0
 float _MinWeight;                    // skip cell if any corner weight < this
+int _CellZBase;                      // Z-slab offset for the full-grid kernel (print export
+                                     // reads the mesh back in slabs). MUST be 0 for normal
+                                     // rendering — TSDFView resets it every dispatch because
+                                     // the value persists on the shared ComputeShader asset.
 
 // ---- Active-block dispatch (task 0-1) ----
 // _BlockActiveFront: the DISPLAYED buffer's per-block occupancy (1 = active), read by
@@ -191,10 +195,12 @@ void MarchCell(int3 cell)
 }
 
 // ---- Full-grid reference path: one thread per cell over (dim-1)^3 --------------
+// _CellZBase shifts the covered Z range for slab-wise export; MarchCell's own
+// bounds checks reject anything past dim-2, so a short final slab is safe.
 [numthreads(4, 4, 4)]
 void MarchCubes(uint3 id : SV_DispatchThreadID)
 {
-    MarchCell(int3((int)id.x, (int)id.y, (int)id.z));
+    MarchCell(int3((int)id.x, (int)id.y, (int)id.z + _CellZBase));
 }
 
 // ---- Active-block path: one thread-GROUP per active 8^3-cell block ------------

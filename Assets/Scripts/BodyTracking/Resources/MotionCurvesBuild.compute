@@ -14,6 +14,7 @@
 
 #pragma kernel CSCollect
 #pragma kernel CSBuild
+#pragma kernel CSEmitSegs
 
 struct Sample { float3 A; float3 B; float3 U; float3 V; float3 W; };
 struct LineVert { float3 p; float3 c; };
@@ -44,6 +45,29 @@ uint  _BlendCount;    // number of nearest bones to blend (1 = hard argmax)
 float _BlendSigma;    // rank falloff (m) for blend weights; smaller = sharper boundaries
 uint  _CurveSamples;  // how many of the newest ring frames the curve spans (<= ring length / MAXK)
 uint  _Subdiv;        // Catmull-Rom subdivisions per control-point interval (1 = straight polyline)
+
+// ---- Print export (CSEmitSegs) ----
+// One capsule segment, 48B — MUST match struct Seg in TSDFTrailBake.compute
+// (and the C# TrailSeg in TSDFTrailBaker) so the emitted buffer feeds the
+// existing BakeTrail kernel directly.
+struct Seg
+{
+    float3 a;
+    float3 b;
+    float  ra;
+    float  rb;
+    float3 color;
+    float  _pad;
+};
+RWStructuredBuffer<Seg>  _SegsOut;
+// [0] = total appends attempted (emitted = min([0], _SegCap) on the host),
+// [1] = appends dropped on capacity overflow, [2] = bridges skipped (too long).
+RWStructuredBuffer<uint> _SegStats;
+uint  _SegCap;             // _SegsOut capacity
+uint  _PrintSeedStride;    // emit every Nth seed slot (thin the 20k drawn curves down)
+float _PrintRadius;        // uniform curve-tube capsule radius (m) — print minimum, not ribbon width
+float _BridgeRadiusScale;  // body-side bridge radius multiplier (fillet root)
+float _MaxBridgeLength;    // skip (and count) bridges longer than this (m) — misclassified seeds
 
 // Centripetal Catmull-Rom (alpha = 0.5): interpolates P1..P2 at u in [0,1] with knot spacing
 // sqrt(distance), which prevents the overshoot / self-intersection that the uniform version
@@ -94,24 +118,32 @@ void CSCollect(uint3 id : SV_DispatchThreadID)
     if (idx < _CollectCap) { SeedPoint sp; sp.pos = p; sp.col = col; _CollectOut[idx] = sp; }
 }
 
-[numthreads(64, 1, 1)]
-void CSBuild(uint3 id : SV_DispatchThreadID)
+// Map a seed slot to its compacted collect-buffer point. Stride evenly so the seed
+// budget spreads across the whole collected set. Float mapping keeps SM5.0 (no 64-bit ints).
+// Returns false when the collect pass produced nothing.
+bool SeedFromCollect(uint seedLocal, out SeedPoint sp)
 {
-    uint seedLocal = id.x;
-    if (seedLocal >= _SeedCount) return;
-
-    uint segsPerSeed = (_RingLen - 1u) * _Subdiv;
-    uint slotBase = (_SeedBase + seedLocal) * segsPerSeed * 2u;
-
-    // Seed from the compacted in-bbox points (already world-space, valid). Stride evenly so the seed
-    // budget spreads across the whole collected set. Float mapping keeps SM5.0 (no 64-bit ints).
+    sp.pos = float3(0, 0, 0); sp.col = float3(0, 0, 0);
     uint collectCount = min(_CollectCounter[0], _CollectCap);
-    if (collectCount == 0u) { WriteDegenerate(slotBase, segsPerSeed); return; }
+    if (collectCount == 0u) return false;
     uint srcIdx = (uint)(((float)seedLocal / (float)_SeedCount) * (float)collectCount);
     if (srcIdx >= collectCount) srcIdx = collectCount - 1u;
-    SeedPoint sp = _CollectOut[srcIdx];
-    float3 p = sp.pos;
-    float3 col = sp.col; // the curve keeps this seed point's original point-cloud colour
+    sp = _CollectOut[srcIdx];
+    return true;
+}
+
+// Shared front half of CSBuild (ribbons) and CSEmitSegs (print capsules):
+// classify seed p to the nearest few bones (skinning-style blend), parameterise
+// as (t, cv, cw) in each bone's newest stable frame, and reproject through the
+// pose history into pts[0..m-1] (oldest->newest). Also returns the blended
+// newest-frame CENTERLINE point (the cv=cw=0 reprojection) — the print bridge
+// anchor. Returns m = control-point count; 0 = background-culled / no bones.
+uint ClassifyReproject(float3 p, out float3 pts[32], out float3 anchor)
+{
+    // Zero-init the out array (silences Metal "potentially uninitialised" warnings;
+    // callers only read pts[0..m-1]).
+    for (uint z = 0; z < 32u; z++) pts[z] = float3(0, 0, 0);
+    anchor = float3(0, 0, 0);
 
     // --- classify: soft-assign to the nearest few bones (skinning-style blend) ---
     // Select the top-N bones ordered by rank = max(surf,0) (tie-broken by centerline d),
@@ -152,8 +184,7 @@ void CSBuild(uint3 id : SV_DispatchThreadID)
     }
 
     // Background cull on the nearest bone's surface distance.
-    if (selN == 0u || selSurf[0] > _SurfaceMargin)
-    { WriteDegenerate(slotBase, segsPerSeed); return; }
+    if (selN == 0u || selSurf[0] > _SurfaceMargin) return 0u;
 
     // Per-selected-bone weight + (t, cv, cw) in that bone's newest frame.
     float w[4]; float tb[4]; float cvb[4]; float cwb[4]; uint baseB[4]; uint cntB[4];
@@ -174,13 +205,19 @@ void CSBuild(uint3 id : SV_DispatchThreadID)
     }
     float invW = (wsum > 1e-8) ? (1.0 / wsum) : 0.0;
 
+    // Blended newest-frame centerline point (cv=cw=0): the print bridge anchor.
+    for (uint ja = 0; ja < selN; ja++)
+    {
+        Sample sa = _History[baseB[ja] + (cntB[ja] - 1u)];
+        anchor += (w[ja] * invW) * lerp(sa.A, sa.B, tb[ja]);
+    }
+
     // Curve length: the newest _CurveSamples frames (clamped to what's available and the MAXK cap). The
     // ring always holds up to MAXK, so raising _CurveSamples lengthens the curve out of already-captured
     // history — even while paused.
     const uint MAXK = 32u;
     uint m = min(min(minCnt, _CurveSamples), MAXK);
     // Reproject the newest m control points (weighted blend of the selected bones) into a local array.
-    float3 pts[32];
     for (uint k = 0; k < m; k++)
     {
         float3 xk = float3(0, 0, 0);
@@ -192,25 +229,48 @@ void CSBuild(uint3 id : SV_DispatchThreadID)
         }
         pts[k] = xk;
     }
+    return m;
+}
 
-    // Emit a Catmull-Rom subdivided line strip through pts[0..m-1]. Sample j maps to interval
-    // i = j / subdiv at u = (j % subdiv) / subdiv; the final sample is exactly pts[m-1].
+// Catmull-Rom sample along the pts[0..m-1] strip. si in [0, (m-1)*_Subdiv]; the
+// final sample is exactly pts[m-1]. Sample j maps to interval i = j / subdiv at
+// u = (j % subdiv) / subdiv.
+float3 StripPoint(float3 pts[32], uint m, uint si, uint totalSegs)
+{
+    if (si >= totalSegs) return pts[m - 1u];
+    uint iv = si / _Subdiv;
+    uint ss = si - iv * _Subdiv;
+    float3 p0 = pts[(iv == 0u) ? 0u : (iv - 1u)];
+    float3 p1 = pts[iv];
+    float3 p2 = pts[iv + 1u];
+    float3 p3 = pts[min(iv + 2u, m - 1u)];
+    return CatmullRom(p0, p1, p2, p3, (float)ss / (float)_Subdiv);
+}
+
+[numthreads(64, 1, 1)]
+void CSBuild(uint3 id : SV_DispatchThreadID)
+{
+    uint seedLocal = id.x;
+    if (seedLocal >= _SeedCount) return;
+
+    uint segsPerSeed = (_RingLen - 1u) * _Subdiv;
+    uint slotBase = (_SeedBase + seedLocal) * segsPerSeed * 2u;
+
+    SeedPoint sp;
+    if (!SeedFromCollect(seedLocal, sp)) { WriteDegenerate(slotBase, segsPerSeed); return; }
+    float3 col = sp.col; // the curve keeps this seed point's original point-cloud colour
+
+    float3 pts[32];
+    float3 anchorUnused;
+    uint m = ClassifyReproject(sp.pos, pts, anchorUnused);
+    if (m == 0u) { WriteDegenerate(slotBase, segsPerSeed); return; }
+
+    // Emit a Catmull-Rom subdivided line strip through pts[0..m-1].
     uint totalSegs = (m >= 2u) ? (m - 1u) * _Subdiv : 0u;
     float3 prev = float3(0, 0, 0);
     for (uint si = 0; si <= totalSegs; si++)
     {
-        float3 pt;
-        if (si >= totalSegs) pt = pts[m - 1u];
-        else
-        {
-            uint iv = si / _Subdiv;
-            uint ss = si - iv * _Subdiv;
-            float3 p0 = pts[(iv == 0u) ? 0u : (iv - 1u)];
-            float3 p1 = pts[iv];
-            float3 p2 = pts[iv + 1u];
-            float3 p3 = pts[min(iv + 2u, m - 1u)];
-            pt = CatmullRom(p0, p1, p2, p3, (float)ss / (float)_Subdiv);
-        }
+        float3 pt = StripPoint(pts, m, si, totalSegs);
         if (si > 0u)
         {
             uint seg = si - 1u;
@@ -228,4 +288,55 @@ void CSBuild(uint3 id : SV_DispatchThreadID)
         _Out[slotBase + s * 2u]      = z;
         _Out[slotBase + s * 2u + 1u] = z;
     }
+}
+
+// Bounds-checked append into _SegsOut. _SegStats[0] counts every attempt, so the
+// host reads emitted = min(stats[0], cap) and dropped = stats[1].
+void AppendSeg(float3 a, float3 b, float ra, float rb, float3 col)
+{
+    uint idx;
+    InterlockedAdd(_SegStats[0], 1u, idx);
+    if (idx >= _SegCap) { InterlockedAdd(_SegStats[1], 1u); return; }
+    Seg s; s.a = a; s.b = b; s.ra = ra; s.rb = rb; s.color = col; s._pad = 0.0;
+    _SegsOut[idx] = s;
+}
+
+// Print export: one thread per PRINT seed (every _PrintSeedStride-th seed slot,
+// so the emitted subset is a thinning of the drawn curves). Appends the
+// Catmull-Rom subdivided chain as capsule segments plus ONE bridge capsule from
+// the newest end to the blended bone-centerline anchor — every printed tube is
+// physically attached to the body. Culled / insufficient-history seeds emit
+// nothing at all (no orphan bridges).
+[numthreads(64, 1, 1)]
+void CSEmitSegs(uint3 id : SV_DispatchThreadID)
+{
+    uint stride = max(_PrintSeedStride, 1u);
+    uint seedLocal = id.x * stride;
+    if (seedLocal >= _SeedCount) return;
+
+    SeedPoint sp;
+    if (!SeedFromCollect(seedLocal, sp)) return;
+
+    float3 pts[32];
+    float3 anchor;
+    uint m = ClassifyReproject(sp.pos, pts, anchor);
+    if (m < 2u) return; // culled or not enough history for a curve
+
+    float r = _PrintRadius;
+    float3 col = sp.col;
+
+    uint totalSegs = (m - 1u) * _Subdiv;
+    float3 prev = float3(0, 0, 0);
+    for (uint si = 0; si <= totalSegs; si++)
+    {
+        float3 pt = StripPoint(pts, m, si, totalSegs);
+        if (si > 0u) AppendSeg(prev, pt, r, r, col);
+        prev = pt;
+    }
+
+    // Bridge: newest curve end -> blended bone-centerline anchor (fillet: body
+    // side thicker). Guard against long struts from misclassified seeds.
+    float3 tip = pts[m - 1u];
+    if (length(anchor - tip) > _MaxBridgeLength) { InterlockedAdd(_SegStats[2], 1u); return; }
+    AppendSeg(tip, anchor, r, r * _BridgeRadiusScale, col);
 }

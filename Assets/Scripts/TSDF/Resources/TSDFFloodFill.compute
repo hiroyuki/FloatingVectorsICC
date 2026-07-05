@@ -1,0 +1,200 @@
+// Print-export hole closing: morphological closing + outside flood-fill over the
+// TSDF volume (TSDFPrintExporter). A camera-scanned body is an OPEN shell —
+// unobserved regions (back side, floor contact, occlusions) are weight==0 voxels,
+// so a naive boundary flood-fill would leak through those openings into the body
+// interior and fill nothing. Instead:
+//
+//   1. BuildMask   : solid = (weight > 0 && sdf < 0)          -> mask 1, else 0
+//   2. Dilate  x k : 6-neighbour dilation seals openings up to ~2k voxels wide
+//   3. SeedOutside : grid-boundary voxels that are not solid   -> mask 2
+//      Propagate   : outside (2) spreads through non-solid (0), in-place,
+//                    monotonic — races only delay a voxel one iteration.
+//                    Host loops dispatches, polling _Changed for early exit.
+//   4. MarkFilled  : outside -> 0, everything else (solid + enclosed) -> 1
+//      Erode  x k  : pulls the dilation back to ~the original surface while
+//                    keeping sealed openings / cavities filled (closing).
+//                    The 6-neighbour (L1) metric is approximate: concavities may
+//                    thicken by ~1 voxel. Irrelevant at print scale.
+//   5. FillWrite   : voxels that ended mask==1 but are not already solid get
+//                    sdf=-tau / weight=1 (+ fill colour, + active-block mark);
+//                    unknown (weight==0) voxels TOUCHING the filled region get a
+//                    synthetic observed-empty +tau / weight=1 — without this rim
+//                    the MC weight gate skips every cap cell and the closed hole
+//                    still doesn't mesh.
+//
+// Masks are one uint per voxel (0 free/unknown, 1 solid, 2 outside), ping-ponged
+// between two buffers for Dilate/Erode and updated in place for the flood.
+
+#pragma kernel BuildMask
+#pragma kernel Dilate
+#pragma kernel SeedOutside
+#pragma kernel Propagate
+#pragma kernel MarkFilled
+#pragma kernel Erode
+#pragma kernel FillWrite
+#pragma kernel CullMask
+
+int3  _Dim;
+float _Tau;                 // truncation distance (m) — fill writes +/- this
+float3 _FillColor;          // colour for synthesised voxels (neutral grey)
+
+StructuredBuffer<float2>   _VoxelsIn;   // BuildMask: front SDF (x=sdf, y=weight)
+StructuredBuffer<uint>     _MaskRead;   // Dilate/Erode/FillWrite read side
+RWStructuredBuffer<uint>   _MaskOut;    // Dilate/Erode write side
+RWStructuredBuffer<uint>   _Mask;       // SeedOutside/Propagate/MarkFilled in place
+RWStructuredBuffer<uint>   _Changed;    // [0] != 0 -> the last Propagate pass changed something
+RWStructuredBuffer<float2> _VoxelsOut;  // FillWrite target (the volume's WRITE buffer)
+RWStructuredBuffer<float4> _ColorsOut;
+RWStructuredBuffer<uint>   _FillStats;  // [0] = interior voxels filled, [1] = +tau rim voxels
+
+#include "TSDFBlockActive.hlsl"
+
+int Lin(int3 v) { return v.x + _Dim.x * (v.y + _Dim.y * v.z); }
+
+bool InGrid(int3 v)
+{
+    return v.x >= 0 && v.y >= 0 && v.z >= 0 &&
+           v.x < _Dim.x && v.y < _Dim.y && v.z < _Dim.z;
+}
+
+static const int3 kNb[6] =
+{
+    int3(1, 0, 0), int3(-1, 0, 0),
+    int3(0, 1, 0), int3(0, -1, 0),
+    int3(0, 0, 1), int3(0, 0, -1)
+};
+
+[numthreads(4, 4, 4)]
+void BuildMask(uint3 id : SV_DispatchThreadID)
+{
+    int3 v = int3(id);
+    if (!InGrid(v)) return;
+    float2 d = _VoxelsIn[Lin(v)];
+    _MaskOut[Lin(v)] = (d.y > 0.0 && d.x < 0.0) ? 1u : 0u;
+}
+
+[numthreads(4, 4, 4)]
+void Dilate(uint3 id : SV_DispatchThreadID)
+{
+    int3 v = int3(id);
+    if (!InGrid(v)) return;
+    uint m = _MaskRead[Lin(v)];
+    if (m != 1u)
+    {
+        [unroll] for (int n = 0; n < 6; n++)
+        {
+            int3 nb = v + kNb[n];
+            if (InGrid(nb) && _MaskRead[Lin(nb)] == 1u) { m = 1u; break; }
+        }
+    }
+    _MaskOut[Lin(v)] = m;
+}
+
+[numthreads(4, 4, 4)]
+void SeedOutside(uint3 id : SV_DispatchThreadID)
+{
+    int3 v = int3(id);
+    if (!InGrid(v)) return;
+    bool boundary = v.x == 0 || v.y == 0 || v.z == 0 ||
+                    v.x == _Dim.x - 1 || v.y == _Dim.y - 1 || v.z == _Dim.z - 1;
+    if (!boundary) return;
+    int lin = Lin(v);
+    if (_Mask[lin] != 1u) _Mask[lin] = 2u;
+}
+
+[numthreads(4, 4, 4)]
+void Propagate(uint3 id : SV_DispatchThreadID)
+{
+    int3 v = int3(id);
+    if (!InGrid(v)) return;
+    int lin = Lin(v);
+    if (_Mask[lin] != 0u) return;
+    [unroll] for (int n = 0; n < 6; n++)
+    {
+        int3 nb = v + kNb[n];
+        if (InGrid(nb) && _Mask[Lin(nb)] == 2u)
+        {
+            _Mask[lin] = 2u;
+            InterlockedAdd(_Changed[0], 1u);
+            return;
+        }
+    }
+}
+
+[numthreads(4, 4, 4)]
+void MarkFilled(uint3 id : SV_DispatchThreadID)
+{
+    int3 v = int3(id);
+    if (!InGrid(v)) return;
+    int lin = Lin(v);
+    _Mask[lin] = (_Mask[lin] == 2u) ? 0u : 1u;
+}
+
+// Out-of-grid neighbours count as empty, so solid touching the grid boundary
+// erodes from that face — the sculpture should not touch the bbox anyway.
+[numthreads(4, 4, 4)]
+void Erode(uint3 id : SV_DispatchThreadID)
+{
+    int3 v = int3(id);
+    if (!InGrid(v)) return;
+    uint m = _MaskRead[Lin(v)];
+    if (m == 1u)
+    {
+        [unroll] for (int n = 0; n < 6; n++)
+        {
+            int3 nb = v + kNb[n];
+            if (!InGrid(nb) || _MaskRead[Lin(nb)] != 1u) { m = 0u; break; }
+        }
+    }
+    _MaskOut[Lin(v)] = m;
+}
+
+// Remove voxels flagged 1 in _MaskRead (the exporter's CPU connectivity pass
+// marks non-largest components): overwrite with observed-empty +tau so MC drops
+// them while the all-corners weight gate stays satisfied.
+[numthreads(4, 4, 4)]
+void CullMask(uint3 id : SV_DispatchThreadID)
+{
+    int3 v = int3(id);
+    if (!InGrid(v)) return;
+    int lin = Lin(v);
+    if (_MaskRead[lin] != 1u) return;
+    _VoxelsOut[lin] = float2(_Tau, 1.0);
+    _ColorsOut[lin] = float4(_FillColor, 1.0);
+}
+
+[numthreads(4, 4, 4)]
+void FillWrite(uint3 id : SV_DispatchThreadID)
+{
+    int3 v = int3(id);
+    if (!InGrid(v)) return;
+    int lin = Lin(v);
+    float2 cur = _VoxelsOut[lin];
+    bool origSolid = cur.y > 0.0 && cur.x < 0.0;
+    uint m = _MaskRead[lin];
+
+    if (m == 1u)
+    {
+        if (origSolid) return; // already good — keep the observed band untouched
+        _VoxelsOut[lin] = float2(-_Tau, 1.0);
+        _ColorsOut[lin] = float4(_FillColor, 1.0);
+        MarkVoxelActive(v, _Dim, -_Tau, 1.0);
+        InterlockedAdd(_FillStats[0], 1u);
+    }
+    else if (cur.y <= 0.0)
+    {
+        // Unknown voxel just outside the filled region: synthesise the empty
+        // side of the cap surface, or MC's all-corners weight gate drops it.
+        [unroll] for (int n = 0; n < 6; n++)
+        {
+            int3 nb = v + kNb[n];
+            if (InGrid(nb) && _MaskRead[Lin(nb)] == 1u)
+            {
+                _VoxelsOut[lin] = float2(_Tau, 1.0);
+                _ColorsOut[lin] = float4(_FillColor, 1.0);
+                InterlockedAdd(_FillStats[1], 1u);
+                return;
+            }
+        }
+    }
+}

@@ -102,6 +102,7 @@ namespace BodyTracking
         private ComputeShader _shader;
         private int _collectKernel = -1;
         private int _buildKernel = -1;
+        private int _emitKernel = -1;   // CSEmitSegs (print export)
         private Material _mat;
         private GraphicsBuffer _outBuf;      // LineVert[seedCount*(K-1)*2]
         private GraphicsBuffer _argsBuf;     // 4-uint indirect args
@@ -110,7 +111,9 @@ namespace BodyTracking
         private GraphicsBuffer _collectBuf;      // SeedPoint[totalSourceVerts] compacted in-bbox points
         private GraphicsBuffer _collectCounter;  // uint[1]
         private int _collectCap;                 // _collectBuf capacity (total source verts sized)
+        private GraphicsBuffer _segStatsBuf;     // uint[3] print-emit stats (appends / dropped / bridges skipped)
         private static readonly uint[] s_counterReset = { 0u };
+        private static readonly uint[] s_segStatsReset = { 0u, 0u, 0u };
         private int _boneCount;
         private int _ringLen;
         private int _subdiv;                  // Catmull-Rom subdiv the output buffer was sized for
@@ -146,6 +149,13 @@ namespace BodyTracking
         private static readonly int kVerts = Shader.PropertyToID("_Verts");
         private static readonly int kBrightness = Shader.PropertyToID("_Brightness");
         private static readonly int kWidth = Shader.PropertyToID("_Width");
+        private static readonly int kSegsOut = Shader.PropertyToID("_SegsOut");
+        private static readonly int kSegStats = Shader.PropertyToID("_SegStats");
+        private static readonly int kSegCap = Shader.PropertyToID("_SegCap");
+        private static readonly int kPrintSeedStride = Shader.PropertyToID("_PrintSeedStride");
+        private static readonly int kPrintRadius = Shader.PropertyToID("_PrintRadius");
+        private static readonly int kBridgeRadiusScale = Shader.PropertyToID("_BridgeRadiusScale");
+        private static readonly int kMaxBridgeLength = Shader.PropertyToID("_MaxBridgeLength");
 
         private void OnEnable()
         {
@@ -157,6 +167,7 @@ namespace BodyTracking
                 {
                     _collectKernel = _shader.FindKernel("CSCollect");
                     _buildKernel = _shader.FindKernel("CSBuild");
+                    _emitKernel = _shader.FindKernel("CSEmitSegs");
                 }
             }
             if (_mat == null)
@@ -184,6 +195,7 @@ namespace BodyTracking
             _radiusBBuf?.Release(); _radiusBBuf = null;
             _collectBuf?.Release(); _collectBuf = null;
             _collectCounter?.Release(); _collectCounter = null;
+            _segStatsBuf?.Release(); _segStatsBuf = null;
             _capacity = 0; _ringLen = 0; _subdiv = 0; _collectCap = 0;
             _hasBuilt = false;
         }
@@ -202,19 +214,40 @@ namespace BodyTracking
                 return;
             }
 
-            if (history == null) return;
+            if (!CollectSeeds(out _)) return;
+
+            // --- build: one dispatch, seeds strided over the compacted points ---
+            BindBuildParams(_buildKernel);
+            _shader.SetBuffer(_buildKernel, kOut, _outBuf);
+            _shader.Dispatch(_buildKernel, (_capacity + 63) / 64, 1, 1);
+
+            _hasBuilt = true;
+            DrawCurves();
+        }
+
+        // Shared front half of Update() and EmitPrintSegs(): validates inputs,
+        // resolves sources, (re)sizes buffers and runs the CSCollect prepass.
+        // Returns false with a human-readable reason when there is nothing to
+        // build from this frame.
+        private bool CollectSeeds(out string reason)
+        {
+            reason = null;
+            if (_shader == null || _collectKernel < 0 || _buildKernel < 0)
+            { reason = "MotionCurvesBuild compute shader not loaded"; return false; }
+            if (history == null) { reason = "no BonePoseHistory in the scene"; return false; }
             var histBuf = history.HistoryBuffer;
             var countBuf = history.CountBuffer;
-            if (histBuf == null || countBuf == null) return;
+            if (histBuf == null || countBuf == null)
+            { reason = "BonePoseHistory buffers not ready (no pose ingested yet)"; return false; }
 
             int boneCount = history.BoneCount;
             int ringLen = history.RingLength;
-            if (boneCount <= 0 || ringLen < 2) return;
+            if (boneCount <= 0 || ringLen < 2) { reason = "no bones / history ring too short"; return false; }
             int subdiv = Mathf.Clamp(smoothSubdiv, 1, 8);
 
             // Resolve source meshes and size the collect buffer to their total vertex count.
             var sources = ResolveSources();
-            if (sources.Count == 0) return; // nothing to seed from -> draw nothing
+            if (sources.Count == 0) { reason = "no usable point-cloud source meshes"; return false; }
             int totalSrcVerts = 0;
             foreach (var mf in sources) totalSrcVerts += mf.sharedMesh.vertexCount;
 
@@ -251,32 +284,93 @@ namespace BodyTracking
                 _shader.Dispatch(_collectKernel, (mesh.vertexCount + 63) / 64, 1, 1);
             }
             foreach (var vb in borrowed) vb.Dispose();
-            if (borrowed.Count == 0) return;
+            if (borrowed.Count == 0) { reason = "source mesh vertex buffers unavailable"; return false; }
+            return true;
+        }
 
-            // --- build: one dispatch, seeds strided over the compacted points ---
-            int cap = _capacity;
-            _shader.SetBuffer(_buildKernel, kCollectOut, _collectBuf);
-            _shader.SetBuffer(_buildKernel, kCollectCounter, _collectCounter);
+        // Bind the collect/history/radius inputs + classify/reproject scalars shared
+        // by CSBuild and CSEmitSegs. CollectSeeds() must have succeeded this frame.
+        private void BindBuildParams(int kernel)
+        {
+            _shader.SetBuffer(kernel, kCollectOut, _collectBuf);
+            _shader.SetBuffer(kernel, kCollectCounter, _collectCounter);
             _shader.SetInt(kCollectCap, _collectCap);
-            _shader.SetBuffer(_buildKernel, kHistory, histBuf);
-            _shader.SetBuffer(_buildKernel, kBoneCounts, countBuf);
-            _shader.SetBuffer(_buildKernel, kRadiusA, _radiusABuf);
-            _shader.SetBuffer(_buildKernel, kRadiusB, _radiusBBuf);
-            _shader.SetBuffer(_buildKernel, kOut, _outBuf);
-            _shader.SetInt(kBoneCount, boneCount);
-            _shader.SetInt(kRingLen, ringLen);
+            _shader.SetBuffer(kernel, kHistory, history.HistoryBuffer);
+            _shader.SetBuffer(kernel, kBoneCounts, history.CountBuffer);
+            _shader.SetBuffer(kernel, kRadiusA, _radiusABuf);
+            _shader.SetBuffer(kernel, kRadiusB, _radiusBBuf);
+            _shader.SetInt(kBoneCount, _boneCount);
+            _shader.SetInt(kRingLen, _ringLen);
             _shader.SetFloat(kRadiusScale, radiusScale);
             _shader.SetFloat(kSurfaceMargin, surfaceMargin);
             _shader.SetInt(kBlendCount, Mathf.Clamp(boneBlendCount, 1, 4));
             _shader.SetFloat(kBlendSigma, blendSharpness);
             _shader.SetInt(kCurveSamples, history.CurveSamples);
-            _shader.SetInt(kSubdiv, subdiv);
+            _shader.SetInt(kSubdiv, _subdiv);
             _shader.SetInt(kSeedBase, 0);
-            _shader.SetInt(kSeedCount, cap);
-            _shader.Dispatch(_buildKernel, (cap + 63) / 64, 1, 1);
+            _shader.SetInt(kSeedCount, _capacity);
+        }
 
-            _hasBuilt = true;
-            DrawCurves();
+        // ---- Print export (TSDFPrintExporter) ----
+
+        /// <summary>Stats returned by <see cref="EmitPrintSegs"/>.</summary>
+        public struct PrintSegStats
+        {
+            public int emitted;         // segments actually written to the buffer
+            public int dropped;         // appends lost to capacity overflow
+            public int bridgesSkipped;  // bridges over maxBridgeLength (misclassified seeds)
+        }
+
+        /// <summary>Worst-case segment count <see cref="EmitPrintSegs"/> can produce for
+        /// a given stride — size the seg buffer with this.</summary>
+        public int MaxPrintSegs(int printSeedStride)
+        {
+            int cap = Mathf.Max(64, seedCount);
+            int stride = Mathf.Max(1, printSeedStride);
+            int printSeeds = (cap + stride - 1) / stride;
+            int subdiv = Mathf.Clamp(smoothSubdiv, 1, 8);
+            int m = history != null ? Mathf.Clamp(history.CurveSamples, 2, 32) : 32;
+            return printSeeds * ((m - 1) * subdiv + 1); // chain + 1 bridge per seed
+        }
+
+        /// <summary>One-shot print bake: re-runs the collect prepass on the current
+        /// (paused) inputs and appends every _PrintSeedStride-th curve as capsule
+        /// segments (TSDFTrailBake Seg layout, 48B) into segsOut, each with a bridge
+        /// capsule to its blended bone-centerline anchor. Synchronous stats readback —
+        /// print path only, not for per-frame use. Returns false (and logs why) when
+        /// inputs are missing.</summary>
+        public bool EmitPrintSegs(ComputeBuffer segsOut, int printSeedStride, float printRadius,
+                                  float bridgeRadiusScale, float maxBridgeLength,
+                                  out PrintSegStats stats)
+        {
+            stats = default;
+            if (segsOut == null) { Debug.LogError("[MotionCurves] EmitPrintSegs: segsOut is null.", this); return false; }
+            if (_emitKernel < 0) { Debug.LogError("[MotionCurves] CSEmitSegs kernel missing.", this); return false; }
+            if (!CollectSeeds(out string reason))
+            { Debug.LogError($"[MotionCurves] print emit aborted: {reason}.", this); return false; }
+
+            if (_segStatsBuf == null)
+                _segStatsBuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 3, sizeof(uint));
+            _segStatsBuf.SetData(s_segStatsReset);
+
+            int stride = Mathf.Max(1, printSeedStride);
+            BindBuildParams(_emitKernel);
+            _shader.SetBuffer(_emitKernel, kSegsOut, segsOut);
+            _shader.SetBuffer(_emitKernel, kSegStats, _segStatsBuf);
+            _shader.SetInt(kSegCap, segsOut.count);
+            _shader.SetInt(kPrintSeedStride, stride);
+            _shader.SetFloat(kPrintRadius, printRadius);
+            _shader.SetFloat(kBridgeRadiusScale, bridgeRadiusScale);
+            _shader.SetFloat(kMaxBridgeLength, maxBridgeLength);
+            int printSeeds = (_capacity + stride - 1) / stride;
+            _shader.Dispatch(_emitKernel, (printSeeds + 63) / 64, 1, 1);
+
+            var s = new uint[3];
+            _segStatsBuf.GetData(s);
+            stats.emitted = (int)Mathf.Min(s[0], (uint)segsOut.count);
+            stats.dropped = (int)s[1];
+            stats.bridgesSkipped = (int)s[2];
+            return true;
         }
 
         private void DrawCurves()

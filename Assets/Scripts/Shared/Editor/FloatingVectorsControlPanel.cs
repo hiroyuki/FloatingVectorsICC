@@ -30,6 +30,7 @@ namespace Shared.EditorTools
         private readonly List<IRecorderTransport> _transports = new List<IRecorderTransport>();
         private readonly List<IViewToggle> _views = new List<IViewToggle>();
         private readonly List<IAccumulationController> _accums = new List<IAccumulationController>();
+        private readonly List<IPanelActions> _actions = new List<IPanelActions>();
         private readonly List<IPanelTunable> _tunables = new List<IPanelTunable>();
         private Vector2 _scroll;
 
@@ -40,12 +41,14 @@ namespace Shared.EditorTools
             _transports.Clear();
             _views.Clear();
             _accums.Clear();
+            _actions.Clear();
             _tunables.Clear();
             foreach (var mb in FindObjectsByType<MonoBehaviour>(FindObjectsInactive.Include, FindObjectsSortMode.None))
             {
                 if (mb is IRecorderTransport rt) _transports.Add(rt);
                 if (mb is IViewToggle vt) _views.Add(vt);
                 if (mb is IAccumulationController ac) _accums.Add(ac);
+                if (mb is IPanelActions pa) _actions.Add(pa);
                 if (mb is IPanelTunable tn) _tunables.Add(tn);
             }
             _views.Sort((a, b) => string.CompareOrdinal(a.ViewLabel, b.ViewLabel));
@@ -58,6 +61,8 @@ namespace Shared.EditorTools
             DrawViewsSection();
             EditorGUILayout.Space(12);
             DrawAccumulationSection();
+            EditorGUILayout.Space(12);
+            DrawActionsSection();
             EditorGUILayout.Space(12);
             DrawTuningSection();
 
@@ -229,6 +234,44 @@ namespace Shared.EditorTools
         private static string CheckKey(Component comp) => "FVCP.accum." + (comp != null ? comp.GetInstanceID() : 0);
         private static bool IsChecked(Component comp) => SessionState.GetBool(CheckKey(comp), true);
         private static void SetChecked(Component comp, bool v) => SessionState.SetBool(CheckKey(comp), v);
+
+        // ---------------- Actions ----------------
+        // One-shot operation buttons (IPanelActions) — no accumulate state
+        // machine, just "press to run" with per-action enable gating.
+        private void DrawActionsSection()
+        {
+            EditorGUILayout.LabelField("Actions (操作)", EditorStyles.boldLabel);
+            if (_actions.Count == 0)
+            {
+                EditorGUILayout.HelpBox("No IPanelActions components in the open scene(s).", MessageType.Info);
+                return;
+            }
+
+            foreach (var pa in _actions)
+            {
+                var comp = pa as Component;
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    EditorGUILayout.LabelField(pa.ActionsLabel, EditorStyles.miniBoldLabel);
+                    DrawSelectButton(comp);
+                }
+
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    for (int i = 0; i < pa.ActionCount; i++)
+                    {
+                        using (new EditorGUI.DisabledScope(!pa.ActionEnabled(i)))
+                        {
+                            if (GUILayout.Button(pa.ActionLabel(i), GUILayout.Height(24)))
+                                pa.RunAction(i);
+                        }
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(pa.ActionsStatusText))
+                    EditorGUILayout.HelpBox(pa.ActionsStatusText, MessageType.Info);
+            }
+        }
 
         // ---------------- Tuning ----------------
         private void DrawTuningSection()
