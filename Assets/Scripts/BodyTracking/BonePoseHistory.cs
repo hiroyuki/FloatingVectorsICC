@@ -130,35 +130,67 @@ namespace BodyTracking
             // silently killing every downstream consumer.
             if (_ring != null && _boneCount == n && _ringLen == k && _histBuf != null) return;
 
-            _boneCount = n;
-            _ringLen = k;
-            _ring = new Sample[n][];
-            _head = new int[n];
-            _count = new int[n];
-            _prevV = new Vector3[n];
-            _scratch = new SkeletonMerger.BoneEndpoints[n];
-            for (int b = 0; b < n; b++)
+            // K changed but the bone layout is otherwise built: resize each ring PRESERVING its newest
+            // samples instead of clearing. Tuning K while paused sends no new frames to refill a cleared
+            // ring, so a naive realloc would make the curves vanish; preserving keeps them (shorter when
+            // K drops; unchanged, then growing on resume, when K rises).
+            bool resizeInPlace = _ring != null && _boneCount == n && _ringLen != k;
+            if (resizeInPlace)
             {
-                _ring[b] = new Sample[k];
-                _head[b] = -1;
-                _count[b] = 0;
-                _prevV[b] = Vector3.zero;
-            }
-
-            // Parent-bone table: for bone (a,b), find the bone whose child joint (.b) == a.
-            // Its direction is the stable-frame reference axis; degenerate/absent -> torso-up.
-            _parentBone = new int[n];
-            for (int b = 0; b < n; b++)
-            {
-                _parentBone[b] = -1;
-                var aJoint = bones[b].a;
-                for (int p = 0; p < n; p++)
+                for (int b = 0; b < n; b++)
                 {
-                    if (p != b && bones[p].b == aJoint) { _parentBone[b] = p; break; }
+                    int copyCount = Mathf.Min(_count[b], k);
+                    var newRingB = new Sample[k];
+                    if (copyCount > 0)
+                    {
+                        int idx = _head[b] - (copyCount - 1);
+                        idx %= _ringLen;
+                        if (idx < 0) idx += _ringLen;
+                        for (int i = 0; i < copyCount; i++)
+                        {
+                            newRingB[i] = _ring[b][idx];
+                            idx++;
+                            if (idx >= _ringLen) idx = 0;
+                        }
+                    }
+                    _ring[b] = newRingB;
+                    _count[b] = copyCount;
+                    _head[b] = copyCount - 1; // newest at copyCount-1 (or -1 if empty)
+                }
+                _ringLen = k;
+            }
+            else
+            {
+                _boneCount = n;
+                _ringLen = k;
+                _ring = new Sample[n][];
+                _head = new int[n];
+                _count = new int[n];
+                _prevV = new Vector3[n];
+                _scratch = new SkeletonMerger.BoneEndpoints[n];
+                for (int b = 0; b < n; b++)
+                {
+                    _ring[b] = new Sample[k];
+                    _head[b] = -1;
+                    _count[b] = 0;
+                    _prevV[b] = Vector3.zero;
+                }
+
+                // Parent-bone table: for bone (a,b), find the bone whose child joint (.b) == a.
+                // Its direction is the stable-frame reference axis; degenerate/absent -> torso-up.
+                _parentBone = new int[n];
+                for (int b = 0; b < n; b++)
+                {
+                    _parentBone[b] = -1;
+                    var aJoint = bones[b].a;
+                    for (int p = 0; p < n; p++)
+                    {
+                        if (p != b && bones[p].b == aJoint) { _parentBone[b] = p; break; }
+                    }
                 }
             }
 
-            // GPU mirror sized to the current layout; reallocated only when boneCount/K change.
+            // GPU mirror (re)sized to the current layout.
             ReleaseGpu();
             _histScratch = new Sample[n * k];
             _countScratch = new int[n];
@@ -170,6 +202,9 @@ namespace BodyTracking
             // counts read as 0 (empty bones) instead of garbage that would drive out-of-bounds indexing.
             _countBuf.SetData(_countScratch);
             _histBuf.SetData(_histScratch);
+            // On a resize, immediately publish the preserved ring so the curves reflect the new K even
+            // while paused (the LateUpdate hold branch won't republish).
+            if (resizeInPlace) PublishGpu();
         }
 
         private void LateUpdate()
