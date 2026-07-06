@@ -698,6 +698,14 @@ namespace BodyTracking
         private void HandleRawFrame(PointCloudRenderer src, RawFrameData frame)
         {
             string serial = string.IsNullOrEmpty(src.deviceSerial) ? src.gameObject.name : src.deviceSerial;
+            // While a recording that contains this serial is being played back, the
+            // playback stream owns the worker feed. Letting the live camera enqueue
+            // too would interleave live-clock and recorded-clock timestamps in one
+            // worker, and the loop-seam guard then drops every skeleton it produces.
+            if (_subscribedRecorder != null
+                && _subscribedRecorder.CurrentState == SensorRecorder.State.Playing
+                && _subscribedRecorder.HasTrack(serial))
+                return;
             DispatchRawFrame(serial, src.CameraParam, src.transform, frame);
         }
 

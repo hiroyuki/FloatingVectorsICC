@@ -258,6 +258,17 @@ namespace PointCloud
                    && t.BodyFrames.Count > 0;
         }
 
+        /// <summary>
+        /// True when the loaded recording has a track for <paramref name="serial"/>.
+        /// Used by SkeletonMerger to keep live camera frames out of the k4abt worker
+        /// feed while that serial is being played back — mixing live and recorded
+        /// timestamps in one worker makes the loop-seam guard drop every skeleton.
+        /// </summary>
+        public bool HasTrack(string serial)
+        {
+            return !string.IsNullOrEmpty(serial) && _tracks.ContainsKey(serial);
+        }
+
         // --- Internals ---
 
         private sealed class DeviceTrack : IDisposable

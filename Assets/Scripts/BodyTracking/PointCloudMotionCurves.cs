@@ -37,11 +37,12 @@ namespace BodyTracking
 
         [Header("Seed source")]
         [Tooltip("Explicit point-cloud MeshFilters to seed from. If empty, all _Playback_* meshes " +
-                 "in the scene are used automatically (playback path).")]
+                 "and live PointCloudRenderer meshes in the scene are used automatically.")]
         public List<MeshFilter> sourceMeshes = new List<MeshFilter>();
 
         [Tooltip("When sourceMeshes is empty, auto-collect MeshFilters whose GameObject name starts " +
-                 "with this prefix each frame (the recorder's per-device playback meshes).")]
+                 "with this prefix (the recorder's per-device playback meshes) plus any live " +
+                 "PointCloudRenderer meshes, each frame.")]
         public string autoSourcePrefix = "_Playback_";
 
         [Header("Seeds / curves")]
@@ -394,12 +395,18 @@ namespace BodyTracking
                     if (IsUsableSource(mf)) _srcScratch.Add(mf);
                 return _srcScratch;
             }
-            // Auto: per-device playback meshes.
+            // Auto: per-device playback meshes (_Playback_*) plus live PointCloudRenderer
+            // meshes. The live GPU-reconstruction mesh comes from the same
+            // PointCloudReconstructor (Raw target, 24B stride, 1e10 hole dummies), so it
+            // seeds identically; CPU-mode live meshes lack the Raw target and are
+            // rejected by IsUsableSource.
             var all = FindObjectsByType<MeshFilter>(FindObjectsSortMode.None);
             foreach (var mf in all)
             {
                 if (!IsUsableSource(mf)) continue;
-                if (!string.IsNullOrEmpty(autoSourcePrefix) && !mf.gameObject.name.StartsWith(autoSourcePrefix)) continue;
+                bool prefixed = string.IsNullOrEmpty(autoSourcePrefix)
+                                || mf.gameObject.name.StartsWith(autoSourcePrefix);
+                if (!prefixed && !mf.TryGetComponent(out PointCloud.PointCloudRenderer _)) continue;
                 _srcScratch.Add(mf);
             }
             return _srcScratch;
