@@ -145,7 +145,7 @@ Transform:
   m_GameObject: {fileID: 7740001}
   serializedVersion: 2
   m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
-  m_LocalPosition: {x: -0.01, y: -0.9, z: 3.55}
+  m_LocalPosition: {x: -0.243, y: -0.91999996, z: 2.366}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -621,7 +621,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: TSDF::TSDF.TSDFVolume
   boundingBox: {fileID: 1151541767}
-  voxelSize: 0.0055
+  voxelSize: 0.0052
   tauMultiplier: 4
   accumulationMode: 1
   accumulateSmoothK: 0
@@ -1356,8 +1356,8 @@ Transform:
   m_GameObject: {fileID: 1151541766}
   serializedVersion: 2
   m_LocalRotation: {x: -0, y: 0.34070775, z: -0, w: 0.94016933}
-  m_LocalPosition: {x: -0.243, y: -0.044, z: 2.366}
-  m_LocalScale: {x: 2.49, y: 2.56, z: 3.4}
+  m_LocalPosition: {x: -0.243, y: 0.168, z: 2.366}
+  m_LocalScale: {x: 2.49, y: 2.136, z: 3.4}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 894098144}

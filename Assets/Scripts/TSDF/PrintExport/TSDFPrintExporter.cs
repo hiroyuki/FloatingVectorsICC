@@ -21,6 +21,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading.Tasks;
 using BodyTracking;
 using UnityEngine;
 
@@ -108,7 +109,8 @@ namespace TSDF
         private int _bakeKernel = -1;
         private ComputeShader _floodShader;  // Resources/TSDFFloodFill
         private int _kBuildMask = -1, _kDilate = -1, _kSeedOutside = -1, _kPropagate = -1,
-                    _kMarkFilled = -1, _kErode = -1, _kFillWrite = -1, _kCullMask = -1;
+                    _kMarkFilled = -1, _kErode = -1, _kFillWrite = -1, _kCapBoundary = -1,
+                    _kCullMask = -1;
         private ComputeShader _mcShader;     // Resources/TSDFMarchingCubes
         private int _mcKernel = -1;
 
@@ -343,6 +345,12 @@ namespace TSDF
                 _floodShader.SetBuffer(_kFillWrite, "_FillStats", fillStats);
                 volume.BindBlockMarking(_floodShader, _kFillWrite, volume.WriteBlockActive);
                 Dispatch3D(_kFillWrite, dim);
+
+                // Watertight bbox cut: cap anything crossing a boundary face (the
+                // floor crop cuts legs/trail/curves) one voxel inside.
+                _floodShader.SetBuffer(_kCapBoundary, "_VoxelsOut", volume.WriteBuffer);
+                _floodShader.SetBuffer(_kCapBoundary, "_ColorsOut", volume.WriteColorBuffer);
+                Dispatch3D(_kCapBoundary, dim);
                 volume.Publish();
 
                 var stats = new uint[2];
@@ -523,10 +531,15 @@ namespace TSDF
                     }
                     zBase += gz * 4;
                     thickness = 32;
+                    // Progress heartbeat: a long export must stay diagnosable from
+                    // Editor.log (the editor blocks while this runs).
+                    if (slabs.Count % 5 == 0)
+                        Debug.Log($"[TSDFPrintExporter] MC slab {zBase}/{cellsZ} — {totalTris} tris so far", this);
                 }
                 _mcShader.SetInt("_CellZBase", 0); // hygiene: shared shader asset state
 
                 if (totalTris == 0) { Fail("Marching Cubes produced 0 triangles — empty volume?"); return; }
+                Debug.Log($"[TSDFPrintExporter] MC done: {totalTris} tris — welding...", this);
                 WriteMeshFiles(slabs, totalTris);
             }
             finally
@@ -541,11 +554,17 @@ namespace TSDF
             // and a much smaller PLY. 0.1 mm quantisation merges the shared-edge
             // vertices adjacent cells emit (not guaranteed bitwise identical) while
             // staying far below any feature at 4-7 mm voxels.
+            var phase = System.Diagnostics.Stopwatch.StartNew();
             WeldSlabs(slabs, out var pos, out var col, out var tri);
             slabs.Clear(); // free the soup copies before smoothing allocates
+            Debug.Log($"[TSDFPrintExporter] welded to {pos.Length} verts in {phase.ElapsedMilliseconds} ms " +
+                      $"— smoothing x{smoothIterations}...", this);
 
+            phase.Restart();
             if (smoothIterations > 0)
                 TaubinSmooth(pos, tri, smoothIterations);
+            Debug.Log($"[TSDFPrintExporter] smoothing done in {phase.ElapsedMilliseconds} ms — writing files...", this);
+            phase.Restart();
 
             Vector3 min = Vector3.positiveInfinity, max = Vector3.negativeInfinity;
             foreach (var p in pos) { min = Vector3.Min(min, p); max = Vector3.Max(max, p); }
@@ -577,7 +596,12 @@ namespace TSDF
             try
             {
                 Directory.CreateDirectory(dir);
-                using (var bw = new BinaryWriter(File.Create(stlPath)))
+                // Build the whole STL in memory and write it in ONE call:
+                // ~/Documents is TCC/sync-managed on macOS and millions of small
+                // BinaryWriter writes go through it catastrophically slowly.
+                long stlBytes = 84L + 50L * written;
+                var ms = new MemoryStream((int)stlBytes);
+                using (var bw = new BinaryWriter(ms))
                 {
                     var header = new byte[80];
                     var tag = System.Text.Encoding.ASCII.GetBytes("FloatingVectorsICC print export");
@@ -598,6 +622,9 @@ namespace TSDF
                         WriteV(bw, nrm); WriteV(bw, a); WriteV(bw, b); WriteV(bw, c);
                         bw.Write((ushort)0);
                     }
+                    bw.Flush();
+                    using (var fs = File.Create(stlPath))
+                        fs.Write(ms.GetBuffer(), 0, (int)ms.Length);
                 }
 
                 string plyNote = "";
@@ -613,7 +640,8 @@ namespace TSDF
                           $"{bytes / (1024 * 1024)} MB{plyNote} -> {stlPath} " +
                           $"(height {targetHeightMm:0} mm, smooth x{smoothIterations}, " +
                           $"winding {(flip ? "flipped" : "ok")}, " +
-                          $"signedVol {(signedVol >= 0 ? "+" : "")}{signedVol:0.0000} m^3)";
+                          $"signedVol {(signedVol >= 0 ? "+" : "")}{signedVol:0.0000} m^3, " +
+                          $"write {phase.ElapsedMilliseconds} ms)";
                 Debug.Log("[TSDFPrintExporter] " + _status, this);
             }
             catch (Exception e)
@@ -675,30 +703,47 @@ namespace TSDF
 
         // Taubin λ|μ smoothing (non-shrinking): alternating positive/negative
         // uniform-Laplacian steps over the unique-edge adjacency. In-place on pos.
+        //
+        // The unique-edge set is built by sorting a primitive long[] of packed edge
+        // keys and deduping linearly. Do NOT switch this to HashSet<long>: at
+        // millions of entries it degrades to minutes inside the editor Mono
+        // (measured 397 s where the sort path takes ~1 s).
         private static void TaubinSmooth(Vector3[] pos, int[] tri, int iterations)
         {
             int n = pos.Length;
+            var phase = System.Diagnostics.Stopwatch.StartNew();
 
-            // Unique undirected edges -> CSR adjacency.
-            var edges = new HashSet<long>();
+            // All triangle edges as packed keys (min<<32|max); -1 = degenerate.
+            var keys = new long[tri.Length];
+            int kc = 0;
             for (int t = 0; t < tri.Length; t += 3)
             {
-                AddEdge(edges, tri[t], tri[t + 1]);
-                AddEdge(edges, tri[t + 1], tri[t + 2]);
-                AddEdge(edges, tri[t + 2], tri[t]);
+                keys[kc++] = EdgeKey(tri[t], tri[t + 1]);
+                keys[kc++] = EdgeKey(tri[t + 1], tri[t + 2]);
+                keys[kc++] = EdgeKey(tri[t + 2], tri[t]);
             }
+            Array.Sort(keys);
+            int e0 = 0;
+            while (e0 < keys.Length && keys[e0] < 0) e0++; // skip degenerates
+            int uniq = 0;
+            for (int i = e0; i < keys.Length; i++)
+                if (uniq == 0 || keys[i] != keys[uniq - 1]) keys[uniq++] = keys[i];
+
             var degree = new int[n];
-            foreach (long e in edges) { degree[(int)(e >> 32)]++; degree[(int)(e & 0xffffffffL)]++; }
+            for (int i = 0; i < uniq; i++)
+            { degree[(int)(keys[i] >> 32)]++; degree[(int)(keys[i] & 0xffffffffL)]++; }
             var offset = new int[n + 1];
             for (int i = 0; i < n; i++) offset[i + 1] = offset[i] + degree[i];
             var adj = new int[offset[n]];
             var cursor = (int[])offset.Clone();
-            foreach (long e in edges)
+            for (int i = 0; i < uniq; i++)
             {
-                int a = (int)(e >> 32), b = (int)(e & 0xffffffffL);
+                int a = (int)(keys[i] >> 32), b = (int)(keys[i] & 0xffffffffL);
                 adj[cursor[a]++] = b;
                 adj[cursor[b]++] = a;
             }
+            Debug.Log($"[TSDFPrintExporter] adjacency: {uniq} edges in {phase.ElapsedMilliseconds} ms");
+            phase.Restart();
 
             const float lambda = 0.5f, mu = -0.53f;
             var tmp = new Vector3[n];
@@ -707,34 +752,39 @@ namespace TSDF
             {
                 LaplacianPass(src, tmp, offset, adj, lambda);
                 LaplacianPass(tmp, src, offset, adj, mu);
+                if ((it + 1) % 5 == 0 || it + 1 == iterations)
+                    Debug.Log($"[TSDFPrintExporter] smooth {it + 1}/{iterations} ({phase.ElapsedMilliseconds} ms elapsed)");
             }
         }
 
-        private static void AddEdge(HashSet<long> edges, int a, int b)
+        private static long EdgeKey(int a, int b)
         {
-            if (a == b) return;
+            if (a == b) return -1;
             long lo = Math.Min(a, b), hi = Math.Max(a, b);
-            edges.Add((lo << 32) | hi);
+            return (lo << 32) | hi;
         }
 
+        // Reads src, writes dst — no cross-vertex write dependency, so the vertex
+        // range parallelises cleanly across cores.
         private static void LaplacianPass(Vector3[] src, Vector3[] dst, int[] offset, int[] adj, float factor)
         {
-            for (int v = 0; v < src.Length; v++)
+            Parallel.For(0, src.Length, v =>
             {
                 int a = offset[v], b = offset[v + 1];
-                if (b == a) { dst[v] = src[v]; continue; }
+                if (b == a) { dst[v] = src[v]; return; }
                 Vector3 avg = Vector3.zero;
                 for (int i = a; i < b; i++) avg += src[adj[i]];
                 avg /= (b - a);
                 dst[v] = src[v] + factor * (avg - src[v]);
-            }
+            });
         }
 
         // Binary little-endian PLY: welded vertices with averaged colours + indexed faces.
         private static void WritePly(string path, Vector3[] pos, Vector3[] col, int[] tri,
                                      int faceCount, Vector3 center, float scale, bool flip)
         {
-            using var fs = File.Create(path);
+            // Same single-write strategy as the STL (sync-managed ~/Documents).
+            var fs = new MemoryStream(pos.Length * 15 + faceCount * 13 + 512);
             string header = "ply\nformat binary_little_endian 1.0\n" +
                             $"element vertex {pos.Length}\n" +
                             "property float x\nproperty float y\nproperty float z\n" +
@@ -760,6 +810,9 @@ namespace TSDF
                 bw.Write((byte)3);
                 bw.Write(i0); bw.Write(i1); bw.Write(i2);
             }
+            bw.Flush();
+            using var file = File.Create(path);
+            file.Write(fs.GetBuffer(), 0, (int)fs.Length);
         }
 
         // ---------------- shared ----------------
@@ -798,6 +851,7 @@ namespace TSDF
             _kMarkFilled = _floodShader.FindKernel("MarkFilled");
             _kErode = _floodShader.FindKernel("Erode");
             _kFillWrite = _floodShader.FindKernel("FillWrite");
+            _kCapBoundary = _floodShader.FindKernel("CapBoundary");
             _kCullMask = _floodShader.FindKernel("CullMask");
             return true;
         }

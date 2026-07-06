@@ -32,6 +32,7 @@
 #pragma kernel MarkFilled
 #pragma kernel Erode
 #pragma kernel FillWrite
+#pragma kernel CapBoundary
 #pragma kernel CullMask
 
 int3  _Dim;
@@ -130,8 +131,10 @@ void MarkFilled(uint3 id : SV_DispatchThreadID)
     _Mask[lin] = (_Mask[lin] == 2u) ? 0u : 1u;
 }
 
-// Out-of-grid neighbours count as empty, so solid touching the grid boundary
-// erodes from that face — the sculpture should not touch the bbox anyway.
+// Out-of-grid neighbours count as SOLID: geometry deliberately cut by the bbox
+// (e.g. the floor cropped away below the feet) must keep its filled interior
+// flush to the boundary — CapBoundary then closes the cut face one voxel in.
+// Counting OOB as empty would recess every cut by k voxels.
 [numthreads(4, 4, 4)]
 void Erode(uint3 id : SV_DispatchThreadID)
 {
@@ -143,10 +146,29 @@ void Erode(uint3 id : SV_DispatchThreadID)
         [unroll] for (int n = 0; n < 6; n++)
         {
             int3 nb = v + kNb[n];
-            if (!InGrid(nb) || _MaskRead[Lin(nb)] != 1u) { m = 0u; break; }
+            if (InGrid(nb) && _MaskRead[Lin(nb)] != 1u) { m = 0u; break; }
         }
     }
     _MaskOut[Lin(v)] = m;
+}
+
+// Watertight bbox cut: any boundary-face voxel that is not already observed-
+// empty becomes observed-empty (+tau). Geometry crossing the bbox face (legs,
+// trail, curves cut by the floor crop) then iso-crosses between layer 0 and
+// layer 1 and MC emits a flat cap one voxel inside. Runs after FillWrite.
+[numthreads(4, 4, 4)]
+void CapBoundary(uint3 id : SV_DispatchThreadID)
+{
+    int3 v = int3(id);
+    if (!InGrid(v)) return;
+    bool boundary = v.x == 0 || v.y == 0 || v.z == 0 ||
+                    v.x == _Dim.x - 1 || v.y == _Dim.y - 1 || v.z == _Dim.z - 1;
+    if (!boundary) return;
+    int lin = Lin(v);
+    float2 cur = _VoxelsOut[lin];
+    if (cur.y > 0.0 && cur.x >= 0.0) return; // already observed empty
+    _VoxelsOut[lin] = float2(_Tau, 1.0);
+    _ColorsOut[lin] = float4(_FillColor, 1.0);
 }
 
 // Remove voxels flagged 1 in _MaskRead (the exporter's CPU connectivity pass
