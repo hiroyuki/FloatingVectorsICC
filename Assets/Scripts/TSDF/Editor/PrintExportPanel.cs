@@ -120,6 +120,10 @@ namespace TSDF.EditorTools
             bool ply = EditorGUILayout.ToggleLeft(
                 new GUIContent("Export Ply With Color", "フルカラー印刷サービス用の頂点色付き PLY も出力。"),
                 pe.exportPlyWithColor);
+            int smooth = EditorGUILayout.IntSlider(
+                new GUIContent("Smooth Iterations", "書き出し時の Taubin 平滑化（縮まない）。0=OFF。" +
+                    "MC の階段状ガタつきを除去する。表示中の TSDF mesh には影響しない。"),
+                pe.smoothIterations, 0, 30);
 
             if (EditorGUI.EndChangeCheck())
             {
@@ -132,6 +136,7 @@ namespace TSDF.EditorTools
                 pe.keepLargestOnly = keepLargest;
                 pe.targetHeightMm = heightMm;
                 pe.exportPlyWithColor = ply;
+                pe.smoothIterations = smooth;
                 EditorUtility.SetDirty(pe);
             }
         }

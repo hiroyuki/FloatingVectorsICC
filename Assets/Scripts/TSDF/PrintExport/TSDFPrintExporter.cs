@@ -80,6 +80,13 @@ namespace TSDF
         [Tooltip("Also write a binary PLY with per-vertex colours (full-colour print services).")]
         public bool exportPlyWithColor = false;
 
+        [Range(0, 30)]
+        [Tooltip("Taubin smoothing iterations on export (0 = off). Non-shrinking smoothing " +
+                 "that removes the Marching-Cubes staircase from tubes and surfaces; ~10 is " +
+                 "a good start. Runs on the welded mesh, purely at export — the displayed " +
+                 "TSDF mesh is untouched.")]
+        public int smoothIterations = 10;
+
         [Min(100_000)]
         [Tooltip("Triangle capacity of the per-slab MC readback buffer (72 B each).")]
         public int triangleBudgetPerSlab = 2_000_000;
@@ -530,36 +537,36 @@ namespace TSDF
 
         private void WriteMeshFiles(List<(float[] data, int tris)> slabs, long totalTris)
         {
-            // Bounds + signed volume over all triangles (positions only; layout per
-            // tri: p0 c0 p1 c1 p2 c2, 3 floats each).
+            // Weld the MC soup into an indexed mesh: adjacency for Taubin smoothing,
+            // and a much smaller PLY. 0.1 mm quantisation merges the shared-edge
+            // vertices adjacent cells emit (not guaranteed bitwise identical) while
+            // staying far below any feature at 4-7 mm voxels.
+            WeldSlabs(slabs, out var pos, out var col, out var tri);
+            slabs.Clear(); // free the soup copies before smoothing allocates
+
+            if (smoothIterations > 0)
+                TaubinSmooth(pos, tri, smoothIterations);
+
             Vector3 min = Vector3.positiveInfinity, max = Vector3.negativeInfinity;
-            foreach (var (data, tris) in slabs)
-                for (int t = 0; t < tris; t++)
-                {
-                    int o = t * 18;
-                    for (int v = 0; v < 3; v++)
-                    {
-                        int p = o + v * 6;
-                        var w = new Vector3(data[p], data[p + 1], data[p + 2]);
-                        min = Vector3.Min(min, w); max = Vector3.Max(max, w);
-                    }
-                }
+            foreach (var p in pos) { min = Vector3.Min(min, p); max = Vector3.Max(max, p); }
             Vector3 center = (min + max) * 0.5f;
             Vector3 size = max - min;
             if (size.y < 1e-4f) { Fail("degenerate mesh bounds"); return; }
 
+            // Count non-degenerate triangles (0.1 mm weld can collapse slivers) and
+            // measure the signed volume: MC emits inside = sdf < iso, so a negative
+            // volume means the winding faces inward — flip on write.
+            int triCount = tri.Length / 3;
+            int written = 0;
             double signedVol = 0;
-            foreach (var (data, tris) in slabs)
-                for (int t = 0; t < tris; t++)
-                {
-                    int o = t * 18;
-                    Vector3 a = new Vector3(data[o], data[o + 1], data[o + 2]) - center;
-                    Vector3 b = new Vector3(data[o + 6], data[o + 7], data[o + 8]) - center;
-                    Vector3 c = new Vector3(data[o + 12], data[o + 13], data[o + 14]) - center;
-                    signedVol += Vector3.Dot(a, Vector3.Cross(b, c)) / 6.0;
-                }
-            // MC emits inside = sdf < iso; a positive signed volume means the winding
-            // already faces outward. Flip everything if not.
+            for (int t = 0; t < triCount; t++)
+            {
+                int i0 = tri[t * 3], i1 = tri[t * 3 + 1], i2 = tri[t * 3 + 2];
+                if (i0 == i1 || i1 == i2 || i0 == i2) continue;
+                written++;
+                Vector3 a = pos[i0] - center, b = pos[i1] - center, c = pos[i2] - center;
+                signedVol += Vector3.Dot(a, Vector3.Cross(b, c)) / 6.0;
+            }
             bool flip = signedVol < 0;
 
             float scale = targetHeightMm / size.y; // metres -> printed mm
@@ -576,34 +583,36 @@ namespace TSDF
                     var tag = System.Text.Encoding.ASCII.GetBytes("FloatingVectorsICC print export");
                     Array.Copy(tag, header, Math.Min(tag.Length, 80));
                     bw.Write(header);
-                    bw.Write((uint)totalTris);
-                    foreach (var (data, tris) in slabs)
-                        for (int t = 0; t < tris; t++)
-                        {
-                            int o = t * 18;
-                            Vector3 a = ToPrint(data, o, center, scale);
-                            Vector3 b = ToPrint(data, o + 6, center, scale);
-                            Vector3 c = ToPrint(data, o + 12, center, scale);
-                            if (flip) (b, c) = (c, b);
-                            Vector3 nrm = Vector3.Cross(b - a, c - a);
-                            float len = nrm.magnitude;
-                            nrm = len > 1e-12f ? nrm / len : Vector3.up;
-                            WriteV(bw, nrm); WriteV(bw, a); WriteV(bw, b); WriteV(bw, c);
-                            bw.Write((ushort)0);
-                        }
+                    bw.Write((uint)written);
+                    for (int t = 0; t < triCount; t++)
+                    {
+                        int i0 = tri[t * 3], i1 = tri[t * 3 + 1], i2 = tri[t * 3 + 2];
+                        if (i0 == i1 || i1 == i2 || i0 == i2) continue;
+                        if (flip) (i1, i2) = (i2, i1);
+                        Vector3 a = (pos[i0] - center) * scale;
+                        Vector3 b = (pos[i1] - center) * scale;
+                        Vector3 c = (pos[i2] - center) * scale;
+                        Vector3 nrm = Vector3.Cross(b - a, c - a);
+                        float len = nrm.magnitude;
+                        nrm = len > 1e-12f ? nrm / len : Vector3.up;
+                        WriteV(bw, nrm); WriteV(bw, a); WriteV(bw, b); WriteV(bw, c);
+                        bw.Write((ushort)0);
+                    }
                 }
 
                 string plyNote = "";
                 if (exportPlyWithColor)
                 {
                     string plyPath = Path.Combine(dir, $"print_{stamp}.ply");
-                    WritePly(plyPath, slabs, totalTris, center, scale, flip);
+                    WritePly(plyPath, pos, col, tri, written, center, scale, flip);
                     plyNote = " + PLY";
                 }
 
                 long bytes = new FileInfo(stlPath).Length;
-                _status = $"STL: {totalTris} tris, {bytes / (1024 * 1024)} MB{plyNote} -> {stlPath} " +
-                          $"(height {targetHeightMm:0} mm, winding {(flip ? "flipped" : "ok")}, " +
+                _status = $"STL: {written} tris / {pos.Length} welded verts, " +
+                          $"{bytes / (1024 * 1024)} MB{plyNote} -> {stlPath} " +
+                          $"(height {targetHeightMm:0} mm, smooth x{smoothIterations}, " +
+                          $"winding {(flip ? "flipped" : "ok")}, " +
                           $"signedVol {(signedVol >= 0 ? "+" : "")}{signedVol:0.0000} m^3)";
                 Debug.Log("[TSDFPrintExporter] " + _status, this);
             }
@@ -613,50 +622,142 @@ namespace TSDF
             }
         }
 
-        private static Vector3 ToPrint(float[] data, int o, Vector3 center, float scale)
-            => (new Vector3(data[o], data[o + 1], data[o + 2]) - center) * scale;
-
         private static void WriteV(BinaryWriter bw, Vector3 v)
         {
             bw.Write(v.x); bw.Write(v.y); bw.Write(v.z);
         }
 
-        // Binary little-endian PLY, triangle soup (no weld) with per-vertex colour.
-        private static void WritePly(string path, List<(float[] data, int tris)> slabs, long totalTris,
-                                     Vector3 center, float scale, bool flip)
+        // Weld the per-slab triangle soup (Tri = p0 c0 p1 c1 p2 c2, 3 floats each)
+        // into unique vertices + index list. Vertex colours are averaged over all
+        // soup occurrences. Keys are positions quantised to 0.1 mm packed into a
+        // long (21 bits/axis = ±104 m range).
+        private static void WeldSlabs(List<(float[] data, int tris)> slabs,
+                                      out Vector3[] positions, out Vector3[] colors, out int[] triangles)
         {
-            using var fs = File.Create(path);
-            long vcount = totalTris * 3;
-            string header = "ply\nformat binary_little_endian 1.0\n" +
-                            $"element vertex {vcount}\n" +
-                            "property float x\nproperty float y\nproperty float z\n" +
-                            "property uchar red\nproperty uchar green\nproperty uchar blue\n" +
-                            $"element face {totalTris}\n" +
-                            "property list uchar int vertex_indices\nend_header\n";
-            var hb = System.Text.Encoding.ASCII.GetBytes(header);
-            fs.Write(hb, 0, hb.Length);
-            using var bw = new BinaryWriter(fs);
+            var map = new Dictionary<long, int>();
+            var pos = new List<Vector3>();
+            var colSum = new List<Vector3>();
+            var colCnt = new List<int>();
+            var tri = new List<int>();
+
             foreach (var (data, tris) in slabs)
                 for (int t = 0; t < tris; t++)
                 {
                     int o = t * 18;
-                    // vertex order matches the face winding below (flip handled there),
-                    // so write vertices in stored order.
                     for (int v = 0; v < 3; v++)
                     {
                         int p = o + v * 6;
-                        Vector3 w = (new Vector3(data[p], data[p + 1], data[p + 2]) - center) * scale;
-                        bw.Write(w.x); bw.Write(w.y); bw.Write(w.z);
-                        bw.Write((byte)Mathf.Clamp(Mathf.RoundToInt(data[p + 3] * 255f), 0, 255));
-                        bw.Write((byte)Mathf.Clamp(Mathf.RoundToInt(data[p + 4] * 255f), 0, 255));
-                        bw.Write((byte)Mathf.Clamp(Mathf.RoundToInt(data[p + 5] * 255f), 0, 255));
+                        var w = new Vector3(data[p], data[p + 1], data[p + 2]);
+                        long kx = (long)Math.Round(w.x * 10000.0) + 1048576;
+                        long ky = (long)Math.Round(w.y * 10000.0) + 1048576;
+                        long kz = (long)Math.Round(w.z * 10000.0) + 1048576;
+                        long key = (kx << 42) | (ky << 21) | kz;
+                        if (!map.TryGetValue(key, out int idx))
+                        {
+                            idx = pos.Count;
+                            map.Add(key, idx);
+                            pos.Add(w);
+                            colSum.Add(Vector3.zero);
+                            colCnt.Add(0);
+                        }
+                        colSum[idx] += new Vector3(data[p + 3], data[p + 4], data[p + 5]);
+                        colCnt[idx]++;
+                        tri.Add(idx);
                     }
                 }
-            for (long t = 0; t < totalTris; t++)
+
+            positions = pos.ToArray();
+            colors = new Vector3[positions.Length];
+            for (int i = 0; i < colors.Length; i++)
+                colors[i] = colCnt[i] > 0 ? colSum[i] / colCnt[i] : Vector3.one * 0.5f;
+            triangles = tri.ToArray();
+        }
+
+        // Taubin λ|μ smoothing (non-shrinking): alternating positive/negative
+        // uniform-Laplacian steps over the unique-edge adjacency. In-place on pos.
+        private static void TaubinSmooth(Vector3[] pos, int[] tri, int iterations)
+        {
+            int n = pos.Length;
+
+            // Unique undirected edges -> CSR adjacency.
+            var edges = new HashSet<long>();
+            for (int t = 0; t < tri.Length; t += 3)
             {
-                bw.Write((byte)3);
-                int i0 = (int)(t * 3), i1 = i0 + 1, i2 = i0 + 2;
+                AddEdge(edges, tri[t], tri[t + 1]);
+                AddEdge(edges, tri[t + 1], tri[t + 2]);
+                AddEdge(edges, tri[t + 2], tri[t]);
+            }
+            var degree = new int[n];
+            foreach (long e in edges) { degree[(int)(e >> 32)]++; degree[(int)(e & 0xffffffffL)]++; }
+            var offset = new int[n + 1];
+            for (int i = 0; i < n; i++) offset[i + 1] = offset[i] + degree[i];
+            var adj = new int[offset[n]];
+            var cursor = (int[])offset.Clone();
+            foreach (long e in edges)
+            {
+                int a = (int)(e >> 32), b = (int)(e & 0xffffffffL);
+                adj[cursor[a]++] = b;
+                adj[cursor[b]++] = a;
+            }
+
+            const float lambda = 0.5f, mu = -0.53f;
+            var tmp = new Vector3[n];
+            var src = pos;
+            for (int it = 0; it < iterations; it++)
+            {
+                LaplacianPass(src, tmp, offset, adj, lambda);
+                LaplacianPass(tmp, src, offset, adj, mu);
+            }
+        }
+
+        private static void AddEdge(HashSet<long> edges, int a, int b)
+        {
+            if (a == b) return;
+            long lo = Math.Min(a, b), hi = Math.Max(a, b);
+            edges.Add((lo << 32) | hi);
+        }
+
+        private static void LaplacianPass(Vector3[] src, Vector3[] dst, int[] offset, int[] adj, float factor)
+        {
+            for (int v = 0; v < src.Length; v++)
+            {
+                int a = offset[v], b = offset[v + 1];
+                if (b == a) { dst[v] = src[v]; continue; }
+                Vector3 avg = Vector3.zero;
+                for (int i = a; i < b; i++) avg += src[adj[i]];
+                avg /= (b - a);
+                dst[v] = src[v] + factor * (avg - src[v]);
+            }
+        }
+
+        // Binary little-endian PLY: welded vertices with averaged colours + indexed faces.
+        private static void WritePly(string path, Vector3[] pos, Vector3[] col, int[] tri,
+                                     int faceCount, Vector3 center, float scale, bool flip)
+        {
+            using var fs = File.Create(path);
+            string header = "ply\nformat binary_little_endian 1.0\n" +
+                            $"element vertex {pos.Length}\n" +
+                            "property float x\nproperty float y\nproperty float z\n" +
+                            "property uchar red\nproperty uchar green\nproperty uchar blue\n" +
+                            $"element face {faceCount}\n" +
+                            "property list uchar int vertex_indices\nend_header\n";
+            var hb = System.Text.Encoding.ASCII.GetBytes(header);
+            fs.Write(hb, 0, hb.Length);
+            using var bw = new BinaryWriter(fs);
+            for (int i = 0; i < pos.Length; i++)
+            {
+                Vector3 w = (pos[i] - center) * scale;
+                bw.Write(w.x); bw.Write(w.y); bw.Write(w.z);
+                bw.Write((byte)Mathf.Clamp(Mathf.RoundToInt(col[i].x * 255f), 0, 255));
+                bw.Write((byte)Mathf.Clamp(Mathf.RoundToInt(col[i].y * 255f), 0, 255));
+                bw.Write((byte)Mathf.Clamp(Mathf.RoundToInt(col[i].z * 255f), 0, 255));
+            }
+            for (int t = 0; t < tri.Length; t += 3)
+            {
+                int i0 = tri[t], i1 = tri[t + 1], i2 = tri[t + 2];
+                if (i0 == i1 || i1 == i2 || i0 == i2) continue;
                 if (flip) (i1, i2) = (i2, i1);
+                bw.Write((byte)3);
                 bw.Write(i0); bw.Write(i1); bw.Write(i2);
             }
         }
