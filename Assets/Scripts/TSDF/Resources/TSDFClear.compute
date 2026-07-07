@@ -5,6 +5,7 @@
 
 #pragma kernel Clear
 #pragma kernel ClearUint
+#pragma kernel ClearBlocks
 
 RWStructuredBuffer<float2> _Voxels;   // x = tsdf, y = weight
 int3 _Dim;                            // grid dimensions
@@ -37,4 +38,43 @@ void ClearUint(uint3 id : SV_DispatchThreadID)
     uint idx = id.y * (uint)_DispatchWidth + id.x;
     if (idx >= (uint)_UintCount) return;
     _UintBuf[idx] = _UintClearValue;
+}
+
+// Active-block clear (Phase 1b): reset ONLY the voxels in blocks the depth-basis
+// scatter touched last time this buffer was written, instead of the whole grid.
+// One thread-group per 8x8x8-voxel block, 512 threads = 1 voxel each. A group whose
+// _CBTouched flag is 0 early-outs whole (no writes), so cost is proportional to the
+// occupied region (~the person), not the 1.29e8-voxel volume. Clears both the SDF
+// (→ +tau, weight 0) and the |sdf|-min key (→ 0xFFFFFFFF), and resets the touched flag.
+// The touched set travels with the SDF/key buffer (swapped in Publish), so at batch N
+// it identifies exactly buffer's stale content from its previous use.
+RWStructuredBuffer<float2> _CBVoxels;
+RWStructuredBuffer<uint>   _CBKey;
+RWStructuredBuffer<uint>   _CBTouched;   // one uint per block; 1 = written since last clear
+int3 _CBDim;                             // voxel dims
+int3 _CBBDim;                            // block-grid dims = ceil((Dim-1)/8)
+float _CBInitTsdf;
+int _CBGroupsX;                          // group-grid width (block index = gid.y*_CBGroupsX + gid.x)
+
+[numthreads(512, 1, 1)]
+void ClearBlocks(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
+{
+    uint block = gid.y * (uint)_CBGroupsX + gid.x;
+    uint totalB = (uint)(_CBBDim.x * _CBBDim.y * _CBBDim.z);
+    if (block >= totalB) return;
+    if (_CBTouched[block] == 0u) return;   // untouched block → whole group does nothing
+
+    // 512 threads → local voxel (0..7)^3 within the block.
+    uint lx = gi & 7u, ly = (gi >> 3) & 7u, lz = (gi >> 6) & 7u;
+    uint bx = block % (uint)_CBBDim.x;
+    uint by = (block / (uint)_CBBDim.x) % (uint)_CBBDim.y;
+    uint bz = block / (uint)(_CBBDim.x * _CBBDim.y);
+    uint vx = bx * 8u + lx, vy = by * 8u + ly, vz = bz * 8u + lz;
+    if (vx < (uint)_CBDim.x && vy < (uint)_CBDim.y && vz < (uint)_CBDim.z)
+    {
+        uint lin = vx + (uint)_CBDim.x * (vy + (uint)_CBDim.y * vz);
+        _CBVoxels[lin] = float2(_CBInitTsdf, 0.0);
+        _CBKey[lin] = 0xFFFFFFFFu;
+    }
+    if (gi == 0u) _CBTouched[block] = 0u;   // reset for the next accumulation
 }

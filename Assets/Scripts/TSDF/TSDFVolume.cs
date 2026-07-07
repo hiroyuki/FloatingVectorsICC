@@ -156,7 +156,10 @@ namespace TSDF
                 if (_baA != null) b += (long)_baA.count * sizeof(uint);
                 if (_baB != null) b += (long)_baB.count * sizeof(uint);
                 if (_baInst != null) b += (long)_baInst.count * sizeof(uint);
-                if (_keyBuf != null) b += (long)_keyBuf.count * sizeof(uint);
+                if (_keyA != null) b += (long)_keyA.count * sizeof(uint);
+                if (_keyB != null) b += (long)_keyB.count * sizeof(uint);
+                if (_touchA != null) b += (long)_touchA.count * sizeof(uint);
+                if (_touchB != null) b += (long)_touchB.count * sizeof(uint);
                 return b;
             }
         }
@@ -218,11 +221,19 @@ namespace TSDF
         private ComputeShader _foldShader;
         private int _foldKernel;
 
-        // Depth-basis integration scratch (option ④): per-voxel packed |sdf|-min key
-        // for the 2-pass InterlockedMin scatter. Single (not double) buffered — it is
-        // cleared to 0xFFFFFFFF and fully consumed within one batch's write, before
-        // Publish. Sized to the write buffer; allocated lazily on first ClearWriteKey.
-        private ComputeBuffer _keyBuf;
+        // Depth-basis integration scratch (option ④): per-voxel packed |sdf|-min key for
+        // the 2-pass InterlockedMin scatter, DOUBLE buffered so it swaps with the SDF
+        // buffer in Publish. That lets ONE touched-block set (also swapped) identify each
+        // physical buffer's stale region for the Phase-1b active-block clear. Allocated
+        // lazily on first depth batch; both init to 0xFFFFFFFF. _keyB is null pre-alloc.
+        private ComputeBuffer _keyA;
+        private ComputeBuffer _keyB;
+        // Per-block "written since last clear" set (Phase 1b), one uint per block, paired
+        // and swapped with the SDF/key buffers. ScatterMin marks it; ClearBlocks clears
+        // the marked blocks' voxels + keys and resets the flags.
+        private ComputeBuffer _touchA;
+        private ComputeBuffer _touchB;
+        private int _clearBlocksKernel = -1;
 
         // Front->Write copy (sdf + colour) for TSDFTrailBaker's fuse-into-displayed-body.
         private ComputeShader _copyShader;
@@ -235,10 +246,17 @@ namespace TSDF
         /// <summary>Per-instant colour scratch, parallel to <see cref="InstanceBuffer"/>.</summary>
         public ComputeBuffer InstanceColorBuffer => _instColor;
 
-        /// <summary>Depth-basis 2-pass scatter key buffer (packed |sdf|-min per voxel).
-        /// Bind the ScatterMin/ScatterWrite kernels here. Null until the first
-        /// <see cref="ClearWriteKey"/>. Sized to the current grid, single-buffered.</summary>
-        public ComputeBuffer WriteKeyBuffer => _keyBuf;
+        /// <summary>Depth-basis 2-pass scatter key buffer (packed |sdf|-min per voxel) for
+        /// the HIDDEN write buffer. Bind the ScatterMin/ScatterWrite kernels here. Null
+        /// until the first depth batch allocates it. Swaps with the SDF buffer in Publish.</summary>
+        public ComputeBuffer WriteKeyBuffer { get; private set; }
+        private ComputeBuffer FrontKeyBuffer { get; set; }
+
+        /// <summary>Per-block touched set for the write buffer (Phase 1b active-block clear).
+        /// ScatterMin marks it; <see cref="ClearWriteActiveBlocks"/> consumes + resets it.
+        /// Swaps with the write buffer in Publish. Null until the first depth batch.</summary>
+        public ComputeBuffer WriteTouched { get; private set; }
+        private ComputeBuffer FrontTouched { get; set; }
 
         // Track the bbox transform values we last built the grid from so we
         // can rebuild lazily when the user edits the bbox or voxel size.
@@ -499,6 +517,13 @@ namespace TSDF
                 var tmpB = FrontBlockActive;
                 FrontBlockActive = WriteBlockActive;
                 WriteBlockActive = tmpB;
+                // Depth-basis key + touched sets (Phase 1b) travel with their SDF buffer, so
+                // the touched set keeps identifying the physical buffer's own stale region.
+                if (WriteKeyBuffer != null)
+                {
+                    var tmpK = FrontKeyBuffer; FrontKeyBuffer = WriteKeyBuffer; WriteKeyBuffer = tmpK;
+                    var tmpT = FrontTouched; FrontTouched = WriteTouched; WriteTouched = tmpT;
+                }
             }
             PublishVersion++;
         }
@@ -631,6 +656,7 @@ namespace TSDF
             }
             _clearKernel = _clearShader.FindKernel("Clear");
             _clearUintKernel = _clearShader.FindKernel("ClearUint");
+            _clearBlocksKernel = _clearShader.FindKernel("ClearBlocks");
         }
 
         /// <summary>Zero a uint occupancy buffer (block-active set) via the ClearUint
@@ -652,29 +678,93 @@ namespace TSDF
             _clearShader.Dispatch(_clearUintKernel, gx, gy, 1);
         }
 
-        /// <summary>Depth-basis (option ④): (re)allocate the per-voxel key buffer to the
-        /// current grid and clear it to 0xFFFFFFFF (= "no observation yet, farthest
-        /// possible |sdf|"), so the batch's InterlockedMin scatter starts fresh.</summary>
-        public void ClearWriteKey()
+        /// <summary>Depth-basis (option ④, Phase 1b): (re)allocate the double-buffered key +
+        /// touched-block sets to the current grid, pairing them with the current front/write
+        /// SDF buffers so they swap in lockstep. Keys init to 0xFFFFFFFF, touched to 0.</summary>
+        private void EnsureDepthBuffers()
         {
             int total = Dim.x * Dim.y * Dim.z;
+            int blocks = Mathf.Max(1, BlockDim.x * BlockDim.y * BlockDim.z);
             if (total <= 0) return;
-            if (_keyBuf == null || _keyBuf.count != total)
-            {
-                _keyBuf?.Release();
-                _keyBuf = new ComputeBuffer(total, sizeof(uint));
-            }
+            bool realloc = _keyA == null || _keyA.count != total
+                           || _touchA == null || _touchA.count != blocks
+                           || (doubleBuffered && (_keyB == null || _touchB == null));
+            if (!realloc) return;
+
+            _keyA?.Release(); _keyB?.Release(); _touchA?.Release(); _touchB?.Release();
+            _keyA = new ComputeBuffer(total, sizeof(uint));
+            _keyB = doubleBuffered ? new ComputeBuffer(total, sizeof(uint)) : null;
+            _touchA = new ComputeBuffer(blocks, sizeof(uint));
+            _touchB = doubleBuffered ? new ComputeBuffer(blocks, sizeof(uint)) : null;
+            FullClearKey(_keyA); if (_keyB != null) FullClearKey(_keyB);
+            ClearBlockActive(_touchA); if (_touchB != null) ClearBlockActive(_touchB);
+
+            // Pair with the current front/write SDF pairing so lockstep swaps preserve
+            // "each key/touched travels with its physical SDF buffer".
+            bool frontIsA = ReferenceEquals(FrontBuffer, _bufA);
+            FrontKeyBuffer = (doubleBuffered && !frontIsA) ? _keyB : _keyA;
+            WriteKeyBuffer = doubleBuffered ? (frontIsA ? _keyB : _keyA) : _keyA;
+            FrontTouched = (doubleBuffered && !frontIsA) ? _touchB : _touchA;
+            WriteTouched = doubleBuffered ? (frontIsA ? _touchB : _touchA) : _touchA;
+        }
+
+        /// <summary>Full-clear a key buffer to 0xFFFFFFFF (empty / farthest |sdf|).</summary>
+        private void FullClearKey(ComputeBuffer buf)
+        {
+            if (buf == null) return;
             if (_clearShader == null) EnsureClearShader();
             if (_clearShader == null) return;
-
-            int groups = Mathf.CeilToInt(total / 64f);
+            int count = buf.count;
+            int groups = Mathf.CeilToInt(count / 64f);
             int gx = Mathf.Max(1, Mathf.Min(groups, 65535));
             int gy = Mathf.Max(1, Mathf.CeilToInt(groups / (float)gx));
-            _clearShader.SetBuffer(_clearUintKernel, "_UintBuf", _keyBuf);
-            _clearShader.SetInt("_UintCount", total);
+            _clearShader.SetBuffer(_clearUintKernel, "_UintBuf", buf);
+            _clearShader.SetInt("_UintCount", count);
             _clearShader.SetInt("_UintClearValue", unchecked((int)0xFFFFFFFF));
             _clearShader.SetInt("_DispatchWidth", gx * 64);
             _clearShader.Dispatch(_clearUintKernel, gx, gy, 1);
+        }
+
+        /// <summary>Depth-basis (option ④, Phase 1b): clear ONLY the blocks the scatter
+        /// touched last time the write buffer was used — reset those voxels' SDF (→ +tau, 0)
+        /// and key (→ 0xFFFFFFFF) and the touched flags — instead of the whole grid. The
+        /// tiny MC occupancy set is still fully zeroed (cheap). Replaces the per-batch
+        /// full-grid ClearWrite + key clear (~2 ms/batch → surface-proportional).</summary>
+        public void ClearWriteActiveBlocks()
+        {
+            EnsureDepthBuffers();
+            if (_clearShader == null) EnsureClearShader();
+            if (_clearShader == null || WriteBuffer == null || WriteKeyBuffer == null || WriteTouched == null) return;
+
+            int totalB = Mathf.Max(1, BlockDim.x * BlockDim.y * BlockDim.z);
+            int gx = Mathf.Max(1, Mathf.Min(totalB, 65535));
+            int gy = Mathf.Max(1, Mathf.CeilToInt(totalB / (float)gx));
+            _clearShader.SetBuffer(_clearBlocksKernel, "_CBVoxels", WriteBuffer);
+            _clearShader.SetBuffer(_clearBlocksKernel, "_CBKey", WriteKeyBuffer);
+            _clearShader.SetBuffer(_clearBlocksKernel, "_CBTouched", WriteTouched);
+            _clearShader.SetInts("_CBDim", Dim.x, Dim.y, Dim.z);
+            _clearShader.SetInts("_CBBDim", BlockDim.x, BlockDim.y, BlockDim.z);
+            _clearShader.SetFloat("_CBInitTsdf", Tau);
+            _clearShader.SetInt("_CBGroupsX", gx);
+            _clearShader.Dispatch(_clearBlocksKernel, gx, gy, 1);
+
+            // MC occupancy set is marked one-sided during scatter and is tiny → full zero.
+            ClearBlockActive(WriteBlockActive);
+        }
+
+        /// <summary>Full reset to the clean base state the active-block-clear invariant needs
+        /// (both SDF buffers → +tau/0, both keys → 0xFFFFFFFF, both touched + MC sets → 0).
+        /// Call when switching INTO the depth-basis path — the voxel-basis kernel writes
+        /// voxels without marking the touched set, so its residue would not be cleared by the
+        /// surface-proportional clear and would ghost. Full-grid, but only on the toggle.</summary>
+        public void ResetForDepthBasis()
+        {
+            EnsureDepthBuffers();
+            ClearBuffer(_bufA); if (_bufB != null) ClearBuffer(_bufB);
+            FullClearKey(_keyA); if (_keyB != null) FullClearKey(_keyB);
+            ClearBlockActive(_touchA); if (_touchB != null) ClearBlockActive(_touchB);
+            ClearBlockActive(_baA); if (_baB != null) ClearBlockActive(_baB);
+            PublishVersion++;
         }
 
         /// <summary>Zero ONLY the write buffer's occupancy set, without touching the
@@ -823,8 +913,18 @@ namespace TSDF
             _instColor?.Release();
             _instSdf = null;
             _instColor = null;
-            _keyBuf?.Release();
-            _keyBuf = null;
+            _keyA?.Release();
+            _keyB?.Release();
+            _touchA?.Release();
+            _touchB?.Release();
+            _keyA = null;
+            _keyB = null;
+            _touchA = null;
+            _touchB = null;
+            WriteKeyBuffer = null;
+            FrontKeyBuffer = null;
+            WriteTouched = null;
+            FrontTouched = null;
             _ccLabel?.Release();
             _ccSize?.Release();
             _ccChanged?.Release();

@@ -394,15 +394,18 @@ namespace TSDF
                 _warnedDepthFallback = true;
             }
 
-            // On any transition between the two paths, drop the shared in-flight batch and
-            // clear the write buffer so neither path inherits the other's stale batch state
-            // (a full _batchSerials that would trip RunDepthBatch with buffered cams, or an
-            // uncleared write buffer the voxel path expects to wipe at batch start).
+            // On any transition between the two paths, drop the shared in-flight batch so
+            // neither path inherits the other's stale batch state. Entering depth-basis also
+            // needs a FULL reset (both SDF buffers + keys + touched): the voxel path writes
+            // voxels without marking the touched set, so its residue would survive the
+            // surface-proportional active-block clear and ghost. Leaving depth-basis just
+            // needs the voxel path's usual write-buffer wipe.
             int depthFlag = depthActive ? 1 : 0;
             if (_depthPathActive != depthFlag)
             {
                 _batchSerials.Clear();
-                volume.ClearWrite();
+                if (depthActive) volume.ResetForDepthBasis();
+                else volume.ClearWrite();
                 _depthPathActive = depthFlag;
                 if (depthActive) _warnedDepthFallback = false; // re-warn if it falls back again later
             }
@@ -662,8 +665,11 @@ namespace TSDF
         // then publish the completed snapshot.
         private void RunDepthBatch()
         {
-            volume.ClearWrite();        // sdf=+tau, weight=0, WriteBlockActive zeroed
-            volume.ClearWriteKey();     // _VoxelKey = 0xFFFFFFFF
+            // Phase 1b: surface-proportional clear — reset only the blocks the previous use
+            // of this write buffer touched (SDF → +tau/0, key → 0xFFFFFFFF), not the whole
+            // grid. Replaces the ~2 ms/batch full-grid ClearWrite + key clear (measured
+            // −1.9 ms/frame, +10 fps).
+            volume.ClearWriteActiveBlocks();
 
             // Volume-level uniforms (global scalars, shared by both kernels).
             _depthShader.SetInts("_Dim", volume.Dim.x, volume.Dim.y, volume.Dim.z);
@@ -705,6 +711,7 @@ namespace TSDF
             _depthShader.SetBuffer(kernel, "_Voxels", volume.WriteBuffer);
             _depthShader.SetBuffer(kernel, "_Colors", volume.WriteColorBuffer);
             _depthShader.SetBuffer(kernel, "_VoxelKey", volume.WriteKeyBuffer);
+            _depthShader.SetBuffer(kernel, "_Touched", volume.WriteTouched);
             volume.BindBlockMarking(_depthShader, kernel, volume.WriteBlockActive);
 
             _depthShader.SetBuffer(kernel, "_Depth", st.DepthBuf);
