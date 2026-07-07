@@ -299,9 +299,7 @@ namespace TSDF
         {
             var dim = volume.Dim;
             int total = dim.x * dim.y * dim.z;
-            DispatchGrid(total, out int gx, out int gy);
             _bakeShader.SetInts("_Dim", dim.x, dim.y, dim.z);
-            _bakeShader.SetInt("_DispatchWidth", gx * 64);
             _bakeShader.SetFloat("_Tau", volume.Tau);
             _bakeShader.SetMatrix("_WorldFromVoxel", volume.WorldFromVoxel);
             _bakeShader.SetBuffer(_bakeKernel, "_Segs", segs);
@@ -313,7 +311,7 @@ namespace TSDF
             {
                 _bakeShader.SetInt("_SegOffset", off);
                 _bakeShader.SetInt("_SegCount", Mathf.Min(bakeBatchSize, segCount - off));
-                _bakeShader.Dispatch(_bakeKernel, Mathf.Max(1, gx), Mathf.Max(1, gy), 1);
+                TSDFComputeUtil.DispatchLinear(_bakeShader, _bakeKernel, total);
             }
         }
 
@@ -1180,8 +1178,8 @@ namespace TSDF
         private bool EnsureBakeShader()
         {
             if (_bakeShader != null && _bakeKernel >= 0) return true;
-            _bakeShader = Resources.Load<ComputeShader>("TSDFTrailBake");
-            if (_bakeShader == null) { Fail("Resources/TSDFTrailBake.compute not found"); return false; }
+            if (!TSDFComputeUtil.TryLoad(ref _bakeShader, "TSDFTrailBake", "TSDFPrintExporter", this))
+            { Fail("Resources/TSDFTrailBake.compute not found"); return false; }
             _bakeKernel = _bakeShader.FindKernel("BakeTrail");
             return _bakeKernel >= 0;
         }
@@ -1189,8 +1187,8 @@ namespace TSDF
         private bool EnsureFloodShader()
         {
             if (_floodShader != null && _kFillWrite >= 0) return true;
-            _floodShader = Resources.Load<ComputeShader>("TSDFFloodFill");
-            if (_floodShader == null) { Fail("Resources/TSDFFloodFill.compute not found"); return false; }
+            if (!TSDFComputeUtil.TryLoad(ref _floodShader, "TSDFFloodFill", "TSDFPrintExporter", this))
+            { Fail("Resources/TSDFFloodFill.compute not found"); return false; }
             _kBuildMask = _floodShader.FindKernel("BuildMask");
             _kDilate = _floodShader.FindKernel("Dilate");
             _kSeedOutside = _floodShader.FindKernel("SeedOutside");
@@ -1206,8 +1204,8 @@ namespace TSDF
         private bool EnsureMcShader()
         {
             if (_mcShader != null && _mcKernel >= 0) return true;
-            _mcShader = Resources.Load<ComputeShader>("TSDFMarchingCubes");
-            if (_mcShader == null) { Fail("Resources/TSDFMarchingCubes.compute not found"); return false; }
+            if (!TSDFComputeUtil.TryLoad(ref _mcShader, "TSDFMarchingCubes", "TSDFPrintExporter", this))
+            { Fail("Resources/TSDFMarchingCubes.compute not found"); return false; }
             _mcKernel = _mcShader.FindKernel("MarchCubes");
             return _mcKernel >= 0;
         }
@@ -1218,13 +1216,6 @@ namespace TSDF
                 Mathf.Max(1, Mathf.CeilToInt(dim.x / 4f)),
                 Mathf.Max(1, Mathf.CeilToInt(dim.y / 4f)),
                 Mathf.Max(1, Mathf.CeilToInt(dim.z / 4f)));
-        }
-
-        private static void DispatchGrid(int total, out int gx, out int gy)
-        {
-            int groups = Mathf.CeilToInt(total / 64f);
-            gx = Mathf.Max(1, Mathf.Min(groups, 65535));
-            gy = Mathf.Max(1, Mathf.CeilToInt(groups / (float)gx));
         }
     }
 }

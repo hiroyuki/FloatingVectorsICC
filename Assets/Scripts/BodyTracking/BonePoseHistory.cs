@@ -391,6 +391,23 @@ namespace BodyTracking
             }
         }
 
+        // Ring index of the oldest of a bone's newest <count> samples: head - (count-1), wrapped.
+        private int OldestIndex(int bone, int count)
+        {
+            int idx = _head[bone] - (count - 1);
+            idx %= _ringLen;
+            if (idx < 0) idx += _ringLen;
+            return idx;
+        }
+
+        // Advance a ring index by one, wrapping at K.
+        private int NextIndex(int idx)
+        {
+            idx++;
+            if (idx >= _ringLen) idx = 0;
+            return idx;
+        }
+
         // Mirror the CPU ring to the GPU: per bone, copy its valid samples oldest->newest into the
         // contiguous [bone*K ..] slice and record the count. Called every LateUpdate (including reset
         // frames, so the compute sees empty bones as count 0 rather than stale data).
@@ -403,14 +420,11 @@ namespace BodyTracking
                 _countScratch[b] = cnt;
                 if (cnt == 0) continue;
                 int baseIdx = b * _ringLen;
-                int idx = _head[b] - (cnt - 1);
-                idx %= _ringLen;
-                if (idx < 0) idx += _ringLen;
+                int idx = OldestIndex(b, cnt);
                 for (int i = 0; i < cnt; i++)
                 {
                     _histScratch[baseIdx + i] = _ring[b][idx];
-                    idx++;
-                    if (idx >= _ringLen) idx = 0;
+                    idx = NextIndex(idx);
                 }
             }
             _histBuf.SetData(_histScratch);
@@ -426,16 +440,13 @@ namespace BodyTracking
             if (_ring == null || bone < 0 || bone >= _boneCount || dst == null) return 0;
             int count = Mathf.Min(_count[bone], dst.Length);
             if (count == 0) return 0;
-            // Walk oldest -> newest. Oldest index = head - (count-1) wrapped.
-            int idx = _head[bone] - (count - 1);
-            idx %= _ringLen;
-            if (idx < 0) idx += _ringLen;
+            // Walk oldest -> newest.
+            int idx = OldestIndex(bone, count);
             for (int i = 0; i < count; i++)
             {
                 Sample s = _ring[bone][idx];
                 dst[i] = Vector3.LerpUnclamped(s.A, s.B, t) + cv * s.V + cw * s.W;
-                idx++;
-                if (idx >= _ringLen) idx = 0;
+                idx = NextIndex(idx);
             }
             return count;
         }

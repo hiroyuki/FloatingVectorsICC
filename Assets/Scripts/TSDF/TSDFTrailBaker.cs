@@ -24,6 +24,7 @@
 
 using System.Collections.Generic;
 using BodyTracking;
+using Shared;
 using UnityEngine;
 
 namespace TSDF
@@ -207,14 +208,12 @@ namespace TSDF
             IsCapturing = false;
             _intervalGated = false;
             UnsubscribeFuse();
-            _segBuf?.Release();
-            _segBuf = null;
+            GpuBuf.Release(ref _segBuf);
         }
 
         private void OnDestroy()
         {
-            _segBuf?.Release();
-            _segBuf = null;
+            GpuBuf.Release(ref _segBuf);
         }
 
         private void Update()
@@ -547,9 +546,7 @@ namespace TSDF
             if (clearWrite) volume.ClearWrite();
 
             int total = dim.x * dim.y * dim.z;
-            DispatchGrid(total, out int gx, out int gy);
             _shader.SetInts("_Dim", dim.x, dim.y, dim.z);
-            _shader.SetInt("_DispatchWidth", gx * 64);
             _shader.SetFloat("_Tau", volume.Tau);
             _shader.SetMatrix("_WorldFromVoxel", volume.WorldFromVoxel);
             _shader.SetBuffer(_kernel, "_Segs", _segBuf);
@@ -565,7 +562,7 @@ namespace TSDF
                 int count = Mathf.Min(batchSize, _segScratch.Count - off);
                 _shader.SetInt("_SegOffset", off);
                 _shader.SetInt("_SegCount", count);
-                _shader.Dispatch(_kernel, Mathf.Max(1, gx), Mathf.Max(1, gy), 1);
+                TSDFComputeUtil.DispatchLinear(_shader, _kernel, total);
                 batches++;
             }
 
@@ -659,8 +656,7 @@ namespace TSDF
         private bool EnsureShader()
         {
             if (_shader != null && _kernel >= 0 && _boxKernel >= 0) return true;
-            if (_shader == null) _shader = Resources.Load<ComputeShader>("TSDFTrailBake");
-            if (_shader == null) return false;
+            if (!TSDFComputeUtil.TryLoad(ref _shader, "TSDFTrailBake", "TSDFTrailBaker", this)) return false;
             if (_kernel < 0) _kernel = _shader.FindKernel("BakeTrail");
             if (_boxKernel < 0) _boxKernel = _shader.FindKernel("BakeTrailBox");
             return _kernel >= 0 && _boxKernel >= 0;

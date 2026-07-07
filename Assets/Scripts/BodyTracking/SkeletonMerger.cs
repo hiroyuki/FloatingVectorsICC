@@ -812,10 +812,7 @@ namespace BodyTracking
             var e = cameraParam.Value.Transform;
             if (e.Rot == null || e.Rot.Length < 9 || e.Trans == null || e.Trans.Length < 3) return;
 
-            var m = Matrix4x4.identity;
-            m.SetRow(0, new Vector4(e.Rot[0], e.Rot[1], e.Rot[2], e.Trans[0]));
-            m.SetRow(1, new Vector4(e.Rot[3], e.Rot[4], e.Rot[5], e.Trans[1]));
-            m.SetRow(2, new Vector4(e.Rot[6], e.Rot[7], e.Rot[8], e.Trans[2]));
+            var m = e.ToMatrixMm();
             slot.DepthToColorMm = m;
 
             // Rotation part (unit scale) with the S=diag(1,-1,1) basis change baked in.
@@ -866,10 +863,7 @@ namespace BodyTracking
 
             int n = Mathf.Min(count, slot.Bodies.Length);
             for (int i = 0; i < n; i++)
-            {
-                slot.Bodies[i].Id = bodies[i].Id;
-                System.Array.Copy(bodies[i].Joints, slot.Bodies[i].Joints, slot.Bodies[i].Joints.Length);
-            }
+                slot.Bodies[i].CopyFrom(bodies[i]);
             slot.BodyCount = n;
             slot.CapturedAtRealtime = Time.realtimeSinceStartup;
             slot.CapturedTsNs = tsNs;
@@ -1446,15 +1440,9 @@ namespace BodyTracking
 
             // Encode merged world position as synthetic camera-local mm so the
             // BodyVisual.UpdateFromSkeleton path (which calls K4AmmToUnity) ends up
-            // placing the joint at the desired world position. K4AmmToUnity is
-            //   (x, y, z) mm → (x*0.001, -y*0.001, z*0.001) m
-            // so we invert: jointMm = (worldX*1000, -worldY*1000, worldZ*1000).
-            outJoint.Position = new k4a_float3_t
-            {
-                X = mergedPosWorld.x * 1000f,
-                Y = -mergedPosWorld.y * 1000f,
-                Z = mergedPosWorld.z * 1000f,
-            };
+            // placing the joint at the desired world position — UnityToK4Amm is
+            // the exact inverse.
+            outJoint.Position = BodyTrackingShared.UnityToK4Amm(mergedPosWorld);
             // Orientation isn't read by BodyVisual today, but keep the merged
             // value populated so downstream consumers (motion line, future IK)
             // see something sensible.
@@ -1620,12 +1608,9 @@ namespace BodyTracking
                 Vector3 worldPos = SkeletonWorldTransform.ToWorld(jt.Position, depthToColor, rendererT);
                 output.Joints[j] = new k4abt_joint_t
                 {
-                    Position = new k4a_float3_t
-                    {
-                        X = worldPos.x * 1000f,
-                        Y = -worldPos.y * 1000f,
-                        Z = worldPos.z * 1000f,
-                    },
+                    // Synthetic camera-local mm encoding (inverse of K4AmmToUnity),
+                    // same trick as MergeJoint above.
+                    Position = BodyTrackingShared.UnityToK4Amm(worldPos),
                     Orientation = jt.Orientation,
                     ConfidenceLevel = jt.ConfidenceLevel,
                 };

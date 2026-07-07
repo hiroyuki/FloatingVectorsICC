@@ -7,11 +7,9 @@ namespace Orbbec
     /// (e.g. "PointCloudFilter", "Align", "FormatConverter"); see
     /// libobsensor/hpp/Filter.hpp for the full registry.
     /// </summary>
-    public sealed class OrbbecFilter : IDisposable
+    public sealed class OrbbecFilter : OrbbecHandle
     {
-        internal IntPtr Handle { get; private set; }
         public string Name { get; }
-        private bool _disposed;
 
         public OrbbecFilter(string name)
         {
@@ -50,23 +48,7 @@ namespace Orbbec
             return outHandle == IntPtr.Zero ? null : new OrbbecFrame(outHandle);
         }
 
-        public void Dispose()
-        {
-            if (_disposed) return;
-            _disposed = true;
-            if (Handle != IntPtr.Zero)
-            {
-                OrbbecNative.ob_delete_filter(Handle, out _);
-                Handle = IntPtr.Zero;
-            }
-            GC.SuppressFinalize(this);
-        }
-
-        ~OrbbecFilter() => Dispose();
-
-        private void ThrowIfDisposed()
-        {
-            if (_disposed) throw new ObjectDisposedException(nameof(OrbbecFilter));
-        }
+        protected override void ReleaseHandle(IntPtr handle) =>
+            OrbbecNative.ob_delete_filter(handle, out _);
     }
 }

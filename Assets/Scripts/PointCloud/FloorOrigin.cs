@@ -419,17 +419,17 @@ namespace PointCloud
         {
             if (_gridMesh != null)
             {
-                if (Application.isPlaying) Destroy(_gridMesh); else DestroyImmediate(_gridMesh);
+                PointCloudUtil.DestroySafe(_gridMesh);
                 _gridMesh = null;
             }
             if (_gridMaterial != null)
             {
-                if (Application.isPlaying) Destroy(_gridMaterial); else DestroyImmediate(_gridMaterial);
+                PointCloudUtil.DestroySafe(_gridMaterial);
                 _gridMaterial = null;
             }
             if (_shadowMaterial != null)
             {
-                if (Application.isPlaying) Destroy(_shadowMaterial); else DestroyImmediate(_shadowMaterial);
+                PointCloudUtil.DestroySafe(_shadowMaterial);
                 _shadowMaterial = null;
             }
             _builtCells = -1;

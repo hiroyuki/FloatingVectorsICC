@@ -4,7 +4,8 @@
     "references": [
         "BodyTracking",
         "PointCloud",
-        "Orbbec"
+        "Orbbec",
+        "Shared.Editor"
     ],
     "includePlatforms": [
         "Editor"

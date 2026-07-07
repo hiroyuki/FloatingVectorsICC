@@ -113,7 +113,7 @@ namespace PointCloud
                 foreach (var cam in _expected)
                 {
                     var r = FindRenderer(renderers, cam.Serial);
-                    string name = $"{cam.Label} ({ShortSerial(cam.Serial)})";
+                    string name = $"{cam.Label} ({PointCloudUtil.TailSerial(cam.Serial, 2)})";
                     if (r == null)
                     {
                         _alerts.Add($"カメラ {name} が異常です。接続を確認してください。（未検出）");
@@ -133,7 +133,7 @@ namespace PointCloud
                 {
                     var r = renderers[i];
                     if (r == null) continue;
-                    CheckStreaming(r, ShortSerial(r.deviceSerial));
+                    CheckStreaming(r, PointCloudUtil.TailSerial(r.deviceSerial, 2));
                 }
             }
 
@@ -206,11 +206,6 @@ namespace PointCloud
                 Debug.LogWarning($"[{nameof(CameraHealthMonitor)}] cameras.yaml read failed: {e.Message}", this);
             }
         }
-
-        // Serials only differ in the tail (CL8F253004N → 4N); the last two chars
-        // are enough to identify a camera on the alert banner.
-        private static string ShortSerial(string serial) =>
-            string.IsNullOrEmpty(serial) || serial.Length <= 2 ? serial : serial.Substring(serial.Length - 2);
 
         private static PointCloudRenderer FindRenderer(IReadOnlyList<PointCloudRenderer> renderers, string serial)
         {

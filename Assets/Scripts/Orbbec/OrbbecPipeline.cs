@@ -3,10 +3,8 @@ using System;
 namespace Orbbec
 {
     /// <summary>IDisposable wrapper around ob_pipeline.</summary>
-    public sealed class OrbbecPipeline : IDisposable
+    public sealed class OrbbecPipeline : OrbbecHandle
     {
-        internal IntPtr Handle { get; private set; }
-        private bool _disposed;
         private bool _started;
 
         internal OrbbecPipeline(OrbbecDevice device)
@@ -68,37 +66,22 @@ namespace Orbbec
             return frameHandle == IntPtr.Zero ? null : new OrbbecFrame(frameHandle);
         }
 
-        public void Dispose()
+        protected override void OnBeforeRelease()
         {
-            if (_disposed) return;
-            _disposed = true;
-            if (Handle != IntPtr.Zero)
+            if (_started)
             {
-                if (_started)
-                {
-                    OrbbecNative.ob_pipeline_stop(Handle, out _);
-                    _started = false;
-                }
-                OrbbecNative.ob_delete_pipeline(Handle, out _);
-                Handle = IntPtr.Zero;
+                OrbbecNative.ob_pipeline_stop(Handle, out _);
+                _started = false;
             }
-            GC.SuppressFinalize(this);
         }
 
-        ~OrbbecPipeline() => Dispose();
-
-        private void ThrowIfDisposed()
-        {
-            if (_disposed) throw new ObjectDisposedException(nameof(OrbbecPipeline));
-        }
+        protected override void ReleaseHandle(IntPtr handle) =>
+            OrbbecNative.ob_delete_pipeline(handle, out _);
     }
 
     /// <summary>IDisposable wrapper around ob_config.</summary>
-    public sealed class OrbbecConfig : IDisposable
+    public sealed class OrbbecConfig : OrbbecHandle
     {
-        internal IntPtr Handle { get; private set; }
-        private bool _disposed;
-
         public OrbbecConfig()
         {
             Handle = OrbbecNative.ob_create_config(out var err);
@@ -129,23 +112,7 @@ namespace Orbbec
             OrbbecException.ThrowIfNotEmpty(err);
         }
 
-        public void Dispose()
-        {
-            if (_disposed) return;
-            _disposed = true;
-            if (Handle != IntPtr.Zero)
-            {
-                OrbbecNative.ob_delete_config(Handle, out _);
-                Handle = IntPtr.Zero;
-            }
-            GC.SuppressFinalize(this);
-        }
-
-        ~OrbbecConfig() => Dispose();
-
-        private void ThrowIfDisposed()
-        {
-            if (_disposed) throw new ObjectDisposedException(nameof(OrbbecConfig));
-        }
+        protected override void ReleaseHandle(IntPtr handle) =>
+            OrbbecNative.ob_delete_config(handle, out _);
     }
 }

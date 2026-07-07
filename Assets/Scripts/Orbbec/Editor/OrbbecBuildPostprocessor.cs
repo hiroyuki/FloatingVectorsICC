@@ -21,6 +21,7 @@ using UnityEditor;
 using UnityEditor.Build;
 using UnityEditor.Build.Reporting;
 using UnityEngine;
+using Shared.EditorTools;
 
 namespace Orbbec.EditorTools
 {
@@ -37,17 +38,16 @@ namespace Orbbec.EditorTools
         public void OnPostprocessBuild(BuildReport report)
         {
             var target = report.summary.platform;
-            if (target != BuildTarget.StandaloneWindows64 && target != BuildTarget.StandaloneWindows)
+            if (!WindowsBuildCopy.IsWindowsTarget(target))
                 return;
 
             string exePath = report.summary.outputPath;
-            if (string.IsNullOrEmpty(exePath))
+            if (!WindowsBuildCopy.TryGetBuildDirectory(exePath, out string buildDir))
             {
                 Debug.LogWarning("[OrbbecBuildPostprocessor] no build output path; skipping extensions copy.");
                 return;
             }
 
-            string buildDir = Path.GetDirectoryName(exePath);
             string productDataDir =
                 Path.Combine(buildDir, Path.GetFileNameWithoutExtension(exePath) + "_Data");
             if (!Directory.Exists(productDataDir))
@@ -70,30 +70,13 @@ namespace Orbbec.EditorTools
 
             try
             {
-                int files = CopyTreeSkippingMeta(src, dst);
+                int files = WindowsBuildCopy.CopyTreeSkippingMeta(src, dst);
                 Debug.Log($"[OrbbecBuildPostprocessor] copied {files} OrbbecSDK extension file(s) to {dst}");
             }
             catch (Exception e)
             {
                 Debug.LogError($"[OrbbecBuildPostprocessor] failed to copy extensions to {dst}: {e}");
             }
-        }
-
-        // Recursively copies src -> dst, overwriting, and skipping Unity .meta
-        // sidecars. Returns the number of files copied.
-        private static int CopyTreeSkippingMeta(string src, string dst)
-        {
-            Directory.CreateDirectory(dst);
-            int count = 0;
-            foreach (string file in Directory.GetFiles(src))
-            {
-                if (file.EndsWith(".meta", StringComparison.OrdinalIgnoreCase)) continue;
-                File.Copy(file, Path.Combine(dst, Path.GetFileName(file)), overwrite: true);
-                count++;
-            }
-            foreach (string dir in Directory.GetDirectories(src))
-                count += CopyTreeSkippingMeta(dir, Path.Combine(dst, Path.GetFileName(dir)));
-            return count;
         }
     }
 }

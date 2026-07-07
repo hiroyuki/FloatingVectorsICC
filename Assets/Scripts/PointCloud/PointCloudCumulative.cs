@@ -299,35 +299,15 @@ namespace PointCloud
             //
             // The mesh has to be FULLY initialised (vertex params + index params
             // + index data + an initial SubMesh) BEFORE GetVertexBuffer(0) is
-            // bound for compute write. Without the index-side init, Unity 6
-            // leaves the underlying vertex GPU buffer in an uncommitted state
-            // and the compute's _Dst.Store3 writes go nowhere — confirmed by
-            // GetData readback showing all-zeros despite a non-zero atomic
-            // counter. This mirrors SensorRecorder.EnsurePlaybackMesh which
-            // sets index params + index data at mesh-creation time and works.
+            // bound for compute write — PointCloudMeshUtil.CreatePointMesh does
+            // exactly that (see the Unity-6 uncommitted-vertex-buffer gotcha
+            // documented on the factory). Initial SubMesh has zero indices; the
+            // count is updated post-readback to expose the compact survivor
+            // prefix to the renderer.
             if (diagnosticLogging) _diagSw.Restart();
-            var mesh = new Mesh
-            {
-                name = $"PointCloudSnapshot_{Time.frameCount}",
-                indexFormat = IndexFormat.UInt32,
-                bounds = new Bounds(Vector3.zero, Vector3.one * 100f),
-            };
-            mesh.vertexBufferTarget |= GraphicsBuffer.Target.Raw;
-            var attrs = new[]
-            {
-                new VertexAttributeDescriptor(VertexAttribute.Position, VertexAttributeFormat.Float32, 3, stream: 0),
-                new VertexAttributeDescriptor(VertexAttribute.Color,    VertexAttributeFormat.Float32, 3, stream: 0),
-            };
-            mesh.SetVertexBufferParams(count, attrs);
-            mesh.SetIndexBufferParams(count, IndexFormat.UInt32);
             EnsureSharedIndices(count);
-            mesh.SetIndexBufferData(_sharedIndices, 0, 0, count,
-                MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
-            // Initial SubMesh with zero indices so the mesh is "complete" before
-            // the dispatch. SubMesh count is updated post-readback to expose the
-            // compact survivor prefix to the renderer.
-            mesh.SetSubMesh(0, new SubMeshDescriptor(0, 0, MeshTopology.Points),
-                MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
+            var mesh = PointCloudMeshUtil.CreatePointMesh($"PointCloudSnapshot_{Time.frameCount}", count,
+                rawVertexBufferTarget: true, initialSubmeshCount: 0, sharedIndices: _sharedIndices);
             var dstBuf = mesh.GetVertexBuffer(0);
             if (diagnosticLogging) { _diagSw.Stop(); _diagMeshTicks += _diagSw.ElapsedTicks; }
 
@@ -402,7 +382,7 @@ namespace PointCloud
 
             if (survivors == 0)
             {
-                if (Application.isPlaying) Destroy(mesh); else DestroyImmediate(mesh);
+                PointCloudUtil.DestroySafe(mesh);
                 return;
             }
 
@@ -419,10 +399,7 @@ namespace PointCloud
             var go = new GameObject($"_Snapshot_{_snapshots.Count}");
             var mf = go.AddComponent<MeshFilter>();
             var mr = go.AddComponent<MeshRenderer>();
-            mr.shadowCastingMode = ShadowCastingMode.Off;
-            mr.receiveShadows = false;
-            mr.lightProbeUsage = LightProbeUsage.Off;
-            mr.reflectionProbeUsage = ReflectionProbeUsage.Off;
+            PointCloudUtil.ConfigureUnlitRenderer(mr);
             mr.enabled = _snapshotsVisible;
             mf.sharedMesh = mesh;
 
@@ -573,10 +550,7 @@ namespace PointCloud
             var go = new GameObject($"_Snapshot_{_snapshots.Count}");
             var mf = go.AddComponent<MeshFilter>();
             var mr = go.AddComponent<MeshRenderer>();
-            mr.shadowCastingMode = ShadowCastingMode.Off;
-            mr.receiveShadows = false;
-            mr.lightProbeUsage = LightProbeUsage.Off;
-            mr.reflectionProbeUsage = ReflectionProbeUsage.Off;
+            PointCloudUtil.ConfigureUnlitRenderer(mr);
             mr.enabled = _snapshotsVisible;
             mf.sharedMesh = mesh;
 
@@ -689,10 +663,10 @@ namespace PointCloud
             var mf = go.GetComponent<MeshFilter>();
             if (mf != null) mesh = mf.sharedMesh;
 
-            if (Application.isPlaying) Destroy(go); else DestroyImmediate(go);
+            PointCloudUtil.DestroySafe(go);
             if (mesh != null)
             {
-                if (Application.isPlaying) Destroy(mesh); else DestroyImmediate(mesh);
+                PointCloudUtil.DestroySafe(mesh);
             }
         }
     }

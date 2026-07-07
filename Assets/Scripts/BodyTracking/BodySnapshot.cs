@@ -4,6 +4,8 @@
 // arrays must never be retained beyond the synchronous event handler — copy
 // out anything you need to persist.
 
+using System;
+
 namespace BodyTracking
 {
     public sealed class BodySnapshot
@@ -13,5 +15,12 @@ namespace BodyTracking
 
         /// <summary>Joints in K4ABT order; always length K4ABTConsts.K4ABT_JOINT_COUNT.</summary>
         public readonly k4abt_joint_t[] Joints = new k4abt_joint_t[K4ABTConsts.K4ABT_JOINT_COUNT];
+
+        /// <summary>Deep-copy another snapshot into this pooled instance (Id + all joints).</summary>
+        public void CopyFrom(BodySnapshot src)
+        {
+            Id = src.Id;
+            Array.Copy(src.Joints, Joints, Joints.Length);
+        }
     }
 }

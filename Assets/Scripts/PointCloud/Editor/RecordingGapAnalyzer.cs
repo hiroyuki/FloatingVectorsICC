@@ -37,13 +37,13 @@ namespace PointCloud.EditorTools
         private static string ResolveInitialDir()
         {
             // Prefer the active recorder's currently-loaded folder so the operator
-            // usually just hits Enter on the picker.
+            // usually just hits Enter on the picker. Resolves via the same helper
+            // SensorRecorder itself uses (default folder name + mac override
+            // included — this copy used to lack both).
             var rec = Object.FindFirstObjectByType<SensorRecorder>();
-            if (rec != null && !string.IsNullOrWhiteSpace(rec.folderPath))
+            if (rec != null)
             {
-                string p = rec.folderPath;
-                if (!Path.IsPathRooted(p))
-                    p = Path.Combine(Application.persistentDataPath, p);
+                string p = PointCloudRecording.ResolveRecordingRoot(rec.folderPath, rec.folderPathMacOverride);
                 if (Directory.Exists(p)) return p;
             }
             string fallback = Path.Combine(Application.persistentDataPath, "Recordings");
