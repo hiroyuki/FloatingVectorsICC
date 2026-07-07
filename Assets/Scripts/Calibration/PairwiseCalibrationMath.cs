@@ -135,8 +135,6 @@ namespace Calibration
             // the same yaml) saw the cameras with cam0 pinned at origin while
             // any post-processed yaml moved them, so Live and Playback drifted
             // apart. Convention is now plain: cam0 is the world origin.
-            // RecenterOnCameraCentroid is kept below as an opt-in utility but
-            // is not invoked automatically.
 
             return new SolveResult
             {
@@ -145,29 +143,6 @@ namespace Calibration
                 PathFromCam0 = path,
                 EdgeSampleIndex = ToDirectedSampleMap(directedEdge),
             };
-        }
-
-        private static void RecenterOnCameraCentroid(Rigid3d[] global, bool[] reachable)
-        {
-            double cx = 0, cy = 0, cz = 0;
-            int n = 0;
-            for (int i = 0; i < global.Length; i++)
-            {
-                if (!reachable[i]) continue;
-                cx += global[i].Translation[0];
-                cy += global[i].Translation[1];
-                cz += global[i].Translation[2];
-                n++;
-            }
-            if (n == 0) return;
-            cx /= n; cy /= n; cz /= n;
-            for (int i = 0; i < global.Length; i++)
-            {
-                if (!reachable[i]) continue;
-                var t = global[i].Translation;
-                global[i] = new Rigid3d(global[i].Rotation,
-                    new[] { t[0] - cx, t[1] - cy, t[2] - cz });
-            }
         }
 
         private static Dictionary<(int from, int to), int> ToDirectedSampleMap(

@@ -25,16 +25,6 @@ namespace BodyTracking
         public bool JointValid(int i) => _jointValid[i];
         public Vector3 JointPosition(int i) => _jointPositions[i];
 
-        // Per-joint inter-pop jump tracking. Set whenever a fresh-fresh transition
-        // updates _jointPositions; lets us correlate visible "flying bones" with
-        // which joint is actually moving a lot between pops.
-        private readonly Vector3[] _prevPosForJump = new Vector3[K4ABTConsts.K4ABT_JOINT_COUNT];
-        private readonly float[] _maxJumpThisWindow = new float[K4ABTConsts.K4ABT_JOINT_COUNT];
-        private readonly float[] _lastJump = new float[K4ABTConsts.K4ABT_JOINT_COUNT];
-        public float MaxJumpInWindow(int i) => _maxJumpThisWindow[i];
-        public float LastJumpMeters(int i) => _lastJump[i];
-        public void ResetJumpWindow() { for (int i = 0; i < _maxJumpThisWindow.Length; i++) _maxJumpThisWindow[i] = 0f; }
-
         private readonly GameObject _bonesGO;
         private readonly Mesh _bonesMesh;
         private readonly MeshRenderer _bonesRenderer;
@@ -218,9 +208,6 @@ namespace BodyTracking
                         ? _oneEuro[i].Filter(rawPos, dt, cfg.OneEuroMinCutoff, cfg.OneEuroBeta, cfg.OneEuroDerivCutoff)
                         : rawPos;
 
-                    float jump = (newPos - _jointPositions[i]).magnitude;
-                    _lastJump[i] = jump;
-                    if (jump > _maxJumpThisWindow[i]) _maxJumpThisWindow[i] = jump;
                     _jointPositions[i] = newPos;
                 }
                 // else: leave _jointPositions[i] / _jointValid[i] from previous pop.
@@ -353,26 +340,7 @@ namespace BodyTracking
             _bonesMesh.SetTriangles(_boneTris, 0, true);
         }
 
-        public int SetActiveCallsTrue { get; private set; }
-        public int SetActiveCallsFalse { get; private set; }
-
-        public void SetVisible(bool visible)
-        {
-            if (_root == null) return;
-            if (_root.activeSelf == visible) return;
-            _root.SetActive(visible);
-            if (visible) SetActiveCallsTrue++;
-            else SetActiveCallsFalse++;
-        }
-
         public bool IsActive => _root != null && _root.activeInHierarchy;
-
-        // Diagnostic accessors (used by the parent's per-second log).
-        public Vector3 GetSamplePosition()
-        {
-            int idx = (int)k4abt_joint_id_t.K4ABT_JOINT_PELVIS;
-            return idx < _jointPositions.Length ? _jointPositions[idx] : Vector3.zero;
-        }
 
         public Vector3 WorldOf(Vector3 local)
         {
@@ -389,46 +357,6 @@ namespace BodyTracking
             if (!_jointValid[jointIdx]) return false;
             world = WorldOf(_jointPositions[jointIdx]);
             return true;
-        }
-
-        // Diagnostic: how often did this body's visibility toggle and how big are
-        // the per-pop position jumps? Reset by ResetDiagWindow.
-        public int VisibilityToggles { get; private set; }
-        public float MaxJumpThisWindow { get; private set; }
-        public float SumJumpThisWindow { get; private set; }
-        public int JumpSamples { get; private set; }
-        private bool _wasActive;
-        private Vector3 _prevPelvis;
-
-        public void TickDiagAfterUpdate()
-        {
-            bool nowActive = _root != null && _root.activeSelf;
-            if (nowActive != _wasActive) VisibilityToggles++;
-            _wasActive = nowActive;
-
-            int idx = (int)k4abt_joint_id_t.K4ABT_JOINT_PELVIS;
-            if (idx < _jointPositions.Length)
-            {
-                var cur = _jointPositions[idx];
-                if (_prevPelvis != Vector3.zero)
-                {
-                    float d = (cur - _prevPelvis).magnitude;
-                    if (d > MaxJumpThisWindow) MaxJumpThisWindow = d;
-                    SumJumpThisWindow += d;
-                    JumpSamples++;
-                }
-                _prevPelvis = cur;
-            }
-        }
-
-        public void ResetDiagWindow()
-        {
-            VisibilityToggles = 0;
-            MaxJumpThisWindow = 0f;
-            SumJumpThisWindow = 0f;
-            JumpSamples = 0;
-            SetActiveCallsTrue = 0;
-            SetActiveCallsFalse = 0;
         }
 
         public void Destroy()

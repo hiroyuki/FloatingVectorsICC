@@ -59,7 +59,7 @@ namespace BodyTracking
 
         [Tooltip("If true, accelMax is replaced by the p95 of |a| computed from the " +
                  "current trajectories every Rebuild. Avoids having to hand-tune accelMax " +
-                 "for each recording — same auto behavior as SkeletonMerger.autoAccelMax.")]
+                 "for each recording.")]
         public bool autoAccelMax = false;
 
         [Tooltip("Hot end of the heatmap. The cold end is `flatColor`.")]

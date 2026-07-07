@@ -63,7 +63,7 @@ namespace BodyTracking
         }
 
         /// <summary>
-        /// Tick diagnostics and destroy visuals not seen for the given number of frames.
+        /// Destroy visuals not seen for the given number of frames.
         /// <paramref name="onEvicted"/> fires once per destroyed id so callers can clean
         /// their own per-id state (e.g. SkeletonMerger's continuity dictionaries).
         /// </summary>
@@ -74,7 +74,6 @@ namespace BodyTracking
             {
                 int lastSeen = _lastSeenFrame.TryGetValue(kv.Key, out var f) ? f : -1;
                 int sinceLastSeen = Time.frameCount - lastSeen;
-                kv.Value.TickDiagAfterUpdate();
                 if (sinceLastSeen > unseenFramesBeforeDestroy) _toDestroy.Add(kv.Key);
             }
             for (int i = 0; i < _toDestroy.Count; i++)

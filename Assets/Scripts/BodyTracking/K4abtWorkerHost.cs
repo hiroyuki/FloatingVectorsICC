@@ -1,8 +1,9 @@
 // Unity-side host that owns one k4abt_worker.exe per camera, brokers depth+IR
 // frames into the worker via a per-camera memory-mapped file, and surfaces
 // returned skeletons through OnSkeletonsReady. The IPC contract is defined in
-// BodyTracking.Shared.K4abtWorkerSharedLayout. v1 only handles a single
-// camera at a time (the dictionary makes future multi-cam expansion trivial).
+// BodyTracking.Shared.K4abtWorkerSharedLayout. Multi-cam is supported: the
+// host keeps one worker session per serial (SkeletonMerger spawns one worker
+// per renderer).
 //
 // Lifecycle: StartWorker creates MMF + 4 events, writes the global header
 // (including the calibration blob built from ObCameraParam), spawns

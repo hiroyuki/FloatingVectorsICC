@@ -149,7 +149,7 @@ namespace TSDF
         private ComputeBuffer _meshArgsBuffer;       // IndirectArguments [vertCount, 1, 0, 0]
         private ComputeBuffer _activeBlocksBuffer;   // Append<uint>: compacted active block indices
         private ComputeBuffer _dispatchArgsBuffer;   // IndirectArguments [blockCount, 1, 1]
-        private int _lastBlockCount = -1;            // for per-second diag (active blocks)
+        private int _totalBlocksAtLastDispatch = -1;            // for per-second diag (active blocks)
         private int _frameCounter;
 
         private bool _ownsVoxelMat;
@@ -452,7 +452,7 @@ namespace TSDF
             int gz = Mathf.CeilToInt((volume.Dim.z - 1) / 4f);
             using (s_markMarch.Auto())
                 _mcShader.Dispatch(_mcKernel, Mathf.Max(1, gx), Mathf.Max(1, gy), Mathf.Max(1, gz));
-            _lastBlockCount = -1;   // N/A on the full-grid path
+            _totalBlocksAtLastDispatch = -1;   // N/A on the full-grid path
         }
 
         // Active-block path (task 0-1): compact the front occupancy set into a block
@@ -485,7 +485,7 @@ namespace TSDF
             using (s_markMarch.Auto())
                 _mcShader.DispatchIndirect(_mcActiveKernel, _dispatchArgsBuffer);
 
-            _lastBlockCount = totalBlocks;
+            _totalBlocksAtLastDispatch = totalBlocks;
         }
 
         // ---------- shared ----------
@@ -530,11 +530,11 @@ namespace TSDF
                 _meshArgsBuffer.GetData(args);
                 int verts = (int)args[0];
                 string blocks = "";
-                if (!useFullGridMC && _dispatchArgsBuffer != null && _lastBlockCount > 0)
+                if (!useFullGridMC && _dispatchArgsBuffer != null && _totalBlocksAtLastDispatch > 0)
                 {
                     var da = new uint[3];
                     _dispatchArgsBuffer.GetData(da);
-                    blocks = $" activeBlocks={da[0]}/{_lastBlockCount}";
+                    blocks = $" activeBlocks={da[0]}/{_totalBlocksAtLastDispatch}";
                 }
                 Debug.Log($"[TSDFView Mesh] path={path} voxelSize={volume.voxelSize:F3}m " +
                           $"dim={d.x}x{d.y}x{d.z} mcDispatches={_diagMcDispatchesThisWindow}/s " +
