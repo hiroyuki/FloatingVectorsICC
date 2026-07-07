@@ -4,6 +4,7 @@
 //   1. freeze the moment  — playback pause row (IRecorderTransport)
 //   2. tune               — curve tube / hole closing / export settings
 //   3. operate            — Fuse curves / Close holes / Export STL / Restore
+//                           + Export Web (GLB for web viewers, USDZ for iPhone AR)
 //
 // The print operations used to live on the shared Control Panel's Actions
 // section; they moved here so settings and buttons sit together. The panel
@@ -125,6 +126,35 @@ namespace TSDF.EditorTools
                     "MC の階段状ガタつきを除去する。表示中の TSDF mesh には影響しない。"),
                 pe.smoothIterations, 0, 30);
 
+            EditorGUILayout.Space(4);
+            EditorGUILayout.LabelField("Web export (GLB + USDZ)", EditorStyles.miniBoldLabel);
+            bool webCurves = EditorGUILayout.ToggleLeft(
+                new GUIContent("Include Curves (表示解像度のチューブで同梱)",
+                    "カーブを描画バッファから読み戻してチューブメッシュ化し、TSDF mesh と一緒に書き出す。" +
+                    "voxel 化を通らないので解像度は落ちない。Fuse curves は不要（すると二重になる）。"),
+                pe.webIncludeCurves);
+            int webStride = EditorGUILayout.IntSlider(
+                new GUIContent("Web Curve Stride", "何本置きに1本チューブ化するか。1本≈1000三角形。" +
+                    "40 → 20000本中約500本 ≈ 0.5M 三角形。下げると密になるがファイルが大きくなる（USDZ はテキスト形式）。"),
+                pe.webCurveStride, 1, 400);
+            int webSides = EditorGUILayout.IntSlider(
+                new GUIContent("Web Curve Sides", "チューブ断面の角数。リボン幅なら 4-6 で丸く見える。"),
+                pe.webCurveSides, 3, 12);
+            int webTris = EditorGUILayout.IntField(
+                new GUIContent("Web Mesh Target Tris", "TSDF mesh をこの三角形数まで削減して書き出す" +
+                    "（QEM デシメーション、色保持）。0=削減なし。STL には影響しない。" +
+                    "150k + デフォルトのカーブで両ファイル 10MB 以内が目安。"),
+                pe.webMeshTargetTris);
+            float webTol = EditorGUILayout.Slider(
+                new GUIContent("Web Curve Tolerance (m)", "チューブ化前のポリライン簡略化の許容誤差" +
+                    "（Douglas-Peucker）。1.5mm で三角形数が半分以下、見た目は変わらない。0=OFF。"),
+                pe.webCurveTolerance, 0f, 0.01f);
+            string usdPy = EditorGUILayout.TextField(
+                new GUIContent("Usd Python Path", "usd-core 入り python のパス（空=自動検出: ~/.venvs/usd → " +
+                    "システム python）。見つかれば USDZ をバイナリ usdc に変換（3-4倍小さい）、" +
+                    "無ければ ASCII usda のまま。"),
+                pe.usdPythonPath);
+
             if (EditorGUI.EndChangeCheck())
             {
                 Undo.RecordObject(pe, "Print export settings");
@@ -137,6 +167,12 @@ namespace TSDF.EditorTools
                 pe.targetHeightMm = heightMm;
                 pe.exportPlyWithColor = ply;
                 pe.smoothIterations = smooth;
+                pe.webIncludeCurves = webCurves;
+                pe.webCurveStride = webStride;
+                pe.webCurveSides = webSides;
+                pe.webMeshTargetTris = Mathf.Max(0, webTris);
+                pe.webCurveTolerance = webTol;
+                pe.usdPythonPath = usdPy;
                 EditorUtility.SetDirty(pe);
             }
         }
@@ -171,6 +207,17 @@ namespace TSDF.EditorTools
                             "全プリント操作を取り消して融合前に戻す"), GUILayout.Height(26)))
                         pe.RestoreSnapshot();
                 }
+            }
+
+            using (new EditorGUI.DisabledScope(!ready))
+            {
+                if (GUILayout.Button(new GUIContent("Export Web (GLB + USDZ)",
+                        "ウェブ表示用 .glb（頂点カラー）と iPhone AR Quick Look 用 .usdz" +
+                        "（色はテクスチャに焼き込み）を実寸(m)で書き出し。カーブは表示解像度のまま" +
+                        "チューブとして自動同梱（Fuse curves 不要）。出力先は STL と同じ " +
+                        "~/Documents/FloatingVectorsPrints/。"),
+                        GUILayout.Height(26)))
+                    pe.ExportWeb();
             }
 
             if (!Application.isPlaying)

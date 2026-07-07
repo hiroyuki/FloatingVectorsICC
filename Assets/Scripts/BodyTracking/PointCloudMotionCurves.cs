@@ -374,6 +374,55 @@ namespace BodyTracking
             return true;
         }
 
+        // ---- Web export (TSDFPrintExporter.ExportWeb) ----
+
+        // CPU mirror of the compute LineVert (float3 pos + float3 colour, 24B) so
+        // GetData offsets are unambiguous buffer-element counts.
+        private struct LineVertCpu
+        {
+            public Vector3 p;
+            public Vector3 c;
+        }
+
+        /// <summary>Read back every seedStride-th drawn curve as a CPU polyline —
+        /// the same Catmull-Rom subdivided points the ribbons are drawn from
+        /// (world space, full display resolution), plus the curve's original
+        /// point-cloud colour. Culled seeds yield nothing (their slots are
+        /// zero-filled by CSBuild). Synchronous GPU readback — export path only,
+        /// not for per-frame use.</summary>
+        public bool TryReadCurvePolylines(int seedStride, List<Vector3[]> polylines, List<Vector3> colors,
+                                          out string reason)
+        {
+            reason = null;
+            if (_outBuf == null || !_hasBuilt)
+            { reason = "no curves built yet (Motion lines hidden, or nothing seeded)"; return false; }
+
+            int segsPerSeed = (_ringLen - 1) * _subdiv;
+            int vertsPerSeed = segsPerSeed * 2;
+            var slot = new LineVertCpu[vertsPerSeed];
+            var pts = new List<Vector3>(segsPerSeed + 1);
+            int stride = Mathf.Max(1, seedStride);
+            for (int s = 0; s < _capacity; s += stride)
+            {
+                _outBuf.GetData(slot, 0, s * vertsPerSeed, vertsPerSeed);
+                pts.Clear();
+                for (int seg = 0; seg < segsPerSeed; seg++)
+                {
+                    Vector3 a = slot[seg * 2].p, b = slot[seg * 2 + 1].p;
+                    // Exact-zero pair = the zero-filled tail (culled seed / unused
+                    // slots); real world-space points never land exactly on origin.
+                    if (a.x == 0f && a.y == 0f && a.z == 0f &&
+                        b.x == 0f && b.y == 0f && b.z == 0f) break;
+                    if (seg == 0) pts.Add(a);
+                    pts.Add(b);
+                }
+                if (pts.Count < 2) continue;
+                polylines.Add(pts.ToArray());
+                colors.Add(slot[0].c);
+            }
+            return true;
+        }
+
         private void DrawCurves()
         {
             _mat.SetBuffer(kVerts, _outBuf);
