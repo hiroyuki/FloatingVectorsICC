@@ -4,11 +4,8 @@ using System.Collections.Generic;
 namespace Orbbec
 {
     /// <summary>IDisposable wrapper around ob_device.</summary>
-    public sealed class OrbbecDevice : IDisposable
+    public sealed class OrbbecDevice : OrbbecHandle
     {
-        internal IntPtr Handle { get; private set; }
-        private bool _disposed;
-
         internal OrbbecDevice(IntPtr handle)
         {
             if (handle == IntPtr.Zero) throw new ArgumentNullException(nameof(handle));
@@ -194,24 +191,8 @@ namespace Orbbec
             return names;
         }
 
-        public void Dispose()
-        {
-            if (_disposed) return;
-            _disposed = true;
-            if (Handle != IntPtr.Zero)
-            {
-                OrbbecNative.ob_delete_device(Handle, out _);
-                Handle = IntPtr.Zero;
-            }
-            GC.SuppressFinalize(this);
-        }
-
-        ~OrbbecDevice() => Dispose();
-
-        private void ThrowIfDisposed()
-        {
-            if (_disposed) throw new ObjectDisposedException(nameof(OrbbecDevice));
-        }
+        protected override void ReleaseHandle(IntPtr handle) =>
+            OrbbecNative.ob_delete_device(handle, out _);
     }
 
     public sealed class OrbbecDeviceInfo

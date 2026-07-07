@@ -507,6 +507,29 @@ namespace PointCloud
             Path.Combine(rootDir, "calibration");
 
         /// <summary>
+        /// Resolves a configured recording root to an absolute path:
+        /// empty/whitespace → <c>persistentDataPath/Recordings/recording</c>,
+        /// relative → under <c>persistentDataPath</c>, absolute → as-is.
+        /// On macOS (editor or standalone) a non-blank <paramref name="macOverride"/>
+        /// replaces <paramref name="configured"/> before resolution, so a Mac
+        /// checkout can point at e.g. a local Dropbox mount without touching
+        /// the canonical configured path.
+        /// </summary>
+        public static string ResolveRecordingRoot(string configured, string macOverride = null)
+        {
+            string p = configured;
+#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+            if (!string.IsNullOrWhiteSpace(macOverride))
+                p = macOverride;
+#endif
+            if (string.IsNullOrWhiteSpace(p))
+                p = Path.Combine(UnityEngine.Application.persistentDataPath, "Recordings", "recording");
+            else if (!Path.IsPathRooted(p))
+                p = Path.Combine(UnityEngine.Application.persistentDataPath, p);
+            return p;
+        }
+
+        /// <summary>
         /// Enumerates recorded devices under <paramref name="rootDir"/>. Returns (serial, deviceDir)
         /// pairs so callers can pick the sensor files they care about (depth_main, color_main, etc.).
         /// </summary>

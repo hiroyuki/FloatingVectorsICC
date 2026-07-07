@@ -7,11 +7,8 @@ namespace Orbbec
     /// IDisposable wrapper around ob_context. One per process is recommended;
     /// SensorManager owns the lifecycle.
     /// </summary>
-    public sealed class OrbbecContext : IDisposable
+    public sealed class OrbbecContext : OrbbecHandle
     {
-        internal IntPtr Handle { get; private set; }
-        private bool _disposed;
-
         public OrbbecContext()
         {
             Handle = OrbbecNative.ob_create_context(out var err);
@@ -105,24 +102,8 @@ namespace Orbbec
             }
         }
 
-        public void Dispose()
-        {
-            if (_disposed) return;
-            _disposed = true;
-            if (Handle != IntPtr.Zero)
-            {
-                OrbbecNative.ob_delete_context(Handle, out _);
-                Handle = IntPtr.Zero;
-            }
-            GC.SuppressFinalize(this);
-        }
-
-        ~OrbbecContext() => Dispose();
-
-        private void ThrowIfDisposed()
-        {
-            if (_disposed) throw new ObjectDisposedException(nameof(OrbbecContext));
-        }
+        protected override void ReleaseHandle(IntPtr handle) =>
+            OrbbecNative.ob_delete_context(handle, out _);
     }
 
     /// <summary>Lightweight metadata snapshot of a device entry from the device list.</summary>

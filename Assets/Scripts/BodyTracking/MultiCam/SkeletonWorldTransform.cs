@@ -48,7 +48,9 @@ namespace BodyTracking.MultiCam
             Vector3 colorMm = depthToColorMm.MultiplyPoint3x4(
                 new Vector3(jointMm.X, jointMm.Y, jointMm.Z));
 
-            // 1. mm/OpenCV → m/Unity-local (Y flip, mm→m); mirrors BodyTrackingShared.K4AmmToUnity.
+            // 1. mm/OpenCV → m/Unity-local (Y flip, mm→m). Must stay in lockstep with
+            //    BodyTrackingShared.K4AmmToUnity (the source of truth for this mapping);
+            //    inlined here only because the input is already a Vector3, not k4a_float3_t.
             Vector3 unityLocal = new Vector3(colorMm.x, -colorMm.y, colorMm.z) * 0.001f;
 
             if (rendererTransform == null) return unityLocal;

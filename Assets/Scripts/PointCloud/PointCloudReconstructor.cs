@@ -97,40 +97,14 @@ namespace PointCloud
             if (_mesh != null && _meshCapacity >= capacity) return;
 
             if (_mesh != null)
-            {
-                if (Application.isPlaying) UnityEngine.Object.Destroy(_mesh);
-                else UnityEngine.Object.DestroyImmediate(_mesh);
-            }
+                PointCloudUtil.DestroySafe(_mesh);
 
-            _mesh = new Mesh
-            {
-                name = $"PointCloudMesh_{_name}",
-                indexFormat = IndexFormat.UInt32,
-                // Wide static bounds: per-vertex positions get clip-culled invalid
-                // pixels far offscreen, so a recalculate-after-Dispatch would be
-                // wrong (read-back) and unnecessary (positions stable enough).
-                bounds = new Bounds(Vector3.zero, Vector3.one * 100f),
-            };
-            // RWByteAddressBuffer access from the compute kernel needs Raw target.
-            _mesh.vertexBufferTarget |= GraphicsBuffer.Target.Raw;
-            var attrs = new[]
-            {
-                new VertexAttributeDescriptor(VertexAttribute.Position, VertexAttributeFormat.Float32, 3, stream: 0),
-                new VertexAttributeDescriptor(VertexAttribute.Color,    VertexAttributeFormat.Float32, 3, stream: 0),
-            };
-            _mesh.SetVertexBufferParams(capacity, attrs);
-            _mesh.SetIndexBufferParams(capacity, IndexFormat.UInt32);
-            // Identity index buffer for MeshTopology.Points.
-            var indices = new NativeArray<uint>(capacity, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
-            try
-            {
-                for (int i = 0; i < capacity; i++) indices[i] = (uint)i;
-                _mesh.SetIndexBufferData(indices, 0, 0, capacity,
-                    MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
-            }
-            finally { indices.Dispose(); }
-            _mesh.SetSubMesh(0, new SubMeshDescriptor(0, capacity, MeshTopology.Points),
-                MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
+            // Raw vertex-buffer target: the compute kernel writes via
+            // RWByteAddressBuffer. Full submesh [0, capacity): every Dispatch
+            // fills the entire buffer (invalid pixels are pushed offscreen by
+            // the kernel, not compacted).
+            _mesh = PointCloudMeshUtil.CreatePointMesh($"PointCloudMesh_{_name}", capacity,
+                rawVertexBufferTarget: true, initialSubmeshCount: capacity);
             _meshCapacity = capacity;
         }
 
@@ -301,8 +275,7 @@ namespace PointCloud
             _colorScratchU32 = null;
             if (_mesh != null)
             {
-                if (Application.isPlaying) UnityEngine.Object.Destroy(_mesh);
-                else UnityEngine.Object.DestroyImmediate(_mesh);
+                PointCloudUtil.DestroySafe(_mesh);
                 _mesh = null;
             }
             _meshCapacity = 0;

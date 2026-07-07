@@ -26,7 +26,9 @@ namespace BodyTracking.Shared
 
         public const int InputSlotCount = 2;   // double-buffer (latest-wins backpressure)
         public const int OutputSlotCount = 2;
-        public const int K4abtJointCount = 32; // K4ABT_JOINT_COUNT (k4abttypes.h)
+        // Anchored to the k4abt enum (K4ABTNative.cs is compiled into both Unity and
+        // the worker, so this stays Unity-free). == 32 (k4abttypes.h).
+        public const int K4abtJointCount = (int)k4abt_joint_id_t.K4ABT_JOINT_COUNT;
         public const int MaxBodies = 6;        // K4ABT_MAX_BODIES (k4abttypes.h L24)
 
         // Calibration blob size: anchored to the layout K4ACalibration.cs writes by

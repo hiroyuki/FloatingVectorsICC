@@ -472,7 +472,7 @@ namespace PointCloud
             double meshMs   = _meshTicks   * tickToMs / framesForAvg;
 
             Debug.Log(
-                $"[PCR {Truncate(deviceSerial, 6)}] captured={capturedFps:F1} " +
+                $"[PCR {PointCloudUtil.TailSerial(deviceSerial, 6)}] captured={capturedFps:F1} " +
                 $"consumed={consumedFps:F1} dropped={droppedFps:F1} (/s) | " +
                 $"per-frame avg ms: shader={shaderMs:F2} cumul={cumulMs:F2} " +
                 $"mesh={meshMs:F2} pts={LastPointCount}",
@@ -636,35 +636,10 @@ namespace PointCloud
             else
             {
                 int capacity = maxPoints;
-                _mesh = new Mesh
-                {
-                    name = $"PointCloud_{deviceSerial}",
-                    indexFormat = IndexFormat.UInt32,
-                    bounds = new Bounds(Vector3.zero, Vector3.one * 100f),
-                };
-                // Vertex layout = OBColorPoint (position float3 + color float3, 24 bytes).
-                var attrs = new[]
-                {
-                    new VertexAttributeDescriptor(VertexAttribute.Position, VertexAttributeFormat.Float32, 3, stream: 0),
-                    new VertexAttributeDescriptor(VertexAttribute.Color,    VertexAttributeFormat.Float32, 3, stream: 0),
-                };
-                _mesh.SetVertexBufferParams(capacity, attrs);
-
-                // Identity index buffer for MeshTopology.Points.
-                // (try/finally instead of `using` because `using` makes the variable
-                //  readonly, which blocks NativeArray's indexer set on a struct.)
-                _mesh.SetIndexBufferParams(capacity, IndexFormat.UInt32);
-                var indices = new NativeArray<uint>(capacity, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
-                try
-                {
-                    for (int i = 0; i < capacity; i++) indices[i] = (uint)i;
-                    _mesh.SetIndexBufferData(indices, 0, 0, capacity,
-                        MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
-                }
-                finally { indices.Dispose(); }
-                // CPU mode starts empty and is sized per-frame by the upload path.
-                _mesh.SetSubMesh(0, new SubMeshDescriptor(0, 0, MeshTopology.Points),
-                    MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
+                // CPU mode starts empty (submesh 0) and is sized per-frame by
+                // the upload path; no Raw target (no compute writes).
+                _mesh = PointCloudMeshUtil.CreatePointMesh($"PointCloud_{deviceSerial}", capacity,
+                    rawVertexBufferTarget: false, initialSubmeshCount: 0);
             }
 
             _meshFilter.sharedMesh = _mesh;
@@ -833,7 +808,7 @@ namespace PointCloud
             _captureThread = new Thread(() => CaptureLoop(token))
             {
                 IsBackground = true,
-                Name = $"OrbbecCapture-{Truncate(deviceSerial, 6)}",
+                Name = $"OrbbecCapture-{PointCloudUtil.TailSerial(deviceSerial, 6)}",
             };
             _captureThread.Start();
         }
@@ -1055,8 +1030,6 @@ namespace PointCloud
             }
         }
 
-        private static string Truncate(string s, int n) =>
-            string.IsNullOrEmpty(s) || s.Length <= n ? s : s.Substring(s.Length - n);
     }
 
     /// <summary>

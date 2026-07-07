@@ -26,6 +26,7 @@ using UnityEditor;
 using UnityEditor.Build;
 using UnityEditor.Build.Reporting;
 using UnityEngine;
+using Shared.EditorTools;
 
 namespace BodyTracking.EditorTools
 {
@@ -42,19 +43,17 @@ namespace BodyTracking.EditorTools
         public void OnPostprocessBuild(BuildReport report)
         {
             var target = report.summary.platform;
-            if (target != BuildTarget.StandaloneWindows64 && target != BuildTarget.StandaloneWindows)
+            if (!WindowsBuildCopy.IsWindowsTarget(target))
                 return;
 
             string exePath = report.summary.outputPath;
-            if (string.IsNullOrEmpty(exePath))
+            // Build root = folder containing the player exe. ResolveExePath uses
+            // Application.dataPath/.. which is this same folder in a player.
+            if (!WindowsBuildCopy.TryGetBuildDirectory(exePath, out string buildRoot))
             {
                 Debug.LogWarning("[BodyTrackingBuildPostprocessor] no build output path; skipping worker copy.");
                 return;
             }
-
-            // Build root = folder containing the player exe. ResolveExePath uses
-            // Application.dataPath/.. which is this same folder in a player.
-            string buildRoot = Path.GetDirectoryName(exePath);
             // Editor: Application.dataPath == <project>/Assets, so project root is its parent.
             string projectRoot = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
 

@@ -1809,13 +1809,13 @@ namespace PointCloud
                     var rs = kv.Value;
                     double fps = rs.Frames / elapsed;
                     double mbps = rs.Bytes / 1048576.0 / elapsed;
-                    parts.Add($"{TruncSerial(kv.Key)}={fps:F1}fps,{mbps:F1}MB/s,gap={rs.MaxGapMs:F0}ms");
+                    parts.Add($"{PointCloudUtil.TailSerial(kv.Key, 6)}={fps:F1}fps,{mbps:F1}MB/s,gap={rs.MaxGapMs:F0}ms");
 
                     // Per-stream WriteFrame timing (avg + max ms). Skip a
                     // stream's segment if it didn't fire this window so the
                     // line stays scannable for the common case (e.g. IR off).
                     var seg = new System.Text.StringBuilder();
-                    seg.Append(TruncSerial(kv.Key)).Append(' ');
+                    seg.Append(PointCloudUtil.TailSerial(kv.Key, 6)).Append(' ');
                     if (rs.DepthWriteCount > 0)
                         seg.Append($"D[avg={rs.DepthWriteTicks * tickToMs / rs.DepthWriteCount:F2}ms,max={rs.DepthWriteMaxTicks * tickToMs:F1}ms] ");
                     if (rs.ColorWriteCount > 0)
@@ -1884,12 +1884,6 @@ namespace PointCloud
             _diagGc1Start    = System.GC.CollectionCount(1);
             _diagGc2Start    = System.GC.CollectionCount(2);
             _diagMonoMemStart = UnityEngine.Profiling.Profiler.GetMonoUsedSizeLong();
-        }
-
-        private static string TruncSerial(string s)
-        {
-            if (string.IsNullOrEmpty(s) || s.Length <= 6) return s;
-            return s.Substring(s.Length - 6);
         }
 
         // Per-frame MPB scratch handed to PointCloudShaderFilters.Apply so the
@@ -1996,10 +1990,7 @@ namespace PointCloud
                 Calibration.ExtrinsicsApply.ApplyToTransform(go.transform, track.GlobalTrColorCamera.Value);
             var mf = go.AddComponent<MeshFilter>();
             var mr = go.AddComponent<MeshRenderer>();
-            mr.shadowCastingMode = ShadowCastingMode.Off;
-            mr.receiveShadows = false;
-            mr.lightProbeUsage = LightProbeUsage.Off;
-            mr.reflectionProbeUsage = ReflectionProbeUsage.Off;
+            PointCloudUtil.ConfigureUnlitRenderer(mr);
 
             Material mat = playbackMaterial;
             if (mat == null)
@@ -2218,10 +2209,7 @@ namespace PointCloud
                 track.Reconstructor?.Dispose();
                 track.Reconstructor = null;
                 if (track.PlaybackObject != null)
-                {
-                    if (Application.isPlaying) Destroy(track.PlaybackObject);
-                    else DestroyImmediate(track.PlaybackObject);
-                }
+                    PointCloudUtil.DestroySafe(track.PlaybackObject);
                 // Close any open RcsvFrameStream handles. Skipping this would
                 // leak FileStreams (12 handles per Read in a 4-cam setup) and
                 // keep Windows from reopening the file for append on a
@@ -2241,8 +2229,7 @@ namespace PointCloud
             {
                 var child = transform.GetChild(i);
                 if (child == null || !child.name.StartsWith("_Playback_")) continue;
-                if (Application.isPlaying) Destroy(child.gameObject);
-                else DestroyImmediate(child.gameObject);
+                PointCloudUtil.DestroySafe(child.gameObject);
             }
         }
 
@@ -2302,19 +2289,8 @@ namespace PointCloud
             return list;
         }
 
-        private string ResolveRoot()
-        {
-            string p = folderPath;
-#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
-            if (!string.IsNullOrWhiteSpace(folderPathMacOverride))
-                p = folderPathMacOverride;
-#endif
-            if (string.IsNullOrWhiteSpace(p))
-                p = Path.Combine(Application.persistentDataPath, "Recordings", "recording");
-            else if (!Path.IsPathRooted(p))
-                p = Path.Combine(Application.persistentDataPath, p);
-            return p;
-        }
+        private string ResolveRoot() =>
+            PointCloudRecording.ResolveRecordingRoot(folderPath, folderPathMacOverride);
 
         private static string SafeMachineName()
         {

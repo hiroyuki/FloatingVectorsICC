@@ -1,7 +1,9 @@
 {
     "name": "Orbbec.Editor",
     "rootNamespace": "Orbbec.EditorTools",
-    "references": [],
+    "references": [
+        "Shared.Editor"
+    ],
     "includePlatforms": [
         "Editor"
     ],

@@ -6,11 +6,8 @@ namespace Orbbec
     /// IDisposable wrapper around ob_frame. Covers both individual frames and
     /// framesets (a frameset is itself an ob_frame).
     /// </summary>
-    public sealed class OrbbecFrame : IDisposable
+    public sealed class OrbbecFrame : OrbbecHandle
     {
-        internal IntPtr Handle { get; private set; }
-        private bool _disposed;
-
         internal OrbbecFrame(IntPtr handle)
         {
             if (handle == IntPtr.Zero) throw new ArgumentNullException(nameof(handle));
@@ -192,23 +189,7 @@ namespace Orbbec
             return h == IntPtr.Zero ? null : new OrbbecFrame(h);
         }
 
-        public void Dispose()
-        {
-            if (_disposed) return;
-            _disposed = true;
-            if (Handle != IntPtr.Zero)
-            {
-                OrbbecNative.ob_delete_frame(Handle, out _);
-                Handle = IntPtr.Zero;
-            }
-            GC.SuppressFinalize(this);
-        }
-
-        ~OrbbecFrame() => Dispose();
-
-        private void ThrowIfDisposed()
-        {
-            if (_disposed) throw new ObjectDisposedException(nameof(OrbbecFrame));
-        }
+        protected override void ReleaseHandle(IntPtr handle) =>
+            OrbbecNative.ob_delete_frame(handle, out _);
     }
 }

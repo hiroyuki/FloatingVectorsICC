@@ -132,6 +132,19 @@ namespace BodyTracking
 
         private readonly Dictionary<string, WorkerSession> _sessions = new Dictionary<string, WorkerSession>();
 
+        // Reused key-snapshot scratch for Pump/StopAllWorkers (StopWorker mutates the
+        // dictionary mid-iteration). Pump runs every frame, so avoid a per-call array.
+        private readonly List<string> _keyScratch = new List<string>();
+
+        // Clear and refill _keyScratch with the current session keys (same .Keys order
+        // as the previous per-call array snapshot).
+        private List<string> SnapshotKeys()
+        {
+            _keyScratch.Clear();
+            foreach (var k in _sessions.Keys) _keyScratch.Add(k);
+            return _keyScratch;
+        }
+
         public bool IsReady(string serial) =>
             _sessions.TryGetValue(serial, out var s) && s.Ready;
 
@@ -342,12 +355,10 @@ namespace BodyTracking
         {
             // Local snapshot; StopWorker mutates the dictionary.
             if (_sessions.Count == 0) return;
-            // Avoid LINQ; iterate a fresh array each frame.
-            var keys = new string[_sessions.Count];
-            int ki = 0;
-            foreach (var k in _sessions.Keys) keys[ki++] = k;
+            // Avoid LINQ and per-frame allocation; reuse the scratch list.
+            var keys = SnapshotKeys();
 
-            for (int i = 0; i < keys.Length; i++)
+            for (int i = 0; i < keys.Count; i++)
             {
                 if (!_sessions.TryGetValue(keys[i], out var s)) continue;
                 // Check liveness before the readiness gate: a worker that dies during
@@ -376,10 +387,8 @@ namespace BodyTracking
         private void StopAllWorkers()
         {
             if (_sessions.Count == 0) return;
-            var keys = new string[_sessions.Count];
-            int ki = 0;
-            foreach (var k in _sessions.Keys) keys[ki++] = k;
-            for (int i = 0; i < keys.Length; i++) StopWorker(keys[i]);
+            var keys = SnapshotKeys();
+            for (int i = 0; i < keys.Count; i++) StopWorker(keys[i]);
         }
 
         // --- internals ---

@@ -12,6 +12,7 @@
 using System.Collections.Generic;
 using Orbbec;
 using PointCloud;
+using Shared;
 using UnityEngine;
 
 namespace TSDF.DebugTools
@@ -688,13 +689,7 @@ namespace TSDF.DebugTools
         private bool EnsureSmoothUnionShader()
         {
             if (_suShader != null) return true;
-            _suShader = Resources.Load<ComputeShader>("TSDFSmoothUnion");
-            if (_suShader == null)
-            {
-                Debug.LogError("[TSDFDebugSession] Compute shader \"Resources/TSDFSmoothUnion.compute\" " +
-                               "not found — falling back to RetainGhost.", this);
-                return false;
-            }
+            if (!TSDFComputeUtil.TryLoad(ref _suShader, "TSDFSmoothUnion", "TSDFDebugSession", this)) return false;
             _suCopyKernel = _suShader.FindKernel("Copy");
             _suUnionKernel = _suShader.FindKernel("SmoothUnion");
             return true;
@@ -715,9 +710,8 @@ namespace TSDF.DebugTools
 
         private void ReleaseSmoothUnionBuffers()
         {
-            _suVoxA?.Release(); _suColA?.Release();
-            _suVoxB?.Release(); _suColB?.Release();
-            _suVoxA = _suColA = _suVoxB = _suColB = null;
+            GpuBuf.Release(ref _suVoxA); GpuBuf.Release(ref _suColA);
+            GpuBuf.Release(ref _suVoxB); GpuBuf.Release(ref _suColB);
             _suBufCount = -1;
             _haveInstants = false;
         }
@@ -728,14 +722,12 @@ namespace TSDF.DebugTools
         {
             if (_suShader == null || _suCopyKernel < 0) return;
             if (volume == null || volume.WriteBuffer == null) return;
-            SuDispatchDims(total, out int gx, out int gy);
             _suShader.SetInts("_Dim", volume.Dim.x, volume.Dim.y, volume.Dim.z);
-            _suShader.SetInt("_DispatchWidth", gx * 64);
             _suShader.SetBuffer(_suCopyKernel, "_SrcVoxels", volume.WriteBuffer);
             _suShader.SetBuffer(_suCopyKernel, "_SrcColors", volume.WriteColorBuffer);
             _suShader.SetBuffer(_suCopyKernel, "_DstVoxels", dstVox);
             _suShader.SetBuffer(_suCopyKernel, "_DstColors", dstCol);
-            _suShader.Dispatch(_suCopyKernel, Mathf.Max(1, gx), Mathf.Max(1, gy), 1);
+            TSDFComputeUtil.DispatchLinear(_suShader, _suCopyKernel, total);
         }
 
         // smin(A, B, k) -> volume write buffer, then publish so MC re-extracts. Used
@@ -747,7 +739,6 @@ namespace TSDF.DebugTools
             int total = volume.Dim.x * volume.Dim.y * volume.Dim.z;
             if (total <= 0 || _suBufCount != total) return;   // grid changed under us — re-run Build
 
-            SuDispatchDims(total, out int gx, out int gy);
             _suShader.SetInts("_Dim", volume.Dim.x, volume.Dim.y, volume.Dim.z);
             _suShader.SetFloat("_Tau", volume.Tau);
             // The smin seam dip is k/4 at its deepest. Co-observed free space sits at
@@ -768,7 +759,6 @@ namespace TSDF.DebugTools
             _suShader.SetInt("_HighlightSeam", highlightSeam ? 1 : 0);
             _suShader.SetVector("_SeamColor", seamColor);
             _suShader.SetVector("_SeamRange", new Vector4(Mathf.Clamp01(seamThreshold), 1f, 0f, 0f));
-            _suShader.SetInt("_DispatchWidth", gx * 64);
             _suShader.SetBuffer(_suUnionKernel, "_VoxelsA", _suVoxA);
             _suShader.SetBuffer(_suUnionKernel, "_ColorsA", _suColA);
             _suShader.SetBuffer(_suUnionKernel, "_VoxelsB", _suVoxB);
@@ -781,22 +771,12 @@ namespace TSDF.DebugTools
             // (useFullGridMC=false) would drop the A-only + smin-neck geometry.
             volume.ClearWriteBlockActive();
             volume.BindBlockMarking(_suShader, _suUnionKernel, volume.WriteBlockActive);
-            _suShader.Dispatch(_suUnionKernel, Mathf.Max(1, gx), Mathf.Max(1, gy), 1);
+            TSDFComputeUtil.DispatchLinear(_suShader, _suUnionKernel, total);
 
             volume.Publish();
             _lastComposedK = smoothUnionK;
             _lastHighlightSeam = highlightSeam;
             _lastSeamThreshold = seamThreshold;
-        }
-
-        // 2D dispatch grid (mirrors TSDFVolume/Integrator): keeps large volumes under
-        // the 65535 threadgroup-per-axis D3D limit; the kernels linearise via
-        // _DispatchWidth = gx * 64.
-        private static void SuDispatchDims(int total, out int gx, out int gy)
-        {
-            int groups = Mathf.CeilToInt(total / 64f);
-            gx = Mathf.Max(1, Mathf.Min(groups, 65535));
-            gy = Mathf.Max(1, Mathf.CeilToInt(groups / (float)gx));
         }
 
         /// <summary>Integrate the currently-cached snapshot of every serial in

@@ -312,15 +312,8 @@ namespace PointCloud
         /// the live renderers used — recordings inherit the rig's current setup
         /// rather than starting from identity in a fresh folder.
         /// </summary>
-        public string ResolveExtrinsicsRoot()
-        {
-            string p = extrinsicsRoot;
-            if (string.IsNullOrWhiteSpace(p))
-                p = Path.Combine(Application.persistentDataPath, "Recordings", "recording");
-            else if (!Path.IsPathRooted(p))
-                p = Path.Combine(Application.persistentDataPath, p);
-            return p;
-        }
+        public string ResolveExtrinsicsRoot() =>
+            PointCloudRecording.ResolveRecordingRoot(extrinsicsRoot);
 
         private PointCloudRenderer FindRendererBySerial(string serial)
         {

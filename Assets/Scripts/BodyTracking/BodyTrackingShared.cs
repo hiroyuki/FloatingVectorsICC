@@ -16,6 +16,13 @@ namespace BodyTracking
             return new Vector3(p.X * 0.001f, -p.Y * 0.001f, p.Z * 0.001f);
         }
 
+        // Exact inverse of K4AmmToUnity: Unity local coordinates (m, left-handed: +Y up)
+        // back into a K4A camera-frame point (mm, right-handed: +X right, +Y down, +Z forward).
+        public static k4a_float3_t UnityToK4Amm(Vector3 p)
+        {
+            return new k4a_float3_t { X = p.x * 1000f, Y = -p.y * 1000f, Z = p.z * 1000f };
+        }
+
         public static readonly (k4abt_joint_id_t a, k4abt_joint_id_t b)[] Bones = new[]
         {
             // spine

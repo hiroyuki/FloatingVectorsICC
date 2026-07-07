@@ -96,10 +96,7 @@ namespace PointCloud
 
             _vizFilter = _vizObject.AddComponent<MeshFilter>();
             _vizRenderer = _vizObject.AddComponent<MeshRenderer>();
-            _vizRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-            _vizRenderer.receiveShadows = false;
-            _vizRenderer.lightProbeUsage = UnityEngine.Rendering.LightProbeUsage.Off;
-            _vizRenderer.reflectionProbeUsage = UnityEngine.Rendering.ReflectionProbeUsage.Off;
+            PointCloudUtil.ConfigureUnlitRenderer(_vizRenderer);
 
             _vizMesh = BuildWireCubeMesh();
             ApplyVertexColor(_vizMesh, color);
@@ -125,19 +122,19 @@ namespace PointCloud
         {
             if (_vizObject != null)
             {
-                if (Application.isPlaying) Destroy(_vizObject); else DestroyImmediate(_vizObject);
+                PointCloudUtil.DestroySafe(_vizObject);
                 _vizObject = null;
                 _vizFilter = null;
                 _vizRenderer = null;
             }
             if (_vizMesh != null)
             {
-                if (Application.isPlaying) Destroy(_vizMesh); else DestroyImmediate(_vizMesh);
+                PointCloudUtil.DestroySafe(_vizMesh);
                 _vizMesh = null;
             }
             if (_vizMaterial != null)
             {
-                if (Application.isPlaying) Destroy(_vizMaterial); else DestroyImmediate(_vizMaterial);
+                PointCloudUtil.DestroySafe(_vizMaterial);
                 _vizMaterial = null;
             }
         }

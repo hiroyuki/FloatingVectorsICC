@@ -9,6 +9,7 @@
 // Cubes (commit 3) read this volume; they never allocate their own.
 
 using PointCloud;
+using Shared;
 using UnityEngine;
 
 namespace TSDF
@@ -350,14 +351,11 @@ namespace TSDF
             int total = Dim.x * Dim.y * Dim.z;
             if (total <= 0) return;
 
-            int gx, gy;
-            DispatchGrid(total, out gx, out gy);
             _foldShader.SetBuffer(_foldKernel, "_Acc", WriteBuffer);
             _foldShader.SetBuffer(_foldKernel, "_AccColor", WriteColorBuffer);
             _foldShader.SetBuffer(_foldKernel, "_Inst", _instSdf);
             _foldShader.SetBuffer(_foldKernel, "_InstColor", _instColor);
             _foldShader.SetInts("_Dim", Dim.x, Dim.y, Dim.z);
-            _foldShader.SetInt("_DispatchWidth", gx * 64);
             // 0 = hard RetainGhost |sdf|-min; >0 = separation-gated smooth-min so the
             // motion sweep's pose-shells join with organic necks (see TSDFFold.compute).
             _foldShader.SetFloat("_Tau", Tau);
@@ -365,7 +363,7 @@ namespace TSDF
             // Fold marks the accumulation set (= WriteBlockActive; == front in single-
             // buffer accumulate). Never cleared per instant, so preserved surfaces stay.
             BindBlockMarking(_foldShader, _foldKernel, WriteBlockActive);
-            _foldShader.Dispatch(_foldKernel, gx, gy, 1);
+            TSDFComputeUtil.DispatchLinear(_foldShader, _foldKernel, total);
         }
 
         /// <summary>
@@ -384,15 +382,12 @@ namespace TSDF
             int total = Dim.x * Dim.y * Dim.z;
             if (total <= 0) return;
 
-            int gx, gy;
-            DispatchGrid(total, out gx, out gy);
             _copyShader.SetInts("_Dim", Dim.x, Dim.y, Dim.z);
-            _copyShader.SetInt("_DispatchWidth", gx * 64);
             _copyShader.SetBuffer(_copyKernel, "_SrcSdf", FrontBuffer);
             _copyShader.SetBuffer(_copyKernel, "_SrcColor", FrontColorBuffer);
             _copyShader.SetBuffer(_copyKernel, "_DstSdf", WriteBuffer);
             _copyShader.SetBuffer(_copyKernel, "_DstColor", WriteColorBuffer);
-            _copyShader.Dispatch(_copyKernel, gx, gy, 1);
+            TSDFComputeUtil.DispatchLinear(_copyShader, _copyKernel, total);
 
             // Copy the occupancy set too, so a subsequent trail-bake into the write
             // buffer min-unions onto the DISPLAYED body's active blocks (not the stale
@@ -411,12 +406,7 @@ namespace TSDF
         private bool EnsureCopyShader()
         {
             if (_copyShader != null) return true;
-            _copyShader = Resources.Load<ComputeShader>("TSDFCopy");
-            if (_copyShader == null)
-            {
-                Debug.LogError("[TSDFVolume] Compute shader \"Resources/TSDFCopy.compute\" not found.", this);
-                return false;
-            }
+            if (!TSDFComputeUtil.TryLoad(ref _copyShader, "TSDFCopy", "TSDFVolume", this)) return false;
             _copyKernel = _copyShader.FindKernel("Copy");
             return true;
         }
@@ -425,33 +415,16 @@ namespace TSDF
         {
             int total = Dim.x * Dim.y * Dim.z;
             if (total <= 0) return;
-            if (_instSdf == null || _instSdf.count != total)
-            {
-                _instSdf?.Release();
-                _instSdf = new ComputeBuffer(total, sizeof(float) * 2);
-            }
-            if (_instColor == null || _instColor.count != total)
-            {
-                _instColor?.Release();
-                _instColor = new ComputeBuffer(total, sizeof(float) * 4);
-            }
+            GpuBuf.Ensure(ref _instSdf, total, sizeof(float) * 2);
+            GpuBuf.Ensure(ref _instColor, total, sizeof(float) * 4);
             int blocks = Mathf.Max(1, BlockDim.x * BlockDim.y * BlockDim.z);
-            if (_baInst == null || _baInst.count != blocks)
-            {
-                _baInst?.Release();
-                _baInst = new ComputeBuffer(blocks, sizeof(uint));
-            }
+            GpuBuf.Ensure(ref _baInst, blocks, sizeof(uint));
         }
 
         private bool EnsureFoldShader()
         {
             if (_foldShader != null) return true;
-            _foldShader = Resources.Load<ComputeShader>("TSDFFold");
-            if (_foldShader == null)
-            {
-                Debug.LogError("[TSDFVolume] Compute shader \"Resources/TSDFFold.compute\" not found.", this);
-                return false;
-            }
+            if (!TSDFComputeUtil.TryLoad(ref _foldShader, "TSDFFold", "TSDFVolume", this)) return false;
             _foldKernel = _foldShader.FindKernel("Fold");
             return true;
         }
@@ -493,11 +466,7 @@ namespace TSDF
             // threadgroup limit is never exceeded (a 1x1m@1cm volume already
             // needs >100k groups).
             int total = Dim.x * Dim.y * Dim.z;
-            int groups = Mathf.CeilToInt(total / 64f);
-            int gx = Mathf.Min(groups, 65535);
-            int gy = Mathf.CeilToInt(groups / (float)gx);
-            _clearShader.SetInt("_DispatchWidth", gx * 64);
-            _clearShader.Dispatch(_clearKernel, Mathf.Max(1, gx), Mathf.Max(1, gy), 1);
+            TSDFComputeUtil.DispatchLinear(_clearShader, _clearKernel, total);
         }
 
         /// <summary>
@@ -541,12 +510,7 @@ namespace TSDF
         private void EnsureCcShader()
         {
             if (_ccShader != null) return;
-            _ccShader = Resources.Load<ComputeShader>("TSDFConnectedComponents");
-            if (_ccShader == null)
-            {
-                Debug.LogError("[TSDFVolume] Compute shader \"Resources/TSDFConnectedComponents.compute\" not found.", this);
-                return;
-            }
+            if (!TSDFComputeUtil.TryLoad(ref _ccShader, "TSDFConnectedComponents", "TSDFVolume", this)) return;
             _ccInit = _ccShader.FindKernel("InitLabels");
             _ccProp = _ccShader.FindKernel("Propagate");
             _ccResetSize = _ccShader.FindKernel("ResetSizes");
@@ -573,9 +537,6 @@ namespace TSDF
             if (total <= 0) return;
 
             EnsureCcResources(total);
-            int gx, gy;
-            DispatchGrid(total, out gx, out gy);
-            int dw = gx * 64;
 
             void Bind(int k)
             {
@@ -587,11 +548,10 @@ namespace TSDF
                 _ccShader.SetFloat("_MinWeight", ccMinWeight);
                 _ccShader.SetFloat("_Tau", Tau);
                 _ccShader.SetInt("_MinComponent", Mathf.Max(1, minVoxels));
-                _ccShader.SetInt("_DispatchWidth", dw);
             }
 
             Bind(_ccInit);
-            _ccShader.Dispatch(_ccInit, gx, gy, 1);
+            TSDFComputeUtil.DispatchLinear(_ccShader, _ccInit, total);
 
             int iters = Mathf.Max(1, ccMaxIterations);
             bool converged = false;
@@ -600,7 +560,7 @@ namespace TSDF
             {
                 _ccChanged.SetData(new uint[] { 0 });
                 Bind(_ccProp);
-                _ccShader.Dispatch(_ccProp, gx, gy, 1);
+                TSDFComputeUtil.DispatchLinear(_ccShader, _ccProp, total);
                 _ccChanged.GetData(changed);
                 if (changed[0] == 0) { converged = true; break; }   // labels stabilised
             }
@@ -617,48 +577,27 @@ namespace TSDF
             }
 
             Bind(_ccResetSize);
-            _ccShader.Dispatch(_ccResetSize, gx, gy, 1);
+            TSDFComputeUtil.DispatchLinear(_ccShader, _ccResetSize, total);
             Bind(_ccCount);
-            _ccShader.Dispatch(_ccCount, gx, gy, 1);
+            TSDFComputeUtil.DispatchLinear(_ccShader, _ccCount, total);
             Bind(_ccCull);
-            _ccShader.Dispatch(_ccCull, gx, gy, 1);
+            TSDFComputeUtil.DispatchLinear(_ccShader, _ccCull, total);
 
             PublishVersion++;   // re-extract Marching Cubes on the cleaned front buffer
         }
 
         private void EnsureCcResources(int total)
         {
-            if (_ccLabel == null || _ccLabel.count != total)
-            {
-                _ccLabel?.Release();
-                _ccLabel = new ComputeBuffer(total, sizeof(uint));
-            }
-            if (_ccSize == null || _ccSize.count != total)
-            {
-                _ccSize?.Release();
-                _ccSize = new ComputeBuffer(total, sizeof(uint));
-            }
+            GpuBuf.Ensure(ref _ccLabel, total, sizeof(uint));
+            GpuBuf.Ensure(ref _ccSize, total, sizeof(uint));
             if (_ccChanged == null)
                 _ccChanged = new ComputeBuffer(1, sizeof(uint));
-        }
-
-        private void DispatchGrid(int total, out int gx, out int gy)
-        {
-            int groups = Mathf.CeilToInt(total / 64f);
-            gx = Mathf.Max(1, Mathf.Min(groups, 65535));
-            gy = Mathf.Max(1, Mathf.CeilToInt(groups / (float)gx));
         }
 
         private void EnsureClearShader()
         {
             if (_clearShader != null) return;
-            _clearShader = Resources.Load<ComputeShader>("TSDFClear");
-            if (_clearShader == null)
-            {
-                Debug.LogError("[TSDFVolume] Compute shader \"Resources/TSDFClear.compute\" not found. " +
-                               "Did the Resources/ folder import correctly?", this);
-                return;
-            }
+            if (!TSDFComputeUtil.TryLoad(ref _clearShader, "TSDFClear", "TSDFVolume", this)) return;
             _clearKernel = _clearShader.FindKernel("Clear");
             _clearUintKernel = _clearShader.FindKernel("ClearUint");
             _clearBlocksKernel = _clearShader.FindKernel("ClearBlocks");
@@ -673,14 +612,10 @@ namespace TSDF
             if (_clearShader == null) return;
 
             int count = buf.count;
-            int groups = Mathf.CeilToInt(count / 64f);
-            int gx = Mathf.Max(1, Mathf.Min(groups, 65535));
-            int gy = Mathf.Max(1, Mathf.CeilToInt(groups / (float)gx));
             _clearShader.SetBuffer(_clearUintKernel, "_UintBuf", buf);
             _clearShader.SetInt("_UintCount", count);
             _clearShader.SetInt("_UintClearValue", 0);
-            _clearShader.SetInt("_DispatchWidth", gx * 64);
-            _clearShader.Dispatch(_clearUintKernel, gx, gy, 1);
+            TSDFComputeUtil.DispatchLinear(_clearShader, _clearUintKernel, count);
         }
 
         /// <summary>Depth-basis (option ④, Phase 1b): (re)allocate the double-buffered key +
@@ -720,14 +655,10 @@ namespace TSDF
             if (_clearShader == null) EnsureClearShader();
             if (_clearShader == null) return;
             int count = buf.count;
-            int groups = Mathf.CeilToInt(count / 64f);
-            int gx = Mathf.Max(1, Mathf.Min(groups, 65535));
-            int gy = Mathf.Max(1, Mathf.CeilToInt(groups / (float)gx));
             _clearShader.SetBuffer(_clearUintKernel, "_UintBuf", buf);
             _clearShader.SetInt("_UintCount", count);
             _clearShader.SetInt("_UintClearValue", unchecked((int)0xFFFFFFFF));
-            _clearShader.SetInt("_DispatchWidth", gx * 64);
-            _clearShader.Dispatch(_clearUintKernel, gx, gy, 1);
+            TSDFComputeUtil.DispatchLinear(_clearShader, _clearUintKernel, count);
         }
 
         /// <summary>Depth-basis (option ④, Phase 1b): clear ONLY the blocks the scatter
@@ -923,44 +854,28 @@ namespace TSDF
 
         private void ReleaseBuffer()
         {
-            _bufA?.Release();
-            _bufB?.Release();
-            _colA?.Release();
-            _colB?.Release();
-            _baA?.Release();
-            _baB?.Release();
-            _baInst?.Release();
-            _baA = null;
-            _baB = null;
-            _baInst = null;
+            GpuBuf.Release(ref _bufA);
+            GpuBuf.Release(ref _bufB);
+            GpuBuf.Release(ref _colA);
+            GpuBuf.Release(ref _colB);
+            GpuBuf.Release(ref _baA);
+            GpuBuf.Release(ref _baB);
+            GpuBuf.Release(ref _baInst);
             FrontBlockActive = null;
             WriteBlockActive = null;
-            _instSdf?.Release();
-            _instColor?.Release();
-            _instSdf = null;
-            _instColor = null;
-            _keyA?.Release();
-            _keyB?.Release();
-            _touchA?.Release();
-            _touchB?.Release();
-            _keyA = null;
-            _keyB = null;
-            _touchA = null;
-            _touchB = null;
+            GpuBuf.Release(ref _instSdf);
+            GpuBuf.Release(ref _instColor);
+            GpuBuf.Release(ref _keyA);
+            GpuBuf.Release(ref _keyB);
+            GpuBuf.Release(ref _touchA);
+            GpuBuf.Release(ref _touchB);
             WriteKeyBuffer = null;
             FrontKeyBuffer = null;
             WriteTouched = null;
             FrontTouched = null;
-            _ccLabel?.Release();
-            _ccSize?.Release();
-            _ccChanged?.Release();
-            _ccLabel = null;
-            _ccSize = null;
-            _ccChanged = null;
-            _bufA = null;
-            _bufB = null;
-            _colA = null;
-            _colB = null;
+            GpuBuf.Release(ref _ccLabel);
+            GpuBuf.Release(ref _ccSize);
+            GpuBuf.Release(ref _ccChanged);
             FrontBuffer = null;
             WriteBuffer = null;
             FrontColorBuffer = null;

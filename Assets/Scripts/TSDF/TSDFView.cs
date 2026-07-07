@@ -14,6 +14,7 @@
 // All three modes read the SAME ComputeBuffer owned by TSDFVolume — no CPU
 // readback, no buffer duplication.
 
+using Shared;
 using Unity.Profiling;
 using UnityEngine;
 using UnityEngine.Rendering;
@@ -244,24 +245,20 @@ namespace TSDF
         {
             // Indirect-args buffers for the two instanced views. Layout (5 uints):
             // [indexCount, instanceCount, startIndex, baseVertex, startInstance].
-            if (_voxelArgsBuffer == null)
-                _voxelArgsBuffer = new ComputeBuffer(5, sizeof(uint), ComputeBufferType.IndirectArguments);
-            if (_cellArgsBuffer == null)
-                _cellArgsBuffer = new ComputeBuffer(5, sizeof(uint), ComputeBufferType.IndirectArguments);
+            GpuBuf.Ensure(ref _voxelArgsBuffer, 5, sizeof(uint), ComputeBufferType.IndirectArguments);
+            GpuBuf.Ensure(ref _cellArgsBuffer, 5, sizeof(uint), ComputeBufferType.IndirectArguments);
 
             // Mesh-view AppendBuffer of Tri = per vertex (float3 pos + float3
             // colour) × 3 = 6 float3 = 72 bytes per slot. Must match the Tri
             // struct in TSDFMarchingCubes.compute and TSDFMesh.shader.
             const int triStride = 72;
-            if (_meshTrianglesBuffer == null || _meshTrianglesBuffer.count != meshMaxTriangles)
-            {
-                _meshTrianglesBuffer?.Release();
-                _meshTrianglesBuffer = new ComputeBuffer(meshMaxTriangles, triStride, ComputeBufferType.Append);
-            }
+            GpuBuf.Ensure(ref _meshTrianglesBuffer, meshMaxTriangles, triStride, ComputeBufferType.Append);
             // 4-uint indirect args buffer for DrawProceduralIndirect: [vertCount, 1, 0, 0]
+            // Seed only on (re)alloc — ScaleArgs owns [0] afterwards, so an unconditional
+            // SetData here would zero the draw between publishes.
             if (_meshArgsBuffer == null)
             {
-                _meshArgsBuffer = new ComputeBuffer(4, sizeof(uint), ComputeBufferType.IndirectArguments);
+                GpuBuf.Ensure(ref _meshArgsBuffer, 4, sizeof(uint), ComputeBufferType.IndirectArguments);
                 _meshArgsBuffer.SetData(new uint[] { 0, 1, 0, 0 });
             }
 
@@ -271,35 +268,29 @@ namespace TSDF
             // _dispatchArgsBuffer is the 3-uint DispatchIndirect args (distinct from the
             // 4-uint DRAW args above).
             int blockCount = volume != null ? Mathf.Max(1, volume.BlockDim.x * volume.BlockDim.y * volume.BlockDim.z) : 1;
-            if (_activeBlocksBuffer == null || _activeBlocksBuffer.count != blockCount)
-            {
-                _activeBlocksBuffer?.Release();
-                _activeBlocksBuffer = new ComputeBuffer(blockCount, sizeof(uint), ComputeBufferType.Append);
-            }
+            GpuBuf.Ensure(ref _activeBlocksBuffer, blockCount, sizeof(uint), ComputeBufferType.Append);
             if (_dispatchArgsBuffer == null)
             {
-                _dispatchArgsBuffer = new ComputeBuffer(3, sizeof(uint), ComputeBufferType.IndirectArguments);
+                GpuBuf.Ensure(ref _dispatchArgsBuffer, 3, sizeof(uint), ComputeBufferType.IndirectArguments);
                 _dispatchArgsBuffer.SetData(new uint[] { 0, 1, 1 });
             }
         }
 
         private void ReleaseBuffers()
         {
-            _voxelArgsBuffer?.Release();     _voxelArgsBuffer = null;
-            _cellArgsBuffer?.Release();      _cellArgsBuffer = null;
-            _meshTrianglesBuffer?.Release(); _meshTrianglesBuffer = null;
-            _meshArgsBuffer?.Release();      _meshArgsBuffer = null;
-            _activeBlocksBuffer?.Release();  _activeBlocksBuffer = null;
-            _dispatchArgsBuffer?.Release();  _dispatchArgsBuffer = null;
+            GpuBuf.Release(ref _voxelArgsBuffer);
+            GpuBuf.Release(ref _cellArgsBuffer);
+            GpuBuf.Release(ref _meshTrianglesBuffer);
+            GpuBuf.Release(ref _meshArgsBuffer);
+            GpuBuf.Release(ref _activeBlocksBuffer);
+            GpuBuf.Release(ref _dispatchArgsBuffer);
         }
 
         private void EnsureMcShader()
         {
             if (_mcShader != null) return;
-            _mcShader = Resources.Load<ComputeShader>("TSDFMarchingCubes");
-            if (_mcShader == null)
+            if (!TSDFComputeUtil.TryLoad(ref _mcShader, "TSDFMarchingCubes", "TSDFView", this))
             {
-                Debug.LogError("[TSDFView] Compute shader \"Resources/TSDFMarchingCubes.compute\" not found.", this);
                 enabled = false;
                 return;
             }

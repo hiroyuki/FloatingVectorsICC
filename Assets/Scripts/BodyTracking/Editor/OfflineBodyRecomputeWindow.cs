@@ -353,10 +353,7 @@ namespace BodyTracking.EditorTools
         {
             int n = Math.Min(count, _outBodies.Length);
             for (int i = 0; i < n; i++)
-            {
-                _outBodies[i].Id = bodies[i].Id;
-                Array.Copy(bodies[i].Joints, _outBodies[i].Joints, _outBodies[i].Joints.Length);
-            }
+                _outBodies[i].CopyFrom(bodies[i]);
             _outBodyCount = n;
             _outTsNs = tsNs;
             _gotOutput = true;

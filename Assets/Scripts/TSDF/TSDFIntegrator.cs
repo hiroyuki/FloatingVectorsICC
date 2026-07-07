@@ -9,6 +9,7 @@
 using System.Collections.Generic;
 using Orbbec;
 using PointCloud;
+using Shared;
 using UnityEngine;
 
 namespace TSDF
@@ -243,9 +244,9 @@ namespace TSDF
             UnbindAll();
             foreach (var kv in _states)
             {
-                kv.Value.DepthBuf?.Release();
-                kv.Value.ColorBuf?.Release();
-                kv.Value.RayLutBuf?.Release();
+                GpuBuf.Release(ref kv.Value.DepthBuf);
+                GpuBuf.Release(ref kv.Value.ColorBuf);
+                GpuBuf.Release(ref kv.Value.RayLutBuf);
             }
             _states.Clear();
         }
@@ -253,10 +254,8 @@ namespace TSDF
         private void EnsureShader()
         {
             if (_shader != null) return;
-            _shader = Resources.Load<ComputeShader>("TSDFIntegrate");
-            if (_shader == null)
+            if (!TSDFComputeUtil.TryLoad(ref _shader, "TSDFIntegrate", "TSDFIntegrator", this))
             {
-                Debug.LogError("[TSDFIntegrator] Compute shader \"Resources/TSDFIntegrate.compute\" not found.", this);
                 enabled = false;
                 return;
             }
@@ -266,12 +265,7 @@ namespace TSDF
         private bool EnsureDepthShader()
         {
             if (_depthShader != null) return true;
-            _depthShader = Resources.Load<ComputeShader>("TSDFIntegrateDepth");
-            if (_depthShader == null)
-            {
-                Debug.LogError("[TSDFIntegrator] Compute shader \"Resources/TSDFIntegrateDepth.compute\" not found.", this);
-                return false;
-            }
+            if (!TSDFComputeUtil.TryLoad(ref _depthShader, "TSDFIntegrateDepth", "TSDFIntegrator", this)) return false;
             _kScatterMin = _depthShader.FindKernel("ScatterMin");
             _kScatterWrite = _depthShader.FindKernel("ScatterWrite");
             return true;
@@ -497,11 +491,7 @@ namespace TSDF
             // pattern from PointCloudReconstructor: BlockCopy the raw bytes
             // into a scratch uint[] first, then upload by element count.
             int uintCount = (raw.DepthByteCount + 3) / 4;
-            if (st.DepthBuf == null || st.DepthBuf.count != uintCount)
-            {
-                st.DepthBuf?.Release();
-                st.DepthBuf = new ComputeBuffer(uintCount, 4, ComputeBufferType.Raw);
-            }
+            GpuBuf.Ensure(ref st.DepthBuf, uintCount, 4, ComputeBufferType.Raw);
             if (st.DepthScratchU32 == null || st.DepthScratchU32.Length != uintCount)
                 st.DepthScratchU32 = new uint[uintCount];
             System.Buffer.BlockCopy(raw.DepthBytes, 0, st.DepthScratchU32, 0, raw.DepthByteCount);
@@ -519,11 +509,7 @@ namespace TSDF
                 st.ColorWidth = raw.ColorWidth;
                 st.ColorHeight = raw.ColorHeight;
                 int cUintCount = (raw.ColorByteCount + 3) / 4;
-                if (st.ColorBuf == null || st.ColorBuf.count != cUintCount)
-                {
-                    st.ColorBuf?.Release();
-                    st.ColorBuf = new ComputeBuffer(cUintCount, 4, ComputeBufferType.Raw);
-                }
+                GpuBuf.Ensure(ref st.ColorBuf, cUintCount, 4, ComputeBufferType.Raw);
                 if (st.ColorScratchU32 == null || st.ColorScratchU32.Length != cUintCount)
                     st.ColorScratchU32 = new uint[cUintCount];
                 System.Buffer.BlockCopy(raw.ColorBytes, 0, st.ColorScratchU32, 0, raw.ColorByteCount);
@@ -599,7 +585,7 @@ namespace TSDF
             // renderer-transform half of depthFromWorld (the source GO transform
             // is already in colour-camera metres), scaled to mm — without the
             // colour->depth extrinsic inverse that depthFromWorld applies.
-            Matrix4x4 colorFromWorld = Matrix4x4.Scale(new Vector3(1000f, 1000f, 1000f))
+            Matrix4x4 colorFromWorld = Units.MToMmScale
                                        * sourceTransform.worldToLocalMatrix;
             var cintr = st.CamParam.RgbIntrinsic;
             _shader.SetBuffer(_kernel, "_Colors", targetColor);
@@ -615,15 +601,11 @@ namespace TSDF
             _shader.SetInt("_UseColorOverride", colorOverride.a > 0f ? 1 : 0);
             _shader.SetVector("_OverrideColor", new Vector4(colorOverride.r, colorOverride.g, colorOverride.b, 0f));
 
-            int total = volume.Dim.x * volume.Dim.y * volume.Dim.z;
-            int groups = Mathf.CeilToInt(total / 64f);
             // 2D group grid so fine volumes (voxelSize 0.01 → >100k groups) stay
             // under the 65535 threadgroup-per-axis limit. The kernel linearises
             // via _DispatchWidth = groupsX * 64.
-            int gx = Mathf.Min(groups, 65535);
-            int gy = Mathf.CeilToInt(groups / (float)gx);
-            _shader.SetInt("_DispatchWidth", gx * 64);
-            _shader.Dispatch(_kernel, Mathf.Max(1, gx), Mathf.Max(1, gy), 1);
+            int total = volume.Dim.x * volume.Dim.y * volume.Dim.z;
+            TSDFComputeUtil.DispatchLinear(_shader, _kernel, total);
 
             st.FramesIntegrated++;
             TotalIntegrationCount++;
@@ -703,7 +685,7 @@ namespace TSDF
             Matrix4x4 depthFromWorld = ComputeDepthFromWorld(st.SourceTransform, st.CamParam);
             var intr = st.CamParam.DepthIntrinsic;
             var cintr = st.CamParam.RgbIntrinsic;
-            Matrix4x4 colorFromWorld = Matrix4x4.Scale(new Vector3(1000f, 1000f, 1000f))
+            Matrix4x4 colorFromWorld = Units.MToMmScale
                                        * st.SourceTransform.worldToLocalMatrix;
 
             _depthShader.SetBuffer(kernel, "_Voxels", volume.WriteBuffer);
@@ -784,11 +766,7 @@ namespace TSDF
                           : PointCloud.DepthUndistortLut.Build(intr, dist, st.DepthWidth, st.DepthHeight);
             if (lut != null && lut.Length > 0)
             {
-                if (st.RayLutBuf == null || st.RayLutBuf.count != lut.Length)
-                {
-                    st.RayLutBuf?.Release();
-                    st.RayLutBuf = new ComputeBuffer(lut.Length, sizeof(float) * 2);
-                }
+                GpuBuf.Ensure(ref st.RayLutBuf, lut.Length, sizeof(float) * 2);
                 st.RayLutBuf.SetData(lut);
                 st.HasRayLut = true;
             }
@@ -831,13 +809,10 @@ namespace TSDF
         private static Matrix4x4 ComputeDepthFromWorld(Transform src, in ObCameraParam camParam)
         {
             Matrix4x4 colorMFromWorldM = src.worldToLocalMatrix;
-            Matrix4x4 scaleMmFromM = Matrix4x4.Scale(new Vector3(1000f, 1000f, 1000f));
+            Matrix4x4 scaleMmFromM = Units.MToMmScale;
 
             var ext = camParam.Transform;
-            Matrix4x4 colorMmFromDepthMm = Matrix4x4.identity;
-            colorMmFromDepthMm.m00 = ext.Rot[0]; colorMmFromDepthMm.m01 = ext.Rot[1]; colorMmFromDepthMm.m02 = ext.Rot[2]; colorMmFromDepthMm.m03 = ext.Trans[0];
-            colorMmFromDepthMm.m10 = ext.Rot[3]; colorMmFromDepthMm.m11 = ext.Rot[4]; colorMmFromDepthMm.m12 = ext.Rot[5]; colorMmFromDepthMm.m13 = ext.Trans[1];
-            colorMmFromDepthMm.m20 = ext.Rot[6]; colorMmFromDepthMm.m21 = ext.Rot[7]; colorMmFromDepthMm.m22 = ext.Rot[8]; colorMmFromDepthMm.m23 = ext.Trans[2];
+            Matrix4x4 colorMmFromDepthMm = ext.ToMatrixMm();
 
             Matrix4x4 depthMmFromColorMm = colorMmFromDepthMm.inverse;
             return depthMmFromColorMm * scaleMmFromM * colorMFromWorldM;
