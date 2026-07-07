@@ -152,6 +152,22 @@ namespace PointCloud
                               "SensorRecorder will drive playback from its folderPath.");
                 return;
             }
+            StartLive();
+        }
+
+        /// <summary>
+        /// Enumerate connected Femto Bolts and spawn one PointCloudRenderer per
+        /// device. Runs from Start() on live scenes, and again from
+        /// SensorRecorder.SwitchToLive() after playback destroyed the renderers,
+        /// so switching back to live no longer requires reloading the scene.
+        /// No-op while live renderers already exist. Ignores playbackOnly — the
+        /// flag only decides the startup mode, not explicit switches.
+        /// </summary>
+        public void StartLive()
+        {
+            _renderers.RemoveAll(r => r == null);
+            if (_renderers.Count > 0) return;
+
             var ctx = OrbbecRuntime.Context;
             var devices = ctx.QueryDevices();
             if (verboseLogging)
@@ -187,9 +203,8 @@ namespace PointCloud
         /// Destroy every spawned PointCloudRenderer GameObject so its capture
         /// thread / OrbbecSDK pipeline tears down and releases the USB device.
         /// Called by SensorRecorder.Read so playback runs without the live
-        /// cameras competing for USB bandwidth / GPU. Manager itself stays alive
-        /// but won't re-spawn (Start only ran once). Re-connecting requires
-        /// reloading the scene (or re-entering Play mode).
+        /// cameras competing for USB bandwidth / GPU. Re-connect with
+        /// <see cref="StartLive"/> (SensorRecorder's Switch Mode button).
         /// </summary>
         public void DestroyAllRenderers()
         {

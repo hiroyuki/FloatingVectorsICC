@@ -78,11 +78,6 @@ namespace PointCloud
         [Header("Playback")]
         public bool loop = true;
 
-        [Tooltip("When Play mode starts, automatically Read + Play this recording so you don't " +
-                 "have to press Read/Play by hand. (Also implied when the camera manager is in " +
-                 "playbackOnly mode.)")]
-        public bool autoPlayOnStart = false;
-
         [Tooltip("Where to register playback meshes for visibility toggling. " +
                  "Auto-found via FindFirstObjectByType if left null.")]
         public PointCloudView view;
@@ -146,6 +141,12 @@ namespace PointCloud
         // these readouts complete it so the panel can drive the transport centrally.
         public bool IsRecording => CurrentState == State.Recording;
         public bool IsPlaying => CurrentState == State.Playing;
+        public string RecordingFolder
+        {
+            get => folderPath;
+            set => folderPath = value ?? string.Empty;
+        }
+        public string ResolvedRecordingFolder => ResolveRoot();
         public string TransportStatus =>
             CurrentState + (IsPaused ? " (paused)" : "")
             + (CurrentState == State.Playing ? $" @ {CurrentPlayheadSeconds:0.00}s" : "")
@@ -492,6 +493,63 @@ namespace PointCloud
         {
             if (CurrentState == State.Playing) StopPlayback();
             else StartPlayback();
+        }
+
+        /// <summary>
+        /// True while live PointCloudRenderers exist. Loading a recording
+        /// destroys them (Load → DestroyAllRenderers), so this doubles as the
+        /// live/playback mode indicator for the Inspector's Switch Mode button.
+        /// </summary>
+        public bool IsLiveMode => ResolveManager() != null && ResolveManager().Renderers.Count > 0;
+
+        /// <summary>
+        /// One-button live ⇄ playback switch. Live → playback: TogglePlay
+        /// (auto-Loads folderPath; Load frees the live cameras). Playback →
+        /// live: stop playback, drop the loaded tracks + _Playback_* GOs, and
+        /// respawn the live renderers via SensorManager.StartLive.
+        /// </summary>
+        [ContextMenu("Switch Mode (Live/Playback)")]
+        public void SwitchMode()
+        {
+            if (CurrentState == State.Recording)
+            {
+                SetStatus("Switch mode: stop recording first.", warn: true);
+                return;
+            }
+            if (IsLiveMode) TogglePlay();
+            else SwitchToLive();
+        }
+
+        /// <summary>
+        /// Leave playback and reconnect the live cameras: stops playback,
+        /// releases every loaded track (closes RCSV streams, destroys the
+        /// _Playback_* GameObjects) and re-enumerates devices.
+        /// </summary>
+        public void SwitchToLive()
+        {
+            if (CurrentState == State.Recording)
+            {
+                SetStatus("Switch to live: stop recording first.", warn: true);
+                return;
+            }
+            if (CurrentState == State.Playing) StopPlayback();
+            ClearTracks();
+
+            var mgr = ResolveManager();
+            if (mgr == null)
+            {
+                SetStatus("Switch to live: no SensorManager in scene.", warn: true);
+                return;
+            }
+            mgr.StartLive();
+            SetStatus($"Live mode: {mgr.Renderers.Count} camera(s) connected.");
+        }
+
+        private SensorManager ResolveManager()
+        {
+            if (cameraManager == null)
+                cameraManager = FindFirstObjectByType<SensorManager>();
+            return cameraManager;
         }
 
         [ContextMenu("Toggle Pause")]
@@ -1107,8 +1165,8 @@ namespace PointCloud
                 // Free the live Femto Bolt pipelines now that the recording is on
                 // disk in memory — the user pressed Read to play back, so the live
                 // cameras compete for USB bandwidth and double-render the same
-                // subjects. Live capture cannot be resumed without reloading the
-                // scene; this is intentional (Read = commit to playback mode).
+                // subjects. Live capture resumes via SwitchToLive (Switch Mode
+                // button), which re-enumerates the devices.
                 int liveDestroyed = 0;
                 if (cameraManager != null)
                 {
@@ -1574,11 +1632,12 @@ namespace PointCloud
 
         private void Start()
         {
-            // Auto-play on entering Play mode when either the recorder's own
-            // autoPlayOnStart toggle is set, or the camera manager is in playbackOnly
-            // mode ("don't connect to live devices, play this folder instead").
-            // StartPlayback auto-Reads, so pressing Editor Play "just works".
-            if (autoPlayOnStart || (cameraManager != null && cameraManager.playbackOnly))
+            // Auto-play on entering Play mode when the camera manager is in
+            // playbackOnly mode ("don't connect to live devices, play this folder
+            // instead"). StartPlayback auto-Reads, so pressing Editor Play "just
+            // works". Otherwise the scene starts LIVE and the operator switches to
+            // playback from the Control Panel when they want it.
+            if (cameraManager != null && cameraManager.playbackOnly)
                 TogglePlay();
         }
 

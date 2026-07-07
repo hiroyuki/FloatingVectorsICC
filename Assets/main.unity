@@ -268,7 +268,6 @@ MonoBehaviour:
   folderPathMacOverride: /Volumes/horristicSSD2T/Dropbox/projects/ICC/Recordings/Rec2_jump
   datasetName: 
   loop: 1
-  autoPlayOnStart: 1
   view: {fileID: 1168113566}
   playbackRate: 1
   bodyLeadFrames: 0
@@ -856,7 +855,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 96892899ec43f7246a88f0b3f63d9e67, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::PointCloud.PointCloudCameraManager
-  playbackOnly: 1
+  playbackOnly: 0
   defaultPointMaterial: {fileID: 0}
   depthWidth: 320
   depthHeight: 288

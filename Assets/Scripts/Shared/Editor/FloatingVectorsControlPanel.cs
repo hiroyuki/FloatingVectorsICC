@@ -93,6 +93,43 @@ namespace Shared.EditorTools
                     EditorGUILayout.HelpBox(t.TransportStatus,
                         t.IsRecording ? MessageType.Warning : MessageType.Info);
 
+                // Recording folder (folderPath). Editing is locked while recording
+                // so the destination can't change mid-take. Delayed field so Undo /
+                // the setter fire once per commit, not per keystroke. Below it, the
+                // resolved absolute path so the operator sees where Rec/Play land.
+                using (new EditorGUI.DisabledScope(t.IsRecording))
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    GUILayout.Label(new GUIContent("設定ディレクトリ",
+                        "録画/再生のルートフォルダ（SensorRecorder.folderPath）。相対パスは " +
+                        "persistentDataPath 起点。空欄で既定の recording フォルダ。"),
+                        GUILayout.Width(150));
+                    string folder = EditorGUILayout.DelayedTextField(t.RecordingFolder ?? string.Empty);
+                    if (folder != (t.RecordingFolder ?? string.Empty))
+                    {
+                        if (comp != null) Undo.RecordObject(comp, "Set recording folder");
+                        t.RecordingFolder = folder;
+                        if (comp != null) EditorUtility.SetDirty(comp);
+                    }
+                }
+                if (!string.IsNullOrEmpty(t.ResolvedRecordingFolder))
+                    EditorGUILayout.LabelField(" ", t.ResolvedRecordingFolder, EditorStyles.miniLabel);
+
+                // One-button live ⇄ playback switch. Playback → live reconnects the
+                // cameras via SensorManager.StartLive, no scene reload needed.
+                // Disabled while recording (stop recording first).
+                using (new EditorGUI.DisabledScope(!Application.isPlaying || t.IsRecording))
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    bool live = Application.isPlaying && t.IsLiveMode;
+                    GUILayout.Label(
+                        "Mode: " + (!Application.isPlaying ? "-" : live ? "LIVE (realtime)" : "PLAYBACK"),
+                        EditorStyles.miniBoldLabel, GUILayout.Width(150));
+                    if (GUILayout.Button(live ? "Switch to PLAYBACK ▶" : "Switch to LIVE ⦿",
+                                         GUILayout.Height(24)))
+                        t.SwitchMode();
+                }
+
                 using (new EditorGUI.DisabledScope(!Application.isPlaying))
                 using (new EditorGUILayout.HorizontalScope())
                 {

@@ -33,6 +33,21 @@ namespace PointCloud.EditorTools
 
             EditorGUILayout.Space();
 
+            // One-button live ⇄ playback switch. Live → playback auto-Loads and
+            // plays; playback → live drops the tracks and reconnects the cameras
+            // (SensorManager.StartLive), no scene reload needed.
+            using (new EditorGUI.DisabledScope(!Application.isPlaying ||
+                                               t.CurrentState == SensorRecorder.State.Recording))
+            {
+                bool live = Application.isPlaying && t.IsLiveMode;
+                string modeLabel = !Application.isPlaying ? "-" : live ? "LIVE (realtime)" : "PLAYBACK";
+                EditorGUILayout.LabelField("Mode", modeLabel);
+                string btn = live ? "Switch to PLAYBACK ▶" : "Switch to LIVE ⦿";
+                if (GUILayout.Button(btn, GUILayout.Height(28))) t.SwitchMode();
+            }
+
+            EditorGUILayout.Space();
+
             using (new EditorGUILayout.HorizontalScope())
             {
                 using (new EditorGUI.DisabledScope(!Application.isPlaying))
