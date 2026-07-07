@@ -1,5 +1,11 @@
 # リアルタイム軽量化ガイド（TSDF mesh / curved line）
 
+> **⚠️ 2026-07-07 追記・要改訂**: 本ガイドの主軸「三角形を減らす」は Unity MCP 実測で**否定された**。
+> フレーム時間の 90% は毎フレームの GPU コンピュート（うち **TSDF 統合 `TSDFIntegrator` が ~25ms で支配的**）、
+> ラスタ描画は 8% だけ。三角形削減（`smoothSubdiv` / `meshMaxTriangles`）はその 8% しか触れず、ほぼ効かない。
+> → 新しい方針・実測値・計測手法・改造プランは **`Plans/tsdf-integration-perf-refactor.md`** を参照。
+> 以下の記述は「curved line が最大の三角形供給源」という誤った前提に立っているため、鵜呑みにしないこと。
+
 2026-07-07 時点。Web エクスポート実装（Export Web: GLB+USDZ）の削減実験で得た実測値をもとに、
 リアルタイム表示の負荷ノブと推奨手順をまとめる。
 
