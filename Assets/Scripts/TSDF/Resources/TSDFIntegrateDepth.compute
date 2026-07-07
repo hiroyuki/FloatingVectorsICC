@@ -30,10 +30,12 @@
 RWStructuredBuffer<float2> _Voxels;   // x = sdf (m), y = weight
 RWStructuredBuffer<float4> _Colors;   // rgb (0..1) + colour weight
 RWStructuredBuffer<uint>   _VoxelKey; // packed |sdf|-min key (this batch), 0xFFFFFFFF = empty
-// Active-block clear (Phase 1b): one uint per 8^3-voxel block; ScatterMin sets the
-// block of every voxel it touches so the next batch's clear only wipes the occupied
-// region. Block dims come from _BDim (TSDFBlockActive.hlsl), same grid as the MC set.
+// Active-block clear (Phase 1b): one uint per 8^3-VOXEL block; ScatterMin sets the block
+// of every voxel it touches so the next batch's clear only wipes the occupied region.
+// _TBDim = ceil(Dim/8) (voxel blocks) — NOT _BDim (MC cell blocks = ceil((Dim-1)/8)),
+// which would overflow at the last voxel when an axis is ≡1 mod 8.
 RWStructuredBuffer<uint>   _Touched;
+int3 _TBDim;
 int3 _Dim;
 float4x4 _WorldFromVoxel;             // voxel index centre -> world metres
 float4x4 _VoxelFromWorld;             // world metres -> voxel index space
@@ -196,9 +198,9 @@ void SplatMin(int3 c, uint u, uint v, float zM)
     InterlockedMin(_VoxelKey[LinIdx(c)], PackKey(sdf));
     // Mark this voxel's block touched so the next active-block clear wipes it. This is
     // the superset of ScatterWrite's writes (winners ⊆ min-touched), so clearing over
-    // it covers both the key and the SDF. _BDim = block-grid dims (ceil((Dim-1)/8)).
+    // it covers both the key and the SDF. _TBDim = voxel-block dims (ceil(Dim/8)).
     int3 b = c >> 3;
-    _Touched[b.x + _BDim.x * (b.y + _BDim.y * b.z)] = 1u;
+    _Touched[b.x + _TBDim.x * (b.y + _TBDim.y * b.z)] = 1u;
 }
 
 void SplatWrite(int3 c, uint u, uint v, float zM)

@@ -668,11 +668,16 @@ namespace TSDF
             // Phase 1b: surface-proportional clear — reset only the blocks the previous use
             // of this write buffer touched (SDF → +tau/0, key → 0xFFFFFFFF), not the whole
             // grid. Replaces the ~2 ms/batch full-grid ClearWrite + key clear (measured
-            // −1.9 ms/frame, +10 fps).
-            volume.ClearWriteActiveBlocks();
+            // −1.9 ms/frame, +10 fps). EXCEPTION: a BeforePublish subscriber (e.g.
+            // TSDFTrailBaker) can stamp geometry into the write buffer WITHOUT marking the
+            // touched set, so its residue would ghost through the ping-pong — fall back to a
+            // full write clear when any subscriber is attached (correct, forgoes the speedup).
+            if (BeforePublishCompleteBatch != null) volume.ClearWriteFull();
+            else volume.ClearWriteActiveBlocks();
 
             // Volume-level uniforms (global scalars, shared by both kernels).
             _depthShader.SetInts("_Dim", volume.Dim.x, volume.Dim.y, volume.Dim.z);
+            _depthShader.SetInts("_TBDim", volume.VoxelBlockDim.x, volume.VoxelBlockDim.y, volume.VoxelBlockDim.z);
             _depthShader.SetMatrix("_WorldFromVoxel", volume.WorldFromVoxel);
             _depthShader.SetMatrix("_VoxelFromWorld", volume.VoxelFromWorld);
             _depthShader.SetFloat("_Tau", volume.Tau);

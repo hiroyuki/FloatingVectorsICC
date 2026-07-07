@@ -123,6 +123,11 @@ namespace TSDF
         /// block records whether that block currently emits surface.</summary>
         public Vector3Int BlockDim { get; private set; }
 
+        /// <summary>Block-grid dims for the depth-basis touched/clear set = ceil(Dim/8)
+        /// (VOXEL blocks, indexed by voxel&gt;&gt;3). Distinct from <see cref="BlockDim"/>
+        /// (MC cell blocks = ceil((Dim-1)/8)) — they differ when an axis is ≡1 mod 8.</summary>
+        public Vector3Int VoxelBlockDim { get; private set; }
+
         /// <summary>Per-block occupancy set (uint per block, 1 = active) for the
         /// DISPLAYED front buffer — active-block Marching Cubes consumes ONLY this.
         /// Swapped with <see cref="FrontBuffer"/> in <see cref="Publish"/> so it always
@@ -684,7 +689,7 @@ namespace TSDF
         private void EnsureDepthBuffers()
         {
             int total = Dim.x * Dim.y * Dim.z;
-            int blocks = Mathf.Max(1, BlockDim.x * BlockDim.y * BlockDim.z);
+            int blocks = Mathf.Max(1, VoxelBlockDim.x * VoxelBlockDim.y * VoxelBlockDim.z);
             if (total <= 0) return;
             bool realloc = _keyA == null || _keyA.count != total
                            || _touchA == null || _touchA.count != blocks
@@ -736,20 +741,34 @@ namespace TSDF
             if (_clearShader == null) EnsureClearShader();
             if (_clearShader == null || WriteBuffer == null || WriteKeyBuffer == null || WriteTouched == null) return;
 
-            int totalB = Mathf.Max(1, BlockDim.x * BlockDim.y * BlockDim.z);
+            int totalB = Mathf.Max(1, VoxelBlockDim.x * VoxelBlockDim.y * VoxelBlockDim.z);
             int gx = Mathf.Max(1, Mathf.Min(totalB, 65535));
             int gy = Mathf.Max(1, Mathf.CeilToInt(totalB / (float)gx));
             _clearShader.SetBuffer(_clearBlocksKernel, "_CBVoxels", WriteBuffer);
             _clearShader.SetBuffer(_clearBlocksKernel, "_CBKey", WriteKeyBuffer);
             _clearShader.SetBuffer(_clearBlocksKernel, "_CBTouched", WriteTouched);
             _clearShader.SetInts("_CBDim", Dim.x, Dim.y, Dim.z);
-            _clearShader.SetInts("_CBBDim", BlockDim.x, BlockDim.y, BlockDim.z);
+            _clearShader.SetInts("_CBBDim", VoxelBlockDim.x, VoxelBlockDim.y, VoxelBlockDim.z);
             _clearShader.SetFloat("_CBInitTsdf", Tau);
             _clearShader.SetInt("_CBGroupsX", gx);
             _clearShader.Dispatch(_clearBlocksKernel, gx, gy, 1);
 
             // MC occupancy set is marked one-sided during scatter and is tiny → full zero.
             ClearBlockActive(WriteBlockActive);
+        }
+
+        /// <summary>Depth-basis full-grid write clear (SDF + key + occupancy + touched). Used
+        /// instead of <see cref="ClearWriteActiveBlocks"/> when a BeforePublish subscriber
+        /// (e.g. TSDFTrailBaker) may stamp geometry into the write buffer WITHOUT marking the
+        /// touched set — its residue would otherwise survive the surface-proportional clear
+        /// and ghost. Correct but forfeits the Phase-1b speedup for that (niche) combo.</summary>
+        public void ClearWriteFull()
+        {
+            EnsureDepthBuffers();
+            ClearBuffer(WriteBuffer);
+            FullClearKey(WriteKeyBuffer);
+            ClearBlockActive(WriteBlockActive);
+            if (WriteTouched != null) ClearBlockActive(WriteTouched);
         }
 
         /// <summary>Full reset to the clean base state the active-block-clear invariant needs
@@ -834,11 +853,18 @@ namespace TSDF
                 voxelSize = v;
             }
             Dim = new Vector3Int(dx, dy, dz);
-            // Block grid = ceil(cells/8) where cells = dim-1 per axis (8³ cells/block).
+            // MC block grid = ceil(cells/8) where cells = dim-1 per axis (8³ cells/block).
             BlockDim = new Vector3Int(
                 Mathf.Max(1, Mathf.CeilToInt((dx - 1) / 8f)),
                 Mathf.Max(1, Mathf.CeilToInt((dy - 1) / 8f)),
                 Mathf.Max(1, Mathf.CeilToInt((dz - 1) / 8f)));
+            // Depth-basis touched/clear block grid = ceil(VOXELS/8): the touched set is
+            // indexed by voxel>>3, and the max voxel (dim-1) maps to block (dim-1)/8, which
+            // exceeds the MC cell-grid ceil((dim-1)/8) when dim%8==1. Must be its own dim.
+            VoxelBlockDim = new Vector3Int(
+                Mathf.Max(1, Mathf.CeilToInt(dx / 8f)),
+                Mathf.Max(1, Mathf.CeilToInt(dy / 8f)),
+                Mathf.Max(1, Mathf.CeilToInt(dz / 8f)));
 
             // World-from-voxel: place voxel index (i+0.5, j+0.5, k+0.5) at the
             // world position of voxel center i,j,k. Anchor is the bbox's
