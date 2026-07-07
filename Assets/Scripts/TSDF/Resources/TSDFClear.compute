@@ -52,13 +52,16 @@ RWStructuredBuffer<float2> _CBVoxels;
 RWStructuredBuffer<uint>   _CBKey;
 RWStructuredBuffer<uint>   _CBTouched;   // one uint per block; 1 = written since last clear
 int3 _CBDim;                             // voxel dims
-int3 _CBBDim;                            // block-grid dims = ceil((Dim-1)/8)
+int3 _CBBDim;                            // VOXEL block-grid dims = ceil(Dim/8) (VoxelBlockDim)
 float _CBInitTsdf;
 int _CBGroupsX;                          // group-grid width (block index = gid.y*_CBGroupsX + gid.x)
 
 [numthreads(512, 1, 1)]
 void ClearBlocks(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
 {
+    // block and totalB are UNIFORM across the group (gid is per-group), so both early-outs
+    // below are uniform — either the whole group returns or all 512 threads continue and
+    // reach the barrier. That keeps GroupMemoryBarrierWithGroupSync well-defined.
     uint block = gid.y * (uint)_CBGroupsX + gid.x;
     uint totalB = (uint)(_CBBDim.x * _CBBDim.y * _CBBDim.z);
     if (block >= totalB) return;
@@ -76,5 +79,9 @@ void ClearBlocks(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
         _CBVoxels[lin] = float2(_CBInitTsdf, 0.0);
         _CBKey[lin] = 0xFFFFFFFFu;
     }
-    if (gi == 0u) _CBTouched[block] = 0u;   // reset for the next accumulation
+    // Reset the touched flag only AFTER every thread has read it and cleared its voxel.
+    // Without this barrier, thread 0 could reset the flag while a later wave in the same
+    // group is still at the early-out read above, making it skip its voxels (stale ghost).
+    GroupMemoryBarrierWithGroupSync();
+    if (gi == 0u) _CBTouched[block] = 0u;
 }
