@@ -206,7 +206,9 @@ namespace TSDF
             public ComputeBuffer RayLutBuf;     // StructuredBuffer<float2>, or 1-elem dummy
             public bool HasRayLut;
             public int RayLutW, RayLutH;
-            public ObCameraDistortion RayLutDist;
+            public ObCameraDistortion RayLutDist;   // full cache key: coeffs + model...
+            public ObCameraIntrinsic RayLutIntr;    // ...intrinsics...
+            public bool RayLutForcePinhole;         // ...and the forcePinhole debug toggle.
             public bool LastHadColor;           // did the last uploaded frame carry colour
         }
         private readonly Dictionary<string, CamState> _states = new Dictionary<string, CamState>();
@@ -755,13 +757,23 @@ namespace TSDF
         {
             var intr = st.CamParam.DepthIntrinsic;
             var dist = st.CamParam.DepthDistortion;
+            // Cache key MUST cover everything the LUT and the projection gate depend on:
+            // resolution, distortion (coeffs + model), intrinsics, AND forcePinhole. Missing
+            // forcePinhole/intrinsics would let a toggle return a stale LUT while BindDepthCam
+            // flips _HasDepthDist, so unprojection and the forward-projection gate would use
+            // different camera models (the gate then misses valid voxels / stamps a wrong band).
             bool same = st.RayLutBuf != null && st.RayLutW == st.DepthWidth && st.RayLutH == st.DepthHeight
-                        && DistApproxEqual(st.RayLutDist, dist);
+                        && st.RayLutForcePinhole == forcePinhole
+                        && st.RayLutDist.Model == dist.Model
+                        && DistApproxEqual(st.RayLutDist, dist)
+                        && IntrExactEqual(st.RayLutIntr, intr);
             if (same) return;
 
             st.RayLutW = st.DepthWidth;
             st.RayLutH = st.DepthHeight;
             st.RayLutDist = dist;
+            st.RayLutIntr = intr;
+            st.RayLutForcePinhole = forcePinhole;
 
             Vector2[] lut = forcePinhole ? null
                           : PointCloud.DepthUndistortLut.Build(intr, dist, st.DepthWidth, st.DepthHeight);
@@ -787,6 +799,11 @@ namespace TSDF
         {
             return a.K1 == b.K1 && a.K2 == b.K2 && a.K3 == b.K3 && a.K4 == b.K4
                 && a.K5 == b.K5 && a.K6 == b.K6 && a.P1 == b.P1 && a.P2 == b.P2;
+        }
+
+        private static bool IntrExactEqual(in ObCameraIntrinsic a, in ObCameraIntrinsic b)
+        {
+            return a.Fx == b.Fx && a.Fy == b.Fy && a.Cx == b.Cx && a.Cy == b.Cy;
         }
 
         /// <summary>
