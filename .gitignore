@@ -134,3 +134,4 @@ InitTestScene*.unity*
 # Posted to the issue as a comment; not a permanent repo artifact.
 IMPLEMENTATION_NOTES.md
 .DS_Store
+AGENTS.md
