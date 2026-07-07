@@ -194,6 +194,8 @@ namespace PointCloud
         /// (microseconds). The buffer is reused next frame, so consumers must copy any data they
         /// need to retain before returning from the handler.
         /// </summary>
+        [Obsolete("No in-repo subscribers remain; fires only in CPU reconstruction mode. " +
+                  "Use OnRawFramesReady instead. Scheduled for removal after one milestone.")]
         public event Action<PointCloudRenderer, NativeArray<ObColorPoint>, int, ulong> OnFrameUploaded;
 
         /// <summary>
@@ -365,9 +367,11 @@ namespace PointCloud
                     LastPointCount = n;
                     LastTimestampUs = slot.TimestampUs;
                     _consumedCount++;
+#pragma warning disable CS0618 // internal raise site of the [Obsolete] event
                     if (!useGpuReconstruction)
                         OnFrameUploaded?.Invoke(this, slot.Buffer, n, slot.TimestampUs);
                     else if (OnFrameUploaded != null) WarnGpuModeSkipsCpuFeatures(ref _warnedOnFrameUploaded, "OnFrameUploaded");
+#pragma warning restore CS0618
                     if (useGpuReconstruction && cumulative != null) WarnGpuModeSkipsCpuFeatures(ref _warnedCumulative, $"cumulative ({cumulative.name})");
 
                     if (OnRawFramesReady != null && slot.DepthByteCount > 0 && slot.ColorByteCount > 0)
@@ -884,10 +888,11 @@ namespace PointCloud
                         slot = _slots.AcquireWrite();
                         if (slot == null) continue;
 
+                        var pointBuffer = slot.EnsureBuffer();
                         unsafe
                         {
                             UnsafeUtility.MemCpy(
-                                NativeArrayUnsafeUtility.GetUnsafePtr(slot.Buffer),
+                                NativeArrayUnsafeUtility.GetUnsafePtr(pointBuffer),
                                 (void*)points.DataPointer,
                                 (long)pointCount * UnsafeUtility.SizeOf<ObColorPoint>());
                         }
@@ -1062,9 +1067,26 @@ namespace PointCloud
     {
         public sealed class Slot
         {
+            // Allocated lazily on first EnsureBuffer() call: only the CPU
+            // reconstruction path writes/reads this array, so GPU mode (the
+            // default) never pays the ~maxPoints*24B*3slots persistent cost
+            // (~26 MB per camera at 640x576). Lazy-on-access (rather than a
+            // construction-time flag) keeps a runtime useGpuReconstruction
+            // toggle to CPU mode working.
             public NativeArray<ObColorPoint> Buffer;
+            internal int PointCapacity;
             public int PointCount;
             public ulong TimestampUs;
+
+            /// <summary>Allocate <see cref="Buffer"/> on first use (capture thread safe:
+            /// Allocator.Persistent works off the main thread).</summary>
+            public NativeArray<ObColorPoint> EnsureBuffer()
+            {
+                if (!Buffer.IsCreated)
+                    Buffer = new NativeArray<ObColorPoint>(PointCapacity, Allocator.Persistent,
+                        NativeArrayOptions.UninitializedMemory);
+                return Buffer;
+            }
 
             // Raw pre-D2C frames captured alongside the point cloud. Byte arrays are
             // oversized (allocated once for the configured resolution) and reused.
@@ -1096,8 +1118,8 @@ namespace PointCloud
             {
                 _free[i] = new Slot
                 {
-                    Buffer = new NativeArray<ObColorPoint>(capacity, Allocator.Persistent,
-                        NativeArrayOptions.UninitializedMemory),
+                    // Buffer is NOT allocated here — see Slot.EnsureBuffer().
+                    PointCapacity = capacity,
                     DepthBytes = depthRawByteCapacity > 0 ? new byte[depthRawByteCapacity] : Array.Empty<byte>(),
                     ColorBytes = colorRawByteCapacity > 0 ? new byte[colorRawByteCapacity] : Array.Empty<byte>(),
                     IRBytes = irRawByteCapacity > 0 ? new byte[irRawByteCapacity] : Array.Empty<byte>(),

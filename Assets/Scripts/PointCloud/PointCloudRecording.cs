@@ -4,11 +4,11 @@
 // along with the top-level YAML metadata files and a calibration/extrinsics.yaml that
 // describes the camera intrinsics and depth-to-color extrinsic.
 //
-// The three sensor files we emit are:
+// The sensor files we emit are:
 //   - depth_main    : raw Y16 depth frames (2 bytes per pixel, width*height*2 B/record)
 //   - color_main    : raw RGB8 color frames (3 bytes per pixel, width*height*3 B/record)
-//   - pointcloud_main (legacy) : ObColorPoint buffer (24 B per point) — kept for back-compat
-//                     when raw sensor capture is unavailable; not part of the SR layout.
+//   - ir_main       : raw Y16 IR frames (debug-only; not read on playback)
+//   - bodies_main   : k4abt skeleton records (see RecordedBodySerializer)
 //
 // Every RCSV file uses the variable-size record layout: `u64 timestamp_ns + u32 size + bytes`
 // followed by a trailing index chunk (u64 count, then u64 offsets[count + 1]). Even though
@@ -38,9 +38,6 @@ namespace PointCloud
         public const string ColorSensorName      = "color_main";
         public const string IRSensorName         = "ir_main";
         public const string BodiesSensorName     = "bodies_main";
-        public const string PointcloudSensorName = "pointcloud_main"; // legacy
-
-        public const int PointCloudVertexStride = 24; // sizeof(ObColorPoint)
 
         /// <summary>One recorded frame for a single sensor. <see cref="Bytes"/> is the raw payload.</summary>
         public sealed class Frame
@@ -58,9 +55,6 @@ namespace PointCloud
             /// <see cref="ByteCount"/> equals <c>Bytes?.Length ?? 0</c>.
             /// </summary>
             public int ByteCount;
-
-            /// <summary>Convenience: legacy pointcloud_main byte count expressed as point count.</summary>
-            public int PointCount => ByteCount / PointCloudVertexStride;
         }
 
         // ------------------------------------------------------------------
@@ -135,7 +129,6 @@ namespace PointCloud
 
             public string FilePath => _filePath;
             public int FrameCount => _offsets.Count;
-            public long BytesWritten => _fs?.Position ?? 0;
 
             public RcsvStreamWriter(string filePath, string headerYaml)
             {
@@ -631,24 +624,6 @@ namespace PointCloud
             sb.Append("    max_bodies_per_frame: 6\n");
             sb.Append($"  device_serial: \"{EscapeYaml(serial)}\"\n");
             sb.Append("  timestamp_basis: device_synced_unix_like_ns\n");
-            sb.Append("  producer: FloatingVectorsICC\n");
-            return sb.ToString();
-        }
-
-        public static string BuildPointcloudHeaderYaml(string serial)
-        {
-            var sb = new StringBuilder();
-            sb.Append("record_format:\n");
-            sb.Append("  - name: timestamp_ns\n");
-            sb.Append("    type: u64\n");
-            sb.Append("  - name: image\n");
-            sb.Append("    type: u32\n");
-            sb.Append("    count: 0\n");
-            sb.Append("    comment: ObColorPoint[] (legacy, 6 floats per point, 24 B stride)\n");
-            sb.Append("custom:\n");
-            sb.Append("  sensor:\n");
-            sb.Append("    sensor_type: pointcloud_legacy\n");
-            sb.Append($"  device_serial: \"{EscapeYaml(serial)}\"\n");
             sb.Append("  producer: FloatingVectorsICC\n");
             return sb.ToString();
         }

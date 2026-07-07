@@ -76,26 +76,6 @@ namespace BodyTracking
         }
 
         /// <summary>
-        /// Create a k4a_capture_t containing the supplied depth image. Adds a ref to the
-        /// image internally (so it is safe to release the caller's handle afterwards).
-        /// Caller releases the returned capture via <see cref="K4ANative.k4a_capture_release"/>.
-        /// Returns IntPtr.Zero on failure.
-        /// </summary>
-        public static IntPtr CreateCaptureWithDepth(IntPtr depthImage)
-        {
-            if (depthImage == IntPtr.Zero) return IntPtr.Zero;
-
-            var rc = K4ANative.k4a_capture_create(out IntPtr capture);
-            if (rc != k4a_result_t.K4A_RESULT_SUCCEEDED)
-            {
-                WorkerLog.Error("[K4ACaptureBridge] k4a_capture_create failed");
-                return IntPtr.Zero;
-            }
-            K4ANative.k4a_capture_set_depth_image(capture, depthImage);
-            return capture;
-        }
-
-        /// <summary>
         /// Build a k4a_capture_t with a depth image and (if supplied) a proper IR image.
         /// Pass <paramref name="ir16"/> = null and <paramref name="irByteCount"/> = 0 to
         /// fall back to using the depth bytes as a stand-in IR image — the tracker runs
@@ -145,16 +125,6 @@ namespace BodyTracking
             K4ANative.k4a_image_release(depth);
             K4ANative.k4a_image_release(ir);
             return capture;
-        }
-
-        /// <summary>Backward-compat wrapper that uses depth as the IR stand-in.</summary>
-        public static IntPtr CreateCaptureFromDepthY16(byte[] y16, int byteCount, int width, int height,
-                                                        ulong deviceTimestampUsec)
-        {
-            return CreateCaptureFromDepthAndIR(
-                y16, byteCount, width, height,
-                null, 0, 0, 0,
-                deviceTimestampUsec);
         }
 
         /// <summary>

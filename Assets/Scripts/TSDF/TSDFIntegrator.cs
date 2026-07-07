@@ -7,7 +7,6 @@
 // by TSDFVolume; we only push observations into it.
 
 using System.Collections.Generic;
-using System.Runtime.InteropServices;
 using Orbbec;
 using PointCloud;
 using UnityEngine;
@@ -81,11 +80,6 @@ namespace TSDF
                  "(clearVolumeOnNewBatch) only for now; accumulate mode still uses the " +
                  "voxel-basis kernel. See Plans/tsdf-depth-basis-integration-design.md.")]
         public bool useDepthBasis = false;
-
-        [Tooltip("Depth-basis: number of samples marched across the ±tau band along " +
-                 "each pixel's view ray. ~2·tau/(0.5·voxelSize) is a safe floor; too " +
-                 "few leaves gaps across the band, too many just costs writes.")]
-        [Range(2, 64)] public int bandSteps = 24;
 
         [Tooltip("Depth-basis: axis-neighbour splat radius (0 or 1) to close lateral " +
                  "screen-door holes where voxelSize <= depth-pixel footprint. Start at " +
@@ -547,7 +541,7 @@ namespace TSDF
         /// batch / clear / publish side effects — pure GPU integrate + counters.
         /// Returns false if the frame was rejected (missing intrinsics, no depth…).
         /// </summary>
-        private unsafe bool IntegrateOne(string serial, ObCameraParam? camParam,
+        private bool IntegrateOne(string serial, ObCameraParam? camParam,
                                          Transform sourceTransform, RawFrameData raw,
                                          ComputeBuffer targetSdf, ComputeBuffer targetColor,
                                          int modeOverride)
@@ -682,7 +676,6 @@ namespace TSDF
             _depthShader.SetMatrix("_VoxelFromWorld", volume.VoxelFromWorld);
             _depthShader.SetFloat("_Tau", volume.Tau);
             _depthShader.SetFloat("_WObs", observationWeight);
-            _depthShader.SetInt("_BandSteps", bandSteps);
             _depthShader.SetInt("_LatRadius", latRadius);
             _depthShader.SetFloat("_TubeRadius", Mathf.Max(0.01f, tubeRadiusVoxels) * volume.voxelSize);
             _depthShader.SetInt("_EdgeRejectRadius", edgeRejectRadius);

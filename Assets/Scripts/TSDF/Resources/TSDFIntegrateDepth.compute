@@ -79,9 +79,7 @@ float3 _OverrideColor;
 // the view-ray line AND within ±tau along it are written. The tube radius closes
 // inter-pixel holes without the grazing-angle over-fill an axis-aligned box produces
 // (a wide box keeps too many z-based-|sdf|<=tau voxels on surfaces grazing the camera).
-// _LatRadius pads the search AABB so the tube is fully contained. _BandSteps is unused
-// (kept for the Inspector field / rollback).
-int _BandSteps;
+// _LatRadius pads the search AABB so the tube is fully contained.
 int _LatRadius;
 float _TubeRadius;   // capsule radius around the ray (metres)
 
