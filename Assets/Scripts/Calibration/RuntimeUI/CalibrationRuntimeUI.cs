@@ -561,7 +561,9 @@ namespace Calibration.RuntimeUI
 
             if (_manager == null || _manager.Renderers.Count == 0)
             {
-                GUI.Label(new Rect(10, 10, 800, 30),
+                // Bottom-left: the top-left corner belongs to MultiCameraDebugView's
+                // header, and the bottom HUD box only exists once renderers are up.
+                GUI.Label(new Rect(10, Screen.height - 34, 800, 26),
                     "Calibration: waiting for SensorManager / renderers...", _hud);
                 return;
             }
