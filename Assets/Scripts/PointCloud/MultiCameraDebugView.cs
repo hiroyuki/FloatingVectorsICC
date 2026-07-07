@@ -29,8 +29,13 @@ namespace PointCloud
         public float depthFarMm = 4000f;
 
         [Header("Layout")]
-        [Tooltip("Width in pixels of each image tile. Height follows the source aspect ratio.")]
-        public int tileWidth = 320;
+        [Tooltip("Devices per row. 2 = the 2x2 grid for the 4-camera rig (each device cell " +
+                 "holds its color + depth pair side by side).")]
+        [Min(1)]
+        public int deviceColumns = 2;
+        [Tooltip("Maximum width in pixels of each image tile; tiles shrink automatically so " +
+                 "all device columns fit the screen. Height follows the source aspect ratio.")]
+        public int tileWidth = 480;
         [Tooltip("Pixels between the screen edge / panel and the tiles.")]
         public float margin = 8f;
         [Tooltip("Pixels between the color and depth tiles / rows.")]
@@ -219,24 +224,46 @@ namespace PointCloud
                 _labelStyle);
             y += 20f;
 
-            foreach (var kv in _cams)
+            if (_cams.Count == 0) return;
+
+            // Device grid: deviceColumns cells per row, each cell = color|depth pair.
+            // Tiles shrink to fit the screen width so 4 devices sit in a 2x2 grid
+            // instead of scrolling off the bottom. Keys are sorted so cells don't
+            // shuffle when a camera (re)appears.
+            int devCols = Mathf.Min(deviceColumns, _cams.Count);
+            var keys = new List<string>(_cams.Keys);
+            keys.Sort();
+
+            float cellW = (Screen.width - margin * 2f - gap * (devCols - 1)) / devCols;
+            float tw = Mathf.Min(tileWidth, (cellW - gap) * 0.5f);
+
+            float rowY = y;
+            float rowH = 0f;
+            for (int i = 0; i < keys.Count; i++)
             {
-                var cam = kv.Value;
-                string tag = ShortSerial(kv.Key);
+                int col = i % devCols;
+                var cam = _cams[keys[i]];
+                string tag = ShortSerial(keys[i]);
                 var aspectTex = cam.Color != null ? cam.Color : cam.Depth;
                 float th = aspectTex != null
-                    ? tileWidth * (float)aspectTex.height / aspectTex.width
-                    : tileWidth * 0.5625f;
+                    ? tw * (float)aspectTex.height / aspectTex.width
+                    : tw * 0.5625f;
 
-                float x2 = margin + tileWidth + gap;
-                GUI.Label(new Rect(margin, y, tileWidth, 16f), tag + "  color", _labelStyle);
-                GUI.Label(new Rect(x2, y, tileWidth, 16f), tag + "  depth", _labelStyle);
-                float ty = y + 16f;
+                float cx = margin + col * (cellW + gap);
+                float x2 = cx + tw + gap;
+                GUI.Label(new Rect(cx, rowY, tw, 16f), tag + "  color", _labelStyle);
+                GUI.Label(new Rect(x2, rowY, tw, 16f), tag + "  depth", _labelStyle);
+                float ty = rowY + 16f;
 
-                DrawTile(new Rect(margin, ty, tileWidth, th), cam.Color);
-                DrawTile(new Rect(x2, ty, tileWidth, th), cam.Depth);
+                DrawTile(new Rect(cx, ty, tw, th), cam.Color);
+                DrawTile(new Rect(x2, ty, tw, th), cam.Depth);
 
-                y = ty + th + gap;
+                rowH = Mathf.Max(rowH, 16f + th);
+                if (col == devCols - 1)
+                {
+                    rowY += rowH + gap;
+                    rowH = 0f;
+                }
             }
         }
 
@@ -259,7 +286,7 @@ namespace PointCloud
         private static string ShortSerial(string serial)
         {
             if (string.IsNullOrEmpty(serial)) return "?";
-            return serial.Length > 4 ? serial.Substring(serial.Length - 4) : serial;
+            return serial.Length > 2 ? serial.Substring(serial.Length - 2) : serial;
         }
     }
 }

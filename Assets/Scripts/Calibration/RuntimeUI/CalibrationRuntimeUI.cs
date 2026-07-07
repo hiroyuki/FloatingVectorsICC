@@ -50,6 +50,10 @@ namespace Calibration.RuntimeUI
                  "TSDF components are restored so the normal show runs. Toggling back on re-suspends " +
                  "them. The component stays enabled so this key keeps working while disabled.")]
         public KeyCode toggleActiveKey = KeyCode.F1;
+        [Tooltip("Master active state when the component starts. OFF = the normal show keeps " +
+                 "running and nothing is suspended; press the toggle key to enter calibration " +
+                 "mode. ON = calibration mode from the first frame (legacy behavior).")]
+        public bool startActive = false;
         public KeyCode captureKey = KeyCode.C;
         public KeyCode solveKey = KeyCode.S;
         public KeyCode resetKey = KeyCode.R;
@@ -71,8 +75,8 @@ namespace Calibration.RuntimeUI
                  "non-destructive mode. Assembly-qualified type names ('Namespace.Type, Assembly').")]
         public bool suspendInterferingComponents = true;
         public string[] suspendComponentTypeNames = {
-            "BodyTracking.SkeletonMerger, Assembly-CSharp",
-            "BodyTracking.BodyTrackingPlayback, Assembly-CSharp",
+            "BodyTracking.SkeletonMerger, BodyTracking",
+            "BodyTracking.BodyTrackingPlayback, BodyTracking",
             "TSDF.DebugTools.TSDFDebugSession, TSDF",
             "TSDF.MeshCumulative, TSDF",
         };
@@ -160,9 +164,14 @@ namespace Calibration.RuntimeUI
             public List<CameraResult> Cameras;
         }
 
+        private void Awake()
+        {
+            _active = startActive;
+        }
+
         private void OnEnable()
         {
-            if (suspendInterferingComponents) SuspendInterfering();
+            if (_active && suspendInterferingComponents) SuspendInterfering();
         }
 
         private void OnDisable()

@@ -702,7 +702,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 0
+  m_IsActive: 1
 --- !u!114 &836522995
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -721,6 +721,7 @@ MonoBehaviour:
   detectIntervalSec: 0.12
   showUI: 1
   toggleActiveKey: 282
+  startActive: 0
   captureKey: 99
   solveKey: 115
   resetKey: 114
@@ -731,8 +732,8 @@ MonoBehaviour:
   setOriginKey: 111
   suspendInterferingComponents: 1
   suspendComponentTypeNames:
-  - BodyTracking.SkeletonMerger, Assembly-CSharp
-  - BodyTracking.BodyTrackingPlayback, Assembly-CSharp
+  - BodyTracking.SkeletonMerger, BodyTracking
+  - BodyTracking.BodyTrackingPlayback, BodyTracking
   - TSDF.DebugTools.TSDFDebugSession, TSDF
   - TSDF.MeshCumulative, TSDF
 --- !u!4 &836522996
@@ -835,6 +836,7 @@ GameObject:
   m_Component:
   - component: {fileID: 925702424}
   - component: {fileID: 925702423}
+  - component: {fileID: 925702425}
   m_Layer: 0
   m_Name: SensorManager
   m_TagString: Untagged
@@ -896,6 +898,25 @@ Transform:
   m_Children: []
   m_Father: {fileID: 894098144}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &925702425
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 925702422}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 8b9bbd1bbd31c68409aa02015a70369d, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: PointCloud::PointCloud.CameraHealthMonitor
+  expectedSerials: []
+  expectedCameraCount: 4
+  startupGraceSeconds: 15
+  staleFrameSeconds: 3
+  checkIntervalSeconds: 1
+  showAlert: 1
+  logAlerts: 1
 --- !u!1 &943244990
 GameObject:
   m_ObjectHideFlags: 0
@@ -1910,6 +1931,12 @@ MonoBehaviour:
   exportPlyWithColor: 0
   smoothIterations: 10
   triangleBudgetPerSlab: 2000000
+  webIncludeCurves: 1
+  webCurveStride: 40
+  webCurveSides: 4
+  webMeshTargetTris: 150000
+  webCurveTolerance: 0.0015
+  usdPythonPath: 
 --- !u!4 &1547982917
 Transform:
   m_ObjectHideFlags: 0
