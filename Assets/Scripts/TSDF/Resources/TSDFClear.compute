@@ -29,11 +29,12 @@ void Clear(uint3 id : SV_DispatchThreadID)
 // dispatch is linearised via _DispatchWidth exactly like Clear.
 RWStructuredBuffer<uint> _UintBuf;
 int _UintCount;
+uint _UintClearValue;                 // fill value (0 for occupancy sets, 0xFFFFFFFF for _VoxelKey)
 
 [numthreads(64, 1, 1)]
 void ClearUint(uint3 id : SV_DispatchThreadID)
 {
     uint idx = id.y * (uint)_DispatchWidth + id.x;
     if (idx >= (uint)_UintCount) return;
-    _UintBuf[idx] = 0u;
+    _UintBuf[idx] = _UintClearValue;
 }

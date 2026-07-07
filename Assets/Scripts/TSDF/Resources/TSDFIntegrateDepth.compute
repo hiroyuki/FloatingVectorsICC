@@ -1,0 +1,287 @@
+// Depth-basis TSDF integration (option ④ of Plans/tsdf-integration-perf-refactor.md;
+// design in Plans/tsdf-depth-basis-integration-design.md).
+//
+// Replaces the voxel-basis kernel (TSDFIntegrate.compute, 1 thread = 1 voxel over
+// the WHOLE grid, ~515M threads/frame for 4 cams) with a DEPTH-BASIS scatter:
+// 1 thread = 1 depth PIXEL (~369K/frame), each splatting a small ±tau band of
+// voxels around the observed surface point. Only surface-adjacent voxels are ever
+// touched, so the per-frame compute drops by orders of magnitude.
+//
+// The surface point is unprojected with the SAME undistort ray LUT the point cloud
+// uses (PointCloudReconstruct.compute), so the TSDF surface is coordinate-identical
+// to the point cloud (avoids the offset class of bugs).
+//
+// RACE HANDLING (design §3-A): many pixels (+4 cameras) scatter into the same
+// voxel. RetainGhost's |sdf|-min is made exact & lock-free with a 2-pass
+// InterlockedMin:
+//   ScatterMin   — each pixel InterlockedMin's a packed |sdf| key into _VoxelKey.
+//   ScatterWrite — each pixel re-marches; the voxel whose key == the stored min is
+//                  materialised into _Voxels (float2) + _Colors, weight = _WObs.
+// _VoxelKey is cleared to 0xFFFFFFFF and _Voxels weight-cleared to 0 each batch, so
+// untouched voxels stay invalid and the MC 8-corner weight gate ignores them.
+//
+// sdf convention matches the voxel-basis kernel exactly (sdf = d - depthZ(voxel)
+// along the depth camera Z axis) so Marching Cubes extracts an identical iso-surface.
+
+#pragma kernel ScatterMin
+#pragma kernel ScatterWrite
+
+// --- voxel volume (shared layout with TSDFMarchingCubes / TSDFIntegrate) ---
+RWStructuredBuffer<float2> _Voxels;   // x = sdf (m), y = weight
+RWStructuredBuffer<float4> _Colors;   // rgb (0..1) + colour weight
+RWStructuredBuffer<uint>   _VoxelKey; // packed |sdf|-min key (this batch), 0xFFFFFFFF = empty
+int3 _Dim;
+float4x4 _WorldFromVoxel;             // voxel index centre -> world metres
+float4x4 _VoxelFromWorld;             // world metres -> voxel index space
+float _Tau;                           // truncation (metres)
+float _WObs;                          // base observation weight
+
+// --- per-camera depth ---
+ByteAddressBuffer _Depth;             // Y16, length = _DepthW*_DepthH*2 bytes
+int _DepthW;
+int _DepthH;
+float _FxD, _FyD, _CxD, _CyD;         // depth pinhole (fallback when no LUT)
+float4x4 _DepthFromWorld;             // world m -> depth camera mm (for depthZ per voxel)
+float4x4 _WorldFromDepthMm;           // depth camera mm -> world m (unproject surface point)
+
+// Forward depth-lens distortion (mirrors TSDFIntegrate.compute). Used by the
+// projection GATE: a candidate voxel is written only for the pixel it actually images
+// to, so the scatter's per-voxel sdf equals the voxel-basis gather semantics (each
+// surface voxel written once, by its own pixel — no fatten, no holes).
+float _DK1, _DK2, _DK3, _DK4, _DK5, _DK6, _DP1, _DP2;
+int _HasDepthDist;
+
+// Undistorted-ray LUT (x/z, y/z per depth pixel, row-major idx = v*W+u). Shared with
+// the point cloud so the surface point matches. _HasRayLut==0 -> pinhole fallback.
+StructuredBuffer<float2> _RayLut;
+int _HasRayLut;
+
+// Silhouette-edge rejection (per pixel — evaluated ONCE here, not per surface voxel).
+int _EdgeRejectRadius;
+float _EdgeRejectDepthMm;
+
+// --- per-camera colour image (RGB8) + colour-camera projection ---
+ByteAddressBuffer _ColorImg;
+int _ColorW, _ColorH;
+float _FxC, _FyC, _CxC, _CyC;
+float4x4 _ColorFromWorld;             // world m -> colour camera mm
+int _HasColor;
+int _UseColorOverride;
+float3 _OverrideColor;
+
+// Band splat controls. The stamp is a CAPSULE: voxels within _TubeRadius (metres) of
+// the view-ray line AND within ±tau along it are written. The tube radius closes
+// inter-pixel holes without the grazing-angle over-fill an axis-aligned box produces
+// (a wide box keeps too many z-based-|sdf|<=tau voxels on surfaces grazing the camera).
+// _LatRadius pads the search AABB so the tube is fully contained. _BandSteps is unused
+// (kept for the Inspector field / rollback).
+int _BandSteps;
+int _LatRadius;
+float _TubeRadius;   // capsule radius around the ray (metres)
+
+#include "TSDFBlockActive.hlsl"
+
+static const uint KEY_EMPTY = 0xFFFFFFFFu;
+
+uint LoadDepthU16(int u, int v)
+{
+    uint result = 0u;
+    if (u >= 0 && v >= 0 && u < _DepthW && v < _DepthH)
+    {
+        uint byteOffset = ((uint)v * (uint)_DepthW + (uint)u) * 2u;
+        uint word = _Depth.Load(byteOffset & ~3u);
+        uint shift = (byteOffset & 2u) * 8u;
+        result = (word >> shift) & 0xFFFFu;
+    }
+    return result;
+}
+
+uint LoadColorByte(uint byteOffset)
+{
+    uint word = _ColorImg.Load(byteOffset & ~3u);
+    uint shift = (byteOffset & 3u) * 8u;
+    return (word >> shift) & 0xFFu;
+}
+
+float3 SampleColor(float3 pWorld)
+{
+    if (_HasColor == 0) return float3(0.5, 0.5, 0.5);
+    float3 pc = mul(_ColorFromWorld, float4(pWorld, 1.0)).xyz;
+    if (pc.z <= 0.0) return float3(0.5, 0.5, 0.5);
+    float uu = _FxC * pc.x / pc.z + _CxC;
+    float vv = _FyC * pc.y / pc.z + _CyC;
+    int iu = (int)floor(uu);
+    int iv = (int)floor(vv);
+    if (iu < 0 || iv < 0 || iu >= _ColorW || iv >= _ColorH) return float3(0.5, 0.5, 0.5);
+    uint o = ((uint)iv * (uint)_ColorW + (uint)iu) * 3u;
+    return float3(LoadColorByte(o), LoadColorByte(o + 1u), LoadColorByte(o + 2u)) / 255.0;
+}
+
+// Pack |sdf| into a uint so InterlockedMin selects the observation closest to the
+// surface, while still recovering the SIGNED sdf. 16-bit magnitude + sign tie-break.
+uint PackKey(float sdf)
+{
+    float a = saturate(abs(sdf) / _Tau);
+    uint mag = (uint)round(a * 65535.0);
+    uint sign = (sdf < 0.0) ? 0u : 1u;   // negative (inside) wins ties — arbitrary but stable
+    return (mag << 1) | sign;
+}
+
+float UnpackSdf(uint key)
+{
+    uint sign = key & 1u;
+    float a = (float)(key >> 1) / 65535.0;
+    float s = a * _Tau;
+    return (sign == 1u) ? s : -s;
+}
+
+int LinIdx(int3 c) { return c.x + _Dim.x * (c.y + _Dim.y * c.z); }
+
+bool InBounds(int3 c)
+{
+    return c.x >= 0 && c.y >= 0 && c.z >= 0 &&
+           c.x < _Dim.x && c.y < _Dim.y && c.z < _Dim.z;
+}
+
+// Forward-project a voxel centre to its depth pixel (with lens distortion), matching
+// the voxel-basis kernel's projection exactly (floor to the read pixel).
+bool ProjectVoxelPixel(float3 pWorld, out int iu, out int iv, out float zCamMm)
+{
+    iu = -1; iv = -1;
+    float3 pd = mul(_DepthFromWorld, float4(pWorld, 1.0)).xyz;
+    zCamMm = pd.z;
+    if (pd.z <= 0.0) return false;
+    float xN = pd.x / pd.z;
+    float yN = pd.y / pd.z;
+    if (_HasDepthDist != 0)
+    {
+        float r2 = xN * xN + yN * yN;
+        float radial = (1.0 + ((_DK3 * r2 + _DK2) * r2 + _DK1) * r2) /
+                       (1.0 + ((_DK6 * r2 + _DK5) * r2 + _DK4) * r2);
+        float ddx = 2.0 * _DP1 * xN * yN + _DP2 * (r2 + 2.0 * xN * xN);
+        float ddy = _DP1 * (r2 + 2.0 * yN * yN) + 2.0 * _DP2 * xN * yN;
+        xN = xN * radial + ddx;
+        yN = yN * radial + ddy;
+    }
+    iu = (int)floor(_FxD * xN + _CxD);
+    iv = (int)floor(_FyD * yN + _CyD);
+    return true;
+}
+
+// Gate a candidate voxel to the pixel (u,v) it actually images to, and compute its
+// sdf from THAT pixel's depth (zM). Returns false unless the voxel projects to (u,v),
+// is in bounds, and lands in the ±tau band. This reproduces the voxel-basis gather:
+// each surface voxel is owned by exactly one pixel, so there is no scatter fatten and
+// no lateral hole regardless of surface obliquity.
+bool VoxelSdfGated(int3 c, uint u, uint v, float zM, out float sdf)
+{
+    sdf = 0.0;
+    if (!InBounds(c)) return false;
+    float3 pWorld = mul(_WorldFromVoxel, float4(float3(c) + 0.5, 1.0)).xyz;
+    int iu, iv; float zCamMm;
+    if (!ProjectVoxelPixel(pWorld, iu, iv, zCamMm)) return false;
+    if (iu != (int)u || iv != (int)v) return false;   // not this pixel's voxel
+    sdf = zM - zCamMm * 0.001;
+    return abs(sdf) <= _Tau;
+}
+
+void SplatMin(int3 c, uint u, uint v, float zM)
+{
+    float sdf;
+    if (!VoxelSdfGated(c, u, v, zM, sdf)) return;
+    InterlockedMin(_VoxelKey[LinIdx(c)], PackKey(sdf));
+}
+
+void SplatWrite(int3 c, uint u, uint v, float zM)
+{
+    float sdf;
+    if (!VoxelSdfGated(c, u, v, zM, sdf)) return;
+    int lin = LinIdx(c);
+    // Only the pixel that produced the winning (|sdf|-min) key materialises this voxel.
+    if (PackKey(sdf) != _VoxelKey[lin]) return;
+
+    float3 pWorld = mul(_WorldFromVoxel, float4(float3(c) + 0.5, 1.0)).xyz;
+    float3 rgb = (_UseColorOverride != 0) ? _OverrideColor : SampleColor(pWorld);
+    _Voxels[lin] = float2(sdf, _WObs);
+    _Colors[lin] = float4(rgb, _WObs);
+    MarkVoxelActive(c, _Dim, sdf, _WObs);
+}
+
+void SplatVoxel(int3 c, uint u, uint v, float zM, bool writePass)
+{
+    if (writePass) SplatWrite(c, u, v, zM); else SplatMin(c, u, v, zM);
+}
+
+// March the ±tau band along the view ray through the surface point and splat each
+// touched voxel (+ axis neighbours when _LatRadius>0 to close lateral holes).
+// writePass selects the ScatterMin vs ScatterWrite behaviour.
+void ProcessPixel(uint u, uint v, bool writePass)
+{
+    if ((int)u >= _DepthW || (int)v >= _DepthH) return;
+    uint zRaw = LoadDepthU16((int)u, (int)v);
+    if (zRaw == 0u) return;
+
+    // Per-pixel silhouette-edge rejection (D2C rim bleed guard).
+    if (_EdgeRejectRadius > 0)
+    {
+        for (int nv = (int)v - _EdgeRejectRadius; nv <= (int)v + _EdgeRejectRadius; nv++)
+        for (int nu = (int)u - _EdgeRejectRadius; nu <= (int)u + _EdgeRejectRadius; nu++)
+        {
+            if (nu < 0 || nv < 0 || nu >= _DepthW || nv >= _DepthH) continue;
+            uint dn = LoadDepthU16(nu, nv);
+            if (dn == 0u || abs((float)dn - (float)zRaw) > _EdgeRejectDepthMm) return;
+        }
+    }
+
+    float z = (float)zRaw;
+    float2 ray;
+    if (_HasRayLut != 0)
+    {
+        ray = _RayLut[v * (uint)_DepthW + u];
+    }
+    else
+    {
+        ray = float2(((float)u - _CxD) / _FxD, ((float)v - _CyD) / _FyD);
+    }
+    float3 pDepthMm = float3(ray.x * z, ray.y * z, z);
+    float3 pWorld = mul(_WorldFromDepthMm, float4(pDepthMm, 1.0)).xyz;
+    float3 camOrigin = mul(_WorldFromDepthMm, float4(0.0, 0.0, 0.0, 1.0)).xyz;
+    float3 viewDir = normalize(pWorld - camOrigin);
+    float zM = z * 0.001;
+
+    // Solid AABB carve: iterate a voxel box that tightly wraps the ±tau segment of
+    // the view ray around the surface point, padded laterally so adjacent pixels'
+    // shells overlap (no screen-door holes when voxelSize <= footprint). The |sdf|<=tau
+    // gate in VoxelSdf keeps only the band shell, so most box voxels early-out — the box
+    // just guarantees COVERAGE while staying surface-proportional (~hundreds of voxels/
+    // pixel vs 129M for the whole grid).
+    float3 aW = pWorld - viewDir * _Tau;
+    float3 bW = pWorld + viewDir * _Tau;
+    float3 aV = mul(_VoxelFromWorld, float4(aW, 1.0)).xyz;
+    float3 bV = mul(_VoxelFromWorld, float4(bW, 1.0)).xyz;
+    // Search AABB wrapping the ±tau ray segment (+pad so voxels that project to this
+    // pixel but sit slightly off the ideal ray are still visited). The projection gate
+    // in VoxelSdfGated does the actual selection, so pad just guarantees coverage; a
+    // grazing surface's long band is spanned because its far end is inside the segment
+    // AABB. _TubeRadius is unused now (kept for rollback).
+    int pad = 2 + _LatRadius;
+    int3 lo = (int3)floor(min(aV, bV)) - pad;
+    int3 hi = (int3)ceil (max(aV, bV)) + pad;
+
+    for (int z0 = lo.z; z0 <= hi.z; z0++)
+    for (int y0 = lo.y; y0 <= hi.y; y0++)
+    for (int x0 = lo.x; x0 <= hi.x; x0++)
+        SplatVoxel(int3(x0, y0, z0), u, v, zM, writePass);
+}
+
+[numthreads(8, 8, 1)]
+void ScatterMin(uint3 id : SV_DispatchThreadID)
+{
+    ProcessPixel(id.x, id.y, false);
+}
+
+[numthreads(8, 8, 1)]
+void ScatterWrite(uint3 id : SV_DispatchThreadID)
+{
+    ProcessPixel(id.x, id.y, true);
+}
