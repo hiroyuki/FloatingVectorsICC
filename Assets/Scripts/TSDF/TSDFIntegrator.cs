@@ -74,6 +74,30 @@ namespace TSDF
                  "set; lower it if you are debugging with fewer cams attached.")]
         [Min(1)] public int expectedCamCount = 4;
 
+        [Header("Depth-basis integration (option ④ — perf refactor)")]
+        [Tooltip("Use the DEPTH-BASIS scatter kernel (1 thread per depth pixel, " +
+                 "~369K/frame) instead of the voxel-basis kernel (1 thread per voxel, " +
+                 "~515M/frame). Off = original path (A/B and rollback). Live-follow " +
+                 "(clearVolumeOnNewBatch) only for now; accumulate mode still uses the " +
+                 "voxel-basis kernel. See Plans/tsdf-depth-basis-integration-design.md.")]
+        public bool useDepthBasis = false;
+
+        [Tooltip("Depth-basis: number of samples marched across the ±tau band along " +
+                 "each pixel's view ray. ~2·tau/(0.5·voxelSize) is a safe floor; too " +
+                 "few leaves gaps across the band, too many just costs writes.")]
+        [Range(2, 64)] public int bandSteps = 24;
+
+        [Tooltip("Depth-basis: axis-neighbour splat radius (0 or 1) to close lateral " +
+                 "screen-door holes where voxelSize <= depth-pixel footprint. Start at " +
+                 "1; drop to 0 if the mesh is hole-free without it (cheaper).")]
+        [Range(0, 1)] public int latRadius = 1;
+
+        [Tooltip("Depth-basis: capsule radius around each pixel's view ray, in VOXELS. " +
+                 "Wide enough to bridge inter-pixel gaps (no holes), narrow enough to " +
+                 "avoid grazing-angle fattening. ~1.0-1.4 is the sweet spot; raise if " +
+                 "holes reappear, lower if the body looks bloated.")]
+        [Range(0.5f, 3f)] public float tubeRadiusVoxels = 1.2f;
+
         // Runtime gate for the live/playback integration path. When false, incoming
         // frames are ignored so the volume (and thus the mesh) freezes on its last
         // state. MeshCumulative flips this to hold the final mesh after a run ends
@@ -146,6 +170,17 @@ namespace TSDF
         private ComputeShader _shader;
         private int _kernel;
 
+        // Depth-basis scatter kernel (option ④). Loaded lazily when useDepthBasis is on.
+        private ComputeShader _depthShader;
+        private int _kScatterMin;
+        private int _kScatterWrite;
+        // Tracks whether the depth-basis path was active last dispatch, so a mid-run
+        // toggle (Inspector or accumulationMode change) resets the shared batch state
+        // and clears the write buffer instead of letting one path inherit the other's
+        // in-flight batch. -1 = uninitialised.
+        private int _depthPathActive = -1;
+        private bool _warnedDepthFallback;
+
         // Per-serial GPU + CPU state. Keyed by device serial so the same
         // entry survives the live <-> playback handoff.
         private sealed class CamState
@@ -165,6 +200,16 @@ namespace TSDF
             public int ColorWidth;
             public int ColorHeight;
             public int FramesIntegrated;        // diag counter, reset per second
+
+            // Depth-basis: undistorted-ray LUT (shared with the point cloud). Built once
+            // per (intrinsics, distortion, resolution); rebuilt only when those change.
+            public ComputeBuffer RayLutBuf;     // StructuredBuffer<float2>, or 1-elem dummy
+            public bool HasRayLut;
+            public int RayLutW, RayLutH;
+            public ObCameraDistortion RayLutDist;   // full cache key: coeffs + model...
+            public ObCameraIntrinsic RayLutIntr;    // ...intrinsics...
+            public bool RayLutForcePinhole;         // ...and the forcePinhole debug toggle.
+            public bool LastHadColor;           // did the last uploaded frame carry colour
         }
         private readonly Dictionary<string, CamState> _states = new Dictionary<string, CamState>();
 
@@ -206,6 +251,7 @@ namespace TSDF
             {
                 kv.Value.DepthBuf?.Release();
                 kv.Value.ColorBuf?.Release();
+                kv.Value.RayLutBuf?.Release();
             }
             _states.Clear();
         }
@@ -221,6 +267,20 @@ namespace TSDF
                 return;
             }
             _kernel = _shader.FindKernel("Integrate");
+        }
+
+        private bool EnsureDepthShader()
+        {
+            if (_depthShader != null) return true;
+            _depthShader = Resources.Load<ComputeShader>("TSDFIntegrateDepth");
+            if (_depthShader == null)
+            {
+                Debug.LogError("[TSDFIntegrator] Compute shader \"Resources/TSDFIntegrateDepth.compute\" not found.", this);
+                return false;
+            }
+            _kScatterMin = _depthShader.FindKernel("ScatterMin");
+            _kScatterWrite = _depthShader.FindKernel("ScatterWrite");
+            return true;
         }
 
         private void BindAllSources()
@@ -317,6 +377,42 @@ namespace TSDF
             if (volume == null) return;
             if (!integrationEnabled) return; // frozen — hold the last accumulated state
 
+            // Depth-basis scatter (option ④) is only valid for live-follow + RetainGhost
+            // camera fusion (the |sdf|-min the 2-pass InterlockedMin implements). Average
+            // fusion and the accumulate/Fold path are NOT ported yet, so fall back to the
+            // voxel-basis kernel for those — enabling the perf flag must never silently
+            // change fusion semantics.
+            bool depthActive = useDepthBasis && clearVolumeOnNewBatch
+                && volume.accumulationMode == TSDFVolume.AccumulationMode.RetainGhost;
+
+            if (useDepthBasis && !depthActive && !_warnedDepthFallback)
+            {
+                Debug.LogWarning("[TSDFIntegrator] useDepthBasis is on but the depth-basis path " +
+                    "only supports live-follow + RetainGhost fusion; using the voxel-basis kernel " +
+                    "for this configuration (clearVolumeOnNewBatch=" + clearVolumeOnNewBatch +
+                    ", accumulationMode=" + volume.accumulationMode + ").", this);
+                _warnedDepthFallback = true;
+            }
+
+            // On any transition between the two paths, drop the shared in-flight batch and
+            // clear the write buffer so neither path inherits the other's stale batch state
+            // (a full _batchSerials that would trip RunDepthBatch with buffered cams, or an
+            // uncleared write buffer the voxel path expects to wipe at batch start).
+            int depthFlag = depthActive ? 1 : 0;
+            if (_depthPathActive != depthFlag)
+            {
+                _batchSerials.Clear();
+                volume.ClearWrite();
+                _depthPathActive = depthFlag;
+                if (depthActive) _warnedDepthFallback = false; // re-warn if it falls back again later
+            }
+
+            if (depthActive)
+            {
+                DispatchIntegrateDepth(serial, camParam, sourceTransform, raw);
+                return;
+            }
+
             if (clearVolumeOnNewBatch)
             {
                 // Live-follow: when a complete batch finished last time, wipe the
@@ -370,20 +466,21 @@ namespace TSDF
         }
 
         /// <summary>
-        /// Integrate ONE depth frame into <see cref="TSDFVolume.WriteBuffer"/>. No
-        /// batch / clear / publish side effects — pure GPU integrate + counters.
-        /// Returns false if the frame was rejected (missing intrinsics, no depth…).
+        /// Validate one raw frame and upload its depth (+ colour) bytes into the
+        /// per-serial <see cref="CamState"/>. Shared by the voxel-basis IntegrateOne
+        /// and the depth-basis batch path. Returns null if the frame was rejected
+        /// (missing intrinsics / no depth / no transform); <paramref name="hasColor"/>
+        /// reports whether a colour frame was uploaded this call.
         /// </summary>
-        private unsafe bool IntegrateOne(string serial, ObCameraParam? camParam,
+        private CamState PrepareCamState(string serial, ObCameraParam? camParam,
                                          Transform sourceTransform, RawFrameData raw,
-                                         ComputeBuffer targetSdf, ComputeBuffer targetColor,
-                                         int modeOverride)
+                                         out bool hasColor)
         {
-            if (string.IsNullOrEmpty(serial)) return false;
-            if (volume == null || targetSdf == null) return false;
-            if (raw.DepthBytes == null || raw.DepthByteCount <= 0) return false;
-            if (!camParam.HasValue) return false; // need intrinsics
-            if (sourceTransform == null) return false;
+            hasColor = false;
+            if (string.IsNullOrEmpty(serial)) return null;
+            if (raw.DepthBytes == null || raw.DepthByteCount <= 0) return null;
+            if (!camParam.HasValue) return null; // need intrinsics
+            if (sourceTransform == null) return null;
 
             if (!_states.TryGetValue(serial, out var st))
             {
@@ -417,8 +514,8 @@ namespace TSDF
             // can sample the camera colour per voxel. When the frame has no colour
             // (depth-only), keep a 1-uint dummy bound and flag _HasColor=0 — the
             // kernel's binding must still exist even though it short-circuits.
-            bool hasColor = raw.ColorBytes != null && raw.ColorByteCount > 0
-                            && raw.ColorWidth > 0 && raw.ColorHeight > 0;
+            hasColor = raw.ColorBytes != null && raw.ColorByteCount > 0
+                       && raw.ColorWidth > 0 && raw.ColorHeight > 0;
             if (hasColor)
             {
                 st.ColorByteCount = raw.ColorByteCount;
@@ -439,6 +536,22 @@ namespace TSDF
             {
                 st.ColorBuf = new ComputeBuffer(1, 4, ComputeBufferType.Raw);
             }
+            return st;
+        }
+
+        /// <summary>
+        /// Integrate ONE depth frame into <see cref="TSDFVolume.WriteBuffer"/>. No
+        /// batch / clear / publish side effects — pure GPU integrate + counters.
+        /// Returns false if the frame was rejected (missing intrinsics, no depth…).
+        /// </summary>
+        private unsafe bool IntegrateOne(string serial, ObCameraParam? camParam,
+                                         Transform sourceTransform, RawFrameData raw,
+                                         ComputeBuffer targetSdf, ComputeBuffer targetColor,
+                                         int modeOverride)
+        {
+            if (volume == null || targetSdf == null) return false;
+            var st = PrepareCamState(serial, camParam, sourceTransform, raw, out bool hasColor);
+            if (st == null) return false;
 
             // Build per-camera world->depth-mm matrix.
             Matrix4x4 depthFromWorld = ComputeDepthFromWorld(sourceTransform, st.CamParam);
@@ -518,6 +631,179 @@ namespace TSDF
             st.FramesIntegrated++;
             TotalIntegrationCount++;
             return true;
+        }
+
+        // ===== Depth-basis integration (option ④) ===============================
+
+        /// <summary>
+        /// Depth-basis live-follow entry: upload each camera's frame as it arrives,
+        /// and once a full batch (<see cref="expectedCamCount"/> unique serials) has
+        /// landed, run the 2-pass scatter over all cameras and publish. Deferring the
+        /// integrate to batch-complete lets the |sdf|-min <c>_VoxelKey</c> be cleared
+        /// exactly once per batch (design §8).
+        /// </summary>
+        private void DispatchIntegrateDepth(string serial, ObCameraParam? camParam,
+                                            Transform sourceTransform, RawFrameData raw)
+        {
+            if (!EnsureDepthShader()) return;
+            var st = PrepareCamState(serial, camParam, sourceTransform, raw, out bool hasColor);
+            if (st == null) return;
+            st.LastHadColor = hasColor;
+            EnsureRayLut(st);
+            _batchSerials.Add(serial);
+            if (_batchSerials.Count < expectedCamCount) return;
+
+            RunDepthBatch();
+            _batchSerials.Clear();
+        }
+
+        // Wipe the back buffer + key set, scatter every batch camera (all ScatterMin,
+        // then all ScatterWrite so the global |sdf|-min is settled before materialise),
+        // then publish the completed snapshot.
+        private void RunDepthBatch()
+        {
+            volume.ClearWrite();        // sdf=+tau, weight=0, WriteBlockActive zeroed
+            volume.ClearWriteKey();     // _VoxelKey = 0xFFFFFFFF
+
+            // Volume-level uniforms (global scalars, shared by both kernels).
+            _depthShader.SetInts("_Dim", volume.Dim.x, volume.Dim.y, volume.Dim.z);
+            _depthShader.SetMatrix("_WorldFromVoxel", volume.WorldFromVoxel);
+            _depthShader.SetMatrix("_VoxelFromWorld", volume.VoxelFromWorld);
+            _depthShader.SetFloat("_Tau", volume.Tau);
+            _depthShader.SetFloat("_WObs", observationWeight);
+            _depthShader.SetInt("_BandSteps", bandSteps);
+            _depthShader.SetInt("_LatRadius", latRadius);
+            _depthShader.SetFloat("_TubeRadius", Mathf.Max(0.01f, tubeRadiusVoxels) * volume.voxelSize);
+            _depthShader.SetInt("_EdgeRejectRadius", edgeRejectRadius);
+            _depthShader.SetFloat("_EdgeRejectDepthMm", edgeRejectDepthMm);
+
+            // Pass A: settle the per-voxel |sdf|-min across every camera of the batch.
+            foreach (var s in _batchSerials)
+                if (_states.TryGetValue(s, out var st) && st.HasCamParam && st.DepthBuf != null)
+                    { EnsureRayLut(st); BindDepthCam(_kScatterMin, st); DispatchDepth(_kScatterMin, st); }
+
+            // Pass B: materialise the winning observation (sdf + colour) into _Voxels.
+            foreach (var s in _batchSerials)
+                if (_states.TryGetValue(s, out var st) && st.HasCamParam && st.DepthBuf != null)
+                    { BindDepthCam(_kScatterWrite, st); DispatchDepth(_kScatterWrite, st); }
+
+            CompletedBatchCount++;
+            InvokeBeforePublishCompleteBatch();
+            volume.Publish();
+            TotalIntegrationCount++;
+        }
+
+        // Bind one camera's per-dispatch buffers + matrices for the given kernel.
+        private void BindDepthCam(int kernel, CamState st)
+        {
+            Matrix4x4 depthFromWorld = ComputeDepthFromWorld(st.SourceTransform, st.CamParam);
+            var intr = st.CamParam.DepthIntrinsic;
+            var cintr = st.CamParam.RgbIntrinsic;
+            Matrix4x4 colorFromWorld = Matrix4x4.Scale(new Vector3(1000f, 1000f, 1000f))
+                                       * st.SourceTransform.worldToLocalMatrix;
+
+            _depthShader.SetBuffer(kernel, "_Voxels", volume.WriteBuffer);
+            _depthShader.SetBuffer(kernel, "_Colors", volume.WriteColorBuffer);
+            _depthShader.SetBuffer(kernel, "_VoxelKey", volume.WriteKeyBuffer);
+            volume.BindBlockMarking(_depthShader, kernel, volume.WriteBlockActive);
+
+            _depthShader.SetBuffer(kernel, "_Depth", st.DepthBuf);
+            _depthShader.SetInt("_DepthW", st.DepthWidth);
+            _depthShader.SetInt("_DepthH", st.DepthHeight);
+            _depthShader.SetFloat("_FxD", intr.Fx);
+            _depthShader.SetFloat("_FyD", intr.Fy);
+            _depthShader.SetFloat("_CxD", intr.Cx);
+            _depthShader.SetFloat("_CyD", intr.Cy);
+            _depthShader.SetMatrix("_DepthFromWorld", depthFromWorld);
+            _depthShader.SetMatrix("_WorldFromDepthMm", depthFromWorld.inverse);
+            _depthShader.SetBuffer(kernel, "_RayLut", st.RayLutBuf);
+            _depthShader.SetInt("_HasRayLut", st.HasRayLut ? 1 : 0);
+
+            // Forward distortion for the projection gate — same gate as the point cloud
+            // undistort LUT so unproject/project round-trips to the same pixel.
+            var ddist = st.CamParam.DepthDistortion;
+            bool hasDepthDist = !forcePinhole && PointCloud.DepthUndistortLut.IsApplicable(ddist);
+            _depthShader.SetInt("_HasDepthDist", hasDepthDist ? 1 : 0);
+            _depthShader.SetFloat("_DK1", ddist.K1); _depthShader.SetFloat("_DK2", ddist.K2);
+            _depthShader.SetFloat("_DK3", ddist.K3); _depthShader.SetFloat("_DK4", ddist.K4);
+            _depthShader.SetFloat("_DK5", ddist.K5); _depthShader.SetFloat("_DK6", ddist.K6);
+            _depthShader.SetFloat("_DP1", ddist.P1); _depthShader.SetFloat("_DP2", ddist.P2);
+
+            _depthShader.SetBuffer(kernel, "_ColorImg", st.ColorBuf);
+            _depthShader.SetInt("_ColorW", st.ColorWidth);
+            _depthShader.SetInt("_ColorH", st.ColorHeight);
+            _depthShader.SetFloat("_FxC", cintr.Fx);
+            _depthShader.SetFloat("_FyC", cintr.Fy);
+            _depthShader.SetFloat("_CxC", cintr.Cx);
+            _depthShader.SetFloat("_CyC", cintr.Cy);
+            _depthShader.SetMatrix("_ColorFromWorld", colorFromWorld);
+            _depthShader.SetInt("_HasColor", st.LastHadColor ? 1 : 0);
+            _depthShader.SetInt("_UseColorOverride", colorOverride.a > 0f ? 1 : 0);
+            _depthShader.SetVector("_OverrideColor", new Vector4(colorOverride.r, colorOverride.g, colorOverride.b, 0f));
+        }
+
+        private void DispatchDepth(int kernel, CamState st)
+        {
+            int gx = Mathf.Max(1, Mathf.CeilToInt(st.DepthWidth / 8f));
+            int gy = Mathf.Max(1, Mathf.CeilToInt(st.DepthHeight / 8f));
+            _depthShader.Dispatch(kernel, gx, gy, 1);
+        }
+
+        // Build / refresh the undistorted-ray LUT for one camera. Rebuilt only when the
+        // intrinsics-derived distortion or resolution changes (effectively never). When
+        // no correction applies (pinhole / forcePinhole / unsupported model) HasRayLut
+        // is false and a 1-element dummy stays bound so the kernel binding is valid.
+        private void EnsureRayLut(CamState st)
+        {
+            var intr = st.CamParam.DepthIntrinsic;
+            var dist = st.CamParam.DepthDistortion;
+            // Cache key MUST cover everything the LUT and the projection gate depend on:
+            // resolution, distortion (coeffs + model), intrinsics, AND forcePinhole. Missing
+            // forcePinhole/intrinsics would let a toggle return a stale LUT while BindDepthCam
+            // flips _HasDepthDist, so unprojection and the forward-projection gate would use
+            // different camera models (the gate then misses valid voxels / stamps a wrong band).
+            bool same = st.RayLutBuf != null && st.RayLutW == st.DepthWidth && st.RayLutH == st.DepthHeight
+                        && st.RayLutForcePinhole == forcePinhole
+                        && st.RayLutDist.Model == dist.Model
+                        && DistApproxEqual(st.RayLutDist, dist)
+                        && IntrExactEqual(st.RayLutIntr, intr);
+            if (same) return;
+
+            st.RayLutW = st.DepthWidth;
+            st.RayLutH = st.DepthHeight;
+            st.RayLutDist = dist;
+            st.RayLutIntr = intr;
+            st.RayLutForcePinhole = forcePinhole;
+
+            Vector2[] lut = forcePinhole ? null
+                          : PointCloud.DepthUndistortLut.Build(intr, dist, st.DepthWidth, st.DepthHeight);
+            if (lut != null && lut.Length > 0)
+            {
+                if (st.RayLutBuf == null || st.RayLutBuf.count != lut.Length)
+                {
+                    st.RayLutBuf?.Release();
+                    st.RayLutBuf = new ComputeBuffer(lut.Length, sizeof(float) * 2);
+                }
+                st.RayLutBuf.SetData(lut);
+                st.HasRayLut = true;
+            }
+            else
+            {
+                if (st.RayLutBuf == null)
+                    st.RayLutBuf = new ComputeBuffer(1, sizeof(float) * 2);
+                st.HasRayLut = false;
+            }
+        }
+
+        private static bool DistApproxEqual(in ObCameraDistortion a, in ObCameraDistortion b)
+        {
+            return a.K1 == b.K1 && a.K2 == b.K2 && a.K3 == b.K3 && a.K4 == b.K4
+                && a.K5 == b.K5 && a.K6 == b.K6 && a.P1 == b.P1 && a.P2 == b.P2;
+        }
+
+        private static bool IntrExactEqual(in ObCameraIntrinsic a, in ObCameraIntrinsic b)
+        {
+            return a.Fx == b.Fx && a.Fy == b.Fy && a.Cx == b.Cx && a.Cy == b.Cy;
         }
 
         /// <summary>

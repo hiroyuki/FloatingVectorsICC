@@ -156,6 +156,7 @@ namespace TSDF
                 if (_baA != null) b += (long)_baA.count * sizeof(uint);
                 if (_baB != null) b += (long)_baB.count * sizeof(uint);
                 if (_baInst != null) b += (long)_baInst.count * sizeof(uint);
+                if (_keyBuf != null) b += (long)_keyBuf.count * sizeof(uint);
                 return b;
             }
         }
@@ -217,6 +218,12 @@ namespace TSDF
         private ComputeShader _foldShader;
         private int _foldKernel;
 
+        // Depth-basis integration scratch (option ④): per-voxel packed |sdf|-min key
+        // for the 2-pass InterlockedMin scatter. Single (not double) buffered — it is
+        // cleared to 0xFFFFFFFF and fully consumed within one batch's write, before
+        // Publish. Sized to the write buffer; allocated lazily on first ClearWriteKey.
+        private ComputeBuffer _keyBuf;
+
         // Front->Write copy (sdf + colour) for TSDFTrailBaker's fuse-into-displayed-body.
         private ComputeShader _copyShader;
         private int _copyKernel;
@@ -227,6 +234,11 @@ namespace TSDF
         public ComputeBuffer InstanceBuffer => _instSdf;
         /// <summary>Per-instant colour scratch, parallel to <see cref="InstanceBuffer"/>.</summary>
         public ComputeBuffer InstanceColorBuffer => _instColor;
+
+        /// <summary>Depth-basis 2-pass scatter key buffer (packed |sdf|-min per voxel).
+        /// Bind the ScatterMin/ScatterWrite kernels here. Null until the first
+        /// <see cref="ClearWriteKey"/>. Sized to the current grid, single-buffered.</summary>
+        public ComputeBuffer WriteKeyBuffer => _keyBuf;
 
         // Track the bbox transform values we last built the grid from so we
         // can rebuild lazily when the user edits the bbox or voxel size.
@@ -635,6 +647,32 @@ namespace TSDF
             int gy = Mathf.Max(1, Mathf.CeilToInt(groups / (float)gx));
             _clearShader.SetBuffer(_clearUintKernel, "_UintBuf", buf);
             _clearShader.SetInt("_UintCount", count);
+            _clearShader.SetInt("_UintClearValue", 0);
+            _clearShader.SetInt("_DispatchWidth", gx * 64);
+            _clearShader.Dispatch(_clearUintKernel, gx, gy, 1);
+        }
+
+        /// <summary>Depth-basis (option ④): (re)allocate the per-voxel key buffer to the
+        /// current grid and clear it to 0xFFFFFFFF (= "no observation yet, farthest
+        /// possible |sdf|"), so the batch's InterlockedMin scatter starts fresh.</summary>
+        public void ClearWriteKey()
+        {
+            int total = Dim.x * Dim.y * Dim.z;
+            if (total <= 0) return;
+            if (_keyBuf == null || _keyBuf.count != total)
+            {
+                _keyBuf?.Release();
+                _keyBuf = new ComputeBuffer(total, sizeof(uint));
+            }
+            if (_clearShader == null) EnsureClearShader();
+            if (_clearShader == null) return;
+
+            int groups = Mathf.CeilToInt(total / 64f);
+            int gx = Mathf.Max(1, Mathf.Min(groups, 65535));
+            int gy = Mathf.Max(1, Mathf.CeilToInt(groups / (float)gx));
+            _clearShader.SetBuffer(_clearUintKernel, "_UintBuf", _keyBuf);
+            _clearShader.SetInt("_UintCount", total);
+            _clearShader.SetInt("_UintClearValue", unchecked((int)0xFFFFFFFF));
             _clearShader.SetInt("_DispatchWidth", gx * 64);
             _clearShader.Dispatch(_clearUintKernel, gx, gy, 1);
         }
@@ -785,6 +823,8 @@ namespace TSDF
             _instColor?.Release();
             _instSdf = null;
             _instColor = null;
+            _keyBuf?.Release();
+            _keyBuf = null;
             _ccLabel?.Release();
             _ccSize?.Release();
             _ccChanged?.Release();
