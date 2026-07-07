@@ -174,6 +174,12 @@ namespace TSDF
         private ComputeShader _depthShader;
         private int _kScatterMin;
         private int _kScatterWrite;
+        // Tracks whether the depth-basis path was active last dispatch, so a mid-run
+        // toggle (Inspector or accumulationMode change) resets the shared batch state
+        // and clears the write buffer instead of letting one path inherit the other's
+        // in-flight batch. -1 = uninitialised.
+        private int _depthPathActive = -1;
+        private bool _warnedDepthFallback;
 
         // Per-serial GPU + CPU state. Keyed by device serial so the same
         // entry survives the live <-> playback handoff.
@@ -369,9 +375,37 @@ namespace TSDF
             if (volume == null) return;
             if (!integrationEnabled) return; // frozen — hold the last accumulated state
 
-            // Depth-basis scatter (option ④). Live-follow only for now; accumulate mode
-            // still falls through to the voxel-basis path below.
-            if (useDepthBasis && clearVolumeOnNewBatch)
+            // Depth-basis scatter (option ④) is only valid for live-follow + RetainGhost
+            // camera fusion (the |sdf|-min the 2-pass InterlockedMin implements). Average
+            // fusion and the accumulate/Fold path are NOT ported yet, so fall back to the
+            // voxel-basis kernel for those — enabling the perf flag must never silently
+            // change fusion semantics.
+            bool depthActive = useDepthBasis && clearVolumeOnNewBatch
+                && volume.accumulationMode == TSDFVolume.AccumulationMode.RetainGhost;
+
+            if (useDepthBasis && !depthActive && !_warnedDepthFallback)
+            {
+                Debug.LogWarning("[TSDFIntegrator] useDepthBasis is on but the depth-basis path " +
+                    "only supports live-follow + RetainGhost fusion; using the voxel-basis kernel " +
+                    "for this configuration (clearVolumeOnNewBatch=" + clearVolumeOnNewBatch +
+                    ", accumulationMode=" + volume.accumulationMode + ").", this);
+                _warnedDepthFallback = true;
+            }
+
+            // On any transition between the two paths, drop the shared in-flight batch and
+            // clear the write buffer so neither path inherits the other's stale batch state
+            // (a full _batchSerials that would trip RunDepthBatch with buffered cams, or an
+            // uncleared write buffer the voxel path expects to wipe at batch start).
+            int depthFlag = depthActive ? 1 : 0;
+            if (_depthPathActive != depthFlag)
+            {
+                _batchSerials.Clear();
+                volume.ClearWrite();
+                _depthPathActive = depthFlag;
+                if (depthActive) _warnedDepthFallback = false; // re-warn if it falls back again later
+            }
+
+            if (depthActive)
             {
                 DispatchIntegrateDepth(serial, camParam, sourceTransform, raw);
                 return;
