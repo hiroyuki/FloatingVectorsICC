@@ -267,7 +267,7 @@ namespace TSDF
             RestoreSnapshot();
 
             int segCap = curves.MaxPrintSegs(printSeedStride);
-            var segBuf = new ComputeBuffer(segCap, sizeof(float) * 12); // TrailSeg/Seg, 48B
+            var segBuf = new ComputeBuffer(segCap, TrailBakeOps.SegStride); // TrailSeg/Seg, 48B
             try
             {
                 if (!curves.EmitPrintSegs(segBuf, printSeedStride, printRadius,
@@ -283,7 +283,9 @@ namespace TSDF
                                      $"(cap {segCap}) — raise printSeedStride.", this);
 
                 volume.CopyFrontToWrite();
-                BakeSegs(segBuf, st.emitted);
+                // Shared full-grid batched bake (3-7 — was a copy of TrailBaker.BakeCore's loop).
+                TrailBakeOps.BakeSegments(_bakeShader, _bakeKernel, volume,
+                                          segBuf, st.emitted, bakeBatchSize);
                 volume.Publish();
                 _snapVersion = volume.PublishVersion; // our own bump
 
@@ -291,28 +293,6 @@ namespace TSDF
                 Debug.Log("[TSDFPrintExporter] " + _status, this);
             }
             finally { segBuf.Release(); }
-        }
-
-        // Same dispatch pattern as TSDFTrailBaker.BakeCore: full grid, batched over
-        // segments so a single dispatch never trips the GPU watchdog.
-        private void BakeSegs(ComputeBuffer segs, int segCount)
-        {
-            var dim = volume.Dim;
-            int total = dim.x * dim.y * dim.z;
-            _bakeShader.SetInts("_Dim", dim.x, dim.y, dim.z);
-            _bakeShader.SetFloat("_Tau", volume.Tau);
-            _bakeShader.SetMatrix("_WorldFromVoxel", volume.WorldFromVoxel);
-            _bakeShader.SetBuffer(_bakeKernel, "_Segs", segs);
-            _bakeShader.SetBuffer(_bakeKernel, "_VoxelsOut", volume.WriteBuffer);
-            _bakeShader.SetBuffer(_bakeKernel, "_ColorsOut", volume.WriteColorBuffer);
-            volume.BindBlockMarking(_bakeShader, _bakeKernel, volume.WriteBlockActive);
-
-            for (int off = 0; off < segCount; off += bakeBatchSize)
-            {
-                _bakeShader.SetInt("_SegOffset", off);
-                _bakeShader.SetInt("_SegCount", Mathf.Min(bakeBatchSize, segCount - off));
-                TSDFComputeUtil.DispatchLinear(_bakeShader, _bakeKernel, total);
-            }
         }
 
         // ---------------- 2: close holes ----------------

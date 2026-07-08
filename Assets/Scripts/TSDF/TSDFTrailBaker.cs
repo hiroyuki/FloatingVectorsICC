@@ -26,6 +26,7 @@ using System.Collections.Generic;
 using BodyTracking;
 using Shared;
 using UnityEngine;
+using TrailSeg = TSDF.TrailBakeOps.TrailSeg;   // 48B GPU capsule (3-7: single definition)
 
 namespace TSDF
 {
@@ -152,17 +153,6 @@ namespace TSDF
         public int batchSize = 512;
 
         public string LastStatus { get; private set; } = "";
-
-        // GPU-side capsule, must match struct Seg in TSDFTrailBake.compute (48 bytes).
-        private struct TrailSeg
-        {
-            public Vector3 a;
-            public Vector3 b;
-            public float ra;
-            public float rb;
-            public Vector3 color;
-            public float pad;
-        }
 
         private ComputeShader _shader;
         private int _kernel = -1;
@@ -434,15 +424,7 @@ namespace TSDF
             if (!EnsureSegBuffer(_segScratch.Count)) return;
             _segBuf.SetData(_segScratch, 0, 0, _segScratch.Count);
 
-            _shader.SetInts("_Dim", dim.x, dim.y, dim.z);
-            _shader.SetFloat("_Tau", volume.Tau);
-            _shader.SetMatrix("_WorldFromVoxel", volume.WorldFromVoxel);
-            _shader.SetBuffer(_boxKernel, "_Segs", _segBuf);
-            _shader.SetBuffer(_boxKernel, "_VoxelsOut", volume.WriteBuffer);
-            _shader.SetBuffer(_boxKernel, "_ColorsOut", volume.WriteColorBuffer);
-            // Active-block marking (task 0-1): baked trail voxels mark the write set so
-            // active-block MC meshes the sculpture (rides the same Publish/swap).
-            volume.BindBlockMarking(_shader, _boxKernel, volume.WriteBlockActive);
+            TrailBakeOps.BindBakeTargets(_shader, _boxKernel, volume, _segBuf);
 
             float padVox = (radius + volume.Tau) / Mathf.Max(1e-6f, volume.voxelSize) + 1f;
             for (int b = 0; b < batchN; b++)
@@ -536,26 +518,8 @@ namespace TSDF
 
             if (clearWrite) volume.ClearWrite();
 
-            int total = dim.x * dim.y * dim.z;
-            _shader.SetInts("_Dim", dim.x, dim.y, dim.z);
-            _shader.SetFloat("_Tau", volume.Tau);
-            _shader.SetMatrix("_WorldFromVoxel", volume.WorldFromVoxel);
-            _shader.SetBuffer(_kernel, "_Segs", _segBuf);
-            _shader.SetBuffer(_kernel, "_VoxelsOut", volume.WriteBuffer);
-            _shader.SetBuffer(_kernel, "_ColorsOut", volume.WriteColorBuffer);
-            // Active-block marking (task 0-1): baked trail voxels mark the write set so
-            // active-block MC meshes the sculpture (rides the Publish/swap).
-            volume.BindBlockMarking(_shader, _kernel, volume.WriteBlockActive);
-
-            int batches = 0;
-            for (int off = 0; off < _segScratch.Count; off += batchSize)
-            {
-                int count = Mathf.Min(batchSize, _segScratch.Count - off);
-                _shader.SetInt("_SegOffset", off);
-                _shader.SetInt("_SegCount", count);
-                TSDFComputeUtil.DispatchLinear(_shader, _kernel, total);
-                batches++;
-            }
+            int batches = TrailBakeOps.BakeSegments(_shader, _kernel, volume,
+                                                    _segBuf, _segScratch.Count, batchSize);
 
             if (doPublish) volume.Publish();
 
@@ -630,7 +594,7 @@ namespace TSDF
             if (_segBuf == null || _segBuf.count < count)
             {
                 _segBuf?.Release();
-                _segBuf = new ComputeBuffer(Mathf.Max(count, 256), sizeof(float) * 12);
+                _segBuf = new ComputeBuffer(Mathf.Max(count, 256), TrailBakeOps.SegStride);
             }
             return true;
         }
