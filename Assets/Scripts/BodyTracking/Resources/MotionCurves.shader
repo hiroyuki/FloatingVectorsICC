@@ -13,6 +13,13 @@ Shader "Orbbec/MotionCurves"
     {
         _Brightness ("Brightness", Range(0, 3)) = 1.0
         _Width      ("Ribbon Width (m)", Range(0, 0.05)) = 0.004
+        // Fake round ribbon: shade the flat camera-facing quad with a cylinder-
+        // equivalent normal so the curve reads as a tube (no extra geometry).
+        // 0 = original flat emissive look, 1 = full rounded shading. Lets the
+        // artist A/B against the old look (see realtime-performance-tuning.md).
+        _Round      ("Round shading", Range(0, 1)) = 1.0
+        _RimColor   ("Rim Color", Color) = (1, 1, 1, 1)
+        _RimPower   ("Rim Power", Float) = 2.5
     }
     SubShader
     {
@@ -36,11 +43,17 @@ Shader "Orbbec/MotionCurves"
 
             float _Brightness;
             float _Width;
+            float _Round;
+            float4 _RimColor;
+            float _RimPower;
 
             struct V2F
             {
                 float4 pos  : SV_POSITION;
                 float3 vcol : TEXCOORD0;
+                float3 worldPos : TEXCOORD1;
+                float3 sideDir  : TEXCOORD2; // unit ribbon-width direction (world)
+                float  u        : TEXCOORD3; // cross-ribbon coord in [-1, +1]
             };
 
             V2F vert(uint vid : SV_VertexID)
@@ -61,6 +74,9 @@ Shader "Orbbec/MotionCurves"
                     // Degenerate / unused slot -> push offscreen so nothing rasterises.
                     o.pos = float4(2, 2, 2, 1);
                     o.vcol = float3(0, 0, 0);
+                    o.worldPos = float3(0, 0, 0);
+                    o.sideDir = float3(0, 1, 0);
+                    o.u = 0;
                     return o;
                 }
 
@@ -77,28 +93,51 @@ Shader "Orbbec/MotionCurves"
                     sideRaw = cross(tang, float3(0, 1, 0));
                     if (dot(sideRaw, sideRaw) < 1e-10) sideRaw = cross(tang, float3(1, 0, 0));
                 }
-                float3 side = normalize(sideRaw) * (_Width * 0.5);
+                float3 sideUnit = normalize(sideRaw);
+                float3 side = sideUnit * (_Width * 0.5);
 
                 float3 a0 = a - side, a1 = a + side;
                 float3 b0 = b - side, b1 = b + side;
 
                 // Two triangles: (a0, a1, b0), (b0, a1, b1).
-                float3 wp; float3 col;
-                if      (corner == 0u) { wp = a0; col = A.c; }
-                else if (corner == 1u) { wp = a1; col = A.c; }
-                else if (corner == 2u) { wp = b0; col = B.c; }
-                else if (corner == 3u) { wp = b0; col = B.c; }
-                else if (corner == 4u) { wp = a1; col = A.c; }
-                else                   { wp = b1; col = B.c; }
+                // u = -1 on the a0/b0 edge, +1 on the a1/b1 edge (ribbon width).
+                float3 wp; float3 col; float uu;
+                if      (corner == 0u) { wp = a0; col = A.c; uu = -1; }
+                else if (corner == 1u) { wp = a1; col = A.c; uu = +1; }
+                else if (corner == 2u) { wp = b0; col = B.c; uu = -1; }
+                else if (corner == 3u) { wp = b0; col = B.c; uu = -1; }
+                else if (corner == 4u) { wp = a1; col = A.c; uu = +1; }
+                else                   { wp = b1; col = B.c; uu = +1; }
 
                 o.pos = mul(UNITY_MATRIX_VP, float4(wp, 1.0));
                 o.vcol = col;
+                o.worldPos = wp;
+                o.sideDir = sideUnit;
+                o.u = uu;
                 return o;
             }
 
             fixed4 frag(V2F i) : SV_Target
             {
-                return fixed4(saturate(i.vcol) * _Brightness, 1.0);
+                float3 albedo = saturate(i.vcol);
+                float3 flatCol = albedo * _Brightness;
+
+                // Cylinder-equivalent normal: the flat quad faces the camera, so
+                // the visible half-cylinder's normal sweeps from +side (u=+1)
+                // through the view direction (u=0) to -side (u=-1). No geometry.
+                float3 view = normalize(_WorldSpaceCameraPos.xyz - i.worldPos);
+                float3 sideUnit = normalize(i.sideDir);
+                float uu = clamp(i.u, -1.0, 1.0);
+                float3 N = normalize(sideUnit * uu + view * sqrt(saturate(1.0 - uu * uu)));
+
+                // Same self-contained lighting convention as TSDF/TSDFMesh.
+                float3 L = normalize(float3(0.35, 0.85, 0.40));
+                float diffuse = saturate(dot(N, L)) * 0.7 + 0.3;
+                float rim = pow(1.0 - saturate(dot(N, view)), _RimPower);
+                float3 rounded = albedo * diffuse * _Brightness + _RimColor.rgb * rim * 0.35;
+
+                float3 rgb = lerp(flatCol, rounded, saturate(_Round));
+                return fixed4(rgb, 1.0);
             }
             ENDCG
         }

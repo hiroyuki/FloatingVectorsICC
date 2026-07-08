@@ -97,6 +97,11 @@ namespace TSDF
         [Tooltip("Gamma applied to the baked colour. <1 brightens / lifts shadows " +
                  "(use ~0.45 if colours look dark from sRGB-as-linear sampling).")]
         public float meshGamma = 1f;
+        [Range(0f, 1f)]
+        [Tooltip("Smooth (SDF-gradient) normals for the mesh. 0 = flat ddx/ddy " +
+                 "facets, 1 = smooth. Samples the displayed front SDF buffer per " +
+                 "fragment; falls back to flat where a neighbour voxel is unobserved.")]
+        public float meshGradNormals = 1f;
         [Tooltip("Max triangles the MC output buffer can hold. 333k tris = 1 M " +
                  "vertices, ~12 MB at 36 bytes per triangle (= 3 × float3).")]
         [Min(1024)] public int meshMaxTriangles = 333_333;
@@ -395,6 +400,14 @@ namespace TSDF
             meshMaterial.SetFloat("_Saturation", meshSaturation);
             meshMaterial.SetFloat("_Brightness", meshBrightness);
             meshMaterial.SetFloat("_Gamma", meshGamma);
+            // Gradient-normal inputs: sample the same displayed front SDF buffer the
+            // mesh was extracted from. Cheap to keep bound even when the toggle is 0.
+            meshMaterial.SetFloat("_GradNormals", meshGradNormals);
+            meshMaterial.SetBuffer("_Voxels", volume.FrontBuffer);
+            meshMaterial.SetMatrix("_WorldFromVoxel", volume.WorldFromVoxel);
+            meshMaterial.SetMatrix("_VoxelFromWorld", volume.WorldFromVoxel.inverse);
+            meshMaterial.SetVector("_VDim", new Vector4(volume.Dim.x, volume.Dim.y, volume.Dim.z, 0f));
+            meshMaterial.SetFloat("_MinWeight", meshMinWeight);
             Graphics.DrawProceduralIndirect(meshMaterial, BuildBounds(1.0f),
                 MeshTopology.Triangles, _meshArgsBuffer, 0,
                 camera: null, properties: null,
