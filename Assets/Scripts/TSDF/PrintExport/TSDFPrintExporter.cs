@@ -598,14 +598,14 @@ namespace TSDF
             // vertices adjacent cells emit (not guaranteed bitwise identical) while
             // staying far below any feature at 4-7 mm voxels.
             var phase = System.Diagnostics.Stopwatch.StartNew();
-            WeldSlabs(slabs, out var pos, out var col, out var tri);
+            MeshOps.WeldSlabs(slabs, out var pos, out var col, out var tri);
             slabs.Clear(); // free the soup copies before smoothing allocates
             Debug.Log($"[TSDFPrintExporter] welded to {pos.Length} verts in {phase.ElapsedMilliseconds} ms " +
                       $"— smoothing x{smoothIterations}...", this);
 
             phase.Restart();
             if (smoothIterations > 0)
-                TaubinSmooth(pos, tri, smoothIterations);
+                MeshOps.TaubinSmooth(pos, tri, smoothIterations);
             Debug.Log($"[TSDFPrintExporter] smoothing done in {phase.ElapsedMilliseconds} ms — writing files...", this);
             phase.Restart();
 
@@ -639,42 +639,13 @@ namespace TSDF
             try
             {
                 Directory.CreateDirectory(dir);
-                // Build the whole STL in memory and write it in ONE call:
-                // ~/Documents is TCC/sync-managed on macOS and millions of small
-                // BinaryWriter writes go through it catastrophically slowly.
-                long stlBytes = 84L + 50L * written;
-                var ms = new MemoryStream((int)stlBytes);
-                using (var bw = new BinaryWriter(ms))
-                {
-                    var header = new byte[80];
-                    var tag = System.Text.Encoding.ASCII.GetBytes("FloatingVectorsICC print export");
-                    Array.Copy(tag, header, Math.Min(tag.Length, 80));
-                    bw.Write(header);
-                    bw.Write((uint)written);
-                    for (int t = 0; t < triCount; t++)
-                    {
-                        int i0 = tri[t * 3], i1 = tri[t * 3 + 1], i2 = tri[t * 3 + 2];
-                        if (i0 == i1 || i1 == i2 || i0 == i2) continue;
-                        if (flip) (i1, i2) = (i2, i1);
-                        Vector3 a = (pos[i0] - center) * scale;
-                        Vector3 b = (pos[i1] - center) * scale;
-                        Vector3 c = (pos[i2] - center) * scale;
-                        Vector3 nrm = Vector3.Cross(b - a, c - a);
-                        float len = nrm.magnitude;
-                        nrm = len > 1e-12f ? nrm / len : Vector3.up;
-                        WriteV(bw, nrm); WriteV(bw, a); WriteV(bw, b); WriteV(bw, c);
-                        bw.Write((ushort)0);
-                    }
-                    bw.Flush();
-                    using (var fs = File.Create(stlPath))
-                        fs.Write(ms.GetBuffer(), 0, (int)ms.Length);
-                }
+                StlWriter.Write(stlPath, pos, tri, written, center, scale, flip);
 
                 string plyNote = "";
                 if (exportPlyWithColor)
                 {
                     string plyPath = Path.Combine(dir, $"print_{stamp}.ply");
-                    WritePly(plyPath, pos, col, tri, written, center, scale, flip);
+                    PlyWriter.Write(plyPath, pos, col, tri, written, center, scale, flip);
                     plyNote = " + PLY";
                 }
 
@@ -693,171 +664,6 @@ namespace TSDF
             }
         }
 
-        private static void WriteV(BinaryWriter bw, Vector3 v)
-        {
-            bw.Write(v.x); bw.Write(v.y); bw.Write(v.z);
-        }
-
-        // Weld the per-slab triangle soup (Tri = p0 c0 p1 c1 p2 c2, 3 floats each)
-        // into unique vertices + index list. Vertex colours are averaged over all
-        // soup occurrences. Keys are positions quantised to 0.1 mm packed into a
-        // long (21 bits/axis = ±104 m range).
-        private static void WeldSlabs(List<(float[] data, int tris)> slabs,
-                                      out Vector3[] positions, out Vector3[] colors, out int[] triangles)
-        {
-            var map = new Dictionary<long, int>();
-            var pos = new List<Vector3>();
-            var colSum = new List<Vector3>();
-            var colCnt = new List<int>();
-            var tri = new List<int>();
-
-            foreach (var (data, tris) in slabs)
-                for (int t = 0; t < tris; t++)
-                {
-                    int o = t * 18;
-                    for (int v = 0; v < 3; v++)
-                    {
-                        int p = o + v * 6;
-                        var w = new Vector3(data[p], data[p + 1], data[p + 2]);
-                        long kx = (long)Math.Round(w.x * 10000.0) + 1048576;
-                        long ky = (long)Math.Round(w.y * 10000.0) + 1048576;
-                        long kz = (long)Math.Round(w.z * 10000.0) + 1048576;
-                        long key = (kx << 42) | (ky << 21) | kz;
-                        if (!map.TryGetValue(key, out int idx))
-                        {
-                            idx = pos.Count;
-                            map.Add(key, idx);
-                            pos.Add(w);
-                            colSum.Add(Vector3.zero);
-                            colCnt.Add(0);
-                        }
-                        colSum[idx] += new Vector3(data[p + 3], data[p + 4], data[p + 5]);
-                        colCnt[idx]++;
-                        tri.Add(idx);
-                    }
-                }
-
-            positions = pos.ToArray();
-            colors = new Vector3[positions.Length];
-            for (int i = 0; i < colors.Length; i++)
-                colors[i] = colCnt[i] > 0 ? colSum[i] / colCnt[i] : Vector3.one * 0.5f;
-            triangles = tri.ToArray();
-        }
-
-        // Taubin λ|μ smoothing (non-shrinking): alternating positive/negative
-        // uniform-Laplacian steps over the unique-edge adjacency. In-place on pos.
-        //
-        // The unique-edge set is built by sorting a primitive long[] of packed edge
-        // keys and deduping linearly. Do NOT switch this to HashSet<long>: at
-        // millions of entries it degrades to minutes inside the editor Mono
-        // (measured 397 s where the sort path takes ~1 s).
-        private static void TaubinSmooth(Vector3[] pos, int[] tri, int iterations)
-        {
-            int n = pos.Length;
-            var phase = System.Diagnostics.Stopwatch.StartNew();
-
-            // All triangle edges as packed keys (min<<32|max); -1 = degenerate.
-            var keys = new long[tri.Length];
-            int kc = 0;
-            for (int t = 0; t < tri.Length; t += 3)
-            {
-                keys[kc++] = EdgeKey(tri[t], tri[t + 1]);
-                keys[kc++] = EdgeKey(tri[t + 1], tri[t + 2]);
-                keys[kc++] = EdgeKey(tri[t + 2], tri[t]);
-            }
-            Array.Sort(keys);
-            int e0 = 0;
-            while (e0 < keys.Length && keys[e0] < 0) e0++; // skip degenerates
-            int uniq = 0;
-            for (int i = e0; i < keys.Length; i++)
-                if (uniq == 0 || keys[i] != keys[uniq - 1]) keys[uniq++] = keys[i];
-
-            var degree = new int[n];
-            for (int i = 0; i < uniq; i++)
-            { degree[(int)(keys[i] >> 32)]++; degree[(int)(keys[i] & 0xffffffffL)]++; }
-            var offset = new int[n + 1];
-            for (int i = 0; i < n; i++) offset[i + 1] = offset[i] + degree[i];
-            var adj = new int[offset[n]];
-            var cursor = (int[])offset.Clone();
-            for (int i = 0; i < uniq; i++)
-            {
-                int a = (int)(keys[i] >> 32), b = (int)(keys[i] & 0xffffffffL);
-                adj[cursor[a]++] = b;
-                adj[cursor[b]++] = a;
-            }
-            Debug.Log($"[TSDFPrintExporter] adjacency: {uniq} edges in {phase.ElapsedMilliseconds} ms");
-            phase.Restart();
-
-            const float lambda = 0.5f, mu = -0.53f;
-            var tmp = new Vector3[n];
-            var src = pos;
-            for (int it = 0; it < iterations; it++)
-            {
-                LaplacianPass(src, tmp, offset, adj, lambda);
-                LaplacianPass(tmp, src, offset, adj, mu);
-                if ((it + 1) % 5 == 0 || it + 1 == iterations)
-                    Debug.Log($"[TSDFPrintExporter] smooth {it + 1}/{iterations} ({phase.ElapsedMilliseconds} ms elapsed)");
-            }
-        }
-
-        private static long EdgeKey(int a, int b)
-        {
-            if (a == b) return -1;
-            long lo = Math.Min(a, b), hi = Math.Max(a, b);
-            return (lo << 32) | hi;
-        }
-
-        // Reads src, writes dst — no cross-vertex write dependency, so the vertex
-        // range parallelises cleanly across cores.
-        private static void LaplacianPass(Vector3[] src, Vector3[] dst, int[] offset, int[] adj, float factor)
-        {
-            Parallel.For(0, src.Length, v =>
-            {
-                int a = offset[v], b = offset[v + 1];
-                if (b == a) { dst[v] = src[v]; return; }
-                Vector3 avg = Vector3.zero;
-                for (int i = a; i < b; i++) avg += src[adj[i]];
-                avg /= (b - a);
-                dst[v] = src[v] + factor * (avg - src[v]);
-            });
-        }
-
-        // Binary little-endian PLY: welded vertices with averaged colours + indexed faces.
-        private static void WritePly(string path, Vector3[] pos, Vector3[] col, int[] tri,
-                                     int faceCount, Vector3 center, float scale, bool flip)
-        {
-            // Same single-write strategy as the STL (sync-managed ~/Documents).
-            var fs = new MemoryStream(pos.Length * 15 + faceCount * 13 + 512);
-            string header = "ply\nformat binary_little_endian 1.0\n" +
-                            $"element vertex {pos.Length}\n" +
-                            "property float x\nproperty float y\nproperty float z\n" +
-                            "property uchar red\nproperty uchar green\nproperty uchar blue\n" +
-                            $"element face {faceCount}\n" +
-                            "property list uchar int vertex_indices\nend_header\n";
-            var hb = System.Text.Encoding.ASCII.GetBytes(header);
-            fs.Write(hb, 0, hb.Length);
-            using var bw = new BinaryWriter(fs);
-            for (int i = 0; i < pos.Length; i++)
-            {
-                Vector3 w = (pos[i] - center) * scale;
-                bw.Write(w.x); bw.Write(w.y); bw.Write(w.z);
-                bw.Write((byte)Mathf.Clamp(Mathf.RoundToInt(col[i].x * 255f), 0, 255));
-                bw.Write((byte)Mathf.Clamp(Mathf.RoundToInt(col[i].y * 255f), 0, 255));
-                bw.Write((byte)Mathf.Clamp(Mathf.RoundToInt(col[i].z * 255f), 0, 255));
-            }
-            for (int t = 0; t < tri.Length; t += 3)
-            {
-                int i0 = tri[t], i1 = tri[t + 1], i2 = tri[t + 2];
-                if (i0 == i1 || i1 == i2 || i0 == i2) continue;
-                if (flip) (i1, i2) = (i2, i1);
-                bw.Write((byte)3);
-                bw.Write(i0); bw.Write(i1); bw.Write(i2);
-            }
-            bw.Flush();
-            using var file = File.Create(path);
-            file.Write(fs.GetBuffer(), 0, (int)fs.Length);
-        }
-
         // ---------------- web/AR export (.glb + .usdz) ----------------
         // Same weld+smooth as the STL path, then written at real-world scale:
         // metres, XZ centred on the origin, base on y=0 (AR Quick Look places the
@@ -868,14 +674,14 @@ namespace TSDF
         {
             var total = System.Diagnostics.Stopwatch.StartNew();
             var phase = System.Diagnostics.Stopwatch.StartNew();
-            WeldSlabs(slabs, out var pos, out var col, out var tri);
+            MeshOps.WeldSlabs(slabs, out var pos, out var col, out var tri);
             slabs.Clear(); // free the soup copies before smoothing allocates
             long weldMs = phase.ElapsedMilliseconds;
             Debug.Log($"[TSDFPrintExporter] welded to {pos.Length} verts in {weldMs} ms " +
                       $"— smoothing x{smoothIterations}...", this);
             phase.Restart();
             if (smoothIterations > 0)
-                TaubinSmooth(pos, tri, smoothIterations);
+                MeshOps.TaubinSmooth(pos, tri, smoothIterations);
             long smoothMs = phase.ElapsedMilliseconds;
 
             // Decimate to the web triangle budget (web files only; the STL path
@@ -920,7 +726,7 @@ namespace TSDF
                 for (int t = 0; t < idx.Length; t += 3)
                     (idx[t + 1], idx[t + 2]) = (idx[t + 2], idx[t + 1]);
 
-            var nrm = ComputeVertexNormals(pos, idx);
+            var nrm = MeshOps.ComputeVertexNormals(pos, idx);
 
             // ---- curved lines: direct tube meshes at display resolution ----
             // NOT the Fuse-curves voxel path: the drawn Catmull-Rom polylines are
@@ -937,7 +743,7 @@ namespace TSDF
                 {
                     var tp = new List<Vector3>(); var tn = new List<Vector3>();
                     var tc = new List<Vector3>(); var ti = new List<int>();
-                    curveCount = AppendCurveTubes(lines, lineCols, curves.brightness,
+                    curveCount = CurveTubeBuilder.AppendCurveTubes(lines, lineCols, curves.brightness,
                         Mathf.Max(0.0005f, curves.ribbonWidth * 0.5f),
                         Mathf.Clamp(webCurveSides, 3, 12), webCurveTolerance, center, min.y, tp, tn, tc, ti);
                     if (curveCount > 0)
@@ -995,149 +801,6 @@ namespace TSDF
             {
                 Fail($"web export failed: {e.Message}");
             }
-        }
-
-        // Sweep each polyline into a closed tube: parallel-transport frames along
-        // the curve, an N-sided ring per point (radial normals), quad strips
-        // between rings and centre-fan end caps. Geometry is emitted directly in
-        // export space (mirrored right-handed, recentred) with CCW-outward
-        // winding, so it appends to the already-oriented mesh arrays untouched.
-        // Returns the number of tubes actually emitted.
-        private static int AppendCurveTubes(List<Vector3[]> lines, List<Vector3> lineCols, float brightness,
-                                            float radius, int sides, float tolerance, Vector3 center, float minY,
-                                            List<Vector3> pos, List<Vector3> nrm, List<Vector3> col,
-                                            List<int> idx)
-        {
-            int tubes = 0;
-            var p = new List<Vector3>(256);
-            for (int li = 0; li < lines.Count; li++)
-            {
-                // To export space; drop near-duplicate points (a paused pose makes
-                // the oldest history frames identical -> zero-length segments).
-                p.Clear();
-                foreach (var w in lines[li])
-                {
-                    var e = new Vector3(-(w.x - center.x), w.y - minY, w.z - center.z);
-                    if (p.Count == 0 || (e - p[p.Count - 1]).sqrMagnitude > 1e-10f) p.Add(e);
-                }
-                if (tolerance > 0f && p.Count > 2) SimplifyPolyline(p, tolerance);
-                int n = p.Count;
-                if (n < 2) continue;
-                tubes++;
-
-                Vector3 c = lineCols[li] * brightness;
-                c = new Vector3(Mathf.Clamp01(c.x), Mathf.Clamp01(c.y), Mathf.Clamp01(c.z));
-
-                int ringBase = pos.Count;
-                Vector3 startT = (p[1] - p[0]).normalized;
-                Vector3 u = Vector3.Cross(startT, Mathf.Abs(startT.y) < 0.9f ? Vector3.up : Vector3.right).normalized;
-                Vector3 prevT = startT;
-                for (int i = 0; i < n; i++)
-                {
-                    Vector3 t = p[Mathf.Min(i + 1, n - 1)] - p[Mathf.Max(i - 1, 0)];
-                    t = t.sqrMagnitude > 1e-12f ? t.normalized : prevT;
-                    u = (Quaternion.FromToRotation(prevT, t) * u).normalized;
-                    prevT = t;
-                    Vector3 v = Vector3.Cross(t, u);
-                    for (int k = 0; k < sides; k++)
-                    {
-                        float ang = 2f * Mathf.PI * k / sides;
-                        Vector3 rd = Mathf.Cos(ang) * u + Mathf.Sin(ang) * v;
-                        pos.Add(p[i] + rd * radius);
-                        nrm.Add(rd);
-                        col.Add(c);
-                    }
-                }
-                Vector3 endT = prevT;
-
-                // Side quads: ring k -> k+1 x segment i -> i+1, CCW-outward.
-                for (int i = 0; i < n - 1; i++)
-                    for (int k = 0; k < sides; k++)
-                    {
-                        int k1 = (k + 1) % sides;
-                        int a = ringBase + i * sides + k;
-                        int b = ringBase + i * sides + k1;
-                        int c2 = ringBase + (i + 1) * sides + k1;
-                        int d = ringBase + (i + 1) * sides + k;
-                        idx.Add(a); idx.Add(b); idx.Add(c2);
-                        idx.Add(a); idx.Add(c2); idx.Add(d);
-                    }
-
-                // End caps: ring verts duplicated with the axial normal + centre fan.
-                int capBase = pos.Count;
-                for (int k = 0; k < sides; k++) { pos.Add(pos[ringBase + k]); nrm.Add(-startT); col.Add(c); }
-                pos.Add(p[0]); nrm.Add(-startT); col.Add(c);
-                for (int k = 0; k < sides; k++)
-                { idx.Add(capBase + sides); idx.Add(capBase + (k + 1) % sides); idx.Add(capBase + k); }
-
-                capBase = pos.Count;
-                int lastRing = ringBase + (n - 1) * sides;
-                for (int k = 0; k < sides; k++) { pos.Add(pos[lastRing + k]); nrm.Add(endT); col.Add(c); }
-                pos.Add(p[n - 1]); nrm.Add(endT); col.Add(c);
-                for (int k = 0; k < sides; k++)
-                { idx.Add(capBase + sides); idx.Add(capBase + k); idx.Add(capBase + (k + 1) % sides); }
-            }
-            return tubes;
-        }
-
-        // Douglas-Peucker in place: keeps endpoints, drops points closer to the
-        // local chord than the tolerance. The Catmull-Rom polylines are heavily
-        // oversampled where the motion is slow, so 1-2 mm typically halves the
-        // point count without visible change.
-        private static void SimplifyPolyline(List<Vector3> p, float tol)
-        {
-            int n = p.Count;
-            var keep = new bool[n];
-            keep[0] = keep[n - 1] = true;
-            var stack = new Stack<(int lo, int hi)>();
-            stack.Push((0, n - 1));
-            float tol2 = tol * tol;
-            while (stack.Count > 0)
-            {
-                var (lo, hi) = stack.Pop();
-                if (hi - lo < 2) continue;
-                Vector3 a = p[lo], ab = p[hi] - a;
-                float abLen2 = ab.sqrMagnitude;
-                float worst = -1f;
-                int wi = -1;
-                for (int i = lo + 1; i < hi; i++)
-                {
-                    Vector3 ap = p[i] - a;
-                    float t = abLen2 > 1e-16f ? Mathf.Clamp01(Vector3.Dot(ap, ab) / abLen2) : 0f;
-                    float d2 = (ap - t * ab).sqrMagnitude;
-                    if (d2 > worst) { worst = d2; wi = i; }
-                }
-                if (worst > tol2)
-                {
-                    keep[wi] = true;
-                    stack.Push((lo, wi));
-                    stack.Push((wi, hi));
-                }
-            }
-            int w = 0;
-            for (int i = 0; i < n; i++)
-                if (keep[i]) p[w++] = p[i];
-            p.RemoveRange(w, n - w);
-        }
-
-        // Area-weighted smooth vertex normals (the accumulated cross product is
-        // proportional to triangle area, so big faces dominate — the right bias
-        // for an MC surface).
-        private static Vector3[] ComputeVertexNormals(Vector3[] pos, int[] tri)
-        {
-            var n = new Vector3[pos.Length];
-            for (int t = 0; t < tri.Length; t += 3)
-            {
-                int i0 = tri[t], i1 = tri[t + 1], i2 = tri[t + 2];
-                Vector3 fn = Vector3.Cross(pos[i1] - pos[i0], pos[i2] - pos[i0]);
-                n[i0] += fn; n[i1] += fn; n[i2] += fn;
-            }
-            for (int i = 0; i < n.Length; i++)
-            {
-                float len = n[i].magnitude;
-                n[i] = len > 1e-12f ? n[i] / len : Vector3.up;
-            }
-            return n;
         }
 
         // ---------------- shared ----------------
