@@ -50,9 +50,10 @@ namespace BodyTracking
                  "played-back depth/IR instead (spawns a worker per camera, same as live capture). " +
                  "Only takes effect on Windows (Editor or player) — on other platforms the BT SDK " +
                  "is unavailable, so recorded bodies_main stays the playback skeleton source and " +
-                 "this flag is inert. Also the escape hatch for recordings whose bodies_main is " +
-                 "mismatched with the depth (wrong session -> stale/misaligned skeletons).")]
-        public bool ignoreRecordedBodies = false;
+                 "this flag is inert. On Windows this is the intended default: playback should " +
+                 "exercise the same live worker pipeline as capture; bodies_main is the fallback " +
+                 "for platforms without k4abt (Mac).")]
+        public bool ignoreRecordedBodies = true;
 
         // ignoreRecordedBodies, platform-gated: live k4abt exists only on Windows, so on any
         // other platform the flag must read as false or playback would have no skeleton source.
@@ -1358,6 +1359,22 @@ namespace BodyTracking
             // confidence-proportional weight.
             const int minAcceptLevel = (int)k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW;
 
+            // Pass 0: k4abt reports occluded joints as LOW with a *predicted*
+            // position (biased toward the floor for lifted feet). If any camera
+            // still tracks the joint at MEDIUM+, averaging those predictions in
+            // drags the merged joint back down — so LOW only participates as a
+            // fallback when no camera has MEDIUM or better.
+            int maxLevelSeen = 0;
+            for (int m = 0; m < cluster.MemberIndices.Count; m++)
+            {
+                var cand = _candidatePool[cluster.MemberIndices[m]];
+                int level = (int)cand.Slot.Bodies[cand.BodyIndex].Joints[jointIndex].ConfidenceLevel;
+                if (level > maxLevelSeen) maxLevelSeen = level;
+            }
+            int effectiveMinLevel = maxLevelSeen >= (int)k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_MEDIUM
+                ? (int)k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_MEDIUM
+                : minAcceptLevel;
+
             // Pass 1: find the highest-confidence sample to use as the
             // hemisphere reference for the quaternion mean. Also accumulate
             // weighted positions in this same pass so we touch each member once.
@@ -1374,7 +1391,7 @@ namespace BodyTracking
                 var cand = _candidatePool[cluster.MemberIndices[m]];
                 var jt = cand.Slot.Bodies[cand.BodyIndex].Joints[jointIndex];
                 int level = (int)jt.ConfidenceLevel;
-                if (level < minAcceptLevel) continue; // NONE excluded
+                if (level < effectiveMinLevel) continue; // NONE excluded; LOW excluded when MEDIUM+ exists
 
                 float weight = level; // confidence-linear weight
                 Vector3 worldPos = SkeletonWorldTransform.ToWorld(jt.Position, cand.Slot.DepthToColorMm, cand.Slot.SourceTransform);
@@ -1420,7 +1437,7 @@ namespace BodyTracking
                 var cand = _candidatePool[cluster.MemberIndices[m]];
                 var jt = cand.Slot.Bodies[cand.BodyIndex].Joints[jointIndex];
                 int level = (int)jt.ConfidenceLevel;
-                if (level < minAcceptLevel) continue;
+                if (level < effectiveMinLevel) continue;
 
                 float weight = level; // confidence-linear weight
                 Quaternion qLocal = SkeletonWorldTransform.ToWorldRotation(jt.Orientation, cand.Slot.DepthToColorRotUnity, cand.Slot.SourceTransform);
