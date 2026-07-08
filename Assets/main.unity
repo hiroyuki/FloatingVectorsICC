@@ -543,7 +543,7 @@ MonoBehaviour:
   meshSaturation: 1.4
   meshBrightness: 1
   meshGamma: 1
-  meshMaxTriangles: 24000000
+  meshMaxTriangles: 2000000
   meshIsoLevel: 0
   meshMinWeight: 0.5
   mcEveryNFrames: 1
