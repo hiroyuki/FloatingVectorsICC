@@ -1,0 +1,238 @@
+// Snaps merged body-tracking joints onto the observed TSDF surface. The k4abt
+// failure mode this corrects: occluded-side cameras report a lifted foot at a
+// floor-biased position with MEDIUM confidence, so the merged joint lags below
+// the real limb — which the depth data (and therefore the TSDF) DOES see.
+//
+// The volume only materialises a +-tau (~2cm) shell around observed surfaces
+// (everything else is weight==0, both inside the body and in free space), so
+// gradient descent from the joint is impossible — the joint sits in a weight==0
+// region. Instead each joint does:
+//   1. brute-force nearest weight>0 voxel inside _SearchRadius (group-wide
+//      strided scan + shared-memory min-reduce; ~24^3..48^3 voxels, trivial next
+//      to the integration kernels),
+//   2. central-difference gradient at that voxel -> outward surface normal,
+//   3. one-shot projection: surface point ps = vc - sdf*n, then the joint
+//      target sits embedDepth INSIDE the limb: target = ps - n*embed,
+//   4. re-search around the target with a small radius and re-project once
+//      (the shell is thin; one refinement replaces iteration),
+//   5. guards: total move capped at _MaxSnapDist; snaps that would move the
+//      joint DOWN by more than _MaxDownward are rejected (the floor is part of
+//      the TSDF and the k4abt error mode is always "too low", so only upward /
+//      lateral correction is ever wanted).
+//
+// One thread group per joint; _JointsIn.w carries the per-joint embed depth.
+// _JointsOut.w is a status flag (1 = snapped, 0 = no result -> caller decays).
+
+#pragma kernel SnapJoints
+
+#define GROUP_SIZE 128
+
+int3 _Dim;
+float4x4 _WorldFromVoxel;    // voxel index centre (+0.5) -> world metres
+float4x4 _VoxelFromWorld;    // world metres -> voxel index
+float _MinWeight;            // voxel weight below this = unobserved
+int _SearchRadiusVox;        // phase-1 window half-extent (voxels)
+int _RefineRadiusVox;        // phase-2 window half-extent (voxels)
+float _MaxSnapDist;          // reject snaps moving the joint further than this (m)
+float _MaxDownward;          // reject snaps moving the joint down more than this (m)
+float _FloorCutoffY;         // ABSOLUTE world height: shell voxels below this are
+                             // never candidates. The per-joint minY (input-relative)
+                             // fails exactly in the failure mode this kernel fixes —
+                             // a floor-biased joint sinks to within _MaxDownward of
+                             // the floor and the floor shell becomes the nearest
+                             // candidate again. C# passes floorY + margin; a very
+                             // negative value disables the cutoff.
+int _JointCount;
+
+StructuredBuffer<float2> _Voxels;      // x = sdf (m), y = weight (front buffer)
+StructuredBuffer<float4> _JointsIn;    // xyz = joint world pos, w = embed depth (m)
+RWStructuredBuffer<float4> _JointsOut; // xyz = snapped world pos, w = status
+
+groupshared float gsDist[GROUP_SIZE];
+groupshared int gsIdx[GROUP_SIZE];
+groupshared float3 gsTarget;
+groupshared float gsPhase1Ok;
+
+int LinIdx(int3 c)
+{
+    return c.x + _Dim.x * (c.y + _Dim.y * c.z);
+}
+
+float3 VoxelCenterWorld(int3 c)
+{
+    return mul(_WorldFromVoxel, float4(float3(c) + 0.5, 1)).xyz;
+}
+
+// Strided scan of a (2r+1)^3 window for the nearest weight>0 voxel to `queryW`
+// (world metres). Candidates below `minY` are excluded UP FRONT: the k4abt error
+// mode is "joint too low", so the true limb shell is above the joint while the
+// FLOOR shell (the volume has no person mask) is usually the nearest neighbour
+// below — without this filter phase 1 locks onto the floor and the downward
+// guard then rejects the whole snap, making the correction a permanent no-op.
+void ScanWindow(float3 queryW, float minY, int r, uint tid)
+{
+    float bestD = 1e30;
+    int bestIdx = -1;
+
+    float3 qv = mul(_VoxelFromWorld, float4(queryW, 1)).xyz;
+    int3 c0 = int3(floor(qv - 0.5));
+    int side = 2 * r + 1;
+    int total = side * side * side;
+
+    for (int i = (int)tid; i < total; i += GROUP_SIZE)
+    {
+        int3 o;
+        o.x = i % side;
+        o.y = (i / side) % side;
+        o.z = i / (side * side);
+        int3 c = c0 + o - r;
+        if (any(c < 0) || any(c >= _Dim)) continue;
+        if (_Voxels[LinIdx(c)].y < _MinWeight) continue;
+        float3 w = VoxelCenterWorld(c);
+        if (w.y < minY) continue;
+        float3 d = w - queryW;
+        float dd = dot(d, d);
+        if (dd < bestD)
+        {
+            bestD = dd;
+            bestIdx = LinIdx(c);
+        }
+    }
+    gsDist[tid] = bestD;
+    gsIdx[tid] = bestIdx;
+}
+
+// Min-reduce gsDist/gsIdx down to slot 0. Call with all GROUP_SIZE threads.
+void Reduce(uint tid)
+{
+    [unroll]
+    for (uint s = GROUP_SIZE / 2; s > 0; s >>= 1)
+    {
+        GroupMemoryBarrierWithGroupSync();
+        if (tid < s && gsDist[tid + s] < gsDist[tid])
+        {
+            gsDist[tid] = gsDist[tid + s];
+            gsIdx[tid] = gsIdx[tid + s];
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+}
+
+// Gradient + one-shot projection at shell voxel `idx` for a joint that wants to
+// sit `embed` metres inside the surface. Returns target world pos; ok=false when
+// the gradient is unusable (fewer than 2 axes have both neighbours observed).
+float3 ProjectFromShellVoxel(int idx, float embed, out bool ok)
+{
+    int3 c;
+    c.x = idx % _Dim.x;
+    c.y = (idx / _Dim.x) % _Dim.y;
+    c.z = idx / (_Dim.x * _Dim.y);
+
+    // Per-axis central difference, unrolled by hand: HLSL forbids dynamic
+    // component writes (grad[a] = ...) on a float3.
+    float3 grad = 0;
+    int validAxes = 0;
+    {
+        int3 cp = c + int3(1, 0, 0), cm = c - int3(1, 0, 0);
+        if (!(any(cp >= _Dim) || any(cm < 0)))
+        {
+            float2 vp = _Voxels[LinIdx(cp)], vm = _Voxels[LinIdx(cm)];
+            if (vp.y >= _MinWeight && vm.y >= _MinWeight) { grad.x = vp.x - vm.x; validAxes++; }
+        }
+    }
+    {
+        int3 cp = c + int3(0, 1, 0), cm = c - int3(0, 1, 0);
+        if (!(any(cp >= _Dim) || any(cm < 0)))
+        {
+            float2 vp = _Voxels[LinIdx(cp)], vm = _Voxels[LinIdx(cm)];
+            if (vp.y >= _MinWeight && vm.y >= _MinWeight) { grad.y = vp.x - vm.x; validAxes++; }
+        }
+    }
+    {
+        int3 cp = c + int3(0, 0, 1), cm = c - int3(0, 0, 1);
+        if (!(any(cp >= _Dim) || any(cm < 0)))
+        {
+            float2 vp = _Voxels[LinIdx(cp)], vm = _Voxels[LinIdx(cm)];
+            if (vp.y >= _MinWeight && vm.y >= _MinWeight) { grad.z = vp.x - vm.x; validAxes++; }
+        }
+    }
+    if (validAxes < 2 || dot(grad, grad) < 1e-12)
+    {
+        ok = false;
+        return 0;
+    }
+
+    // Gradient in voxel-index space -> world direction (WorldFromVoxel is
+    // rotation * uniform scale, so direction transforms by the 3x3 block).
+    float3 n = normalize(mul((float3x3)_WorldFromVoxel, grad));
+    float sdf = _Voxels[idx].x;
+    float3 vc = VoxelCenterWorld(c);
+    float3 surface = vc - n * sdf;   // walk along the outward normal to sdf=0
+    ok = true;
+    return surface - n * embed;      // joint centre sits inside the limb
+}
+
+[numthreads(GROUP_SIZE, 1, 1)]
+void SnapJoints(uint3 gid : SV_GroupID, uint tid : SV_GroupThreadID)
+{
+    int joint = (int)gid.x;
+    if (joint >= _JointCount) return;
+
+    float4 jin = _JointsIn[joint];
+    float3 input = jin.xyz;
+    float embed = jin.w;
+    // Candidate floor: the stricter of "not below the joint" (relative) and
+    // "not the floor shell itself" (absolute).
+    float minY = max(input.y - _MaxDownward, _FloorCutoffY);
+
+    // Phase 1: nearest shell voxel to the merged joint.
+    ScanWindow(input, minY, _SearchRadiusVox, tid);
+    Reduce(tid);
+
+    if (tid == 0)
+    {
+        gsPhase1Ok = 0;
+        gsTarget = input;
+        if (gsIdx[0] >= 0)
+        {
+            bool ok;
+            float3 t = ProjectFromShellVoxel(gsIdx[0], embed, ok);
+            if (ok)
+            {
+                gsTarget = t;
+                gsPhase1Ok = 1;
+            }
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    if (gsPhase1Ok < 0.5)
+    {
+        if (tid == 0) _JointsOut[joint] = float4(input, 0);
+        return;
+    }
+
+    // Phase 2: the phase-1 shell voxel may belong to a far side of the limb;
+    // re-search with a tight window around the projected target and re-project.
+    // Same input-anchored minY: the refine step must not rediscover the floor.
+    ScanWindow(gsTarget, minY, _RefineRadiusVox, tid);
+    Reduce(tid);
+
+    if (tid == 0)
+    {
+        float3 target = gsTarget;
+        bool ok = false;
+        if (gsIdx[0] >= 0)
+        {
+            float3 t = ProjectFromShellVoxel(gsIdx[0], embed, ok);
+            if (ok) target = t;
+        }
+        // Fall back to the phase-1 target when refinement found no usable
+        // gradient — phase 1 already passed, so a result exists either way.
+
+        float3 delta = target - input;
+        bool reject = dot(delta, delta) > _MaxSnapDist * _MaxSnapDist
+                      || delta.y < -_MaxDownward;
+        _JointsOut[joint] = reject ? float4(input, 0) : float4(target, 1);
+    }
+}
