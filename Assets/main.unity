@@ -1765,7 +1765,6 @@ MonoBehaviour:
   jointRadius: 0.03
   skeletonColor: {r: 0.094645746, g: 0.22020026, b: 0.23773581, a: 1}
   boneWidth: 0.03
-  dropLowWhenHigherAvailable: 0
   useOneEuroFilter: 1
   oneEuroMinCutoff: 0.5
   oneEuroBeta: 0.5
@@ -1778,7 +1777,6 @@ MonoBehaviour:
   continuityRadiusMeters: 0.5
   maxSkewMs: 500
   requireMinWorkerCount: 2
-  weightStrategy: 0
   showPerWorkerSkeletons: 0
   perWorkerVisualScale: 0.5
   showDebugHud: 1
@@ -1988,6 +1986,9 @@ MonoBehaviour:
   subscribePlayback: 1
   clearVolumeOnNewBatch: 1
   expectedCamCount: 4
+  useDepthBasis: 1
+  latRadius: 1
+  tubeRadiusVoxels: 1.2
   diagnosticLogging: 0
 --- !u!4 &1289138167
 Transform:
