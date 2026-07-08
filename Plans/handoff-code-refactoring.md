@@ -48,12 +48,22 @@
 マスタープランの該当節を参照。リスク順（低→高）に並んでいる。
 
 ### Phase 3（サブシステム内 M 級 dedup — 各項目独立、着手しやすい順）
-- **3-11 IPanelActions 削除**（S・低）— 実装者ゼロの死抽象。最も簡単。まずこれから。
+第1トランシェ完了（2026-07-08、branch `refactor/phase3-dedup`）:
+- ✅ **3-11 IPanelActions 削除**（`5bd03b6`）
+- ✅ **3-8 SmoothUnion Copy カーネル削除**（`d1e259e` — `TSDFVolume.CopyBuffers` 共有化）
+- ✅ **3-9 interval-gate 抽出**（`5da842d` — `TSDF/BatchIntervalGate.cs`）
+
+残り（着手しやすい順）:
+- 3-7 capsule-bake dispatch 統一（TrailBaker.BakeCore ⇔ PrintExporter.BakeSegs + TrailSeg struct 二重定義）
 - 3-2 TSDFPrintExporter 分割（MeshOps/StlWriter/PlyWriter/CurveTubeBuilder 抽出）
-- 3-7 capsule-bake dispatch 統一、3-8 SmoothUnion Copy カーネル削除、3-9 interval-gate 抽出
 - 3-3 **Calibration 450行丸コピー解消**（CalibrationWindow ⇔ CalibrationRuntimeUI → CalibrationSession）
 - 3-1 SensorRecorder 内部 dedup、3-4 publish 状態のフィーダー移動、3-6 ワイヤ可視化 twin 統合
 - 3-10 GPU raw アップロードヘルパー、3-5 **Primary-body 抽象（⚠️ 唯一の意図的挙動変更・オーナー承認必須）**
+
+**2026-07-08 前提再検証済み**（上流8コミット: SkeletonMerger continuity/foot-snap、Recorder F9/take分割 後）:
+Phase 3 全項目のアンカーは現存・有効。訂正2点 — **3-6 の CameraPoseMarker は `Calibration/` ではなく
+`PointCloud/CameraPoseMarker.cs`**。SkeletonMerger は 1906 行・SensorRecorder は 2367 行に成長しており
+プラン中の行番号参照はズレている（アンカーはコメント/シンボル名で探すこと）。
 
 ### Phase 4（構造リファクタリング — 1継ぎ目ずつ・録画 playback 回帰必須）
 - 4-2 SkeletonMerger 分割（CrowdAlertOverlay → デバッグ → SkeletonMergeCore）
