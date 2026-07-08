@@ -78,6 +78,13 @@ namespace TSDF
                  "current point cloud over time.")]
         public bool clearVolumeOnNewBatch = true;
 
+        [Tooltip("Live-follow normally double-buffers the volume so views never see a " +
+                 "mid-clear / partial-fill front. Forcing single-buffer halves the volume's " +
+                 "VRAM (~3.4 GB at 5.2 mm voxels) at the cost of that flicker — trade-off " +
+                 "for fitting 4x full-model k4abt workers on a 12 GB GPU. No effect in " +
+                 "accumulate mode, which is single-buffered anyway.")]
+        public bool forceSingleBuffer = false;
+
         [Tooltip("Number of unique serials per batch. Default 4 = one Femto Bolt " +
                  "set; lower it if you are debugging with fewer cams attached.")]
         [Min(1)] public int expectedCamCount = 4;
@@ -242,8 +249,9 @@ namespace TSDF
             // Live-follow (clear-per-batch) wants double buffering so views never
             // see a mid-clear / partial-fill front. Accumulate (no clear) is a
             // read-modify-write that needs ONE persistent buffer. Drive the volume
-            // to match our mode so the two stay consistent.
-            volume.doubleBuffered = clearVolumeOnNewBatch;
+            // to match our mode so the two stay consistent. forceSingleBuffer
+            // trades the flicker back for half the volume VRAM.
+            volume.doubleBuffered = clearVolumeOnNewBatch && !forceSingleBuffer;
             BindAllSources();
         }
 
@@ -849,8 +857,9 @@ namespace TSDF
             BindAllSources();
 
             // Keep the volume's buffering mode tracking ours if the user toggles
-            // clearVolumeOnNewBatch at runtime (volume rebuilds on the change).
-            if (volume != null) volume.doubleBuffered = clearVolumeOnNewBatch;
+            // clearVolumeOnNewBatch / forceSingleBuffer at runtime (volume rebuilds
+            // on the change).
+            if (volume != null) volume.doubleBuffered = clearVolumeOnNewBatch && !forceSingleBuffer;
 
             if (!diagnosticLogging) return;
             float now = Time.realtimeSinceStartup;

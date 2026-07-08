@@ -343,7 +343,7 @@ MonoBehaviour:
   k4aWrapperBinOverride: 
   btSdkBinOverride: 
   useWorker: 1
-  useLiteModel: 1
+  useLiteModel: 0
   diagnosticLogging: 0
 --- !u!21 &127532729
 Material:
@@ -628,7 +628,7 @@ MonoBehaviour:
   tauMultiplier: 4
   accumulationMode: 1
   accumulateSmoothK: 0
-  doubleBuffered: 1
+  doubleBuffered: 0
   verboseLogging: 0
   minComponentVoxels: 200
   ccMaxIterations: 256
@@ -1846,7 +1846,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::BodyTracking.BodyTrackingMultiLive
   cameraManager: {fileID: 925702423}
   workerHost: {fileID: 100997492}
-  ignoreRecordedBodies: 0
+  ignoreRecordedBodies: 1
   btInferenceFps: 30
   loopSeamBlackoutSeconds: 0.4
   showBones: 0
@@ -2094,6 +2094,7 @@ MonoBehaviour:
   subscribeLive: 1
   subscribePlayback: 1
   clearVolumeOnNewBatch: 1
+  forceSingleBuffer: 1
   expectedCamCount: 4
   useDepthBasis: 1
   latRadius: 1
