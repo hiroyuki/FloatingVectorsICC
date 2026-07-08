@@ -10,8 +10,28 @@
 | 0 | テスト整備 + doc/コメント修正 | ✅ 完了 | `2fcf5f4` |
 | 1 | 死コード削除・実験終了トグル整理 | ✅ 完了 | `2fcf5f4`（Phase 0 と同一コミット） |
 | 2 | 共有ヘルパー導入（機械的置換） | ✅ 完了 | `75a944d` |
-| 3 | サブシステム内の中規模 dedup | ⬜ 未着手 | — |
+| 3 | サブシステム内の中規模 dedup | 🔶 **7/11 完了**（Mac で可能な分は完了。残りは下の「Windows での次アクション」） | tranche 1-4（`5bd03b6`〜`9218632`） |
 | 4 | 構造リファクタリング | ⬜ 未着手 | — |
+
+## ⚠️ Windows での次アクション（2026-07-09 Mac セッションからの引き継ぎ）
+
+Phase 3 のうち **Mac では検証できない**ため残した項目。Windows（実カメラ / ChArUco / 録画可能環境）でやること:
+
+1. **3-3 Calibration 450行丸コピー解消**（マスタープラン参照）
+   - CalibrationWindow ⇔ CalibrationRuntimeUI（RuntimeUI L772 に "ported from CalibrationWindow" 自白コメント現存）
+   - 検証: リファクタ前後で **Capture/Solve を各1回** 実行し solve 結果・status 表示を目視 A/B。
+2. **3-1 残: extrinsics 精度ロジックの機構化**（save L974-1032 / load L1259-1290 相当 — 行番号はズレているのでシンボルで探す）
+   - 検証: **実録画で前後の extrinsics YAML 等値チェック必須**（保存経路は録画が要るので Mac 不可）。
+3. **3-1 残（Mac でも可能だが未着手）**: `WriteSensorFrame`（HandleRawFrame の depth/color/IR 3連 + RecordBodies の統一。
+   **hot callback path — 既存の `cb[alloc=…]` 診断行でアロケーション非増加を検証**。録画時に走る経路なので Windows の方が自然）、
+   RCSV preamble 3重解消 + `ReadRcsv` 廃止（GapAnalyzer → `RcsvFrameStream.TimestampNsAt`）。
+4. **3-5 Primary-body 抽象** — 着手前に**オーナー承認必須**（唯一の意図的挙動変更）。id フラップ入り録画で A/B。
+
+Windows 環境での注意（このセッションで main に入った関連変更）:
+- **Mac 再生修正 `8a663d3`**: `ResolvePlaybackRoot` に macOS 専用フォールバック追加（`#if UNITY_EDITOR_OSX/STANDALONE_OSX` 内 — Windows 挙動は不変）。シーンに `playbackFolderPathMacOverride` が入ったが Windows には無影響。
+- **STL/PLY 印刷書き出しは削除済み `4c38c6d`**（オーナー決定、.glb/.usdz のみ）。印刷が復活する場合は git 履歴から。
+- TSDF は depth-basis 既定 ON（`useDepthBasis=1`）+ `meshMaxTriangles=2M`（VRAM 対策）。4070 で重い場合の次の一手は `voxelSize` 5.2→6mm、または上流の `forceSingleBuffer`。
+- Editor の Game ビューは **Display 2** を選ぶこと（Display 1 は展示仕様で黒、`9ba902c`）。
 
 いずれも `main` にマージ済み。**まだ `origin/main` へ push していない場合はこの Phase 群を最初に push すること**
 （本書コミット時点では push 済みのはず — `git log origin/main` で確認）。
