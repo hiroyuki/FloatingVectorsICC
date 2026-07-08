@@ -115,12 +115,6 @@ namespace TSDF.EditorTools
 
             EditorGUILayout.Space(4);
             EditorGUILayout.LabelField("Export", EditorStyles.miniBoldLabel);
-            float heightMm = EditorGUILayout.Slider(
-                new GUIContent("Target Height Mm", "プリント時の高さ。STL は mm 単位で書き出される。"),
-                pe.targetHeightMm, 50f, 1000f);
-            bool ply = EditorGUILayout.ToggleLeft(
-                new GUIContent("Export Ply With Color", "フルカラー印刷サービス用の頂点色付き PLY も出力。"),
-                pe.exportPlyWithColor);
             int smooth = EditorGUILayout.IntSlider(
                 new GUIContent("Smooth Iterations", "書き出し時の Taubin 平滑化（縮まない）。0=OFF。" +
                     "MC の階段状ガタつきを除去する。表示中の TSDF mesh には影響しない。"),
@@ -164,8 +158,6 @@ namespace TSDF.EditorTools
                 pe.maxBridgeLength = maxBridge;
                 pe.closeRadiusVoxels = closeR;
                 pe.keepLargestOnly = keepLargest;
-                pe.targetHeightMm = heightMm;
-                pe.exportPlyWithColor = ply;
                 pe.smoothIterations = smooth;
                 pe.webIncludeCurves = webCurves;
                 pe.webCurveStride = webStride;
@@ -197,9 +189,6 @@ namespace TSDF.EditorTools
                     if (GUILayout.Button(new GUIContent("Close holes",
                             "穴塞ぎ＋未接続チェック"), GUILayout.Height(26)))
                         pe.CloseHoles();
-                    if (GUILayout.Button(new GUIContent("Export STL",
-                            "~/Documents/FloatingVectorsPrints/ に書き出し"), GUILayout.Height(26)))
-                        pe.ExportStl();
                 }
                 using (new EditorGUI.DisabledScope(!ready || !pe.HasSnapshot))
                 {
@@ -214,7 +203,7 @@ namespace TSDF.EditorTools
                 if (GUILayout.Button(new GUIContent("Export Web (GLB + USDZ)",
                         "ウェブ表示用 .glb（頂点カラー）と iPhone AR Quick Look 用 .usdz" +
                         "（色はテクスチャに焼き込み）を実寸(m)で書き出し。カーブは表示解像度のまま" +
-                        "チューブとして自動同梱（Fuse curves 不要）。出力先は STL と同じ " +
+                        "チューブとして自動同梱（Fuse curves 不要）。出力先は " +
                         "~/Documents/FloatingVectorsPrints/。"),
                         GUILayout.Height(26)))
                     pe.ExportWeb();

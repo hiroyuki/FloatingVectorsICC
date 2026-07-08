@@ -1,6 +1,6 @@
-// 3D-print export: turn the displayed TSDF mesh + the motion curves into a
-// watertight binary STL. Operated from its own panel, Window > Print Export
-// (Shared.EditorTools.PrintExportPanel — settings + the four operations):
+// Mesh export: turn the displayed TSDF mesh + the motion curves into web/AR
+// files. Operated from its own panel, Window > Print Export
+// (Shared.EditorTools.PrintExportPanel — settings + the operations):
 //
 //   [Fuse curves]  snapshot the front volume (first time), then bake the current
 //                  curves as capsule tubes + body bridges into the DISPLAYED
@@ -11,9 +11,6 @@
 //                  and fills the enclosed interior. Then a CPU connected-
 //                  component pass reports islands and (keepLargestOnly) culls
 //                  everything not attached to the main sculpture.
-//   [Export STL]   full-grid Marching Cubes in Z slabs, CPU readback, binary STL
-//                  scaled to targetHeightMm (mm units, slicer convention), with
-//                  a signed-volume winding check. Optional colour PLY.
 //   [Export Web]   the MC mesh at real-world scale (metres, Y-up right-handed,
 //                  base on y=0) PLUS the curved lines as display-resolution tube
 //                  meshes (read back from the draw buffer — no voxel fuse, so no
@@ -24,7 +21,9 @@
 //                  (GlbWriter / UsdzWriter).
 //   [Restore]      put the pre-print front buffer back (undo all of the above).
 //
-// All ops are one-shot and synchronous (GPU readbacks): print path, not per-frame.
+// (The binary STL / colour PLY physical-print path was removed 2026-07-09 —
+//  restore from git history if a print run ever comes back.)
+// All ops are one-shot and synchronous (GPU readbacks): export path, not per-frame.
 
 using System;
 using System.Collections.Generic;
@@ -82,13 +81,6 @@ namespace TSDF
         public bool keepLargestOnly = true;
 
         [Header("Export")]
-        [Range(50f, 1000f)]
-        [Tooltip("Printed height (mm) of the sculpture's bounding box — STL is written in mm.")]
-        public float targetHeightMm = 300f;
-
-        [Tooltip("Also write a binary PLY with per-vertex colours (full-colour print services).")]
-        public bool exportPlyWithColor = false;
-
         [Range(0, 30)]
         [Tooltip("Taubin smoothing iterations on export (0 = off). Non-shrinking smoothing " +
                  "that removes the Marching-Cubes staircase from tubes and surfaces; ~10 is " +
@@ -490,14 +482,10 @@ namespace TSDF
         }
 
         // ---------------- 3: exports ----------------
-        public void ExportStl()
-        {
-            if (!Guard(needCurves: false)) return;
-            if (!EnsureMcShader()) return;
-            var slabs = RunMarchingCubes(out long totalTris);
-            if (slabs == null) return;
-            WriteMeshFiles(slabs, totalTris);
-        }
+        // (The binary STL / colour PLY print path was removed 2026-07-09 by owner
+        //  decision — glTF (.glb) + .usdz are the only export targets. Restore
+        //  ExportStl/WriteMeshFiles + StlWriter/PlyWriter from git history if a
+        //  physical print run ever comes back.)
 
         /// <summary>Web/AR export: .glb (vertex colours, web viewers) and .usdz
         /// (texture-atlas colours, iPhone AR Quick Look), both real-world metres.</summary>
@@ -588,79 +576,6 @@ namespace TSDF
             finally
             {
                 triBuf.Release(); countBuf.Release();
-            }
-        }
-
-        private void WriteMeshFiles(List<(float[] data, int tris)> slabs, long totalTris)
-        {
-            // Weld the MC soup into an indexed mesh: adjacency for Taubin smoothing,
-            // and a much smaller PLY. 0.1 mm quantisation merges the shared-edge
-            // vertices adjacent cells emit (not guaranteed bitwise identical) while
-            // staying far below any feature at 4-7 mm voxels.
-            var phase = System.Diagnostics.Stopwatch.StartNew();
-            MeshOps.WeldSlabs(slabs, out var pos, out var col, out var tri);
-            slabs.Clear(); // free the soup copies before smoothing allocates
-            Debug.Log($"[TSDFPrintExporter] welded to {pos.Length} verts in {phase.ElapsedMilliseconds} ms " +
-                      $"— smoothing x{smoothIterations}...", this);
-
-            phase.Restart();
-            if (smoothIterations > 0)
-                MeshOps.TaubinSmooth(pos, tri, smoothIterations);
-            Debug.Log($"[TSDFPrintExporter] smoothing done in {phase.ElapsedMilliseconds} ms — writing files...", this);
-            phase.Restart();
-
-            Vector3 min = Vector3.positiveInfinity, max = Vector3.negativeInfinity;
-            foreach (var p in pos) { min = Vector3.Min(min, p); max = Vector3.Max(max, p); }
-            Vector3 center = (min + max) * 0.5f;
-            Vector3 size = max - min;
-            if (size.y < 1e-4f) { Fail("degenerate mesh bounds"); return; }
-
-            // Count non-degenerate triangles (0.1 mm weld can collapse slivers) and
-            // measure the signed volume: MC emits inside = sdf < iso, so a negative
-            // volume means the winding faces inward — flip on write.
-            int triCount = tri.Length / 3;
-            int written = 0;
-            double signedVol = 0;
-            for (int t = 0; t < triCount; t++)
-            {
-                int i0 = tri[t * 3], i1 = tri[t * 3 + 1], i2 = tri[t * 3 + 2];
-                if (i0 == i1 || i1 == i2 || i0 == i2) continue;
-                written++;
-                Vector3 a = pos[i0] - center, b = pos[i1] - center, c = pos[i2] - center;
-                signedVol += Vector3.Dot(a, Vector3.Cross(b, c)) / 6.0;
-            }
-            bool flip = signedVol < 0;
-
-            float scale = targetHeightMm / size.y; // metres -> printed mm
-            string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                                      "Documents", "FloatingVectorsPrints");
-            string stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-            string stlPath = Path.Combine(dir, $"print_{stamp}.stl");
-            try
-            {
-                Directory.CreateDirectory(dir);
-                StlWriter.Write(stlPath, pos, tri, written, center, scale, flip);
-
-                string plyNote = "";
-                if (exportPlyWithColor)
-                {
-                    string plyPath = Path.Combine(dir, $"print_{stamp}.ply");
-                    PlyWriter.Write(plyPath, pos, col, tri, written, center, scale, flip);
-                    plyNote = " + PLY";
-                }
-
-                long bytes = new FileInfo(stlPath).Length;
-                _status = $"STL: {written} tris / {pos.Length} welded verts, " +
-                          $"{bytes / (1024 * 1024)} MB{plyNote} -> {stlPath} " +
-                          $"(height {targetHeightMm:0} mm, smooth x{smoothIterations}, " +
-                          $"winding {(flip ? "flipped" : "ok")}, " +
-                          $"signedVol {(signedVol >= 0 ? "+" : "")}{signedVol:0.0000} m^3, " +
-                          $"write {phase.ElapsedMilliseconds} ms)";
-                Debug.Log("[TSDFPrintExporter] " + _status, this);
-            }
-            catch (Exception e)
-            {
-                Fail($"write failed: {e.Message}");
             }
         }
 
