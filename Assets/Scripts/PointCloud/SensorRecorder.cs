@@ -2346,8 +2346,17 @@ namespace PointCloud
         private string ResolvePlaybackRoot()
         {
             if (string.IsNullOrWhiteSpace(playbackFolderPath)) return ResolveRoot();
-            return PointCloudRecording.ResolveRecordingRoot(
-                playbackFolderPath, playbackFolderPathMacOverride);
+            string macOverride = playbackFolderPathMacOverride;
+#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+            // The playback/record path split left existing scenes with only the
+            // RECORDING mac override filled, while playbackFolderPath holds a Windows
+            // take path that can never exist on a Mac — playback then silently loaded
+            // nothing. Fall back to the recording mac override: Macs never record
+            // (no live cameras), so the "playback must not touch the recording
+            // destination" concern behind the split does not apply on this platform.
+            if (string.IsNullOrWhiteSpace(macOverride)) macOverride = folderPathMacOverride;
+#endif
+            return PointCloudRecording.ResolveRecordingRoot(playbackFolderPath, macOverride);
         }
 
         private static string SafeMachineName()

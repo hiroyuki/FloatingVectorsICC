@@ -265,9 +265,9 @@ MonoBehaviour:
   jointMotionField: {fileID: 0}
   cumulative: {fileID: 18533122}
   folderPath: D:\FloatingVectorsICC\RecordingBase
-  folderPathMacOverride: /Volumes/horristicSSD2T/Dropbox/projects/ICC/Recordings/Rec2_jump
+  folderPathMacOverride: /Users/horihiroyuki/Dropbox/projects/ICC/Recordings/Rec2_jump
   playbackFolderPath: D:\FloatingVectorsICC\RecordingBase\2026-07-08_12-50-09
-  playbackFolderPathMacOverride: 
+  playbackFolderPathMacOverride: /Users/horihiroyuki/Dropbox/projects/ICC/Recordings/rec2_turn
   datasetName: 
   autoTimestampFolder: 1
   recordKey: 290
@@ -1049,7 +1049,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 96892899ec43f7246a88f0b3f63d9e67, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::PointCloud.PointCloudCameraManager
-  playbackOnly: 0
+  playbackOnly: 1
   defaultPointMaterial: {fileID: 0}
   depthWidth: 320
   depthHeight: 288
@@ -2296,8 +2296,6 @@ MonoBehaviour:
   bakeBatchSize: 256
   closeRadiusVoxels: 5
   keepLargestOnly: 1
-  targetHeightMm: 300
-  exportPlyWithColor: 0
   smoothIterations: 10
   triangleBudgetPerSlab: 2000000
   webIncludeCurves: 1
