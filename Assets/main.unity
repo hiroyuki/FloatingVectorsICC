@@ -1809,6 +1809,7 @@ GameObject:
   - component: {fileID: 1180694594}
   - component: {fileID: 1180694595}
   - component: {fileID: 1180694596}
+  - component: {fileID: 1180694597}
   m_Layer: 0
   m_Name: '[SkeletonMerger]'
   m_TagString: Untagged
@@ -1892,6 +1893,25 @@ MonoBehaviour:
   drawGizmos: 0
   gizmoOffset: 0.12
   gizmoColor: {r: 1, g: 0.55, b: 0.1, a: 1}
+--- !u!114 &1180694597
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1180694593}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: fa795fadab78ad04191cd4af3de0d745, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: BodyTracking::BodyTracking.WorkerGapMonitor
+  cameraManager: {fileID: 0}
+  workerHost: {fileID: 0}
+  merger: {fileID: 0}
+  spawnGraceSeconds: 15
+  checkIntervalSeconds: 1
+  showAlert: 1
+  logAlerts: 1
 --- !u!1 &1214840952
 GameObject:
   m_ObjectHideFlags: 0
