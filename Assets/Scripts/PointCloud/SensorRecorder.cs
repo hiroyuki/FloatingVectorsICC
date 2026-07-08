@@ -750,12 +750,7 @@ namespace PointCloud
                 if (track.DepthFrames.Count == 0) continue;
                 // Latest frame whose timestamp <= playhead (clamped to frame 0
                 // when the whole track starts after the playhead).
-                int target = 0;
-                for (int i = 0; i < track.DepthFrames.Count; i++)
-                {
-                    if (TimestampNsAt(track.DepthFrames, i) <= playheadNs) target = i;
-                    else break;
-                }
+                int target = Mathf.Max(0, AdvanceCursorTo(track.DepthFrames, -1, playheadNs));
                 if (target == track.PlaybackCursor) continue;
                 SetCursorAndEmit(track, target);
                 moved = true;
@@ -893,12 +888,7 @@ namespace PointCloud
             // Pick the latest body frame whose ts ≤ depthTs. Falls back to -1 if
             // every body frame is in the future (e.g. user stepped to the very
             // first depth frame and bodies started a few frames later).
-            int target = -1;
-            for (int i = 0; i < bodyCount; i++)
-            {
-                ulong bts = TimestampNsAt(track.BodyFrames, i);
-                if (bts <= depthTs) target = i; else break;
-            }
+            int target = AdvanceCursorTo(track.BodyFrames, -1, depthTs);
             if (target == track.BodyPlaybackCursor) return;
             track.BodyPlaybackCursor = target;
             if (target >= 0) FireBodyEvent(track, target);
@@ -1750,11 +1740,9 @@ namespace PointCloud
                 var track = kv.Value;
                 if (track.DepthFrames.Count == 0) continue;
 
-                int cursor = Mathf.Max(track.PlaybackCursor, 0);
                 int cursorBeforeAdvance = track.PlaybackCursor;
-                while (cursor + 1 < track.DepthFrames.Count
-                       && TimestampNsAt(track.DepthFrames, cursor + 1) <= playheadNs)
-                    cursor++;
+                int cursor = AdvanceCursorTo(track.DepthFrames,
+                                             Mathf.Max(track.PlaybackCursor, 0), playheadNs);
 
                 // Playback drop diagnostic: when one Update consumes multiple
                 // frames the operator never sees the intermediate ones — that's
@@ -2017,10 +2005,8 @@ namespace PointCloud
             int count = track.BodyFrames.Count;
             if (count == 0) return;
 
-            int cursor = Mathf.Max(track.BodyPlaybackCursor, -1);
-            while (cursor + 1 < count
-                   && TimestampNsAt(track.BodyFrames, cursor + 1) <= playheadNs)
-                cursor++;
+            int cursor = AdvanceCursorTo(track.BodyFrames,
+                                         Mathf.Max(track.BodyPlaybackCursor, -1), playheadNs);
 
             if (cursor == track.BodyPlaybackCursor) return;
             // Emit only the latest frame in the crossed run — listeners (BT merge
@@ -2247,6 +2233,20 @@ namespace PointCloud
         {
             if (frames is PointCloudRecording.RcsvFrameStream s) return s.TimestampNsAt(idx);
             return frames[idx].TimestampNs;
+        }
+
+        // Latest index whose timestamp is <= limitNs, scanning forward from `cursor`
+        // (3-1 dedup — this "advance to the newest frame at or before the playhead"
+        // walk existed as four inline copies: the depth advance in Update, the body
+        // advance, the playhead seek, and the body-to-depth sync). Returns `cursor`
+        // unchanged when no later frame qualifies, so callers get their own fallback
+        // semantics by seeding -1 (may stay -1), 0, or the current cursor.
+        private static int AdvanceCursorTo(IReadOnlyList<PointCloudRecording.Frame> frames,
+                                           int cursor, ulong limitNs)
+        {
+            while (cursor + 1 < frames.Count && TimestampNsAt(frames, cursor + 1) <= limitNs)
+                cursor++;
+            return cursor;
         }
 
         private void FillDimensionsFromRenderer(DeviceTrack track)
