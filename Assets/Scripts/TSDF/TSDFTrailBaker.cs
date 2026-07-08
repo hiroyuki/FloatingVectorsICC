@@ -193,20 +193,19 @@ namespace TSDF
         // Integrator hook subscription (used only while capturing with accumulateBody).
         private TSDFIntegrator _subscribedIntegrator;
 
-        // Interval gating (intervalSeconds > 0). Trail-only mode gates the per-frame
-        // StampNewSegments call directly; _lastSite then connects the last STAMPED
-        // pose to the current one, so the polyline just gets coarser. Body-sweep mode
-        // instead closes the integrator gate right after each complete-batch fold
+        // Interval gating (intervalSeconds > 0): see BatchIntervalGate. Trail-only mode
+        // uses its clock as a plain stamp throttle (_lastSite then connects the last
+        // STAMPED pose to the current one, so the polyline just gets coarser). Body-
+        // sweep mode closes the integrator gate right after each complete-batch fold
         // (inside OnBeforePublish — the only race-free batch boundary) and CaptureTick
         // re-opens it once the interval elapses; the trail rides those folds so both
         // stamp on the same clock.
-        private double _lastStampTime = double.NegativeInfinity;
-        private bool _intervalGated;
+        private readonly BatchIntervalGate _gate = new BatchIntervalGate();
 
         private void OnDisable()
         {
             IsCapturing = false;
-            _intervalGated = false;
+            _gate.Reset();
             UnsubscribeFuse();
             GpuBuf.Release(ref _segBuf);
         }
@@ -254,9 +253,7 @@ namespace TSDF
                 // Close the gate at this batch boundary: the fold that just happened
                 // still publishes, then whole frames are dropped until CaptureTick
                 // re-opens the gate after the interval. No partial instants can mix.
-                _lastStampTime = Time.timeAsDouble;
-                integ.integrationEnabled = false;
-                _intervalGated = true;
+                _gate.Close(integ);
             }
         }
 
@@ -295,8 +292,7 @@ namespace TSDF
             _accumDim = volume.Dim;
             SetupAccumSites();         // fresh sweep: size per-site state + clear "seen" flags
 
-            _lastStampTime = double.NegativeInfinity;   // first stamp fires immediately
-            _intervalGated = false;
+            _gate.Reset(immediateNextStamp: true);   // first stamp fires immediately
             IsCapturing = true;
             LastStatus = $"CAPTURING ({(accumulateBody ? "trail + body sweep" : "trail only")})…";
             Debug.Log($"[TSDFTrailBaker] {LastStatus}", this);
@@ -307,7 +303,7 @@ namespace TSDF
         {
             if (!IsCapturing) return;
             IsCapturing = false;
-            _intervalGated = false;
+            _gate.Reset();
             if (integrator != null) integrator.integrationEnabled = false;   // freeze the body sweep
             UnsubscribeFuse();                                               // stop adding trail
             if (volume != null) volume.Publish();                           // show the final accumulated mesh
@@ -333,7 +329,7 @@ namespace TSDF
             if (!ResolveVolume(silent: false)) return;
             if (integrator == null) integrator = FindFirstObjectByType<TSDFIntegrator>();
             IsCapturing = false;
-            _intervalGated = false;
+            _gate.Reset();
             UnsubscribeFuse();
             volume.doubleBuffered = true;
             if (integrator != null)
@@ -363,16 +359,11 @@ namespace TSDF
                 // Body sweep + trail ride the integrator's pre-publish hook; here we
                 // only re-open the interval gate that OnBeforePublish closed (also
                 // when the user sets the interval back to 0 mid-capture).
-                if (_intervalGated
-                    && (intervalSeconds <= 0f || Time.timeAsDouble - _lastStampTime >= intervalSeconds))
-                {
-                    _intervalGated = false;
-                    if (integrator != null) integrator.integrationEnabled = true;
-                }
+                _gate.TryReopen(integrator, intervalSeconds);
                 return;
             }
-            if (intervalSeconds > 0f && Time.timeAsDouble - _lastStampTime < intervalSeconds) return;
-            _lastStampTime = Time.timeAsDouble;
+            if (!_gate.IntervalElapsed(intervalSeconds)) return;
+            _gate.MarkNow();
             StampNewSegments(doPublish: true);
         }
 

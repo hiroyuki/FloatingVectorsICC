@@ -103,15 +103,11 @@ namespace TSDF
         private bool _priorClearOnBatch = true;
         private TSDFVolume.AccumulationMode _priorAccumMode = TSDFVolume.AccumulationMode.StandardWeightedAvg;
 
-        // Interval gating (intervalSeconds > 0). The integrator's fold happens inside
-        // DispatchIntegrate when the last camera of a batch lands, so the only safe
-        // place to close the gate is its BeforePublishCompleteBatch hook: the batch
-        // that just completed still publishes, then integrationEnabled=false drops
-        // whole frames until Update() re-opens the gate after the interval. Because
-        // frames are rejected at DispatchIntegrate entry, no partial instant can mix.
+        // Interval gating (intervalSeconds > 0): see BatchIntervalGate — the gate is
+        // closed in the integrator's BeforePublishCompleteBatch hook (the only race-
+        // free batch boundary) and re-opened from Update() once the interval elapses.
         private bool _subscribedFold;
-        private bool _intervalGated;
-        private double _lastFoldTime;
+        private readonly BatchIntervalGate _gate = new BatchIntervalGate();
 
         private void SubscribeFold()
         {
@@ -125,15 +121,13 @@ namespace TSDF
             if (_subscribedFold && integrator != null)
                 integrator.BeforePublishCompleteBatch -= OnBatchFold;
             _subscribedFold = false;
-            _intervalGated = false;
+            _gate.Reset();
         }
 
         private void OnBatchFold(TSDFIntegrator integ, TSDFVolume vol)
         {
             if (State != CumulativeState.Accumulating || intervalSeconds <= 0f) return;
-            _lastFoldTime = Time.timeAsDouble;
-            integ.integrationEnabled = false;   // this batch still publishes; next frames wait
-            _intervalGated = true;
+            _gate.Close(integ);   // this batch still publishes; next frames wait
         }
 
         private void OnEnable()
@@ -188,7 +182,7 @@ namespace TSDF
 
             _startTime = Time.timeAsDouble;
             Elapsed = 0f;
-            _intervalGated = false;   // gate open — first batch folds immediately
+            _gate.Reset();   // gate open — first batch folds immediately
             SubscribeFold();
             State = CumulativeState.Accumulating;
         }
@@ -240,12 +234,7 @@ namespace TSDF
 
             // Re-open the interval gate once the wait has elapsed (or the user set
             // the interval back to 0 mid-run).
-            if (_intervalGated
-                && (intervalSeconds <= 0f || Time.timeAsDouble - _lastFoldTime >= intervalSeconds))
-            {
-                _intervalGated = false;
-                if (integrator != null) integrator.integrationEnabled = true;
-            }
+            _gate.TryReopen(integrator, intervalSeconds);
 
             Elapsed = (float)(Time.timeAsDouble - _startTime);
             if (Elapsed >= duration)
