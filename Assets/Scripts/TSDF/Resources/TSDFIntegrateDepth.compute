@@ -62,9 +62,16 @@ int _HasDepthDist;
 StructuredBuffer<float2> _RayLut;
 int _HasRayLut;
 
-// Silhouette-edge rejection (per pixel — evaluated ONCE here, not per surface voxel).
+// Silhouette-edge handling (per pixel — evaluated ONCE here, not per surface voxel).
+// _EdgeColorBorrow == 0: legacy behaviour — edge pixels are fully REJECTED (geometry +
+//   colour), which visibly thins limbs (their whole perimeter is "edge").
+// _EdgeColorBorrow != 0: edge pixels keep their GEOMETRY (full limb thickness) but
+//   their COLOUR is borrowed from a nearby interior (non-edge, depth-consistent)
+//   pixel, so the D2C rim bleed (background colour on the silhouette) still can't
+//   enter the volume. _EdgeRejectRadius then only defines what counts as an edge.
 int _EdgeRejectRadius;
 float _EdgeRejectDepthMm;
+int _EdgeColorBorrow;
 
 // --- per-camera colour image (RGB8) + colour-camera projection ---
 ByteAddressBuffer _ColorImg;
@@ -201,7 +208,10 @@ void SplatMin(int3 c, uint u, uint v, float zM)
     _Touched[b.x + _TBDim.x * (b.y + _TBDim.y * b.z)] = 1u;
 }
 
-void SplatWrite(int3 c, uint u, uint v, float zM)
+// useRim: this pixel sits on a silhouette edge, so projecting the voxel into the
+// colour camera would land on the BACKGROUND (D2C rim bleed) — use the pre-computed
+// rimCol (borrowed from a nearby interior pixel) instead of sampling per voxel.
+void SplatWrite(int3 c, uint u, uint v, float zM, float3 rimCol, bool useRim)
 {
     float sdf;
     if (!VoxelSdfGated(c, u, v, zM, sdf)) return;
@@ -209,16 +219,73 @@ void SplatWrite(int3 c, uint u, uint v, float zM)
     // Only the pixel that produced the winning (|sdf|-min) key materialises this voxel.
     if (PackKey(sdf) != _VoxelKey[lin]) return;
 
-    float3 pWorld = mul(_WorldFromVoxel, float4(float3(c) + 0.5, 1.0)).xyz;
-    float3 rgb = (_UseColorOverride != 0) ? _OverrideColor : SampleColor(pWorld);
+    float3 rgb;
+    if (_UseColorOverride != 0)      rgb = _OverrideColor;
+    else if (useRim)                 rgb = rimCol;
+    else
+    {
+        float3 pWorld = mul(_WorldFromVoxel, float4(float3(c) + 0.5, 1.0)).xyz;
+        rgb = SampleColor(pWorld);
+    }
     _Voxels[lin] = float2(sdf, _WObs);
     _Colors[lin] = float4(rgb, _WObs);
     MarkVoxelActive(c, _Dim, sdf, _WObs);
 }
 
-void SplatVoxel(int3 c, uint u, uint v, float zM, bool writePass)
+void SplatVoxel(int3 c, uint u, uint v, float zM, bool writePass, float3 rimCol, bool useRim)
 {
-    if (writePass) SplatWrite(c, u, v, zM); else SplatMin(c, u, v, zM);
+    if (writePass) SplatWrite(c, u, v, zM, rimCol, useRim); else SplatMin(c, u, v, zM);
+}
+
+// True when the (2r+1)^2 neighbourhood of (u,v) contains an invalid pixel or a depth
+// jump beyond _EdgeRejectDepthMm — i.e. (u,v) sits on a silhouette edge where the D2C
+// colour reprojection is unreliable. Out-of-image neighbours are ignored.
+bool IsEdgePixel(int u, int v, uint zRaw, int radius)
+{
+    for (int nv = v - radius; nv <= v + radius; nv++)
+    for (int nu = u - radius; nu <= u + radius; nu++)
+    {
+        if (nu < 0 || nv < 0 || nu >= _DepthW || nv >= _DepthH) continue;
+        uint dn = LoadDepthU16(nu, nv);
+        if (dn == 0u || abs((float)dn - (float)zRaw) > _EdgeRejectDepthMm) return true;
+    }
+    return false;
+}
+
+// Unproject depth pixel (u,v) with depth z (mm) to WORLD metres, via the undistorted
+// ray LUT when available (same path the surface point uses).
+float3 UnprojectPixelWorld(uint u, uint v, float z)
+{
+    float2 ray;
+    if (_HasRayLut != 0) ray = _RayLut[v * (uint)_DepthW + u];
+    else                 ray = float2(((float)u - _CxD) / _FxD, ((float)v - _CyD) / _FyD);
+    return mul(_WorldFromDepthMm, float4(ray.x * z, ray.y * z, z, 1.0)).xyz;
+}
+
+// For an edge pixel: find a nearby INTERIOR pixel (valid, depth-consistent with this
+// pixel, and itself not on an edge at radius 1) and return the camera colour at ITS
+// surface point. That colour is the person's clothing/skin just inside the rim — safe
+// from background bleed. Rings r=2..4 outward; first hit wins. Only edge pixels (a few
+// % of the frame) pay this search, so the cost is negligible.
+bool FindBorrowedColor(int u, int v, uint zRaw, out float3 col)
+{
+    col = float3(0.5, 0.5, 0.5);
+    for (int r = 2; r <= 4; r++)
+    {
+        for (int nv = v - r; nv <= v + r; nv++)
+        for (int nu = u - r; nu <= u + r; nu++)
+        {
+            // ring only (skip the interior already covered by smaller r)
+            if (abs(nu - u) != r && abs(nv - v) != r) continue;
+            if (nu < 0 || nv < 0 || nu >= _DepthW || nv >= _DepthH) continue;
+            uint dn = LoadDepthU16(nu, nv);
+            if (dn == 0u || abs((float)dn - (float)zRaw) > _EdgeRejectDepthMm) continue;
+            if (IsEdgePixel(nu, nv, dn, 1)) continue;   // must be safely interior
+            col = SampleColor(UnprojectPixelWorld((uint)nu, (uint)nv, (float)dn));
+            return true;
+        }
+    }
+    return false;
 }
 
 // March the ±tau band along the view ray through the surface point and splat each
@@ -230,15 +297,21 @@ void ProcessPixel(uint u, uint v, bool writePass)
     uint zRaw = LoadDepthU16((int)u, (int)v);
     if (zRaw == 0u) return;
 
-    // Per-pixel silhouette-edge rejection (D2C rim bleed guard).
-    if (_EdgeRejectRadius > 0)
+    // Per-pixel silhouette-edge handling (D2C rim bleed guard).
+    // Legacy (_EdgeColorBorrow==0): reject edge pixels entirely — thins limbs.
+    // Borrow (_EdgeColorBorrow!=0): keep the geometry, swap only the COLOUR for one
+    // borrowed from a nearby interior pixel (rim voxels get clothing colour, not wall).
+    float3 rimCol = float3(0.5, 0.5, 0.5);
+    bool useRim = false;
+    if (_EdgeRejectRadius > 0 && IsEdgePixel((int)u, (int)v, zRaw, _EdgeRejectRadius))
     {
-        for (int nv = (int)v - _EdgeRejectRadius; nv <= (int)v + _EdgeRejectRadius; nv++)
-        for (int nu = (int)u - _EdgeRejectRadius; nu <= (int)u + _EdgeRejectRadius; nu++)
+        if (_EdgeColorBorrow == 0) return;                       // legacy: drop the pixel
+        useRim = true;                                           // borrow: geometry stays
+        if (!FindBorrowedColor((int)u, (int)v, zRaw, rimCol))
         {
-            if (nu < 0 || nv < 0 || nu >= _DepthW || nv >= _DepthH) continue;
-            uint dn = LoadDepthU16(nu, nv);
-            if (dn == 0u || abs((float)dn - (float)zRaw) > _EdgeRejectDepthMm) return;
+            // No interior neighbour found (isolated sliver) — bleed risk outweighs the
+            // few voxels this pixel contributes; drop it like the legacy path did.
+            return;
         }
     }
 
@@ -280,7 +353,7 @@ void ProcessPixel(uint u, uint v, bool writePass)
     for (int z0 = lo.z; z0 <= hi.z; z0++)
     for (int y0 = lo.y; y0 <= hi.y; y0++)
     for (int x0 = lo.x; x0 <= hi.x; x0++)
-        SplatVoxel(int3(x0, y0, z0), u, v, zM, writePass);
+        SplatVoxel(int3(x0, y0, z0), u, v, zM, writePass, rimCol, useRim);
 }
 
 [numthreads(8, 8, 1)]

@@ -47,6 +47,14 @@ namespace TSDF
                  "steeply slanted real surfaces (~100 mm is a safe start).")]
         [Range(10f, 500f)] public float edgeRejectDepthMm = 100f;
 
+        [Tooltip("Depth-basis only: instead of REJECTING silhouette-edge pixels " +
+                 "(which visibly thins limbs — their whole perimeter is 'edge'), keep " +
+                 "their GEOMETRY and only swap the colour for one borrowed from a " +
+                 "nearby interior pixel. Full limb thickness + no background-colour " +
+                 "rim bleed. edgeRejectRadius then just defines what counts as edge. " +
+                 "Off = legacy reject (and the voxel-basis path always rejects).")]
+        public bool edgeColorBorrow = true;
+
         [Tooltip("Dev colour override: when alpha > 0, bake this flat colour into " +
                  "integrated voxels instead of the camera RGB (debug tooling uses it " +
                  "to tag frames/instants — e.g. red vs blue). Alpha == 0 (default) = " +
@@ -351,6 +359,19 @@ namespace TSDF
             _batchSerials.Clear();
             if (volume != null) volume.ClearWrite();
         }
+
+        /// <summary>
+        /// Drop the in-flight multi-cam batch WITHOUT touching any buffer. For hold-time
+        /// interventions (TSDFHoldBeautify) that reuse the write/instance scratch while a
+        /// batch may be partially collected: clearing the serial set forces every camera
+        /// to re-arrive after resume before a batch can complete, so a batch can never mix
+        /// pre-hold and post-hold frames. Buffers are deliberately left alone — in single-
+        /// buffer (frozen accumulate) mode a ClearWrite here would erase the held mesh, and
+        /// each path re-establishes its own scratch at batch/instant start anyway
+        /// (live-follow: the write buffer was already fully re-cleared by the intervention;
+        /// accumulate: the empty serial set triggers ClearInstance on the next arrival).
+        /// </summary>
+        public void DropInFlightBatch() => _batchSerials.Clear();
 
         /// <summary>
         /// Event-path entry: integrate one cam frame AND drive the live-follow
@@ -662,6 +683,7 @@ namespace TSDF
             _depthShader.SetFloat("_TubeRadius", Mathf.Max(0.01f, tubeRadiusVoxels) * volume.voxelSize);
             _depthShader.SetInt("_EdgeRejectRadius", edgeRejectRadius);
             _depthShader.SetFloat("_EdgeRejectDepthMm", edgeRejectDepthMm);
+            _depthShader.SetInt("_EdgeColorBorrow", edgeColorBorrow ? 1 : 0);
 
             // Pass A: settle the per-voxel |sdf|-min across every camera of the batch.
             foreach (var s in _batchSerials)

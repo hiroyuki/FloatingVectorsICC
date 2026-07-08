@@ -245,6 +245,11 @@ namespace TSDF
         private ComputeShader _copyShader;
         private int _copyKernel;
 
+        // One-shot beautify (3x3x3 sdf median) for a held front buffer — see
+        // Resources/TSDFBeautify.compute and BeautifyFront().
+        private ComputeShader _beautifyShader;
+        private int _medianKernel;
+
         /// <summary>Per-instant sdf+weight scratch (camera-averaged). Bind the integrate
         /// kernel here, not <see cref="WriteBuffer"/>, when separating camera fusion from
         /// time accumulation. Null until <see cref="ClearInstance"/> first allocates it.</summary>
@@ -409,6 +414,74 @@ namespace TSDF
             if (!TSDFComputeUtil.TryLoad(ref _copyShader, "TSDFCopy", "TSDFVolume", this)) return false;
             _copyKernel = _copyShader.FindKernel("Copy");
             return true;
+        }
+
+        /// <summary>
+        /// One-shot repair of the DISPLAYED (front) buffer for a held/paused mesh:
+        /// an even number of 3x3x3 sdf-median passes. Kills the RetainGhost multi-cam
+        /// ribbing / double-shell fray on thin limbs while preserving true surfaces
+        /// (median is edge-preserving); bridged gap voxels gain a fill weight so they
+        /// pass the MC gate. Re-publishes so Marching Cubes re-extracts. NOT a per-
+        /// frame operation — call when playback pauses / the mesh freezes (the next
+        /// live publish overwrites the repaired front, which is the desired behaviour).
+        /// Scratch: the hidden write buffer when double-buffered (then fully re-cleared
+        /// to keep the depth-basis active-block-clear invariant), else the instance pair.
+        /// </summary>
+        public void BeautifyFront(int iterations = 2)
+        {
+            if (FrontBuffer == null || FrontColorBuffer == null || FrontBlockActive == null) return;
+            int total = Dim.x * Dim.y * Dim.z;
+            if (total <= 0) return;
+            if (_beautifyShader == null)
+            {
+                if (!TSDFComputeUtil.TryLoad(ref _beautifyShader, "TSDFBeautify", "TSDFVolume", this)) return;
+                _medianKernel = _beautifyShader.FindKernel("Median");
+            }
+
+            // Scratch pair for the ping-pong. Double-buffered: reuse the hidden write
+            // buffers (clobbered — restored below). Single-buffer (frozen accumulate):
+            // reuse the instance scratch pair.
+            ComputeBuffer scratchSdf, scratchCol;
+            bool scratchIsWrite = doubleBuffered && !ReferenceEquals(WriteBuffer, FrontBuffer)
+                                  && WriteBuffer != null && WriteColorBuffer != null;
+            if (scratchIsWrite) { scratchSdf = WriteBuffer; scratchCol = WriteColorBuffer; }
+            else
+            {
+                EnsureInstanceBuffers();
+                scratchSdf = _instSdf; scratchCol = _instColor;
+                if (scratchSdf == null || scratchCol == null) return;
+            }
+
+            // Round up to an even pass count so the result lands back in the FRONT pair.
+            int passes = Mathf.Max(2, (iterations + 1) & ~1);
+            ComputeBuffer src = FrontBuffer, srcC = FrontColorBuffer;
+            ComputeBuffer dst = scratchSdf, dstC = scratchCol;
+            for (int p = 0; p < passes; p++)
+            {
+                _beautifyShader.SetBuffer(_medianKernel, "_MedSrc", src);
+                _beautifyShader.SetBuffer(_medianKernel, "_MedSrcCol", srcC);
+                _beautifyShader.SetBuffer(_medianKernel, "_MedDst", dst);
+                _beautifyShader.SetBuffer(_medianKernel, "_MedDstCol", dstC);
+                _beautifyShader.SetInts("_MedDim", Dim.x, Dim.y, Dim.z);
+                _beautifyShader.SetFloat("_MedTau", Tau);
+                _beautifyShader.SetInt("_MedMinObs", 14);
+                // Gate + write-marking both use the FRONT active set (bits only added).
+                BindBlockMarking(_beautifyShader, _medianKernel, FrontBlockActive);
+                TSDFComputeUtil.DispatchLinear(_beautifyShader, _medianKernel, total);
+                var t = src; src = dst; dst = t;
+                var tc = srcC; srcC = dstC; dstC = tc;
+            }
+
+            // The write-buffer scratch was clobbered WITHOUT marking the depth-basis
+            // touched set, so a surface-proportional clear would miss the residue and
+            // ghost — restore the invariant with a full write clear (one-shot, cheap here).
+            if (scratchIsWrite)
+            {
+                if (WriteKeyBuffer != null) ClearWriteFull();
+                else ClearWrite();
+            }
+
+            MarkFrontDirty();   // re-extract Marching Cubes on the repaired front
         }
 
         private void EnsureInstanceBuffers()

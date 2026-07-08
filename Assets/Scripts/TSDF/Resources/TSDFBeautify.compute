@@ -1,0 +1,113 @@
+// One-shot "beautify" filter for a HELD (paused/frozen) TSDF front buffer.
+//
+// Problem it solves: RetainGhost multi-camera fusion picks a single winning camera
+// per voxel, so adjacent voxel columns can flip between cameras whose surface
+// estimates differ by a few mm — thin limbs fray into vertical strands / venetian-
+// blind ribbing (see memory tsdf-thin-limb-collapse-retainghost). Averaging instead
+// is not an option for a MOVING subject (unsynced cameras smear motion into sheets),
+// so we keep RetainGhost live and repair the field once, when the mesh is held.
+//
+// Repair = 3x3x3 MEDIAN of the sdf. The median is edge-preserving (true surfaces
+// stay put) but kills single-column outliers (ribbing) and flips thin gap voxels
+// between double shells negative when the majority of their neighbourhood is inside
+// (a light morphological close). Colour follows the median-supplying neighbour.
+// Unobserved (weight<=0) or out-of-bounds neighbours count as +tau "open space", so
+// isolated specks also melt away. Voxels with enough observed neighbours gain a fill
+// weight so newly bridged gaps pass Marching Cubes' 8-corner weight gate.
+//
+// One thread per voxel, but blocks not in the front active set are plain-copied
+// (person-proportional work). Ping-pong: reads _MedSrc*, writes _MedDst* — the C#
+// side (TSDFVolume.BeautifyFront) runs an even number of passes so the result lands
+// back in the front buffer. Runs ONCE on pause/freeze, not per frame.
+
+#pragma kernel Median
+
+StructuredBuffer<float2>   _MedSrc;      // x = sdf (m), y = weight
+StructuredBuffer<float4>   _MedSrcCol;   // rgb + colour weight
+RWStructuredBuffer<float2> _MedDst;
+RWStructuredBuffer<float4> _MedDstCol;
+// (the FRONT active-block set doubles as the gate — bound as _BlockActive below)
+
+int3  _MedDim;               // voxel dims
+float _MedTau;               // truncation (m) — open-space stand-in for unobserved
+int   _MedMinObs;            // min observed neighbours (of 27) to grant a fill weight
+int   _DispatchWidth;     // = groupsX * 64 (2D dispatch linearisation)
+
+// Write-time active-block marking: bridged gap voxels may extend surface into cells
+// whose blocks weren't active yet, so mark on write (bits are only ever ADDED to the
+// front set — no clear needed). Declares _BlockActive/_BDim/_MarkBand.
+#include "TSDFBlockActive.hlsl"
+
+int MedLin(int3 c) { return c.x + _MedDim.x * (c.y + _MedDim.y * c.z); }
+
+[numthreads(64, 1, 1)]
+void Median(uint3 id : SV_DispatchThreadID)
+{
+    uint lin = id.y * (uint)_DispatchWidth + id.x;
+    uint total = (uint)(_MedDim.x * _MedDim.y * _MedDim.z);
+    if (lin >= total) return;
+
+    uint dx = (uint)_MedDim.x, dy = (uint)_MedDim.y;
+    int3 c = int3((int)(lin % dx), (int)((lin / dx) % dy), (int)(lin / (dx * dy)));
+
+    // Person-proportional gate: skip (plain copy) voxels whose MC cell block was
+    // never active — nothing to repair there. _BDim/_BlockActive come from the
+    // marking header and are bound to the FRONT set/cell grid by BindBlockMarking.
+    int bx = min(c.x >> 3, _BDim.x - 1);
+    int by = min(c.y >> 3, _BDim.y - 1);
+    int bz = min(c.z >> 3, _BDim.z - 1);
+    if (_BlockActive[bx + _BDim.x * (by + _BDim.y * bz)] == 0u)
+    {
+        _MedDst[lin] = _MedSrc[lin];
+        _MedDstCol[lin] = _MedSrcCol[lin];
+        return;
+    }
+
+    float2 own = _MedSrc[lin];
+
+    // Gather the 3x3x3 neighbourhood. Unobserved / out-of-bounds neighbours stand in
+    // as +tau open space with no colour source (idx = -1).
+    float vals[27];
+    int   idxs[27];
+    int   n = 0;
+    int   observed = 0;
+    [unroll] for (int oz = -1; oz <= 1; oz++)
+    [unroll] for (int oy = -1; oy <= 1; oy++)
+    [unroll] for (int ox = -1; ox <= 1; ox++)
+    {
+        int3 q = c + int3(ox, oy, oz);
+        float v = _MedTau;
+        int   qi = -1;
+        if (q.x >= 0 && q.y >= 0 && q.z >= 0 && q.x < _MedDim.x && q.y < _MedDim.y && q.z < _MedDim.z)
+        {
+            int ql = MedLin(q);
+            float2 s = _MedSrc[ql];
+            if (s.y > 0.0) { v = s.x; qi = ql; observed++; }
+        }
+        vals[n] = v; idxs[n] = qi; n++;
+    }
+
+    // Partial selection to the median (14th smallest of 27, index 13).
+    [loop] for (int k = 0; k <= 13; k++)
+    {
+        int m = k;
+        [loop] for (int j = k + 1; j < 27; j++)
+            if (vals[j] < vals[m]) m = j;
+        float tv = vals[k]; vals[k] = vals[m]; vals[m] = tv;
+        int ti = idxs[k]; idxs[k] = idxs[m]; idxs[m] = ti;
+    }
+    float med = vals[13];
+    int   medIdx = idxs[13];
+
+    // Weight: keep an observed voxel's own weight; grant a fill weight to voxels with
+    // a solidly observed neighbourhood so bridged gaps pass the MC 8-corner gate.
+    float w = own.y > 0.0 ? own.y : (observed >= _MedMinObs ? 1.0 : 0.0);
+
+    // Colour follows the median-supplying neighbour; fall back to own colour when the
+    // median came from an open-space stand-in.
+    float4 col = (medIdx >= 0) ? _MedSrcCol[medIdx] : _MedSrcCol[lin];
+
+    _MedDst[lin] = float2(med, w);
+    _MedDstCol[lin] = float4(col.rgb, max(col.a, w));
+    MarkVoxelActive(c, _MedDim, med, w);
+}
