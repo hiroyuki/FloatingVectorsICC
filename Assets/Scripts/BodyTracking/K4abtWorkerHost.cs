@@ -454,6 +454,10 @@ namespace BodyTracking
                 p.OutputDataReceived += (sender, args) =>
                 {
                     if (string.IsNullOrEmpty(args.Data)) return;
+                    // The worker prints a per-second "[Diag] ..." telemetry line to stdout.
+                    // Relay it only when host diagnostics are on, so the console isn't
+                    // flooded 1x/s/worker. Startup / status lines still come through.
+                    if (!diagnosticLogging && args.Data.Contains("[Diag]")) return;
                     Debug.Log($"[k4abt_worker {serial}] {args.Data}");
                 };
                 p.ErrorDataReceived += (sender, args) =>

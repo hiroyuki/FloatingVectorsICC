@@ -63,8 +63,11 @@ namespace PointCloud
         public PointCloudCumulative cumulative;
 
         [Header("Files")]
-        [Tooltip("Root folder for recordings. Relative paths resolve under Application.persistentDataPath. " +
-                 "Leave empty to use '<persistentDataPath>/Recordings/recording'.")]
+        [Tooltip("RECORDING root — where Rec writes new takes. Each Rec creates a " +
+                 "timestamped subfolder under here (see autoTimestampFolder). Relative " +
+                 "paths resolve under Application.persistentDataPath. Leave empty to use " +
+                 "'<persistentDataPath>/Recordings/recording'. Playback reads from " +
+                 "playbackFolderPath instead, so recording and playback never collide.")]
         public string folderPath = "";
 
         [Tooltip("Optional override used only when running on macOS — Windows absolute paths like " +
@@ -72,8 +75,30 @@ namespace PointCloud
                  "can point at the local Dropbox mount without touching the canonical folderPath.")]
         public string folderPathMacOverride = "";
 
+        [Tooltip("PLAYBACK root — the specific recording Read/Play loads. Point this at a " +
+                 "single take folder (e.g. <recordingRoot>/2026-07-08_12-50-09). Kept " +
+                 "separate from folderPath so playing an old take never overwrites where " +
+                 "new recordings are written. Leave empty to fall back to folderPath.")]
+        public string playbackFolderPath = "";
+
+        [Tooltip("macOS-only override for playbackFolderPath (same rationale as folderPathMacOverride).")]
+        public string playbackFolderPathMacOverride = "";
+
         [Tooltip("Dataset name written into dataset.yaml. Defaults to the recording folder name.")]
         public string datasetName = "";
+
+        [Tooltip("When on, each Rec creates a fresh timestamped subfolder " +
+                 "<folderPath>/<yyyy-MM-dd_HH-mm-ss> so successive takes never overwrite " +
+                 "each other. The created path is reported in the status line; to play a take " +
+                 "back, point folderPath at that subfolder before pressing Read.")]
+        public bool autoTimestampFolder = true;
+
+        [Header("Hotkeys")]
+        [Tooltip("Key to toggle Rec (start/stop) during live operation. Records depth/color/IR " +
+                 "AND bodies_main (captured automatically by SkeletonMerger while recording) at " +
+                 "once. Ignored during playback so it can't clobber a playback session. " +
+                 "Set to None to disable the hotkey.")]
+        public KeyCode recordKey = KeyCode.F9;
 
         [Header("Playback")]
         public bool loop = true;
@@ -924,7 +949,7 @@ namespace PointCloud
             }
             try
             {
-                string root = ResolveRoot();
+                string root = ResolvePlaybackRoot();
                 string host = SafeMachineName();
                 // Save = refresh sidecars for an already-loaded recording; keep its
                 // own calibration rather than clobbering it with the live rig.
@@ -1073,7 +1098,7 @@ namespace PointCloud
             }
             try
             {
-                string root = ResolveRoot();
+                string root = ResolvePlaybackRoot();
                 if (!Directory.Exists(PointCloudRecording.DatasetRoot(root)))
                 {
                     SetStatus($"Read: no dataset under {root}", warn: true);
@@ -1198,7 +1223,7 @@ namespace PointCloud
         /// </summary>
         private void RefreshExtrinsicsAndReapply()
         {
-            string root = ResolveRoot();
+            string root = ResolvePlaybackRoot();
             int applied = LoadExtrinsicsFromYaml(root);
             if (applied == 0) return;
             foreach (var kv in _tracks)
@@ -1325,6 +1350,21 @@ namespace PointCloud
             try
             {
                 _recordRoot = ResolveRoot();
+                // Each take gets its own timestamped folder so successive recordings
+                // never overwrite one another. DateTime format is filesystem-safe
+                // (no ':'); local time is what the operator reads on the clock.
+                // The timestamp is second-precision, so a stop+start within the same
+                // second would land on the SAME folder — and RcsvStreamWriter opens
+                // with FileMode.Create, silently overwriting the previous take.
+                // Append a numeric suffix until the candidate is unused.
+                if (autoTimestampFolder)
+                {
+                    string stamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
+                    string candidate = Path.Combine(_recordRoot, stamp);
+                    for (int i = 2; Directory.Exists(candidate); i++)
+                        candidate = Path.Combine(_recordRoot, stamp + "_" + i);
+                    _recordRoot = candidate;
+                }
                 _recordHost = SafeMachineName();
                 Directory.CreateDirectory(_recordRoot);
             }
@@ -1643,6 +1683,13 @@ namespace PointCloud
 
         private void Update()
         {
+            // Rec toggle hotkey — works from Idle (start) or Recording (stop). Suppressed
+            // during playback so it can't clobber a playback session. bodies_main is captured
+            // automatically by SkeletonMerger for the duration of State.Recording.
+            if (recordKey != KeyCode.None && CurrentState != State.Playing
+                && Input.GetKeyDown(recordKey))
+                ToggleRecord();
+
             // Recording has no per-tick work, but we still want the per-second
             // diag heartbeat to log capture-side fps / drops while it's happening.
             if (CurrentState == State.Recording)
@@ -2291,6 +2338,17 @@ namespace PointCloud
 
         private string ResolveRoot() =>
             PointCloudRecording.ResolveRecordingRoot(folderPath, folderPathMacOverride);
+
+        // Playback (Read / Play / Save-after-read) resolves from the dedicated
+        // playbackFolderPath so replaying an old take never touches the recording
+        // destination. Falls back to the recording root when playbackFolderPath is
+        // blank, preserving the pre-split single-folder behaviour.
+        private string ResolvePlaybackRoot()
+        {
+            if (string.IsNullOrWhiteSpace(playbackFolderPath)) return ResolveRoot();
+            return PointCloudRecording.ResolveRecordingRoot(
+                playbackFolderPath, playbackFolderPathMacOverride);
+        }
 
         private static string SafeMachineName()
         {

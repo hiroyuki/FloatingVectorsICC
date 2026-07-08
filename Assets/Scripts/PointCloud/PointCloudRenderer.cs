@@ -185,7 +185,7 @@ namespace PointCloud
         [Tooltip("When on, logs captured / consumed / dropped fps once per second to the Unity console. " +
                  "captured = SDK frames published by the capture thread, consumed = frames uploaded to the " +
                  "Mesh on the main thread, dropped = publish-but-unread frames (capture outpacing Update).")]
-        public bool logFps = true;
+        public bool logFps = false;
 
         /// <summary>
         /// Fires each frame after the point cloud mesh has been updated. Subscribers receive the
