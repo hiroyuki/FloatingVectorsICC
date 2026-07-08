@@ -63,12 +63,21 @@
 - ✅ **3-6 ワイヤ可視化 twin 統合**（`cdf7d7d` — `PointCloud/WireVisualizationBehaviour.cs` 基底。
   serialized フィールドはサブクラス残置でシーン移行リスクゼロ。runtime 生成/破棄を実機確認済み）
 
+第4トランシェ（2026-07-09、同ブランチ）— 3-1 の Mac 検証可能サブ項目:
+- ✅ ResolveShared<T>（5つの copy-paste Resolve* → 1つ、非キャプチャラムダでアロケーションなし）
+- ✅ EmitFrameAt（自然再生 ⇔ ステップ再生の emit 連鎖を construction で統一）
+- ✅ AdvanceCursorTo（playhead スキャン 4 変種を統一、fallback は seed cursor で表現）
+いずれも rec2_turn playback で実動確認（自然再生 / step / seek / body 同期）。
+
 残り（着手しやすい順）:
-- 3-3 **Calibration 450行丸コピー解消**（CalibrationWindow ⇔ CalibrationRuntimeUI → CalibrationSession）
-  ※注意: Mac 上では ChArUco ボード入り録画が無く Capture/Solve の機能 A/B ができない。
-  やるなら「機械的抽出 + トークン等価レビュー」のみで進めるか、Windows 実機で A/B するか要判断。
-- 3-1 SensorRecorder 内部 dedup、3-4 publish 状態のフィーダー移動
-- 3-10 GPU raw アップロードヘルパー、3-5 **Primary-body 抽象（⚠️ 唯一の意図的挙動変更・オーナー承認必須）**
+- 3-1 残サブ項目: **WriteSensorFrame**（HandleRawFrame の depth/color/IR 3連 + RecordBodies —
+  hot callback path、cb[alloc=…] 診断で非増加検証必須）、**RCSV preamble 3重解消 + ReadRcsv 廃止**
+  （GapAnalyzer → RcsvFrameStream.TimestampNsAt 移行）、**extrinsics 精度ロジック**（保存側の
+  実データ YAML 等値チェックが必要 → ⚠️ Windows 録画環境でやること）
+- 3-3 **Calibration 450行丸コピー解消** ※Mac では Capture/Solve の機能 A/B 不可 → Windows で。
+- 3-4 publish 状態のフィーダー移動（Mac 可: bodies playback + curves で検証）
+- 3-10 GPU raw アップロードヘルパー（Mac 可: playback の depth/color アップロードが通る）
+- 3-5 **Primary-body 抽象（⚠️ 唯一の意図的挙動変更・オーナー承認必須）**
 
 ※関連バグ修正（このブランチ外・main 直行済み）: `8a663d3` — playback path 分離（92c6b6b）が
 Mac 再生をサイレントに壊していた件。ResolvePlaybackRoot に macOS フォールバック追加 + シーン設定。
