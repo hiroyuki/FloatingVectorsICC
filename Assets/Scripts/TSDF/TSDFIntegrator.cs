@@ -361,6 +361,19 @@ namespace TSDF
         }
 
         /// <summary>
+        /// Drop the in-flight multi-cam batch WITHOUT touching any buffer. For hold-time
+        /// interventions (TSDFHoldBeautify) that reuse the write/instance scratch while a
+        /// batch may be partially collected: clearing the serial set forces every camera
+        /// to re-arrive after resume before a batch can complete, so a batch can never mix
+        /// pre-hold and post-hold frames. Buffers are deliberately left alone — in single-
+        /// buffer (frozen accumulate) mode a ClearWrite here would erase the held mesh, and
+        /// each path re-establishes its own scratch at batch/instant start anyway
+        /// (live-follow: the write buffer was already fully re-cleared by the intervention;
+        /// accumulate: the empty serial set triggers ClearInstance on the next arrival).
+        /// </summary>
+        public void DropInFlightBatch() => _batchSerials.Clear();
+
+        /// <summary>
         /// Event-path entry: integrate one cam frame AND drive the live-follow
         /// batch state machine (clear the back buffer at batch start, publish it
         /// to the front once <see cref="expectedCamCount"/> unique cams have

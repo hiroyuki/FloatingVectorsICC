@@ -56,6 +56,14 @@ namespace TSDF
             if (volume == null) return;
             float t0 = Time.realtimeSinceStartup;
             volume.BeautifyFront(medianPasses);
+            // The repair reused the integrator's write/instance scratch, and the hold may
+            // have landed MID-BATCH (some cameras arrived, some not). Drop the in-flight
+            // serial set so a post-resume batch can only complete from frames that all
+            // arrive AFTER the hold — otherwise it could publish a mixed pre/post-hold
+            // instant (or, in accumulate mode, fold a clobbered instance into the trail).
+            if (_integrator == null)
+                _integrator = FindAnyObjectByType<TSDFIntegrator>(FindObjectsInactive.Include);
+            if (_integrator != null) _integrator.DropInFlightBatch();
             Debug.Log($"[TSDFHoldBeautify] BeautifyFront({medianPasses}) dispatched in " +
                       $"{(Time.realtimeSinceStartup - t0) * 1000f:F1} ms (CPU issue time)", this);
         }
