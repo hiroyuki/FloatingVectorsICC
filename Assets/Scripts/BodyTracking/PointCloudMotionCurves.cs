@@ -500,11 +500,16 @@ namespace BodyTracking
                 _argsBuf.SetData(new uint[] { (uint)(segments * 6), 1, 0, 0 });
 
                 // Standard per-bone radii (absolute m) + endpoint taper; static, scaled at runtime.
+                // Bones past the table are BonePoseHistory's virtual hand bones (rigid forearm
+                // extensions past the wrist): palm -> fingertip taper.
                 var bones = BodyTrackingShared.Bones;
                 var rA = new float[boneCount];
                 var rB = new float[boneCount];
                 for (int b = 0; b < boneCount; b++)
-                    DefaultRadius(bones[b].a, bones[b].b, out rA[b], out rB[b]);
+                {
+                    if (b < bones.Length) DefaultRadius(bones[b].a, bones[b].b, out rA[b], out rB[b]);
+                    else { rA[b] = 0.05f; rB[b] = 0.035f; }
+                }
                 _radiusABuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, boneCount, sizeof(float));
                 _radiusBBuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, boneCount, sizeof(float));
                 _radiusABuf.SetData(rA);

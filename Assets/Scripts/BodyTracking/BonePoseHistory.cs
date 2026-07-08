@@ -40,6 +40,13 @@ namespace BodyTracking
                  "frame is older than this many frames. Guards against dragging held/predicted joints.")]
         public int freshWindowFrames = 12;
 
+        [Range(0f, 0.4f)]
+        [Tooltip("Length (m) of the virtual hand bone appended past each wrist. k4abt's hand " +
+                 "joints are unreliable and dropped project-wide, so the bone table ends at the " +
+                 "wrist and motion curves stopped mid-arm; this extends each forearm rigidly by " +
+                 "this much so hand points inherit the forearm's motion. 0 disables it.")]
+        public float handExtension = 0.18f;
+
         [Header("Debug gizmos (Phase 1 validation)")]
         [Tooltip("Draw each bone's reprojected curve in the Scene view to verify arcs form.")]
         public bool drawGizmos = true;
@@ -82,6 +89,21 @@ namespace BodyTracking
         private SkeletonMerger.BoneEndpoints[] _scratch;
         private int _boneCount;
         private int _ringLen;
+
+        // Virtual hand bones appended after the real Bones table. k4abt's HAND/HANDTIP/THUMB
+        // joints are dropped project-wide (BodyTrackingShared.IsDrawnJoint), so the bone list
+        // ends at the wrist and point-cloud seeds on the hand had no bone within surfaceMargin —
+        // motion curves stopped at the wrist. Each virtual bone rigidly extends its forearm
+        // past the wrist by handExtension, reusing the forearm's stable frame (U/V/W), so hand
+        // points sweep with the forearm's motion. Indices [_realBoneCount ..] in every per-bone
+        // array / the GPU buffers; only this class knows they are synthetic.
+        private static readonly k4abt_joint_id_t[] VirtualTipWrists =
+        {
+            k4abt_joint_id_t.K4ABT_JOINT_WRIST_LEFT,
+            k4abt_joint_id_t.K4ABT_JOINT_WRIST_RIGHT,
+        };
+        private int[] _virtualSrcBone; // per virtual bone: index of the forearm bone it extends
+        private int _realBoneCount;
 
         // GPU mirror of the ring, consumed by the motion-curves compute. Sample is 5 * Vector3 = 60
         // bytes, tightly packed, matching an HLSL struct of 5 float3. Per bone b, samples are written
@@ -145,7 +167,8 @@ namespace BodyTracking
         private void EnsureBuffers()
         {
             var bones = BodyTrackingShared.Bones;
-            int n = bones.Length;
+            int real = bones.Length;
+            int n = real + VirtualTipWrists.Length; // + virtual hand bones (forearm extensions)
             // The ring is ALWAYS MAXK frames. historySamples doesn't size it — it selects, at draw time,
             // how many of the newest captured frames the curve uses (see CurveSamples). So tuning the
             // length (even while paused) shortens OR lengthens the curves instantly out of the already-
@@ -157,13 +180,14 @@ namespace BodyTracking
             // silently killing every downstream consumer.
             if (_ring != null && _boneCount == n && _ringLen == k && _histBuf != null) return;
 
+            _realBoneCount = real;
             _boneCount = n;
             _ringLen = k;
             _ring = new Sample[n][];
             _head = new int[n];
             _count = new int[n];
             _prevV = new Vector3[n];
-            _scratch = new SkeletonMerger.BoneEndpoints[n];
+            _scratch = new SkeletonMerger.BoneEndpoints[real]; // merger only fills the real bones
             for (int b = 0; b < n; b++)
             {
                 _ring[b] = new Sample[k];
@@ -175,14 +199,24 @@ namespace BodyTracking
             // Parent-bone table: for bone (a,b), find the bone whose child joint (.b) == a.
             // Its direction is the stable-frame reference axis; degenerate/absent -> torso-up.
             _parentBone = new int[n];
-            for (int b = 0; b < n; b++)
+            for (int b = 0; b < real; b++)
             {
                 _parentBone[b] = -1;
                 var aJoint = bones[b].a;
-                for (int p = 0; p < n; p++)
+                for (int p = 0; p < real; p++)
                 {
                     if (p != b && bones[p].b == aJoint) { _parentBone[b] = p; break; }
                 }
+            }
+
+            // Virtual bone -> its source forearm (the bone whose child joint is that wrist).
+            _virtualSrcBone = new int[VirtualTipWrists.Length];
+            for (int i = 0; i < VirtualTipWrists.Length; i++)
+            {
+                _virtualSrcBone[i] = -1;
+                for (int b = 0; b < real; b++)
+                    if (bones[b].b == VirtualTipWrists[i]) { _virtualSrcBone[i] = b; break; }
+                _parentBone[real + i] = _virtualSrcBone[i];
             }
 
             // GPU mirror sized to the current layout; reallocated only when boneCount changes.
@@ -246,7 +280,7 @@ namespace BodyTracking
             if (torsoFwd.sqrMagnitude < Eps * Eps) torsoFwd = Vector3.forward;
             torsoFwd.Normalize();
 
-            for (int b = 0; b < _boneCount; b++)
+            for (int b = 0; b < _realBoneCount; b++)
             {
                 var e = _scratch[b];
                 if (!e.Valid || !e.Fresh) { ResetBone(b); continue; }
@@ -273,6 +307,18 @@ namespace BodyTracking
 
                 Push(b, new Sample { A = e.A, B = e.B, U = u, V = v, W = w });
                 _prevV[b] = v;
+            }
+
+            // Virtual hand bones: rigid forearm extensions sharing the forearm's frame.
+            // A forearm that failed above was reset (count 0), so count > 0 here means
+            // its newest ring sample is from THIS frame — extend that one.
+            for (int i = 0; i < _virtualSrcBone.Length; i++)
+            {
+                int vb = _realBoneCount + i;
+                int f = _virtualSrcBone[i];
+                if (f < 0 || _count[f] == 0 || handExtension <= Eps) { ResetBone(vb); continue; }
+                Sample s = _ring[f][_head[f]];
+                Push(vb, new Sample { A = s.B, B = s.B + s.U * handExtension, U = s.U, V = s.V, W = s.W });
             }
         }
 
@@ -384,10 +430,16 @@ namespace BodyTracking
                 ResetAll();
                 return;
             }
-            for (int b = 0; b < _boneCount; b++)
+            for (int b = 0; b < _realBoneCount; b++)
             {
                 var e = _scratch[b];
                 if (!e.Valid || !e.Fresh) ResetBone(b);
+            }
+            // A virtual hand bone clears exactly when its source forearm does.
+            for (int i = 0; i < _virtualSrcBone.Length; i++)
+            {
+                int f = _virtualSrcBone[i];
+                if (f < 0 || _count[f] == 0) ResetBone(_realBoneCount + i);
             }
         }
 
