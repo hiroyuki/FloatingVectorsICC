@@ -53,9 +53,13 @@
 - ✅ **3-8 SmoothUnion Copy カーネル削除**（`d1e259e` — `TSDFVolume.CopyBuffers` 共有化）
 - ✅ **3-9 interval-gate 抽出**（`5da842d` — `TSDF/BatchIntervalGate.cs`）
 
+第2トランシェ完了（2026-07-09、同ブランチ）:
+- ✅ **3-7 capsule-bake 統一**（`8db0784` — `TSDF/TrailBakeOps.cs`: TrailSeg/SegStride/BindBakeTargets/BakeSegments）
+- ✅ **3-2 TSDFPrintExporter 分割**（PrintExport/ に MeshOps・StlWriter・PlyWriter・CurveTubeBuilder、1221→864行）
+  - 未了のオプション: bounds/縮退/winding の 4-5 近似重複（GlbWriter/UsdzWriter/MeshDecimator 側）の MeshOps 吸収は
+    byte 同一でないため見送り。やるなら per-case 検証つきで別途。
+
 残り（着手しやすい順）:
-- 3-7 capsule-bake dispatch 統一（TrailBaker.BakeCore ⇔ PrintExporter.BakeSegs + TrailSeg struct 二重定義）
-- 3-2 TSDFPrintExporter 分割（MeshOps/StlWriter/PlyWriter/CurveTubeBuilder 抽出）
 - 3-3 **Calibration 450行丸コピー解消**（CalibrationWindow ⇔ CalibrationRuntimeUI → CalibrationSession）
 - 3-1 SensorRecorder 内部 dedup、3-4 publish 状態のフィーダー移動、3-6 ワイヤ可視化 twin 統合
 - 3-10 GPU raw アップロードヘルパー、3-5 **Primary-body 抽象（⚠️ 唯一の意図的挙動変更・オーナー承認必須）**
