@@ -383,16 +383,7 @@ namespace TSDF
         {
             if (FrontBuffer == null || WriteBuffer == null) return;
             if (ReferenceEquals(FrontBuffer, WriteBuffer)) return;   // single buffer: nothing to do
-            if (!EnsureCopyShader()) return;
-            int total = Dim.x * Dim.y * Dim.z;
-            if (total <= 0) return;
-
-            _copyShader.SetInts("_Dim", Dim.x, Dim.y, Dim.z);
-            _copyShader.SetBuffer(_copyKernel, "_SrcSdf", FrontBuffer);
-            _copyShader.SetBuffer(_copyKernel, "_SrcColor", FrontColorBuffer);
-            _copyShader.SetBuffer(_copyKernel, "_DstSdf", WriteBuffer);
-            _copyShader.SetBuffer(_copyKernel, "_DstColor", WriteColorBuffer);
-            TSDFComputeUtil.DispatchLinear(_copyShader, _copyKernel, total);
+            if (!CopyBuffers(FrontBuffer, FrontColorBuffer, WriteBuffer, WriteColorBuffer)) return;
 
             // Copy the occupancy set too, so a subsequent trail-bake into the write
             // buffer min-unions onto the DISPLAYED body's active blocks (not the stale
@@ -413,6 +404,30 @@ namespace TSDF
             if (_copyShader != null) return true;
             if (!TSDFComputeUtil.TryLoad(ref _copyShader, "TSDFCopy", "TSDFVolume", this)) return false;
             _copyKernel = _copyShader.FindKernel("Copy");
+            return true;
+        }
+
+        /// <summary>
+        /// GPU copy of one sdf+colour buffer pair into another over the current grid
+        /// (one thread per voxel, TSDFCopy kernel). Shared by
+        /// <see cref="CopyFrontToWrite"/> and external snapshot users (e.g.
+        /// TSDFDebugSession's instant capture), so the copy dispatch exists once.
+        /// Returns false when the shader is missing or the grid is empty.
+        /// </summary>
+        public bool CopyBuffers(ComputeBuffer srcSdf, ComputeBuffer srcColor,
+                                ComputeBuffer dstSdf, ComputeBuffer dstColor)
+        {
+            if (srcSdf == null || srcColor == null || dstSdf == null || dstColor == null) return false;
+            if (!EnsureCopyShader()) return false;
+            int total = Dim.x * Dim.y * Dim.z;
+            if (total <= 0) return false;
+
+            _copyShader.SetInts("_Dim", Dim.x, Dim.y, Dim.z);
+            _copyShader.SetBuffer(_copyKernel, "_SrcSdf", srcSdf);
+            _copyShader.SetBuffer(_copyKernel, "_SrcColor", srcColor);
+            _copyShader.SetBuffer(_copyKernel, "_DstSdf", dstSdf);
+            _copyShader.SetBuffer(_copyKernel, "_DstColor", dstColor);
+            TSDFComputeUtil.DispatchLinear(_copyShader, _copyKernel, total);
             return true;
         }
 

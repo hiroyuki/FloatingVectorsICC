@@ -159,7 +159,7 @@ namespace TSDF.DebugTools
         // the smin compose can be re-run for a new k without re-integrating. The
         // result lands in the volume's write buffer (so MC extracts it normally).
         private ComputeShader _suShader;
-        private int _suCopyKernel = -1, _suUnionKernel = -1;
+        private int _suUnionKernel = -1;
         private ComputeBuffer _suVoxA, _suColA, _suVoxB, _suColB;
         private int _suBufCount = -1;
         private bool _haveInstants;
@@ -497,13 +497,13 @@ namespace TSDF.DebugTools
                 volume.ClearWrite();
                 if (colorByInstant) integrator.colorOverride = instant1Color;
                 done += IntegrateAllCached(serials, $"instant1 @ {startPlayheadSec:0.000}s (SDF A)");
-                SnapshotWriteBuffer(_suVoxA, _suColA, voxelTotal);
+                SnapshotWriteBuffer(_suVoxA, _suColA);
 
                 recorder.SeekToPlayheadSeconds(secondSec);
                 volume.ClearWrite();
                 if (colorByInstant) integrator.colorOverride = instant2Color;
                 done += IntegrateAllCached(serials, $"instant2 @ {secondSec:0.000}s (+{skipFrames}f, SDF B)");
-                SnapshotWriteBuffer(_suVoxB, _suColB, voxelTotal);
+                SnapshotWriteBuffer(_suVoxB, _suColB);
 
                 if (colorByInstant) integrator.colorOverride = new Color(0f, 0f, 0f, 0f);
 
@@ -690,7 +690,6 @@ namespace TSDF.DebugTools
         {
             if (_suShader != null) return true;
             if (!TSDFComputeUtil.TryLoad(ref _suShader, "TSDFSmoothUnion", "TSDFDebugSession", this)) return false;
-            _suCopyKernel = _suShader.FindKernel("Copy");
             _suUnionKernel = _suShader.FindKernel("SmoothUnion");
             return true;
         }
@@ -718,16 +717,12 @@ namespace TSDF.DebugTools
 
         // Copy the freshly-integrated instant out of the volume's write buffer into
         // a scratch (sdf, colour) pair so the next instant can reuse the write buffer.
-        private void SnapshotWriteBuffer(ComputeBuffer dstVox, ComputeBuffer dstCol, int total)
+        // Uses the volume's shared TSDFCopy dispatch (3-8: the byte-identical private
+        // Copy kernel that used to live in TSDFSmoothUnion.compute was removed).
+        private void SnapshotWriteBuffer(ComputeBuffer dstVox, ComputeBuffer dstCol)
         {
-            if (_suShader == null || _suCopyKernel < 0) return;
             if (volume == null || volume.WriteBuffer == null) return;
-            _suShader.SetInts("_Dim", volume.Dim.x, volume.Dim.y, volume.Dim.z);
-            _suShader.SetBuffer(_suCopyKernel, "_SrcVoxels", volume.WriteBuffer);
-            _suShader.SetBuffer(_suCopyKernel, "_SrcColors", volume.WriteColorBuffer);
-            _suShader.SetBuffer(_suCopyKernel, "_DstVoxels", dstVox);
-            _suShader.SetBuffer(_suCopyKernel, "_DstColors", dstCol);
-            TSDFComputeUtil.DispatchLinear(_suShader, _suCopyKernel, total);
+            volume.CopyBuffers(volume.WriteBuffer, volume.WriteColorBuffer, dstVox, dstCol);
         }
 
         // smin(A, B, k) -> volume write buffer, then publish so MC re-extracts. Used

@@ -3,11 +3,12 @@
 // buffers (A and B), then blends them with a polynomial smooth-min so the two
 // shells grow an organic neck toward each other (k tunes the neck thickness).
 //
-//   Copy        : snapshot one freshly-integrated instant out of the volume's
-//                 write buffer into a scratch A/B buffer pair.
 //   SmoothUnion : result = smin(sdfA, sdfB, k) written back into the B buffer
 //                 (= the volume write buffer), with colour blended by the same
 //                 smin weight so the seam is a natural A/B colour mix.
+//
+// (The instant snapshot copy that used to live here as a private Copy kernel is
+//  now TSDFVolume.CopyBuffers via the shared TSDFCopy.compute — 3-8 dedup.)
 //
 // Notes:
 //  - smin <= min, so the seam bulges OUTWARD. This only looks clean where the
@@ -19,7 +20,6 @@
 //  - A voxel observed by only one instant passes that instant straight through
 //    (no smin), so single-sided regions are unchanged.
 
-#pragma kernel Copy
 #pragma kernel SmoothUnion
 
 // = groupsX * 64; linearises the 2D dispatch grid so large volumes stay under
@@ -36,22 +36,6 @@ int _HighlightSeam;  // 0 = off (normal A/B colour blend), 1 = paint the seam
 float4 _SeamColor;   // seam highlight colour (rgb; a unused)
 float2 _SeamRange;   // (lo, hi) blend-strength band remapped onto the highlight ramp
 
-// ---- Copy: _Src* -> _Dst* (snapshot an instant out of the write buffer) ----
-StructuredBuffer<float2> _SrcVoxels;
-StructuredBuffer<float4> _SrcColors;
-RWStructuredBuffer<float2> _DstVoxels;
-RWStructuredBuffer<float4> _DstColors;
-
-[numthreads(64, 1, 1)]
-void Copy(uint3 id : SV_DispatchThreadID)
-{
-    uint lin = id.y * (uint)_DispatchWidth + id.x;
-    uint total = (uint)(_Dim.x * _Dim.y * _Dim.z);
-    if (lin >= total) return;
-    _DstVoxels[lin] = _SrcVoxels[lin];
-    _DstColors[lin] = _SrcColors[lin];
-}
-
 // ---- SmoothUnion: smin(A, B) -> Out ----
 // A and B are the two cached instant snapshots; Out is the volume write buffer
 // that Marching Cubes extracts. Keeping A/B separate from Out lets the caller
@@ -66,8 +50,7 @@ RWStructuredBuffer<float4> _ColorsOut;
 // Write-time active-block marking (task 0-1): SmoothUnion writes the volume write
 // buffer that Marching Cubes extracts, so it must mark occupancy or active-block MC
 // drops the composed surface (A-only regions + smin necks). TSDFDebugSession zeroes
-// WriteBlockActive then binds it here before dispatch. Only referenced by SmoothUnion
-// (Copy writes scratch buffers, not the volume), so Copy needs no _BlockActive binding.
+// WriteBlockActive then binds it here before dispatch.
 #include "TSDFBlockActive.hlsl"
 
 [numthreads(64, 1, 1)]
