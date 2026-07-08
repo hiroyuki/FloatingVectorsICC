@@ -59,10 +59,19 @@
   - 未了のオプション: bounds/縮退/winding の 4-5 近似重複（GlbWriter/UsdzWriter/MeshDecimator 側）の MeshOps 吸収は
     byte 同一でないため見送り。やるなら per-case 検証つきで別途。
 
+第3トランシェ完了（2026-07-09、同ブランチ）:
+- ✅ **3-6 ワイヤ可視化 twin 統合**（`cdf7d7d` — `PointCloud/WireVisualizationBehaviour.cs` 基底。
+  serialized フィールドはサブクラス残置でシーン移行リスクゼロ。runtime 生成/破棄を実機確認済み）
+
 残り（着手しやすい順）:
 - 3-3 **Calibration 450行丸コピー解消**（CalibrationWindow ⇔ CalibrationRuntimeUI → CalibrationSession）
-- 3-1 SensorRecorder 内部 dedup、3-4 publish 状態のフィーダー移動、3-6 ワイヤ可視化 twin 統合
+  ※注意: Mac 上では ChArUco ボード入り録画が無く Capture/Solve の機能 A/B ができない。
+  やるなら「機械的抽出 + トークン等価レビュー」のみで進めるか、Windows 実機で A/B するか要判断。
+- 3-1 SensorRecorder 内部 dedup、3-4 publish 状態のフィーダー移動
 - 3-10 GPU raw アップロードヘルパー、3-5 **Primary-body 抽象（⚠️ 唯一の意図的挙動変更・オーナー承認必須）**
+
+※関連バグ修正（このブランチ外・main 直行済み）: `8a663d3` — playback path 分離（92c6b6b）が
+Mac 再生をサイレントに壊していた件。ResolvePlaybackRoot に macOS フォールバック追加 + シーン設定。
 
 **2026-07-08 前提再検証済み**（上流8コミット: SkeletonMerger continuity/foot-snap、Recorder F9/take分割 後）:
 Phase 3 全項目のアンカーは現存・有効。訂正2点 — **3-6 の CameraPoseMarker は `Calibration/` ではなく
