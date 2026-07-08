@@ -3,13 +3,15 @@
 // center (position), orientation (rotation), and size (localScale). The box
 // occupies the unit cube [-0.5, +0.5]^3 in the GameObject's local space, so
 // a Transform with localScale == (1,1,1) is a 1 m cube.
+//
+// The wireframe rendering (Game view + Gizmo) comes from WireVisualizationBehaviour.
 
 using UnityEngine;
 
 namespace PointCloud
 {
     [DisallowMultipleComponent]
-    public class BoundingVolume : MonoBehaviour
+    public class BoundingVolume : WireVisualizationBehaviour
     {
         public enum FilterMode
         {
@@ -29,115 +31,14 @@ namespace PointCloud
         [Tooltip("Color of the wireframe box.")]
         public Color color = new Color(0.2f, 1f, 0.4f, 1f);
 
-        // Runtime wire-cube rendering (so it shows in Game view / builds, not just the Editor).
-        private GameObject _vizObject;
-        private MeshFilter _vizFilter;
-        private MeshRenderer _vizRenderer;
-        private Mesh _vizMesh;
-        private Material _vizMaterial;
-        private Color _lastAppliedColor;
-
         public FilterMode Mode => filterMode;
 
-        private void OnEnable()
-        {
-            SyncVisualization();
-        }
+        protected override bool Show => showVisualization;
+        protected override Color WireColor => color;
+        protected override string VizObjectName => "_BoundsViz";
+        protected override string MaterialName => "BoundsViz";
 
-        private void OnDisable()
-        {
-            DestroyVisualization();
-        }
-
-        private void OnDestroy()
-        {
-            DestroyVisualization();
-        }
-
-        private void Update()
-        {
-            SyncVisualization();
-        }
-
-        private void OnValidate()
-        {
-            // Defer the actual visualization sync: Unity forbids
-            // DestroyImmediate (and friends) during OnValidate, and toggling
-            // showVisualization off here would call DestroyVisualization
-            // synchronously and log an error every time. Update() runs the
-            // same SyncVisualization() in a context where Destroy is legal,
-            // so just let the next tick pick up the new Inspector value.
-        }
-
-        private void SyncVisualization()
-        {
-            if (showVisualization)
-            {
-                if (_vizObject == null) CreateVisualization();
-                if (_vizMesh != null && _lastAppliedColor != color)
-                {
-                    ApplyVertexColor(_vizMesh, color);
-                    _lastAppliedColor = color;
-                }
-            }
-            else if (_vizObject != null)
-            {
-                DestroyVisualization();
-            }
-        }
-
-        private void CreateVisualization()
-        {
-            _vizObject = new GameObject("_BoundsViz")
-            {
-                hideFlags = HideFlags.DontSave | HideFlags.NotEditable,
-            };
-            _vizObject.transform.SetParent(transform, worldPositionStays: false);
-
-            _vizFilter = _vizObject.AddComponent<MeshFilter>();
-            _vizRenderer = _vizObject.AddComponent<MeshRenderer>();
-            PointCloudUtil.ConfigureUnlitRenderer(_vizRenderer);
-
-            _vizMesh = BuildWireCubeMesh();
-            ApplyVertexColor(_vizMesh, color);
-            _lastAppliedColor = color;
-            _vizFilter.sharedMesh = _vizMesh;
-
-            // Reuse the project's vertex-color unlit shader so the box blends into the
-            // same rendering setup as the points. Fall back to Unity built-ins if absent.
-            var shader = Shader.Find("Orbbec/PointCloudUnlit");
-            if (shader == null) shader = Shader.Find("Hidden/Internal-Colored");
-            if (shader != null)
-            {
-                _vizMaterial = new Material(shader)
-                {
-                    name = "BoundsViz",
-                    hideFlags = HideFlags.DontSave,
-                };
-                _vizRenderer.sharedMaterial = _vizMaterial;
-            }
-        }
-
-        private void DestroyVisualization()
-        {
-            if (_vizObject != null)
-            {
-                PointCloudUtil.DestroySafe(_vizObject);
-                _vizObject = null;
-                _vizFilter = null;
-                _vizRenderer = null;
-            }
-            if (_vizMesh != null)
-            {
-                PointCloudUtil.DestroySafe(_vizMesh);
-                _vizMesh = null;
-            }
-            if (_vizMaterial != null)
-            {
-                PointCloudUtil.DestroySafe(_vizMaterial);
-                _vizMaterial = null;
-            }
-        }
+        protected override Mesh CreateMesh() => BuildWireCubeMesh();
 
         private static Mesh BuildWireCubeMesh()
         {
@@ -165,13 +66,6 @@ namespace PointCloud
             mesh.SetIndices(indices, MeshTopology.Lines, 0);
             mesh.bounds = new Bounds(Vector3.zero, Vector3.one);
             return mesh;
-        }
-
-        private static void ApplyVertexColor(Mesh mesh, Color c)
-        {
-            var colors = new Color[mesh.vertexCount];
-            for (int i = 0; i < colors.Length; i++) colors[i] = c;
-            mesh.SetColors(colors);
         }
 
         private void OnDrawGizmos()
