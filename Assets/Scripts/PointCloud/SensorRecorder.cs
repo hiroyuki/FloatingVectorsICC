@@ -844,13 +844,21 @@ namespace PointCloud
         /// run on a natural cursor advance, so stepping is visually identical
         /// to the live playhead crossing this frame.
         /// </summary>
-        private void SetCursorAndEmit(DeviceTrack track, int cursor)
+        // Emit the frame at `cursor` for one track: advance the cursor, pick the
+        // index-matched colour/IR frames, reconstruct + upload the mesh, fire the
+        // playback event and feed the cumulative snapshotter. Shared by Update's
+        // natural-playback advance and SetCursorAndEmit's frame stepping (3-1 dedup),
+        // so the two paths are identical by construction — not by the parallel
+        // maintenance the old "visually identical" comment had to promise.
+        private void EmitFrameAt(DeviceTrack track, int cursor)
         {
             track.PlaybackCursor = cursor;
             var depthFrame = track.DepthFrames[cursor];
             PointCloudRecording.Frame colorFrame = null;
             if (track.ColorFrames.Count > 0)
             {
+                // Match the color frame with the closest timestamp (frames should be 1:1 with depth
+                // when frame-sync is enabled, but tolerate slight drift).
                 int colorIdx = Mathf.Min(cursor, track.ColorFrames.Count - 1);
                 colorFrame = track.ColorFrames[colorIdx];
             }
@@ -863,6 +871,11 @@ namespace PointCloud
             ReconstructAndUpload(track, depthFrame, colorFrame);
             FirePlaybackEvent(track, depthFrame, colorFrame, irFrame);
             FeedCumulative(track);
+        }
+
+        private void SetCursorAndEmit(DeviceTrack track, int cursor)
+        {
+            EmitFrameAt(track, cursor);
             // Step forward / backward should also land on the BT frame whose
             // timestamp matches this depth frame (or the closest preceding one),
             // so the skeleton overlay stays in sync with the rendered mesh while
@@ -1763,30 +1776,10 @@ namespace PointCloud
                 }
 
                 if (cursor < track.DepthFrames.Count - 1) anyRemaining = true;
+                // Only emit on real cursor advances so a paused playhead doesn't
+                // re-reconstruct / re-snapshot the same frame every Update tick.
                 if (cursor != track.PlaybackCursor)
-                {
-                    track.PlaybackCursor = cursor;
-                    var depthFrame = track.DepthFrames[cursor];
-                    PointCloudRecording.Frame colorFrame = null;
-                    if (track.ColorFrames.Count > 0)
-                    {
-                        // Match the color frame with the closest timestamp (frames should be 1:1 with depth
-                        // when frame-sync is enabled, but tolerate slight drift).
-                        int colorIdx = Mathf.Min(cursor, track.ColorFrames.Count - 1);
-                        colorFrame = track.ColorFrames[colorIdx];
-                    }
-                    PointCloudRecording.Frame irFrame = null;
-                    if (track.IRFrames.Count > 0)
-                    {
-                        int irIdx = Mathf.Min(cursor, track.IRFrames.Count - 1);
-                        irFrame = track.IRFrames[irIdx];
-                    }
-                    ReconstructAndUpload(track, depthFrame, colorFrame);
-                    FirePlaybackEvent(track, depthFrame, colorFrame, irFrame);
-                    // Only emit on real cursor advances so a paused playhead doesn't
-                    // re-snapshot the same frame every Update tick.
-                    FeedCumulative(track);
-                }
+                    EmitFrameAt(track, cursor);
                 AdvanceBodyCursor(track, playheadNs);
                 ApplyBoundingBoxFilter(track);
             }
@@ -1937,80 +1930,32 @@ namespace PointCloud
         // playback path stays bit-for-bit identical with the live PointCloudRenderer.
         private MaterialPropertyBlock _filterMpb;
 
-        private BoundingVolume ResolveBoundingBox()
+        // Shared late-bind for the scene-level filter components (3-1 dedup — this was
+        // five copy-pasted Resolve* methods): cached reference -> any live
+        // PointCloudRenderer that already references one (shared scene-level component
+        // pattern) -> scene-wide search, so playback-only sessions still pick up the
+        // same component authoring puts on the scene. The selector lambdas below are
+        // non-capturing, so the compiler caches them — no per-call allocation on the
+        // per-frame filter paths.
+        private T ResolveShared<T>(ref T cached, System.Func<PointCloudRenderer, T> fromRenderer)
+            where T : UnityEngine.Object
         {
-            if (boundingBox != null) return boundingBox;
-            // Late-bind from any live PointCloudRenderer that already references one
-            // (shared scene-level box pattern). When no live renderers exist
-            // (playback-only sessions), fall back to a scene-wide search so we still
-            // pick up the same box that authoring puts on the scene.
+            if (cached != null) return cached;
             foreach (var r in CollectSourceRenderers())
             {
-                if (r != null && r.boundingBox != null)
-                {
-                    boundingBox = r.boundingBox;
-                    return boundingBox;
-                }
+                if (r == null) continue;
+                var v = fromRenderer(r);
+                if (v != null) { cached = v; return cached; }
             }
-            boundingBox = FindFirstObjectByType<BoundingVolume>();
-            return boundingBox;
+            cached = FindFirstObjectByType<T>();
+            return cached;
         }
 
-        private PointCloudDecimater ResolveDecimater()
-        {
-            if (decimater != null) return decimater;
-            foreach (var r in CollectSourceRenderers())
-            {
-                if (r != null && r.decimater != null) { decimater = r.decimater; return decimater; }
-            }
-            decimater = FindFirstObjectByType<PointCloudDecimater>();
-            return decimater;
-        }
-
-        private PointCloudCapsuleFilter ResolveCapsuleFilter()
-        {
-            if (capsuleFilter != null) return capsuleFilter;
-            foreach (var r in CollectSourceRenderers())
-            {
-                if (r != null && r.capsuleFilter != null)
-                {
-                    capsuleFilter = r.capsuleFilter;
-                    return capsuleFilter;
-                }
-            }
-            capsuleFilter = FindFirstObjectByType<PointCloudCapsuleFilter>();
-            return capsuleFilter;
-        }
-
-        private PointCloudJointMotionField ResolveJointMotionField()
-        {
-            if (jointMotionField != null) return jointMotionField;
-            foreach (var r in CollectSourceRenderers())
-            {
-                if (r != null && r.jointMotionField != null)
-                {
-                    jointMotionField = r.jointMotionField;
-                    return jointMotionField;
-                }
-            }
-            jointMotionField = FindFirstObjectByType<PointCloudJointMotionField>();
-            return jointMotionField;
-        }
-
-        private PointCloudCumulative ResolveCumulative()
-        {
-            if (cumulative != null) return cumulative;
-            foreach (var r in CollectSourceRenderers())
-            {
-                if (r != null && r.cumulative != null)
-                {
-                    cumulative = r.cumulative;
-                    return cumulative;
-                }
-            }
-            cumulative = FindFirstObjectByType<PointCloudCumulative>();
-            return cumulative;
-        }
+        private BoundingVolume ResolveBoundingBox() => ResolveShared(ref boundingBox, r => r.boundingBox);
+        private PointCloudDecimater ResolveDecimater() => ResolveShared(ref decimater, r => r.decimater);
+        private PointCloudCapsuleFilter ResolveCapsuleFilter() => ResolveShared(ref capsuleFilter, r => r.capsuleFilter);
+        private PointCloudJointMotionField ResolveJointMotionField() => ResolveShared(ref jointMotionField, r => r.jointMotionField);
+        private PointCloudCumulative ResolveCumulative() => ResolveShared(ref cumulative, r => r.cumulative);
 
         private void ApplyBoundingBoxFilter(DeviceTrack track)
         {
