@@ -136,6 +136,35 @@ namespace BodyTracking
                  "rarely needs tuning.")]
         public float oneEuroDerivCutoff = 1.0f;
 
+        [Header("Continuity gate")]
+        [Tooltip("Down-weight per-camera joint samples that disagree with the merged joint's " +
+                 "predicted position (previous merged position + smoothed velocity). Fixes the " +
+                 "lifted-foot half-height collapse: occluded-side cameras report a floor-biased " +
+                 "position at MEDIUM confidence, which a plain confidence-weighted mean cannot " +
+                 "reject. Falls back to the ungated mean when the gate would starve (all cameras " +
+                 "agree but the prediction is wrong, e.g. a fast kick).")]
+        public bool enableContinuityGate = true;
+        [Tooltip("Soft gate width (meters). A sample at this distance from the prediction keeps " +
+                 "half its weight: g = 1/(1+(r/sigma)^2). Well below camera disagreement during " +
+                 "occlusion (~0.3-0.5) but above BT jitter (~0.02-0.05).")]
+        public float gateSigma = 0.12f;
+        [Tooltip("EMA retention for the per-joint velocity estimate (0 = raw frame-to-frame " +
+                 "velocity, higher = smoother but laggier prediction).")]
+        [Range(0f, 0.95f)] public float gateVelocitySmoothing = 0.5f;
+        [Tooltip("If the gated weight sum falls below this fraction of the ungated sum, the " +
+                 "gate starves and the ungated mean is used instead. Rescues motion the " +
+                 "prediction did not anticipate without letting a single outlier dominate.")]
+        [Range(0f, 1f)] public float gateFallbackRatio = 0.2f;
+        [Tooltip("Cap (seconds) on the prediction extrapolation window. BT samples arrive at " +
+                 "~19 Hz; beyond this the prediction is stale and stops extrapolating further.")]
+        public float gateMaxPredictionDt = 0.2f;
+        [Tooltip("Escape valve for prediction lock-on: after this many consecutive FRESH merges " +
+                 "where the gated mean sits more than 2*gateSigma from the ungated consensus, " +
+                 "the joint's history resets and the consensus is accepted.")]
+        public int gateDivergenceResetSamples = 12;
+        [Tooltip("Log gate fallback / divergence-reset events (throttled to one line per second).")]
+        public bool logGateDiagnostics = false;
+
         [Header("BigJump logging")]
         [Tooltip("When on, emit a [BIGJUMP] log line whenever any merged joint moves more " +
                  "than bigJumpLogThresholdMeters between frames. Each line lists the per-" +
@@ -299,6 +328,35 @@ namespace BodyTracking
         // merge weight shifts), or occlusion (one camera dropped to NONE).
         private readonly Dictionary<uint, Vector3[]> _prevMergedPosByCluster = new();
 
+        // Continuity-gate history, per cluster id (ids are stable across frames via
+        // the pelvis carry-over reclaim). Unlike _prevMergedPosByCluster this is
+        // updated unconditionally (not just when logBigJumps is on) and only on
+        // FRESH BT data (LastMaxCapturedTsNs guard) so the ~48 fps Update loop
+        // re-merging the same ~19 Hz worker snapshot doesn't zero the velocity.
+        private sealed class GateState
+        {
+            public readonly Vector3[] PrevPos = new Vector3[K4ABTConsts.K4ABT_JOINT_COUNT];
+            public readonly Vector3[] Vel = new Vector3[K4ABTConsts.K4ABT_JOINT_COUNT];
+            public readonly bool[] HasPrev = new bool[K4ABTConsts.K4ABT_JOINT_COUNT];
+            public readonly int[] DivergeCount = new int[K4ABTConsts.K4ABT_JOINT_COUNT];
+            public float LastFreshRealtime;
+            public ulong LastMaxCapturedTsNs;
+        }
+        private readonly Dictionary<uint, GateState> _gateStateById = new();
+        // Per-MergeJoint-call transients (single-threaded, reused across joints).
+        // _gateState/_gateNow are set per cluster in BuildMergedSkeleton; the
+        // scratch arrays carry Pass 1 decisions into Pass 2 (same effective weight
+        // for position and orientation) and into UpdateGateHistory (divergence
+        // flags counted only on fresh merges).
+        private GateState _gateState;
+        private float _gateNow;
+        private float[] _gateWeightScratch = new float[8];
+        private bool _gateUseGated;
+        private readonly bool[] _gateDivergedScratch = new bool[K4ABTConsts.K4ABT_JOINT_COUNT];
+        private int _gateFallbacksThisSecond;
+        private int _gateResetsThisSecond;
+        private float _gateDiagWindowStart;
+
         // Reusable synthetic skeleton handed to BodyVisual.UpdateFromSkeleton.
         // We encode merged world joint positions back into k4a camera-local mm
         // such that K4AmmToUnity (called inside BodyVisual) produces the desired
@@ -372,6 +430,7 @@ namespace BodyTracking
             _playbackLoopedOnce = true;
             _priorPelvisById.Clear();
             _priorMaxConfById.Clear();
+            _gateStateById.Clear();
             _pool.DestroyAll();
             foreach (var kv in _latestBySerial) kv.Value.BodyCount = 0;
         }
@@ -449,6 +508,7 @@ namespace BodyTracking
             _pool?.DestroyAll();
             _priorPelvisById.Clear();
             _priorMaxConfById.Clear();
+            _gateStateById.Clear();
             ClearPerWorkerSkeletons();
             _boundRenderers.Clear();
         }
@@ -1024,8 +1084,51 @@ namespace BodyTracking
                 var cluster = _clusterPool[c];
                 if (cluster.MemberIndices.Count < requireMinWorkerCount) continue;
                 BuildMergedSkeleton(cluster, ref _mergedSkel);
+                if (JointRefiner != null) RefineMergedJoints(cluster.Id, ref _mergedSkel);
                 _pool.Apply(cluster.Id, in _mergedSkel, cfg, OnVisualEvicted);
+                UpdateGateHistory(cluster, in _mergedSkel);
                 _diagPersonsOutput++;
+            }
+            LogGateDiagnosticsIfDue();
+        }
+
+        /// <summary>
+        /// Optional post-merge refiner (e.g. TSDF surface snap). Set/cleared by
+        /// the implementing component's OnEnable/OnDisable; not serialized.
+        /// </summary>
+        public IMergedJointRefiner JointRefiner { get; set; }
+
+        // Joints the refiner sees. Feet only for now — the k4abt failure mode the
+        // refiner corrects (occlusion-lagged limbs) is measured on ankles/feet.
+        private static readonly k4abt_joint_id_t[] s_refineJoints =
+        {
+            k4abt_joint_id_t.K4ABT_JOINT_ANKLE_LEFT,
+            k4abt_joint_id_t.K4ABT_JOINT_FOOT_LEFT,
+            k4abt_joint_id_t.K4ABT_JOINT_ANKLE_RIGHT,
+            k4abt_joint_id_t.K4ABT_JOINT_FOOT_RIGHT,
+        };
+        private readonly Vector3[] _refineScratchPos = new Vector3[4];
+        private readonly bool[] _refineScratchValid = new bool[4];
+
+        private void RefineMergedJoints(uint clusterId, ref k4abt_skeleton_t skel)
+        {
+            for (int i = 0; i < s_refineJoints.Length; i++)
+            {
+                int j = (int)s_refineJoints[i];
+                bool valid = skel.Joints[j].ConfidenceLevel != k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_NONE;
+                _refineScratchValid[i] = valid;
+                _refineScratchPos[i] = valid ? BodyTrackingShared.K4AmmToUnity(skel.Joints[j].Position) : Vector3.zero;
+            }
+
+            JointRefiner.RefineJoints(clusterId, s_refineJoints, _refineScratchPos, _refineScratchValid);
+
+            for (int i = 0; i < s_refineJoints.Length; i++)
+            {
+                if (!_refineScratchValid[i]) continue;
+                int j = (int)s_refineJoints[i];
+                // ConfidenceLevel stays as merged (>= LOW) so BodyVisual applies
+                // the refined position instead of holding the previous one.
+                skel.Joints[j].Position = BodyTrackingShared.UnityToK4Amm(_refineScratchPos[i]);
             }
         }
 
@@ -1048,6 +1151,7 @@ namespace BodyTracking
             _priorPelvisById.Remove(id);
             _priorMaxConfById.Remove(id);
             _prevMergedPosByCluster.Remove(id);
+            _gateStateById.Remove(id);
         }
 
         private void StashPriorState()
@@ -1302,10 +1406,106 @@ namespace BodyTracking
 
         private void BuildMergedSkeleton(Cluster cluster, ref k4abt_skeleton_t output)
         {
+            // Gate context for this cluster: MergeJoint reads history only;
+            // UpdateGateHistory (after _pool.Apply) is the sole writer.
+            _gateState = enableContinuityGate ? GetOrCreateGateState(cluster.Id) : null;
+            _gateNow = Time.realtimeSinceStartup;
+            if (_gateWeightScratch.Length < cluster.MemberIndices.Count)
+                _gateWeightScratch = new float[Mathf.NextPowerOfTwo(cluster.MemberIndices.Count)];
+
             for (int j = 0; j < K4ABTConsts.K4ABT_JOINT_COUNT; j++)
             {
                 MergeJoint(cluster, j, ref output.Joints[j]);
             }
+        }
+
+        private GateState GetOrCreateGateState(uint clusterId)
+        {
+            if (!_gateStateById.TryGetValue(clusterId, out var s))
+            {
+                s = new GateState();
+                _gateStateById[clusterId] = s;
+            }
+            return s;
+        }
+
+        // Sole writer of the gate history. Runs after _pool.Apply so the stored
+        // positions match what BodyVisual received. Kept warm even while
+        // enableContinuityGate is off so toggling it on mid-run starts from real
+        // velocities instead of a cold start.
+        private void UpdateGateHistory(Cluster cluster, in k4abt_skeleton_t merged)
+        {
+            var state = GetOrCreateGateState(cluster.Id);
+
+            ulong maxTs = 0;
+            for (int m = 0; m < cluster.MemberIndices.Count; m++)
+            {
+                var cand = _candidatePool[cluster.MemberIndices[m]];
+                if (cand.Slot.CapturedTsNs > maxTs) maxTs = cand.Slot.CapturedTsNs;
+            }
+            // Update (~48 fps) re-merges the same ~19 Hz worker snapshot on most
+            // frames; recomputing velocity from identical data would zero it out.
+            if (maxTs == state.LastMaxCapturedTsNs) return;
+
+            float now = Time.realtimeSinceStartup;
+            float dt = state.LastFreshRealtime > 0f ? Mathf.Max(1e-4f, now - state.LastFreshRealtime) : 0f;
+
+            for (int j = 0; j < K4ABTConsts.K4ABT_JOINT_COUNT; j++)
+            {
+                if (merged.Joints[j].ConfidenceLevel == k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_NONE)
+                    continue; // no sample this merge — keep history as-is
+                Vector3 cur = BodyTrackingShared.K4AmmToUnity(merged.Joints[j].Position);
+
+                if (!state.HasPrev[j] || dt <= 0f)
+                {
+                    // Cold start (first sighting, post-reset, or unknown dt):
+                    // seed with zero velocity so no fake prediction is emitted.
+                    state.PrevPos[j] = cur;
+                    state.Vel[j] = Vector3.zero;
+                    state.HasPrev[j] = true;
+                    state.DivergeCount[j] = 0;
+                    continue;
+                }
+
+                Vector3 rawVel = (cur - state.PrevPos[j]) / dt;
+                state.Vel[j] = Vector3.Lerp(rawVel, state.Vel[j], gateVelocitySmoothing);
+                state.PrevPos[j] = cur;
+
+                // Lock-on escape: gated output persistently far from the ungated
+                // consensus means the prediction is tracking a wrong branch —
+                // reset the history and accept the consensus on the next merge.
+                if (_gateDivergedScratch[j])
+                {
+                    if (++state.DivergeCount[j] >= Mathf.Max(1, gateDivergenceResetSamples))
+                    {
+                        state.HasPrev[j] = false;
+                        state.DivergeCount[j] = 0;
+                        _gateResetsThisSecond++;
+                    }
+                }
+                else state.DivergeCount[j] = 0;
+            }
+
+            state.LastFreshRealtime = now;
+            state.LastMaxCapturedTsNs = maxTs;
+        }
+
+        private void LogGateDiagnosticsIfDue()
+        {
+            if (!logGateDiagnostics)
+            {
+                _gateFallbacksThisSecond = 0;
+                _gateResetsThisSecond = 0;
+                return;
+            }
+            float now = Time.realtimeSinceStartup;
+            if (_gateDiagWindowStart == 0f) _gateDiagWindowStart = now;
+            if (now - _gateDiagWindowStart < 1f) return;
+            if (_gateFallbacksThisSecond > 0 || _gateResetsThisSecond > 0)
+                Debug.Log($"[SkeletonMerger] gate/sec fallbacks={_gateFallbacksThisSecond} divergenceResets={_gateResetsThisSecond}", this);
+            _gateFallbacksThisSecond = 0;
+            _gateResetsThisSecond = 0;
+            _gateDiagWindowStart = now;
         }
 
         // BigJump diagnostic: compare new merged world position to previous frame's
@@ -1375,19 +1575,34 @@ namespace BodyTracking
                 ? (int)k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_MEDIUM
                 : minAcceptLevel;
 
+            // Continuity gate: predict this joint from the merged history and
+            // down-weight samples far from the prediction. Occluded-side cameras
+            // report floor-biased positions at MEDIUM confidence, so confidence
+            // alone cannot reject them — trajectory consistency can.
+            bool gateActive = _gateState != null && _gateState.HasPrev[jointIndex];
+            Vector3 predicted = default;
+            float gateSigmaSqr = gateSigma * gateSigma;
+            if (gateActive)
+            {
+                float predDt = Mathf.Clamp(_gateNow - _gateState.LastFreshRealtime, 0f, gateMaxPredictionDt);
+                predicted = _gateState.PrevPos[jointIndex] + _gateState.Vel[jointIndex] * predDt;
+            }
+
             // Pass 1: find the highest-confidence sample to use as the
-            // hemisphere reference for the quaternion mean. Also accumulate
-            // weighted positions in this same pass so we touch each member once.
+            // hemisphere reference for the quaternion mean. Accumulate the gated
+            // and ungated weighted positions side by side so the fallback needs
+            // no second pass over the members.
             float refConf = -1f;
             Quaternion refRot = Quaternion.identity;
 
-            float wSum = 0f;
-            Vector3 posSum = Vector3.zero;
+            float wSumRaw = 0f, wSumGated = 0f;
+            Vector3 posSumRaw = Vector3.zero, posSumGated = Vector3.zero;
             int maxConf = 0;
             int sampleCount = 0;
 
             for (int m = 0; m < cluster.MemberIndices.Count; m++)
             {
+                _gateWeightScratch[m] = 0f;
                 var cand = _candidatePool[cluster.MemberIndices[m]];
                 var jt = cand.Slot.Bodies[cand.BodyIndex].Joints[jointIndex];
                 int level = (int)jt.ConfidenceLevel;
@@ -1397,8 +1612,16 @@ namespace BodyTracking
                 Vector3 worldPos = SkeletonWorldTransform.ToWorld(jt.Position, cand.Slot.DepthToColorMm, cand.Slot.SourceTransform);
                 Quaternion worldRot = SkeletonWorldTransform.ToWorldRotation(jt.Orientation, cand.Slot.DepthToColorRotUnity, cand.Slot.SourceTransform);
 
-                wSum += weight;
-                posSum += worldPos * weight;
+                wSumRaw += weight;
+                posSumRaw += worldPos * weight;
+                if (gateActive)
+                {
+                    float g = 1f / (1f + (worldPos - predicted).sqrMagnitude / gateSigmaSqr);
+                    float gw = weight * g;
+                    _gateWeightScratch[m] = gw;
+                    wSumGated += gw;
+                    posSumGated += worldPos * gw;
+                }
                 if (level > maxConf) maxConf = level;
                 if (weight > refConf)
                 {
@@ -1412,13 +1635,28 @@ namespace BodyTracking
             {
                 // No usable sample this frame for this joint — emit a NONE so
                 // BodyVisual keeps the joint at its previous position.
+                _gateDivergedScratch[jointIndex] = false;
                 outJoint.Position = default;
                 outJoint.Orientation = default;
                 outJoint.ConfidenceLevel = k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_NONE;
                 return;
             }
 
-            Vector3 mergedPosWorld = posSum / wSum;
+            // Fallback: when the gated sum collapses relative to the ungated one,
+            // every camera disagrees with the prediction — trust the consensus
+            // (fast unpredicted motion) rather than starving the merge.
+            _gateUseGated = gateActive
+                && wSumGated > 1e-4f
+                && wSumGated >= gateFallbackRatio * wSumRaw;
+            if (gateActive && !_gateUseGated) _gateFallbacksThisSecond++;
+
+            Vector3 mergedPosWorld = _gateUseGated ? posSumGated / wSumGated : posSumRaw / wSumRaw;
+
+            // Lock-on detection input: gated output sitting far from the ungated
+            // consensus. Counted per FRESH merge in UpdateGateHistory; after
+            // gateDivergenceResetSamples in a row the joint history resets.
+            _gateDivergedScratch[jointIndex] = _gateUseGated
+                && (mergedPosWorld - posSumRaw / wSumRaw).sqrMagnitude > 4f * gateSigmaSqr;
 
             // BIGJUMP detection runs on the raw merged position — the diagnostic
             // measures the input to BodyVisual's One-Euro filter, not the output,
@@ -1439,7 +1677,9 @@ namespace BodyTracking
                 int level = (int)jt.ConfidenceLevel;
                 if (level < effectiveMinLevel) continue;
 
-                float weight = level; // confidence-linear weight
+                // Same effective weight as the position pass: a camera whose
+                // position the gate rejected must not steer the orientation.
+                float weight = _gateUseGated ? _gateWeightScratch[m] : level;
                 Quaternion qLocal = SkeletonWorldTransform.ToWorldRotation(jt.Orientation, cand.Slot.DepthToColorRotUnity, cand.Slot.SourceTransform);
                 if (Quaternion.Dot(qLocal, refRot) < 0f)
                 {
