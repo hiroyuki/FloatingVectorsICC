@@ -108,6 +108,12 @@ namespace TSDF
         [Tooltip("Tube cross-section sides. 4-6 reads as round at ribbon width.")]
         public int webCurveSides = 4;
 
+        [Range(0.05f, 1f)]
+        [Tooltip("Tube radius scale at the OLD end of each trail (the past tip). 1 = constant " +
+                 "thickness; 0.25 = the tail tapers to a quarter of the ribbon radius, so the " +
+                 "stroke reads as fading in from the past.")]
+        public float webCurveTipTaper = 0.25f;
+
         [Min(0)]
         [Tooltip("Decimate the TSDF mesh to this many triangles for the web files (quadric edge " +
                  "collapse, colours kept — the STL keeps full resolution). 0 = no decimation. " +
@@ -660,7 +666,8 @@ namespace TSDF
                     var tc = new List<Vector3>(); var ti = new List<int>();
                     curveCount = CurveTubeBuilder.AppendCurveTubes(lines, lineCols, curves.brightness,
                         Mathf.Max(0.0005f, curves.ribbonWidth * 0.5f),
-                        Mathf.Clamp(webCurveSides, 3, 12), webCurveTolerance, center, min.y, tp, tn, tc, ti);
+                        Mathf.Clamp(webCurveSides, 3, 12), webCurveTolerance, center, min.y, tp, tn, tc, ti,
+                        webCurveTipTaper);
                     if (curveCount > 0)
                     {
                         int vOff = pos.Length, iOff = idx.Length;

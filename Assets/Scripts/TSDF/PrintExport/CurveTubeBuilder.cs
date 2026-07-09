@@ -14,10 +14,13 @@ namespace TSDF
         // export space (mirrored right-handed, recentred) with CCW-outward
         // winding, so it appends to the already-oriented mesh arrays untouched.
         // Returns the number of tubes actually emitted.
+        // tipTaper: radius scale at the OLD end of the polyline (index 0 — curve
+        // history runs oldest -> newest), lerped up to the full radius at the new
+        // end, so trails read as strokes that fade in from the past. 1 = constant.
         public static int AppendCurveTubes(List<Vector3[]> lines, List<Vector3> lineCols, float brightness,
                                            float radius, int sides, float tolerance, Vector3 center, float minY,
                                            List<Vector3> pos, List<Vector3> nrm, List<Vector3> col,
-                                           List<int> idx)
+                                           List<int> idx, float tipTaper = 1f)
         {
             int tubes = 0;
             var p = new List<Vector3>(256);
@@ -50,11 +53,12 @@ namespace TSDF
                     u = (Quaternion.FromToRotation(prevT, t) * u).normalized;
                     prevT = t;
                     Vector3 v = Vector3.Cross(t, u);
+                    float r = radius * Mathf.Lerp(Mathf.Clamp01(tipTaper), 1f, n > 1 ? (float)i / (n - 1) : 1f);
                     for (int k = 0; k < sides; k++)
                     {
                         float ang = 2f * Mathf.PI * k / sides;
                         Vector3 rd = Mathf.Cos(ang) * u + Mathf.Sin(ang) * v;
-                        pos.Add(p[i] + rd * radius);
+                        pos.Add(p[i] + rd * r);
                         nrm.Add(rd);
                         col.Add(c);
                     }

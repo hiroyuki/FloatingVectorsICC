@@ -2350,8 +2350,9 @@ MonoBehaviour:
   smoothIterations: 10
   triangleBudgetPerSlab: 2000000
   webIncludeCurves: 1
-  webCurveStride: 20
-  webCurveSides: 4
+  webCurveStride: 30
+  webCurveSides: 3
+  webCurveTipTaper: 0.25
   webMeshTargetTris: 150000
   webCurveTolerance: 0.0015
   usdPythonPath: 
