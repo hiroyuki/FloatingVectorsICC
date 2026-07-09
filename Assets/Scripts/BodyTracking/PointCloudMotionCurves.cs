@@ -92,8 +92,27 @@ namespace BodyTracking
         public float radiusScale = 1f;
 
         [Range(0f, 0.3f)]
-        [Tooltip("Cull a seed as background if its nearest bone surface distance exceeds this (m).")]
+        [Tooltip("Cull a seed as background if its nearest bone surface distance exceeds this (m). " +
+                 "Applies only in the floor band (below floorY + floorBand); everything higher uses " +
+                 "envelopeMargin. Strict here so the floor ring around the feet grows no curves " +
+                 "while the feet themselves (within radius+margin of the foot bones) survive.")]
         public float surfaceMargin = 0.05f;
+
+        [Range(0f, 0.5f)]
+        [Tooltip("Cull distance (m) for seeds ABOVE the floor band. Generous on purpose: hair, " +
+                 "loose clothing and BT lag put real body surface 15-30cm from every skeleton bone " +
+                 "(measured on the bowed head), and a strict margin left the top of the visible " +
+                 "mesh curve-less. Away from the floor, everything within reach of the bone AABB " +
+                 "bbox is the body anyway, so the wide margin grabs no junk.")]
+        public float envelopeMargin = 0.30f;
+
+        [Tooltip("World Y of the floor plane (FloorOrigin aligns it to 0). Seeds below " +
+                 "floorY + floorBand are 'floor band' and use the strict surfaceMargin.")]
+        public float floorY = 0f;
+
+        [Range(0f, 0.2f)]
+        [Tooltip("Height (m) of the floor band above floorY.")]
+        public float floorBand = 0.05f;
 
         [Range(0f, 0.6f)]
         [Tooltip("Padding (m) added around the bone AABB when collecting seed candidates. Seeds are " +
@@ -190,6 +209,8 @@ namespace BodyTracking
         private static readonly int kRingLen = Shader.PropertyToID("_RingLen");
         private static readonly int kRadiusScale = Shader.PropertyToID("_RadiusScale");
         private static readonly int kSurfaceMargin = Shader.PropertyToID("_SurfaceMargin");
+        private static readonly int kEnvelopeMargin = Shader.PropertyToID("_EnvelopeMargin");
+        private static readonly int kFloorCutY = Shader.PropertyToID("_FloorCutY");
         private static readonly int kSanityRange = Shader.PropertyToID("_SanityRange");
         private static readonly int kBlendCount = Shader.PropertyToID("_BlendCount");
         private static readonly int kBlendSigma = Shader.PropertyToID("_BlendSigma");
@@ -392,6 +413,8 @@ namespace BodyTracking
             _shader.SetInt(kRingLen, _ringLen);
             _shader.SetFloat(kRadiusScale, radiusScale);
             _shader.SetFloat(kSurfaceMargin, surfaceMargin);
+            _shader.SetFloat(kEnvelopeMargin, Mathf.Max(envelopeMargin, surfaceMargin));
+            _shader.SetFloat(kFloorCutY, floorY + floorBand);
             _shader.SetInt(kBlendCount, Mathf.Clamp(boneBlendCount, 1, 4));
             _shader.SetFloat(kBlendSigma, blendSharpness);
             _shader.SetInt(kCurveSamples, history.CurveSamples);
@@ -599,13 +622,13 @@ namespace BodyTracking
                 {
                     if (b < bones.Length) { DefaultRadius(bones[b].a, bones[b].b, out rA[b], out rB[b]); continue; }
                     int v = b - bones.Length;
-                    bool crown = v < BonePoseHistory.VirtualTipSources.Length
-                                 && BonePoseHistory.VirtualTipSources[v] == k4abt_joint_id_t.K4ABT_JOINT_HEAD;
-                    // Crown stays skull-radius to the tip (no taper): when the head bows, the
-                    // real skull top sits well off the neck->head axis (measured ~15cm at a
-                    // crouch) and a tapered tip left the topmost mesh curve-less. Nothing but
-                    // hair/air is above the head, so the fat capsule grabs no junk.
-                    if (crown) { rA[b] = 0.10f; rB[b] = 0.09f; }
+                    bool skull = v < BonePoseHistory.VirtualTips.Length && BonePoseHistory.VirtualTipIsSkull(v);
+                    // Skull tips (crown / occiput) stay skull-radius to the tip (no taper):
+                    // when the head bows, the real skull top sits well off the neck->head
+                    // axis (measured ~15-19cm at a crouch) and a tapered tip left the topmost
+                    // mesh curve-less. Nothing but hair/air is up there, so the fat capsules
+                    // grab no junk.
+                    if (skull) { rA[b] = 0.10f; rB[b] = 0.09f; }
                     else { rA[b] = 0.05f; rB[b] = 0.035f; }        // palm -> fingertip taper
                 }
                 _radiusABuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, boneCount, sizeof(float));
