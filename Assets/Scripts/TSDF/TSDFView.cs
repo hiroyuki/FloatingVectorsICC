@@ -261,25 +261,37 @@ namespace TSDF
         {
             if (voxelMaterial == null)
             {
-                var sh = Shader.Find("TSDF/Voxel");
-                if (sh == null) { Debug.LogError("[TSDFView] Shader \"TSDF/Voxel\" not found."); enabled = false; return; }
+                var sh = LoadShader("TSDFVoxel", "TSDF/Voxel");
+                if (sh == null) { enabled = false; return; }
                 voxelMaterial = new Material(sh) { name = "TSDF Voxel (auto)", hideFlags = HideFlags.DontSave };
                 _ownsVoxelMat = true;
             }
             if (cellMaterial == null)
             {
-                var sh = Shader.Find("TSDF/Cell");
-                if (sh == null) { Debug.LogError("[TSDFView] Shader \"TSDF/Cell\" not found."); enabled = false; return; }
+                var sh = LoadShader("TSDFCell", "TSDF/Cell");
+                if (sh == null) { enabled = false; return; }
                 cellMaterial = new Material(sh) { name = "TSDF Cell (auto)", hideFlags = HideFlags.DontSave };
                 _ownsCellMat = true;
             }
             if (meshMaterial == null)
             {
-                var sh = Shader.Find("TSDF/TSDFMesh");
-                if (sh == null) { Debug.LogError("[TSDFView] Shader \"TSDF/TSDFMesh\" not found."); enabled = false; return; }
+                var sh = LoadShader("TSDFMesh", "TSDF/TSDFMesh");
+                if (sh == null) { enabled = false; return; }
                 meshMaterial = new Material(sh) { name = "TSDF Mesh (auto)", hideFlags = HideFlags.DontSave };
                 _ownsMeshMat = true;
             }
+        }
+
+        // Resources first so the shaders survive player-build stripping — nothing else
+        // references them (the scene materials are auto-created), so a bare Shader.Find
+        // returns null in a build and the whole view silently vanished. Same pattern as
+        // PointCloudMotionCurves' MotionCurves shader.
+        private static Shader LoadShader(string resourceName, string shaderName)
+        {
+            var sh = Resources.Load<Shader>(resourceName);
+            if (sh == null) sh = Shader.Find(shaderName);
+            if (sh == null) Debug.LogError($"[TSDFView] Shader \"{shaderName}\" not found (Resources/{resourceName}).");
+            return sh;
         }
 
         private void DestroyOwnedMaterials()

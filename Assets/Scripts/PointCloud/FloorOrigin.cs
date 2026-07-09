@@ -248,7 +248,10 @@ namespace PointCloud
         private void EnsureShadowMaterial()
         {
             if (_shadowMaterial != null) return;
-            var shader = Shader.Find("Orbbec/PointCloudShadow");
+            // Resources first: no serialized material references this shader, so a bare
+            // Shader.Find returns null in a player build (stripped).
+            var shader = Resources.Load<Shader>("PointCloudShadow");
+            if (shader == null) shader = Shader.Find("Orbbec/PointCloudShadow");
             if (shader == null)
             {
                 Debug.LogWarning(

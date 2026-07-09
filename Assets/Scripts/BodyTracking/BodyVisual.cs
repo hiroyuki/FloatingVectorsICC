@@ -372,7 +372,10 @@ namespace BodyTracking
             // (HLSLPROGRAM, UniversalForward LightMode). Fallback to URP/Unlit if it
             // ever fails to compile (skeleton would lose the always-on-top behaviour
             // but at least render).
-            Shader s = Shader.Find("BodyTracking/SkeletonOverlay");
+            // Resources first: nothing else references these auto-material shaders, so
+            // a bare Shader.Find returns null in a player build (they get stripped).
+            Shader s = Resources.Load<Shader>("SkeletonOverlay");
+            if (s == null) s = Shader.Find("BodyTracking/SkeletonOverlay");
             if (s == null) s = Shader.Find("Universal Render Pipeline/Unlit");
             if (s == null) s = Shader.Find("Unlit/Color");
             if (s == null) s = Shader.Find("Sprites/Default");
@@ -397,7 +400,9 @@ namespace BodyTracking
         // to URP particle / sprite shaders as a last resort.
         private static Shader ResolveTrailLitShader()
         {
-            Shader s = Shader.Find("BodyTracking/TrailLit");
+            Shader s = Resources.Load<Shader>("TrailLit");
+            if (s == null) s = Shader.Find("BodyTracking/TrailLit");
+            if (s == null) s = Resources.Load<Shader>("TrailOverlay");
             if (s == null) s = Shader.Find("BodyTracking/TrailOverlay");
             if (s == null) s = Shader.Find("Universal Render Pipeline/Particles/Unlit");
             if (s == null) s = Shader.Find("Sprites/Default");
