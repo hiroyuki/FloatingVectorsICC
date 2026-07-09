@@ -500,15 +500,19 @@ namespace BodyTracking
                 _argsBuf.SetData(new uint[] { (uint)(segments * 6), 1, 0, 0 });
 
                 // Standard per-bone radii (absolute m) + endpoint taper; static, scaled at runtime.
-                // Bones past the table are BonePoseHistory's virtual hand bones (rigid forearm
-                // extensions past the wrist): palm -> fingertip taper.
+                // Bones past the table are BonePoseHistory's virtual tip bones (rigid extensions
+                // past the wrists / HEAD); pick their radii by the tip they extend.
                 var bones = BodyTrackingShared.Bones;
                 var rA = new float[boneCount];
                 var rB = new float[boneCount];
                 for (int b = 0; b < boneCount; b++)
                 {
-                    if (b < bones.Length) DefaultRadius(bones[b].a, bones[b].b, out rA[b], out rB[b]);
-                    else { rA[b] = 0.05f; rB[b] = 0.035f; }
+                    if (b < bones.Length) { DefaultRadius(bones[b].a, bones[b].b, out rA[b], out rB[b]); continue; }
+                    int v = b - bones.Length;
+                    bool crown = v < BonePoseHistory.VirtualTipSources.Length
+                                 && BonePoseHistory.VirtualTipSources[v] == k4abt_joint_id_t.K4ABT_JOINT_HEAD;
+                    if (crown) { rA[b] = 0.09f; rB[b] = 0.05f; }   // skull -> crown taper
+                    else { rA[b] = 0.05f; rB[b] = 0.035f; }        // palm -> fingertip taper
                 }
                 _radiusABuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, boneCount, sizeof(float));
                 _radiusBBuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, boneCount, sizeof(float));

@@ -47,6 +47,13 @@ namespace BodyTracking
                  "this much so hand points inherit the forearm's motion. 0 disables it.")]
         public float handExtension = 0.18f;
 
+        [Range(0f, 0.3f)]
+        [Tooltip("Length (m) of the virtual crown bone appended past the HEAD joint. HEAD sits " +
+                 "near the head's centre, so points on top of the skull were beyond every bone's " +
+                 "reach and got no motion curves; this extends the neck->head bone rigidly by " +
+                 "this much so crown points inherit the head's motion. 0 disables it.")]
+        public float crownExtension = 0.12f;
+
         [Header("Debug gizmos (Phase 1 validation)")]
         [Tooltip("Draw each bone's reprojected curve in the Scene view to verify arcs form.")]
         public bool drawGizmos = true;
@@ -90,20 +97,29 @@ namespace BodyTracking
         private int _boneCount;
         private int _ringLen;
 
-        // Virtual hand bones appended after the real Bones table. k4abt's HAND/HANDTIP/THUMB
-        // joints are dropped project-wide (BodyTrackingShared.IsDrawnJoint), so the bone list
-        // ends at the wrist and point-cloud seeds on the hand had no bone within surfaceMargin —
-        // motion curves stopped at the wrist. Each virtual bone rigidly extends its forearm
-        // past the wrist by handExtension, reusing the forearm's stable frame (U/V/W), so hand
-        // points sweep with the forearm's motion. Indices [_realBoneCount ..] in every per-bone
-        // array / the GPU buffers; only this class knows they are synthetic.
-        private static readonly k4abt_joint_id_t[] VirtualTipWrists =
+        // Virtual tip bones appended after the real Bones table, for body extremities the
+        // skeleton doesn't reach: the hands (HAND/HANDTIP/THUMB joints are dropped
+        // project-wide — BodyTrackingShared.IsDrawnJoint — so the arm ends at the wrist) and
+        // the crown (HEAD sits near the head's centre, nothing spans the top of the skull).
+        // Point-cloud seeds there had no bone within surfaceMargin, so motion curves stopped
+        // short. Each virtual bone rigidly extends the real bone whose CHILD joint is the
+        // listed tip (forearm past the wrist, neck->head past the crown) along that bone's
+        // axis, reusing its stable frame (U/V/W), so tip points sweep with the parent bone's
+        // motion. Indices [_realBoneCount ..] in every per-bone array / the GPU buffers;
+        // consumers see them only as extra bones (PointCloudMotionCurves picks their radii
+        // off this table).
+        public static readonly k4abt_joint_id_t[] VirtualTipSources =
         {
             k4abt_joint_id_t.K4ABT_JOINT_WRIST_LEFT,
             k4abt_joint_id_t.K4ABT_JOINT_WRIST_RIGHT,
+            k4abt_joint_id_t.K4ABT_JOINT_HEAD,
         };
-        private int[] _virtualSrcBone; // per virtual bone: index of the forearm bone it extends
+        private int[] _virtualSrcBone; // per virtual bone: index of the real bone it extends
         private int _realBoneCount;
+
+        // Per-virtual-bone extension length (m): the crown uses its own, shorter knob.
+        private float VirtualTipLength(int i)
+            => VirtualTipSources[i] == k4abt_joint_id_t.K4ABT_JOINT_HEAD ? crownExtension : handExtension;
 
         // GPU mirror of the ring, consumed by the motion-curves compute. Sample is 5 * Vector3 = 60
         // bytes, tightly packed, matching an HLSL struct of 5 float3. Per bone b, samples are written
@@ -168,7 +184,7 @@ namespace BodyTracking
         {
             var bones = BodyTrackingShared.Bones;
             int real = bones.Length;
-            int n = real + VirtualTipWrists.Length; // + virtual hand bones (forearm extensions)
+            int n = real + VirtualTipSources.Length; // + virtual tip bones (hands, crown)
             // The ring is ALWAYS MAXK frames. historySamples doesn't size it — it selects, at draw time,
             // how many of the newest captured frames the curve uses (see CurveSamples). So tuning the
             // length (even while paused) shortens OR lengthens the curves instantly out of the already-
@@ -209,13 +225,14 @@ namespace BodyTracking
                 }
             }
 
-            // Virtual bone -> its source forearm (the bone whose child joint is that wrist).
-            _virtualSrcBone = new int[VirtualTipWrists.Length];
-            for (int i = 0; i < VirtualTipWrists.Length; i++)
+            // Virtual bone -> its source (the real bone whose child joint is that tip:
+            // forearm for the wrists, neck->head for the crown).
+            _virtualSrcBone = new int[VirtualTipSources.Length];
+            for (int i = 0; i < VirtualTipSources.Length; i++)
             {
                 _virtualSrcBone[i] = -1;
                 for (int b = 0; b < real; b++)
-                    if (bones[b].b == VirtualTipWrists[i]) { _virtualSrcBone[i] = b; break; }
+                    if (bones[b].b == VirtualTipSources[i]) { _virtualSrcBone[i] = b; break; }
                 _parentBone[real + i] = _virtualSrcBone[i];
             }
 
@@ -309,16 +326,17 @@ namespace BodyTracking
                 _prevV[b] = v;
             }
 
-            // Virtual hand bones: rigid forearm extensions sharing the forearm's frame.
-            // A forearm that failed above was reset (count 0), so count > 0 here means
+            // Virtual tip bones: rigid extensions sharing their source bone's frame.
+            // A source that failed above was reset (count 0), so count > 0 here means
             // its newest ring sample is from THIS frame — extend that one.
             for (int i = 0; i < _virtualSrcBone.Length; i++)
             {
                 int vb = _realBoneCount + i;
                 int f = _virtualSrcBone[i];
-                if (f < 0 || _count[f] == 0 || handExtension <= Eps) { ResetBone(vb); continue; }
+                float len = VirtualTipLength(i);
+                if (f < 0 || _count[f] == 0 || len <= Eps) { ResetBone(vb); continue; }
                 Sample s = _ring[f][_head[f]];
-                Push(vb, new Sample { A = s.B, B = s.B + s.U * handExtension, U = s.U, V = s.V, W = s.W });
+                Push(vb, new Sample { A = s.B, B = s.B + s.U * len, U = s.U, V = s.V, W = s.W });
             }
         }
 
@@ -435,7 +453,7 @@ namespace BodyTracking
                 var e = _scratch[b];
                 if (!e.Valid || !e.Fresh) ResetBone(b);
             }
-            // A virtual hand bone clears exactly when its source forearm does.
+            // A virtual tip bone clears exactly when its source bone does.
             for (int i = 0; i < _virtualSrcBone.Length; i++)
             {
                 int f = _virtualSrcBone[i];
