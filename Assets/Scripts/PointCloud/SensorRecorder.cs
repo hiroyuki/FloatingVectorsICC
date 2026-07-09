@@ -1785,6 +1785,12 @@ namespace PointCloud
 
             // Spacebar in LIVE mode freezes/unfreezes the whole visual — the live
             // counterpart of the playback pause toggle below. No-op unless live.
+            // Always log the keypress with the guard state: "Space did nothing" has
+            // two very different causes — a state guard rejecting it (logged here)
+            // or the app not having keyboard focus (no log at all; runInBackground
+            // keeps the visuals moving, so focus loss is invisible otherwise).
+            if (Input.GetKeyDown(KeyCode.Space))
+                Debug.Log($"[SensorRecorder] Space: state={CurrentState} live={IsLiveMode} paused={IsPaused}");
             if (CurrentState == State.Idle && Input.GetKeyDown(KeyCode.Space))
                 ToggleLiveFreeze();
 

@@ -450,7 +450,20 @@ namespace TSDF
                 // hidden BACK buffer here at the START of the next batch's first
                 // integration. The displayed front keeps showing the last complete
                 // batch until this one finishes and publishes — no flicker.
-                if (_batchSerials.Count >= expectedCamCount)
+                // A pending full clear (hold-beautify residue) must fire here too:
+                // RunNow dropped the in-flight serials, so the count-based clear
+                // would skip and the first resumed batch would integrate on top of
+                // the beautified front (single buffer: front == write). ClearWrite
+                // (not ClearWriteFull) — the voxel path needs the full-grid SDF wipe
+                // only; ClearWriteFull is depth-basis-specific and would allocate
+                // the key/touched buffers just to clear them.
+                if (_fullClearPending)
+                {
+                    volume.ClearWrite();
+                    _fullClearPending = false;
+                    _batchSerials.Clear();
+                }
+                else if (_batchSerials.Count >= expectedCamCount)
                 {
                     volume.ClearWrite();
                     _batchSerials.Clear();

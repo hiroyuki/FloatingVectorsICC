@@ -19,6 +19,10 @@ namespace CameraControl
         [Tooltip("Orbit controller to gate. Auto-resolves the sibling component.")]
         public CameraOrbitController orbit;
 
+        [Tooltip("Keep the orbit controller enabled regardless of pause — driven by the " +
+                 "Display 1 Auto Orbit toggle (Display1OperatorHud).")]
+        public bool autoOrbitOverride;
+
         private void OnEnable()
         {
             if (orbit == null) orbit = GetComponent<CameraOrbitController>();
@@ -28,8 +32,8 @@ namespace CameraControl
         private void Update()
         {
             if (orbit == null) return;
-            bool paused = recorder != null && recorder.IsPaused;
-            if (orbit.enabled != paused) orbit.enabled = paused;
+            bool want = autoOrbitOverride || (recorder != null && recorder.IsPaused);
+            if (orbit.enabled != want) orbit.enabled = want;
         }
     }
 }
