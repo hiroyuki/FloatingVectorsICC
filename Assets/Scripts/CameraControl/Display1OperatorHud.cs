@@ -14,6 +14,7 @@
 // Assembly-CSharp can see both.
 
 using BodyTracking;
+using TSDF;
 using UnityEngine;
 
 namespace CameraControl
@@ -40,12 +41,19 @@ namespace CameraControl
                  "CameraOrbitController in the scene (including disabled ones) when empty.")]
         public CameraOrbitController[] orbits;
 
+        [Tooltip("Web/AR exporter driven by the Export button (writes .glb + .usdz to " +
+                 "~/Documents/FloatingVectorsPrints). Auto-resolves when left empty. The " +
+                 "export is synchronous and takes a few seconds — freeze (Space) first so " +
+                 "the hitch doesn't show on the stage displays.")]
+        public TSDFPrintExporter exporter;
+
         private bool _autoOrbit;
 
         private void OnEnable()
         {
             if (orbits == null || orbits.Length == 0)
                 orbits = FindObjectsByType<CameraOrbitController>(FindObjectsSortMode.None);
+            if (exporter == null) exporter = FindFirstObjectByType<TSDFPrintExporter>();
             // Reflect an override that is already on (e.g. HUD re-enabled mid-session).
             foreach (var o in orbits)
                 if (o != null && o.TryGetComponent(out PauseOrbitGate g) && g.autoOrbitOverride)
@@ -64,7 +72,7 @@ namespace CameraControl
             GUI.matrix = Matrix4x4.Scale(Vector3.one * uiScale);
 
             // Panel backdrop so the widgets read against the black operator display.
-            GUI.Box(new Rect(position.x - 12, position.y - 10, width + 24, 96), GUIContent.none);
+            GUI.Box(new Rect(position.x - 12, position.y - 10, width + 24, 130), GUIContent.none);
 
             // Tunable 0 is History Samples (frames) — same knob as the Control Panel.
             float min = history.TunableMin(0);
@@ -88,6 +96,14 @@ namespace CameraControl
             bool auto = GUI.Toggle(new Rect(position.x, position.y + 52, width, 24),
                                    _autoOrbit, " Auto Orbit (stage cams)");
             if (auto != _autoOrbit) ApplyAutoOrbit(auto);
+
+            if (exporter != null)
+            {
+                if (GUI.Button(new Rect(position.x, position.y + 82, 190, 26), "Export GLB + USDZ"))
+                    exporter.ExportWeb();
+                GUI.Label(new Rect(position.x + 198, position.y + 84, width - 198, 44),
+                          exporter.StatusText);
+            }
 
             GUI.matrix = Matrix4x4.identity;
         }
