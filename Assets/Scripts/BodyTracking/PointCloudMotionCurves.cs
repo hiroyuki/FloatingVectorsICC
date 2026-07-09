@@ -35,17 +35,19 @@ namespace BodyTracking
         // ---- Shared.IPanelTunable (one-stop Control Panel) ----
         // Look knobs so the curves can be dialled in at runtime, not just the Inspector.
         public string TuningLabel => "Motion lines";
-        public int TunableCount => 5;
+        public int TunableCount => 6;
         public string TunableName(int i) =>
             i == 0 ? "Brightness" :
             i == 1 ? "Ribbon Width (m)" :
             i == 2 ? "Round shading" :
-            i == 3 ? "Rim Boost" : "Lag Comp (s)";
+            i == 3 ? "Rim Boost" :
+            i == 4 ? "Lag Comp (s)" : "Tail Alpha";
         public float TunableValue(int i) =>
             i == 0 ? brightness :
             i == 1 ? ribbonWidth :
             i == 2 ? round :
-            i == 3 ? rimBoost : lagCompSeconds;
+            i == 3 ? rimBoost :
+            i == 4 ? lagCompSeconds : tailAlpha;
         public void SetTunableValue(int i, float value)
         {
             switch (i)
@@ -54,7 +56,8 @@ namespace BodyTracking
                 case 1: ribbonWidth = Mathf.Clamp(value, 0f, 0.05f); break;
                 case 2: round = Mathf.Clamp01(value); break;
                 case 3: rimBoost = Mathf.Clamp(value, 0f, 2f); break;
-                default: lagCompSeconds = Mathf.Clamp(value, 0f, 0.2f); break;
+                case 4: lagCompSeconds = Mathf.Clamp(value, 0f, 0.2f); break;
+                default: tailAlpha = Mathf.Clamp01(value); break;
             }
         }
         public float TunableMin(int i) => 0f;
@@ -62,7 +65,8 @@ namespace BodyTracking
             i == 0 ? 3f :
             i == 1 ? 0.05f :
             i == 2 ? 1f :
-            i == 3 ? 2f : 0.2f;
+            i == 3 ? 2f :
+            i == 4 ? 0.2f : 1f;
         public bool TunableIsInt(int i) => false;
 
         [Tooltip("Bone pose history source. Auto-resolves the first BonePoseHistory at OnEnable.")]
@@ -178,6 +182,11 @@ namespace BodyTracking
                  "rounding stays saturated. Only affects the look when round > 0.")]
         public float rimBoost = 0.5f;
 
+        [Range(0f, 1f)]
+        [Tooltip("Ribbon alpha at the OLD end of each curve. 1 = constant (previous look); 0 = the " +
+                 "past tip dissolves completely, so the trail fades in from the past like a stroke.")]
+        public float tailAlpha = 0f;
+
         [Header("Freeze")]
         [Tooltip("Hard hold: stop rebuilding and keep drawing the last curves, ignoring parameter and " +
                  "pose changes. For holding the sculpture during live play. NOTE: pausing playback " +
@@ -256,6 +265,7 @@ namespace BodyTracking
         private static readonly int kWidth = Shader.PropertyToID("_Width");
         private static readonly int kRound = Shader.PropertyToID("_Round");
         private static readonly int kRimBoost = Shader.PropertyToID("_RimBoost");
+        private static readonly int kTailAlpha = Shader.PropertyToID("_TailAlpha");
         private static readonly int kSegsOut = Shader.PropertyToID("_SegsOut");
         private static readonly int kSegStats = Shader.PropertyToID("_SegStats");
         private static readonly int kSegCap = Shader.PropertyToID("_SegCap");
@@ -571,12 +581,14 @@ namespace BodyTracking
 
         // ---- Web export (TSDFPrintExporter.ExportWeb) ----
 
-        // CPU mirror of the compute LineVert (float3 pos + float3 colour, 24B) so
-        // GetData offsets are unambiguous buffer-element counts.
+        // CPU mirror of the compute LineVert (float3 pos + age + float3 colour + pad,
+        // 32B) so GetData offsets are unambiguous buffer-element counts.
         private struct LineVertCpu
         {
             public Vector3 p;
+            public float age;
             public Vector3 c;
+            public float pad;
         }
 
         /// <summary>Read back every seedStride-th drawn curve as a CPU polyline —
@@ -625,6 +637,7 @@ namespace BodyTracking
             _mat.SetFloat(kWidth, ribbonWidth);
             _mat.SetFloat(kRound, round);
             _mat.SetFloat(kRimBoost, rimBoost);
+            _mat.SetFloat(kTailAlpha, tailAlpha);
             var bounds = new Bounds(Vector3.zero, Vector3.one * 50f);
             Graphics.DrawProceduralIndirect(_mat, bounds, MeshTopology.Triangles, _argsBuf, 0,
                 camera: null, properties: null,
@@ -692,7 +705,7 @@ namespace BodyTracking
 
                 int segments = cap * (ringLen - 1) * subdiv;
                 int lineVerts = segments * 2;                   // _Verts entries (segment endpoint pairs)
-                _outBuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, lineVerts, sizeof(float) * 6); // LineVert
+                _outBuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, lineVerts, sizeof(float) * 8); // LineVert (pos+age+col+pad)
                 _argsBuf = new GraphicsBuffer(GraphicsBuffer.Target.IndirectArguments, 4, sizeof(uint));
                 // Ribbon: each segment is expanded to a quad (2 tris = 6 verts) in the shader.
                 _argsBuf.SetData(new uint[] { (uint)(segments * 6), 1, 0, 0 });

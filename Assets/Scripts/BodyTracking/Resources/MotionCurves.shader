@@ -22,25 +22,32 @@ Shader "Orbbec/MotionCurves"
         // so rounding stays saturated instead of washing out.
         _RimPower   ("Rim Power", Float) = 2.5
         _RimBoost   ("Rim Boost", Range(0, 2)) = 0.5
+        // Alpha at the OLD end of each curve (age 0). 1 = no fade; 0 = the past
+        // tip dissolves completely, so trails read as fading in from the past.
+        _TailAlpha  ("Tail Alpha (past end)", Range(0, 1)) = 0.0
     }
     SubShader
     {
-        Tags { "RenderType" = "Opaque" "Queue" = "Geometry" "IgnoreProjector" = "True" }
+        // Transparent so the tail fade actually blends over the mesh/cloud behind
+        // it. ZWrite off (standard for transparents); ribbons stop occluding each
+        // other, which for thin dense strokes reads fine and avoids sort artefacts.
+        Tags { "RenderType" = "Transparent" "Queue" = "Transparent" "IgnoreProjector" = "True" }
         LOD 100
 
         Pass
         {
             Cull Off
-            ZWrite On
+            ZWrite Off
             ZTest LEqual
+            Blend SrcAlpha OneMinusSrcAlpha
 
             CGPROGRAM
             #pragma vertex   vert
             #pragma fragment frag
             #include "UnityCG.cginc"
 
-            // Matches LineVert in MotionCurvesBuild.compute (pos + colour, 24B).
-            struct LineVert { float3 p; float3 c; };
+            // Matches LineVert in MotionCurvesBuild.compute (pos + age + colour + pad, 32B).
+            struct LineVert { float3 p; float age; float3 c; float pad; };
             StructuredBuffer<LineVert> _Verts;
 
             float _Brightness;
@@ -48,6 +55,7 @@ Shader "Orbbec/MotionCurves"
             float _Round;
             float _RimPower;
             float _RimBoost;
+            float _TailAlpha;
 
             struct V2F
             {
@@ -56,6 +64,7 @@ Shader "Orbbec/MotionCurves"
                 float3 worldPos : TEXCOORD1;
                 float3 sideDir  : TEXCOORD2; // unit ribbon-width direction (world)
                 float  u        : TEXCOORD3; // cross-ribbon coord in [-1, +1]
+                float  age      : TEXCOORD4; // 0 = oldest history end, 1 = newest
             };
 
             V2F vert(uint vid : SV_VertexID)
@@ -79,6 +88,7 @@ Shader "Orbbec/MotionCurves"
                     o.worldPos = float3(0, 0, 0);
                     o.sideDir = float3(0, 1, 0);
                     o.u = 0;
+                    o.age = 0;
                     return o;
                 }
 
@@ -103,19 +113,20 @@ Shader "Orbbec/MotionCurves"
 
                 // Two triangles: (a0, a1, b0), (b0, a1, b1).
                 // u = -1 on the a0/b0 edge, +1 on the a1/b1 edge (ribbon width).
-                float3 wp; float3 col; float uu;
-                if      (corner == 0u) { wp = a0; col = A.c; uu = -1; }
-                else if (corner == 1u) { wp = a1; col = A.c; uu = +1; }
-                else if (corner == 2u) { wp = b0; col = B.c; uu = -1; }
-                else if (corner == 3u) { wp = b0; col = B.c; uu = -1; }
-                else if (corner == 4u) { wp = a1; col = A.c; uu = +1; }
-                else                   { wp = b1; col = B.c; uu = +1; }
+                float3 wp; float3 col; float uu; float age;
+                if      (corner == 0u) { wp = a0; col = A.c; uu = -1; age = A.age; }
+                else if (corner == 1u) { wp = a1; col = A.c; uu = +1; age = A.age; }
+                else if (corner == 2u) { wp = b0; col = B.c; uu = -1; age = B.age; }
+                else if (corner == 3u) { wp = b0; col = B.c; uu = -1; age = B.age; }
+                else if (corner == 4u) { wp = a1; col = A.c; uu = +1; age = A.age; }
+                else                   { wp = b1; col = B.c; uu = +1; age = B.age; }
 
                 o.pos = mul(UNITY_MATRIX_VP, float4(wp, 1.0));
                 o.vcol = col;
                 o.worldPos = wp;
                 o.sideDir = sideUnit;
                 o.u = uu;
+                o.age = age;
                 return o;
             }
 
@@ -143,7 +154,11 @@ Shader "Orbbec/MotionCurves"
                 float3 rounded = albedo * _Brightness * (shade + rim * _RimBoost);
 
                 float3 rgb = lerp(flatCol, rounded, saturate(_Round));
-                return fixed4(rgb, 1.0);
+                // Tail fade: alpha ramps from _TailAlpha at the oldest history
+                // point up to opaque at the newest, so the trail dissolves into
+                // the past instead of ending in a hard cut.
+                float alpha = lerp(saturate(_TailAlpha), 1.0, saturate(i.age));
+                return fixed4(rgb, alpha);
             }
             ENDCG
         }

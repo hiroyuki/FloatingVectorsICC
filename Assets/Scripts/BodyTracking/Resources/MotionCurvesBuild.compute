@@ -18,7 +18,10 @@
 #pragma kernel CSEmitSegs
 
 struct Sample { float3 A; float3 B; float3 U; float3 V; float3 W; };
-struct LineVert { float3 p; float3 c; };
+// age: position along THIS curve, 0 = oldest history end, 1 = newest — the ribbon
+// shader fades the tail out with it. 32B (2 x float4-ish) — keep the C# mirror
+// (PointCloudMotionCurves.LineVertCpu) and MotionCurves.shader in sync.
+struct LineVert { float3 p; float age; float3 c; float pad; };
 struct SeedPoint { float3 pos; float3 col; }; // compacted in-bbox point: world pos + original RGB
 
 ByteAddressBuffer            _Src;          // source vertices, 24B stride (pos12 + col12)
@@ -97,7 +100,7 @@ float3 CatmullRom(float3 p0, float3 p1, float3 p2, float3 p3, float u)
 // Fill a seed's whole output slot with zero-length (invisible) segments.
 void WriteDegenerate(uint slotBase, uint segs)
 {
-    LineVert z; z.p = float3(0, 0, 0); z.c = float3(0, 0, 0);
+    LineVert z; z.p = float3(0, 0, 0); z.age = 0; z.c = float3(0, 0, 0); z.pad = 0;
     for (uint s = 0; s < segs; s++)
     {
         _Out[slotBase + s * 2u]      = z;
@@ -311,8 +314,10 @@ void CSBuild(uint3 id : SV_DispatchThreadID)
     uint m = ClassifyReproject(sp.pos, pts, anchorUnused);
     if (m == 0u) { WriteDegenerate(slotBase, segsPerSeed); return; }
 
-    // Emit a Catmull-Rom subdivided line strip through pts[0..m-1].
+    // Emit a Catmull-Rom subdivided line strip through pts[0..m-1]. Strip index 0
+    // is the OLDEST history point, so age runs 0 (past tip) -> 1 (newest end).
     uint totalSegs = (m >= 2u) ? (m - 1u) * _Subdiv : 0u;
+    float invTotal = totalSegs > 0u ? 1.0 / (float)totalSegs : 0.0;
     float3 prev = float3(0, 0, 0);
     for (uint si = 0; si <= totalSegs; si++)
     {
@@ -320,15 +325,15 @@ void CSBuild(uint3 id : SV_DispatchThreadID)
         if (si > 0u)
         {
             uint seg = si - 1u;
-            LineVert v0; v0.p = prev; v0.c = col;
-            LineVert v1; v1.p = pt;   v1.c = col;
+            LineVert v0; v0.p = prev; v0.age = (si - 1u) * invTotal; v0.c = col; v0.pad = 0;
+            LineVert v1; v1.p = pt;   v1.age = si * invTotal;       v1.c = col; v1.pad = 0;
             _Out[slotBase + seg * 2u]      = v0;
             _Out[slotBase + seg * 2u + 1u] = v1;
         }
         prev = pt;
     }
     // Zero-fill the unused tail.
-    LineVert z; z.p = float3(0, 0, 0); z.c = float3(0, 0, 0);
+    LineVert z; z.p = float3(0, 0, 0); z.age = 0; z.c = float3(0, 0, 0); z.pad = 0;
     for (uint s = totalSegs; s < segsPerSeed; s++)
     {
         _Out[slotBase + s * 2u]      = z;
