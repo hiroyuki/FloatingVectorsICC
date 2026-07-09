@@ -96,6 +96,11 @@ namespace BodyTracking
         private SkeletonMerger.BoneEndpoints[] _scratch;
         private int _boneCount;
         private int _ringLen;
+        // Per-bone endpoint speed (m/s) measured between consecutive ingests. Consumers
+        // (PointCloudMotionCurves) use it to widen classification tolerance in proportion to
+        // how far the BT pipeline lag (~70ms) lets the real limb outrun the tracked bone.
+        private float[] _tipSpeed;
+        private float[] _lastPushRealtime;        // per bone; -1 = no previous push
 
         // Virtual tip bones appended after the real Bones table, for body extremities the
         // skeleton doesn't reach: the hands (HAND/HANDTIP/THUMB joints are dropped
@@ -203,6 +208,8 @@ namespace BodyTracking
             _head = new int[n];
             _count = new int[n];
             _prevV = new Vector3[n];
+            _tipSpeed = new float[n];
+            _lastPushRealtime = new float[n];
             _scratch = new SkeletonMerger.BoneEndpoints[real]; // merger only fills the real bones
             for (int b = 0; b < n; b++)
             {
@@ -210,6 +217,7 @@ namespace BodyTracking
                 _head[b] = -1;
                 _count[b] = 0;
                 _prevV[b] = Vector3.zero;
+                _lastPushRealtime[b] = -1f;
             }
 
             // Parent-bone table: for bone (a,b), find the bone whose child joint (.b) == a.
@@ -265,6 +273,11 @@ namespace BodyTracking
                 _lastPoseVersion = v;
                 _havePoseVersion = true;
             }
+
+            // No new pose this frame: bleed the measured bone speeds out (~0.15s time constant)
+            // so speed-widened tolerances relax once the pose stream stalls or pauses — the
+            // tracked bone has caught up, the extra margin is no longer owed.
+            if (!newFrame) DecayTipSpeeds();
 
             if (newFrame)
             {
@@ -418,6 +431,23 @@ namespace BodyTracking
 
         private void Push(int bone, Sample s)
         {
+            // Endpoint speed vs the previous ingest of this bone. dt is wall clock (ingests
+            // arrive at the BT rate, not the render rate); clamped so a hitch or a
+            // just-reset bone can't produce a silly spike.
+            float now = Time.realtimeSinceStartup;
+            if (_count[bone] > 0 && _lastPushRealtime[bone] >= 0f)
+            {
+                float dt = Mathf.Clamp(now - _lastPushRealtime[bone], 0.01f, 0.3f);
+                Sample prev = _ring[bone][_head[bone]];
+                float moved = Mathf.Max(Vector3.Distance(s.A, prev.A), Vector3.Distance(s.B, prev.B));
+                _tipSpeed[bone] = moved / dt;
+            }
+            else
+            {
+                _tipSpeed[bone] = 0f;
+            }
+            _lastPushRealtime[bone] = now;
+
             int head = _head[bone] + 1;
             if (head >= _ringLen) head = 0;
             _ring[bone][head] = s;
@@ -430,6 +460,21 @@ namespace BodyTracking
             _count[bone] = 0;
             _head[bone] = -1;
             _prevV[bone] = Vector3.zero;
+            _tipSpeed[bone] = 0f;
+            _lastPushRealtime[bone] = -1f;
+        }
+
+        /// <summary>Endpoint speed (m/s) of a bone measured between its two newest ring
+        /// ingests; 0 when unknown. Decays while no new pose arrives (pause / stall) so a
+        /// speed-widened tolerance relaxes back once the tracked bone has caught up.</summary>
+        public float GetTipSpeed(int bone)
+            => (_tipSpeed != null && bone >= 0 && bone < _tipSpeed.Length) ? _tipSpeed[bone] : 0f;
+
+        private void DecayTipSpeeds()
+        {
+            if (_tipSpeed == null) return;
+            float k = Mathf.Exp(-Time.deltaTime / 0.15f);
+            for (int b = 0; b < _tipSpeed.Length; b++) _tipSpeed[b] *= k;
         }
 
         private void ResetAll()

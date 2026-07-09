@@ -35,15 +35,17 @@ namespace BodyTracking
         // ---- Shared.IPanelTunable (one-stop Control Panel) ----
         // Look knobs so the curves can be dialled in at runtime, not just the Inspector.
         public string TuningLabel => "Motion lines";
-        public int TunableCount => 4;
+        public int TunableCount => 5;
         public string TunableName(int i) =>
             i == 0 ? "Brightness" :
             i == 1 ? "Ribbon Width (m)" :
-            i == 2 ? "Round shading" : "Rim Boost";
+            i == 2 ? "Round shading" :
+            i == 3 ? "Rim Boost" : "Lag Comp (s)";
         public float TunableValue(int i) =>
             i == 0 ? brightness :
             i == 1 ? ribbonWidth :
-            i == 2 ? round : rimBoost;
+            i == 2 ? round :
+            i == 3 ? rimBoost : lagCompSeconds;
         public void SetTunableValue(int i, float value)
         {
             switch (i)
@@ -51,14 +53,16 @@ namespace BodyTracking
                 case 0: brightness = Mathf.Clamp(value, 0f, 3f); break;
                 case 1: ribbonWidth = Mathf.Clamp(value, 0f, 0.05f); break;
                 case 2: round = Mathf.Clamp01(value); break;
-                default: rimBoost = Mathf.Clamp(value, 0f, 2f); break;
+                case 3: rimBoost = Mathf.Clamp(value, 0f, 2f); break;
+                default: lagCompSeconds = Mathf.Clamp(value, 0f, 0.2f); break;
             }
         }
         public float TunableMin(int i) => 0f;
         public float TunableMax(int i) =>
             i == 0 ? 3f :
             i == 1 ? 0.05f :
-            i == 2 ? 1f : 2f;
+            i == 2 ? 1f :
+            i == 3 ? 2f : 0.2f;
         public bool TunableIsInt(int i) => false;
 
         [Tooltip("Bone pose history source. Auto-resolves the first BonePoseHistory at OnEnable.")]
@@ -86,6 +90,19 @@ namespace BodyTracking
         [Range(0f, 0.3f)]
         [Tooltip("Cull a seed as background if its nearest bone surface distance exceeds this (m).")]
         public float surfaceMargin = 0.05f;
+
+        [Range(0f, 0.2f)]
+        [Tooltip("Latency compensation (s). Each bone's classification tolerance grows by its own " +
+                 "tip speed × this, so fast-moving limbs keep their seeds even though the tracked " +
+                 "bone axis runs ~70ms (measured BT pipeline lag) behind the point cloud. The seed " +
+                 "anchor is still the real cloud point, so admitted seeds draw in the right place. " +
+                 "0 = off (fixed tolerance, previous behaviour).")]
+        public float lagCompSeconds = 0.07f;
+
+        [Range(0f, 0.4f)]
+        [Tooltip("Cap (m) on the per-bone speed-adaptive tolerance, so a tracking glitch (teleporting " +
+                 "bone) can't open the gate to the whole cloud.")]
+        public float lagMarginMax = 0.25f;
 
         [Range(0f, 0.6f)]
         [Tooltip("Padding (m) added around the bone AABB when collecting seed candidates. Seeds are " +
@@ -148,6 +165,9 @@ namespace BodyTracking
         private GraphicsBuffer _argsBuf;     // 4-uint indirect args
         private GraphicsBuffer _radiusABuf;  // float[boneCount]
         private GraphicsBuffer _radiusBBuf;
+        private GraphicsBuffer _extraMarginBuf; // float[boneCount] speed-adaptive extra tolerance (m)
+        private float[] _extraMargin;           // CPU staging for _extraMarginBuf
+        private float _maxExtraMargin;          // this frame's max, folded into the seed bbox padding
         private GraphicsBuffer _collectBuf;      // SeedPoint[totalSourceVerts] compacted in-bbox points
         private GraphicsBuffer _collectCounter;  // uint[1]
         private int _collectCap;                 // _collectBuf capacity (total source verts sized)
@@ -167,6 +187,7 @@ namespace BodyTracking
         private static readonly int kBoneCounts = Shader.PropertyToID("_BoneCounts");
         private static readonly int kRadiusA = Shader.PropertyToID("_BoneRadiusA");
         private static readonly int kRadiusB = Shader.PropertyToID("_BoneRadiusB");
+        private static readonly int kExtraMargin = Shader.PropertyToID("_BoneExtraMargin");
         private static readonly int kOut = Shader.PropertyToID("_Out");
         private static readonly int kSrcL2W = Shader.PropertyToID("_SrcLocalToWorld");
         private static readonly int kSrcCount = Shader.PropertyToID("_SrcCount");
@@ -235,6 +256,7 @@ namespace BodyTracking
             _argsBuf?.Release(); _argsBuf = null;
             _radiusABuf?.Release(); _radiusABuf = null;
             _radiusBBuf?.Release(); _radiusBBuf = null;
+            _extraMarginBuf?.Release(); _extraMarginBuf = null;
             _collectBuf?.Release(); _collectBuf = null;
             _collectCounter?.Release(); _collectCounter = null;
             _segStatsBuf?.Release(); _segStatsBuf = null;
@@ -294,13 +316,16 @@ namespace BodyTracking
             foreach (var mf in sources) totalSrcVerts += mf.sharedMesh.vertexCount;
 
             EnsureBuffers(boneCount, ringLen, subdiv, totalSrcVerts);
+            UpdateExtraMargins(boneCount);
 
             // Seed bounding box: the bone AABB grown by padding, so the prepass keeps only body points.
+            // The speed-adaptive tolerance widens the box too — the whole point is admitting cloud
+            // points the lagging bone AABB doesn't reach yet.
             // No pose yet -> fall back to an all-encompassing box (behaves like the old whole-cloud seed).
             Vector3 bmin, bmax;
             if (history.TryGetWorldBounds(out var bb))
             {
-                Vector3 pad = Vector3.one * bboxPadding;
+                Vector3 pad = Vector3.one * (bboxPadding + _maxExtraMargin);
                 bmin = bb.min - pad; bmax = bb.max + pad;
             }
             else { bmin = Vector3.one * -1e9f; bmax = Vector3.one * 1e9f; }
@@ -330,6 +355,21 @@ namespace BodyTracking
             return true;
         }
 
+        // Per-bone speed-adaptive extra tolerance: tip speed × lag compensation, capped.
+        // Fast bones widen their own classification gate exactly while they are fast;
+        // everything is 0 when the body is still (or lagCompSeconds is 0).
+        private void UpdateExtraMargins(int boneCount)
+        {
+            _maxExtraMargin = 0f;
+            for (int b = 0; b < boneCount; b++)
+            {
+                float extra = Mathf.Min(history.GetTipSpeed(b) * lagCompSeconds, lagMarginMax);
+                _extraMargin[b] = extra;
+                if (extra > _maxExtraMargin) _maxExtraMargin = extra;
+            }
+            _extraMarginBuf.SetData(_extraMargin);
+        }
+
         // Bind the collect/history/radius inputs + classify/reproject scalars shared
         // by CSBuild and CSEmitSegs. CollectSeeds() must have succeeded this frame.
         private void BindBuildParams(int kernel)
@@ -341,6 +381,7 @@ namespace BodyTracking
             _shader.SetBuffer(kernel, kBoneCounts, history.CountBuffer);
             _shader.SetBuffer(kernel, kRadiusA, _radiusABuf);
             _shader.SetBuffer(kernel, kRadiusB, _radiusBBuf);
+            _shader.SetBuffer(kernel, kExtraMargin, _extraMarginBuf);
             _shader.SetInt(kBoneCount, _boneCount);
             _shader.SetInt(kRingLen, _ringLen);
             _shader.SetFloat(kRadiusScale, radiusScale);
@@ -529,6 +570,7 @@ namespace BodyTracking
             {
                 _outBuf?.Release(); _argsBuf?.Release();
                 _radiusABuf?.Release(); _radiusBBuf?.Release();
+                _extraMarginBuf?.Release();
                 _hasBuilt = false;
                 _boneCount = boneCount;
                 _ringLen = ringLen;
@@ -561,6 +603,9 @@ namespace BodyTracking
                 _radiusBBuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, boneCount, sizeof(float));
                 _radiusABuf.SetData(rA);
                 _radiusBBuf.SetData(rB);
+                _extraMarginBuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, boneCount, sizeof(float));
+                _extraMargin = new float[boneCount];
+                _extraMarginBuf.SetData(_extraMargin); // zeros until the first UpdateExtraMargins
             }
 
             // Collect buffer holds the compacted in-bbox points (SeedPoint = pos + colour, 24B);

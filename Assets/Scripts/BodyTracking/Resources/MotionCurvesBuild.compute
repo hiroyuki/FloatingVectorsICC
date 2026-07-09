@@ -30,6 +30,9 @@ StructuredBuffer<Sample>   _History;      // bone*K, oldest->newest
 StructuredBuffer<uint>     _BoneCounts;   // valid samples per bone
 StructuredBuffer<float>    _BoneRadiusA;  // radius at bone.a (parent side), m
 StructuredBuffer<float>    _BoneRadiusB;  // radius at bone.b (child side), m
+StructuredBuffer<float>    _BoneExtraMargin; // per-bone speed-adaptive extra tolerance (m): tip speed ×
+                                             // lag compensation, so a fast limb keeps its seeds even
+                                             // though its tracked axis runs ~70ms behind the cloud
 RWStructuredBuffer<LineVert> _Out;
 
 float4x4 _SrcLocalToWorld;
@@ -164,7 +167,9 @@ uint ClassifyReproject(float3 p, out float3 pts[32], out float3 anchor)
         float t = (ab2 < 1e-12) ? 0.0 : saturate(dot(p - s.A, ab) / ab2);
         float3 closest = s.A + t * ab;
         float d = length(p - closest);
-        float radius = lerp(_BoneRadiusA[b], _BoneRadiusB[b], t) * _RadiusScale;
+        // Extra margin folds into the effective radius so ranking, blend weights and the
+        // background cull all widen together for a fast-moving bone.
+        float radius = lerp(_BoneRadiusA[b], _BoneRadiusB[b], t) * _RadiusScale + _BoneExtraMargin[b];
         float surf = d - radius;
         float key = max(surf, 0.0) * 1000.0 + d; // order: rank first, centerline d tie-break
 
