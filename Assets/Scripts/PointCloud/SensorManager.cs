@@ -113,6 +113,13 @@ namespace PointCloud
                  "SensorRecorder.folderPath. Empty → Application.persistentDataPath/Recordings/recording.")]
         public string extrinsicsRoot = string.Empty;
 
+        [Header("Frame rate")]
+        [Tooltip("Cap the application frame rate via Application.targetFrameRate. " +
+                 "vSync is disabled (QualitySettings.vSyncCount = 0) so the cap takes " +
+                 "effect — vSync would otherwise override targetFrameRate. Set to 0 or " +
+                 "below to leave the frame rate uncapped.")]
+        public int targetFrameRate = 30;
+
         [Header("Diagnostics")]
         public bool verboseLogging = true;
 
@@ -123,6 +130,18 @@ namespace PointCloud
         private void Awake()
         {
             if (view == null) view = FindFirstObjectByType<PointCloudView>();
+            ApplyTargetFrameRate();
+        }
+
+        // vSync overrides Application.targetFrameRate, so it must be off for the cap
+        // to take effect. Only touch these globals when a positive cap is requested.
+        private void ApplyTargetFrameRate()
+        {
+            if (targetFrameRate <= 0) return;
+            QualitySettings.vSyncCount = 0;
+            Application.targetFrameRate = targetFrameRate;
+            if (verboseLogging)
+                Debug.Log($"[{nameof(SensorManager)}] targetFrameRate capped at {targetFrameRate} fps (vSync off).");
         }
 
         private bool _markerToggleInit;
