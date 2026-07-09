@@ -64,6 +64,13 @@ namespace BodyTracking
         [Tooltip("Bone pose history source. Auto-resolves the first BonePoseHistory at OnEnable.")]
         public BonePoseHistory history;
 
+        [Tooltip("Playback recorder, used only to detect an intentional pause. While paused with " +
+                 "an unchanged pose and unchanged build parameters, the last built curves are held " +
+                 "instead of rebuilt: the seed pool outnumbers the seed budget and the GPU collect " +
+                 "order is nondeterministic, so rebuilding a static frame re-picks a different seed " +
+                 "subset every frame and the paused sculpture shimmers. Auto-resolves at OnEnable.")]
+        public PointCloud.SensorRecorder recorder;
+
         [Header("Seed source")]
         [Tooltip("Explicit point-cloud MeshFilters to seed from. If empty, all _Playback_* meshes " +
                  "and live PointCloudRenderer meshes in the scene are used automatically.")]
@@ -239,6 +246,7 @@ namespace BodyTracking
         private void OnEnable()
         {
             if (history == null) history = FindFirstObjectByType<BonePoseHistory>();
+            if (recorder == null) recorder = FindFirstObjectByType<PointCloud.SensorRecorder>();
             if (_shader == null)
             {
                 _shader = Resources.Load<ComputeShader>("MotionCurvesBuild");
@@ -294,7 +302,25 @@ namespace BodyTracking
                 return;
             }
 
+            // Auto-hold on pause: with the pose AND build params unchanged there is nothing new to
+            // build, and rebuilding anyway is actively harmful — collected sites outnumber the seed
+            // budget (TSDF mesh seeding) and GPU append order is nondeterministic, so each rebuild
+            // seeds a DIFFERENT subset and the paused sculpture shimmers. Any parameter tweak or
+            // frame-step (PoseVersion change) rebuilds normally.
+            bool paused = recorder != null && recorder.IsPaused;
+            int paramHash = BuildParamsHash();
+            ulong poseVersion = history != null && history.bodyTracking != null
+                ? history.bodyTracking.PoseVersion : 0UL;
+            if (paused && _hasBuilt && _outBuf != null
+                && paramHash == _lastBuildParamHash && poseVersion == _lastBuildPoseVersion)
+            {
+                DrawCurves();
+                return;
+            }
+
             if (!CollectSeeds(out _)) return;
+            _lastBuildParamHash = paramHash;
+            _lastBuildPoseVersion = poseVersion;
 
             // --- build: one dispatch, seeds strided over the compacted points ---
             BindBuildParams(_buildKernel);
@@ -303,6 +329,23 @@ namespace BodyTracking
 
             _hasBuilt = true;
             DrawCurves();
+        }
+
+        private int _lastBuildParamHash;
+        private ulong _lastBuildPoseVersion;
+
+        // Hash of every field that changes what CollectSeeds/CSBuild produce (draw-time
+        // material knobs like brightness/ribbonWidth are excluded — they apply to the held
+        // buffer anyway). Used by the pause auto-hold to notice live tuning.
+        private int BuildParamsHash()
+        {
+            var hash = new System.HashCode();
+            hash.Add(seedCount); hash.Add(radiusScale); hash.Add(surfaceMargin);
+            hash.Add(envelopeMargin); hash.Add(floorY); hash.Add(floorBand);
+            hash.Add(bboxPadding); hash.Add(boneBlendCount); hash.Add(blendSharpness);
+            hash.Add(smoothSubdiv); hash.Add(sanityRange); hash.Add(seedFromTsdfMesh);
+            hash.Add(history != null ? history.CurveSamples : 0);
+            return hash.ToHashCode();
         }
 
         // Shared front half of Update() and EmitPrintSegs(): validates inputs,
