@@ -482,6 +482,7 @@ MonoBehaviour:
   ribbonWidth: 0.006
   round: 0.375
   rimBoost: 0.5
+  tailAlpha: 0
   freeze: 0
   sanityRange: 100
 --- !u!4 &333033384
@@ -743,6 +744,7 @@ GameObject:
   - component: {fileID: 814255266}
   - component: {fileID: 814255265}
   - component: {fileID: 814255264}
+  - component: {fileID: 814255267}
   m_Layer: 0
   m_Name: Display2 Camera
   m_TagString: Untagged
@@ -891,6 +893,21 @@ Camera:
   m_OcclusionCulling: 1
   m_StereoConvergence: 10
   m_StereoSeparation: 0.022
+--- !u!114 &814255267
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 814255262}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 5cd1ae4784013fc4b9f61375d0c9b7f0, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::CameraControl.PauseOrbitGate
+  recorder: {fileID: 0}
+  orbit: {fileID: 0}
+  autoOrbitOverride: 0
 --- !u!1 &836522994
 GameObject:
   m_ObjectHideFlags: 0
