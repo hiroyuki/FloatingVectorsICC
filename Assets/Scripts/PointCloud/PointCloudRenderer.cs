@@ -188,6 +188,15 @@ namespace PointCloud
         public bool logFps = false;
 
         /// <summary>
+        /// While true, Update stops consuming capture slots: the displayed mesh, TSDF
+        /// integration and BT feeds all hold the last consumed frame. The capture thread
+        /// keeps draining the SDK into the slot ring, so no backpressure builds and
+        /// clearing the flag resumes instantly. Driven by SensorRecorder.ToggleLiveFreeze
+        /// (Space in live mode); not serialized.
+        /// </summary>
+        [System.NonSerialized] public bool holdLiveFrame;
+
+        /// <summary>
         /// Fires each frame after the point cloud mesh has been updated. Subscribers receive the
         /// raw SDK point buffer in renderer-local space (OBB / decimation filters run in the
         /// vertex shader, not on this buffer), the valid point count, and the SDK frame timestamp
@@ -333,7 +342,7 @@ namespace PointCloud
             _stageSw.Stop();
             if (logFps) _shaderTicks += _stageSw.ElapsedTicks;
 
-            var slot = _slots?.TryAcquireRead();
+            var slot = holdLiveFrame ? null : _slots?.TryAcquireRead();
             if (slot != null)
             {
                 try

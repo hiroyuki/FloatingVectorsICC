@@ -609,9 +609,44 @@ namespace PointCloud
         [ContextMenu("Toggle Pause")]
         public void TogglePause()
         {
-            if (CurrentState != State.Playing) return;
-            if (IsPaused) ResumePlayback();
-            else PausePlayback();
+            if (CurrentState == State.Playing)
+            {
+                if (IsPaused) ResumePlayback();
+                else PausePlayback();
+            }
+            else ToggleLiveFreeze();
+        }
+
+        /// <summary>
+        /// Live-mode counterpart of the playback pause: freezes every live renderer's frame
+        /// intake so the whole visual — point cloud, TSDF mesh, BT skeleton and motion
+        /// curves — holds the current moment. Reuses <see cref="IsPaused"/> as the signal so
+        /// every downstream pause consumer (BonePoseHistory ring hold, PointCloudMotionCurves
+        /// auto-hold, SkeletonMerger staleness skip, WorkerGapMonitor suppression,
+        /// TSDFHoldBeautify) behaves exactly as in a playback pause. No-op unless idle in
+        /// live mode. Starting Rec or Play unfreezes first.
+        /// </summary>
+        public void ToggleLiveFreeze()
+        {
+            if (CurrentState != State.Idle || !IsLiveMode) return;
+            bool freeze = !IsPaused;
+            var mgr = ResolveManager();
+            foreach (var r in mgr.Renderers)
+                if (r != null) r.holdLiveFrame = freeze;
+            IsPaused = freeze;
+            SetStatus(freeze ? "Live frozen — Space resumes."
+                             : $"Live mode: {mgr.Renderers.Count} camera(s) connected.");
+        }
+
+        // Rec/Play must consume fresh frames; drop a live freeze before either starts.
+        private void UnfreezeLiveIfFrozen()
+        {
+            if (CurrentState != State.Idle || !IsPaused) return;
+            var mgr = ResolveManager();
+            if (mgr != null)
+                foreach (var r in mgr.Renderers)
+                    if (r != null) r.holdLiveFrame = false;
+            IsPaused = false;
         }
 
         public void PausePlayback()
@@ -1366,6 +1401,7 @@ namespace PointCloud
         private void StartRecording()
         {
             if (CurrentState == State.Playing) StopPlayback();
+            UnfreezeLiveIfFrozen();
             ClearTracks();
 
             var renderers = CollectSourceRenderers();
@@ -1642,6 +1678,7 @@ namespace PointCloud
         private void StartPlayback()
         {
             if (CurrentState == State.Recording) StopRecording();
+            UnfreezeLiveIfFrozen();
             if (_tracks.Count == 0)
             {
                 // Auto-Read: pressing Play with nothing loaded loads the configured
@@ -1722,6 +1759,11 @@ namespace PointCloud
             if (recordKey != KeyCode.None && CurrentState != State.Playing
                 && Input.GetKeyDown(recordKey))
                 ToggleRecord();
+
+            // Spacebar in LIVE mode freezes/unfreezes the whole visual — the live
+            // counterpart of the playback pause toggle below. No-op unless live.
+            if (CurrentState == State.Idle && Input.GetKeyDown(KeyCode.Space))
+                ToggleLiveFreeze();
 
             // Recording has no per-tick work, but we still want the per-second
             // diag heartbeat to log capture-side fps / drops while it's happening.
