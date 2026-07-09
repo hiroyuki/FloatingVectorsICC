@@ -1098,17 +1098,23 @@ namespace BodyTracking
         /// </summary>
         public IMergedJointRefiner JointRefiner { get; set; }
 
-        // Joints the refiner sees. Feet only for now — the k4abt failure mode the
-        // refiner corrects (occlusion-lagged limbs) is measured on ankles/feet.
+        // Joints the refiner sees. Ankles/feet are where the k4abt failure mode
+        // the refiner corrects (occlusion-lagged limbs) was measured; knees are
+        // included because an unsnapped knee leaves the shin bone axis ~0.18m off
+        // the point cloud, outside the motion-curve seed classification radius
+        // (the shin curve never appears). Order must match TSDFJointSnap's
+        // per-index embed mapping.
         private static readonly k4abt_joint_id_t[] s_refineJoints =
         {
             k4abt_joint_id_t.K4ABT_JOINT_ANKLE_LEFT,
             k4abt_joint_id_t.K4ABT_JOINT_FOOT_LEFT,
             k4abt_joint_id_t.K4ABT_JOINT_ANKLE_RIGHT,
             k4abt_joint_id_t.K4ABT_JOINT_FOOT_RIGHT,
+            k4abt_joint_id_t.K4ABT_JOINT_KNEE_LEFT,
+            k4abt_joint_id_t.K4ABT_JOINT_KNEE_RIGHT,
         };
-        private readonly Vector3[] _refineScratchPos = new Vector3[4];
-        private readonly bool[] _refineScratchValid = new bool[4];
+        private readonly Vector3[] _refineScratchPos = new Vector3[s_refineJoints.Length];
+        private readonly bool[] _refineScratchValid = new bool[s_refineJoints.Length];
 
         private void RefineMergedJoints(uint clusterId, ref k4abt_skeleton_t skel)
         {

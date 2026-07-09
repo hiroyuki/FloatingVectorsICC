@@ -58,6 +58,8 @@ namespace TSDF
         public float ankleEmbedDepth = 0.045f;
         [Tooltip("How deep (metres) inside the surface the foot joint centre sits.")]
         public float footEmbedDepth = 0.025f;
+        [Tooltip("How deep (metres) inside the surface the knee joint centre sits.")]
+        public float kneeEmbedDepth = 0.06f;
 
         [Header("Correction dynamics")]
         [Tooltip("Blend rate of new snap results into the cached correction (per readback).")]
@@ -77,8 +79,8 @@ namespace TSDF
         [Tooltip("Log snap acceptance counters once per second.")]
         public bool logDiagnostics = false;
 
-        private const int kJointCount = 4; // matches SkeletonMerger.s_refineJoints order:
-                                           // ankleL, footL, ankleR, footR
+        private const int kJointCount = 6; // matches SkeletonMerger.s_refineJoints order:
+                                           // ankleL, footL, ankleR, footR, kneeL, kneeR
 
         private sealed class SnapState
         {
@@ -188,7 +190,12 @@ namespace TSDF
 
             for (int i = 0; i < kJointCount; i++)
             {
-                float embed = (i % 2 == 0) ? ankleEmbedDepth : footEmbedDepth;
+                float embed = i switch
+                {
+                    0 or 2 => ankleEmbedDepth,
+                    1 or 3 => footEmbedDepth,
+                    _ => kneeEmbedDepth,
+                };
                 // Invalid joints still occupy a slot (fixed layout); their output
                 // is ignored in ApplyResult.
                 var p = state.PendingInput[i];
@@ -224,7 +231,7 @@ namespace TSDF
             if (debugSyncReadback || !SystemInfo.supportsAsyncGPUReadback)
             {
                 _jointsOut.GetData(_jointsOutSync);
-                ApplyResult(_inFlightClusterId, _jointsOutSync[0], _jointsOutSync[1], _jointsOutSync[2], _jointsOutSync[3]);
+                ApplyResult(_inFlightClusterId, _jointsOutSync);
             }
             else
             {
@@ -238,20 +245,20 @@ namespace TSDF
                     if (gen != _requestGeneration) return;
                     _readbackInFlight = false;
                     if (req.hasError) return;
-                    var data = req.GetData<Vector4>();
-                    ApplyResult(_inFlightClusterId, data[0], data[1], data[2], data[3]);
+                    // Only one readback is ever in flight, so the sync scratch
+                    // array is free to reuse here.
+                    req.GetData<Vector4>().CopyTo(_jointsOutSync);
+                    ApplyResult(_inFlightClusterId, _jointsOutSync);
                 });
             }
         }
 
-        private void ApplyResult(uint clusterId, Vector4 r0, Vector4 r1, Vector4 r2, Vector4 r3)
+        private void ApplyResult(uint clusterId, Vector4[] results)
         {
             if (!_states.TryGetValue(clusterId, out var state)) return; // evicted meanwhile
             state.LastResultRealtime = Time.realtimeSinceStartup;
-            ApplyOne(state, 0, r0);
-            ApplyOne(state, 1, r1);
-            ApplyOne(state, 2, r2);
-            ApplyOne(state, 3, r3);
+            for (int i = 0; i < kJointCount; i++)
+                ApplyOne(state, i, results[i]);
             LogDiagnosticsIfDue();
         }
 
