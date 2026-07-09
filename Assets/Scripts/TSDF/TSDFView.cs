@@ -23,7 +23,8 @@ namespace TSDF
 {
     [AddComponentMenu("TSDF/View")]
     [DefaultExecutionOrder(10)]
-    public sealed class TSDFView : MonoBehaviour, Shared.IViewToggle, Shared.IPanelTunable
+    public sealed class TSDFView : MonoBehaviour, Shared.IViewToggle, Shared.IPanelTunable,
+                                   Shared.ITriangleSeedSource
     {
         public enum ViewMode
         {
@@ -50,6 +51,17 @@ namespace TSDF
         // ---- Shared.IViewToggle (unified Views panel) ----
         public string ViewLabel => "TSDF mesh";
         public bool Visible { get => showMesh; set => showMesh = value; }
+
+        // ---- Shared.ITriangleSeedSource (motion curves seed from the displayed surface) ----
+        // The extracted MC triangle soup, world space. Ready only while the mesh is actually
+        // being drawn: Update early-outs on !showMesh / other modes, so the buffer would go
+        // stale the moment the view is hidden — consumers must fall back to the clouds then.
+        public ComputeBuffer TriangleBuffer => _meshTrianglesBuffer;
+        public ComputeBuffer TriangleArgsBuffer => _meshArgsBuffer;
+        public int MaxTriangles => meshMaxTriangles;
+        public bool TrianglesReady =>
+            isActiveAndEnabled && showMesh && mode == ViewMode.Mesh
+            && _meshTrianglesBuffer != null && _meshArgsBuffer != null && _lastPublishVersion >= 0;
 
         // ---- Shared.IPanelTunable (one-stop Control Panel) ----
         // Mesh look knobs so the surface can be graded at runtime, not just the Inspector.

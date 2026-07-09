@@ -13,6 +13,7 @@
 // col12, 24B raw). See PointCloudMotionCurves.cs for the host side.
 
 #pragma kernel CSCollect
+#pragma kernel CSCollectTris
 #pragma kernel CSBuild
 #pragma kernel CSEmitSegs
 
@@ -97,6 +98,33 @@ void WriteDegenerate(uint slotBase, uint segs)
         _Out[slotBase + s * 2u]      = z;
         _Out[slotBase + s * 2u + 1u] = z;
     }
+}
+
+// ---- TSDF-mesh seed collect (CSCollectTris) ----
+// The displayed TSDF surface is an appended triangle soup (3 x {pos, colour} per entry,
+// WORLD space — see TSDFMarchingCubes.compute / Shared.ITriangleSeedSource). Its cap can
+// sit a few cm proud of the raw depth points (truncation inflation + temporal hole fill),
+// e.g. the top of the head, so seeding only from the clouds leaves the visible surface
+// there curve-less. One thread per triangle appends p0/c0 only: one seed site per
+// triangle is already voxel-density, and skipping p1/p2 avoids tripling the collect load
+// with shared-vertex duplicates.
+struct SrcTri { float3 p0; float3 c0; float3 p1; float3 c1; float3 p2; float3 c2; };
+StructuredBuffer<SrcTri> _SrcTris;
+StructuredBuffer<uint>   _SrcTriArgs;  // draw args: [0] = vertex count (triCount*3, capacity-clamped)
+
+[numthreads(64, 1, 1)]
+void CSCollectTris(uint3 id : SV_DispatchThreadID)
+{
+    uint triCount = _SrcTriArgs[0] / 3u;
+    if (id.x >= triCount) return;
+    float3 p = _SrcTris[id.x].p0;   // already world space
+    if (abs(p.x) > _SanityRange || abs(p.y) > _SanityRange || abs(p.z) > _SanityRange) return;
+    if (p.x < _BboxMin.x || p.y < _BboxMin.y || p.z < _BboxMin.z ||
+        p.x > _BboxMax.x || p.y > _BboxMax.y || p.z > _BboxMax.z) return;
+    float3 col = _SrcTris[id.x].c0;
+    uint idx;
+    InterlockedAdd(_CollectCounter[0], 1u, idx);
+    if (idx < _CollectCap) { SeedPoint sp; sp.pos = p; sp.col = col; _CollectOut[idx] = sp; }
 }
 
 // Prepass: one thread per source vertex. Transform to world, drop invalid-depth dummies and

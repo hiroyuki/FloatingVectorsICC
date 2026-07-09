@@ -74,6 +74,14 @@ namespace BodyTracking
                  "PointCloudRenderer meshes, each frame.")]
         public string autoSourcePrefix = "_Playback_";
 
+        [Tooltip("Also seed curves from the displayed TSDF mesh surface (its marching-cubes " +
+                 "triangles), not just the raw point clouds. The TSDF surface can sit a few cm " +
+                 "proud of the raw depth points (truncation inflation + temporal hole fill) — " +
+                 "e.g. the cap on top of the head — and without this the visible mesh there " +
+                 "grows no curves. Ignored while the TSDF mesh view is hidden (its triangle " +
+                 "buffer goes stale).")]
+        public bool seedFromTsdfMesh = true;
+
         [Header("Seeds / curves")]
         [Min(64)]
         [Tooltip("Total seed count (buffer capacity). Spread evenly across source meshes.")]
@@ -141,8 +149,14 @@ namespace BodyTracking
         // --- GPU ---
         private ComputeShader _shader;
         private int _collectKernel = -1;
+        private int _collectTrisKernel = -1;   // CSCollectTris (TSDF-mesh triangle soup)
         private int _buildKernel = -1;
         private int _emitKernel = -1;   // CSEmitSegs (print export)
+        // Displayed TSDF surface to seed from (Shared.ITriangleSeedSource, implemented by
+        // TSDFView). Discovered through the interface because TSDF already references this
+        // assembly — a direct TSDFView reference would be circular. Re-resolved lazily when
+        // the cached component dies (scene reload).
+        private global::Shared.ITriangleSeedSource _triSource;
         private Material _mat;
         private GraphicsBuffer _outBuf;      // LineVert[seedCount*(K-1)*2]
         private GraphicsBuffer _argsBuf;     // 4-uint indirect args
@@ -181,6 +195,8 @@ namespace BodyTracking
         private static readonly int kBlendSigma = Shader.PropertyToID("_BlendSigma");
         private static readonly int kCurveSamples = Shader.PropertyToID("_CurveSamples");
         private static readonly int kSubdiv = Shader.PropertyToID("_Subdiv");
+        private static readonly int kSrcTris = Shader.PropertyToID("_SrcTris");
+        private static readonly int kSrcTriArgs = Shader.PropertyToID("_SrcTriArgs");
         private static readonly int kCollectOut = Shader.PropertyToID("_CollectOut");
         private static readonly int kCollectCounter = Shader.PropertyToID("_CollectCounter");
         private static readonly int kCollectCap = Shader.PropertyToID("_CollectCap");
@@ -208,6 +224,7 @@ namespace BodyTracking
                 if (_shader != null)
                 {
                     _collectKernel = _shader.FindKernel("CSCollect");
+                    _collectTrisKernel = _shader.FindKernel("CSCollectTris");
                     _buildKernel = _shader.FindKernel("CSBuild");
                     _emitKernel = _shader.FindKernel("CSEmitSegs");
                 }
@@ -289,9 +306,13 @@ namespace BodyTracking
 
             // Resolve source meshes and size the collect buffer to their total vertex count.
             var sources = ResolveSources();
-            if (sources.Count == 0) { reason = "no usable point-cloud source meshes"; return false; }
+            var tri = seedFromTsdfMesh && _collectTrisKernel >= 0 ? ResolveTriSource() : null;
+            bool triReady = tri != null && tri.TrianglesReady;
+            if (sources.Count == 0 && !triReady)
+            { reason = "no usable point-cloud source meshes"; return false; }
             int totalSrcVerts = 0;
             foreach (var mf in sources) totalSrcVerts += mf.sharedMesh.vertexCount;
+            if (triReady) totalSrcVerts += tri.MaxTriangles; // CSCollectTris appends 1 site per triangle
 
             EnsureBuffers(boneCount, ringLen, subdiv, totalSrcVerts);
 
@@ -326,8 +347,34 @@ namespace BodyTracking
                 _shader.Dispatch(_collectKernel, (mesh.vertexCount + 63) / 64, 1, 1);
             }
             foreach (var vb in borrowed) vb.Dispose();
-            if (borrowed.Count == 0) { reason = "source mesh vertex buffers unavailable"; return false; }
+
+            // --- prepass, TSDF surface: append one seed site per displayed triangle ---
+            // Dispatched over the buffer CAPACITY; the kernel early-outs past the live
+            // triangle count it reads from the draw args, so no CPU readback is needed.
+            if (triReady)
+            {
+                _shader.SetBuffer(_collectTrisKernel, kCollectOut, _collectBuf);
+                _shader.SetBuffer(_collectTrisKernel, kCollectCounter, _collectCounter);
+                _shader.SetBuffer(_collectTrisKernel, kSrcTris, tri.TriangleBuffer);
+                _shader.SetBuffer(_collectTrisKernel, kSrcTriArgs, tri.TriangleArgsBuffer);
+                _shader.Dispatch(_collectTrisKernel, (tri.MaxTriangles + 63) / 64, 1, 1);
+            }
+
+            if (borrowed.Count == 0 && !triReady)
+            { reason = "source mesh vertex buffers unavailable"; return false; }
             return true;
+        }
+
+        // Find the scene's displayed TSDF surface via Shared.ITriangleSeedSource (a direct
+        // TSDFView reference would make the assembly graph circular). Cached; re-scans only
+        // while nothing is cached or the cached component was destroyed.
+        private global::Shared.ITriangleSeedSource ResolveTriSource()
+        {
+            if (_triSource is MonoBehaviour alive && alive != null) return _triSource;
+            _triSource = null;
+            foreach (var mb in FindObjectsByType<MonoBehaviour>(FindObjectsSortMode.None))
+                if (mb is global::Shared.ITriangleSeedSource ts) { _triSource = ts; break; }
+            return _triSource;
         }
 
         // Bind the collect/history/radius inputs + classify/reproject scalars shared
