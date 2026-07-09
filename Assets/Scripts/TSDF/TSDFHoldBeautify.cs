@@ -4,8 +4,11 @@
 //   - playback pause (SensorRecorder.IsPaused — the spacebar toggle, issue #17)
 //   - MeshCumulative freeze (integrationEnabled gate closing)
 //   - any future trigger (exhibition timer) via the public RunNow() entry point.
-// The repair only touches the front buffer; the next live publish overwrites it,
-// so resuming playback returns to the raw live mesh automatically — nothing to undo.
+// The repair only touches the front buffer. On a double-buffered volume the next
+// live publish overwrites it, so nothing needs undoing. On a SINGLE-buffered volume
+// front == write, and the depth-basis path's touched-blocks-only clear would leave
+// the repaired (smeared) voxels behind as a permanent ghost of the held frame — so
+// RunNow also requests one full write clear from the integrator for the next batch.
 
 using PointCloud;
 using UnityEngine;
@@ -63,7 +66,13 @@ namespace TSDF
             // instant (or, in accumulate mode, fold a clobbered instance into the trail).
             if (_integrator == null)
                 _integrator = FindAnyObjectByType<TSDFIntegrator>(FindObjectsInactive.Include);
-            if (_integrator != null) _integrator.DropInFlightBatch();
+            if (_integrator != null)
+            {
+                _integrator.DropInFlightBatch();
+                // Single-buffer volumes: the median smear lands outside the touched-set
+                // bookkeeping and would survive the partial clear — wipe fully once.
+                _integrator.RequestFullClearNextBatch();
+            }
             Debug.Log($"[TSDFHoldBeautify] BeautifyFront({medianPasses}) dispatched in " +
                       $"{(Time.realtimeSinceStartup - t0) * 1000f:F1} ms (CPU issue time)", this);
         }

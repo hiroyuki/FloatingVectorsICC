@@ -382,6 +382,17 @@ namespace TSDF
         public void DropInFlightBatch() => _batchSerials.Clear();
 
         /// <summary>
+        /// Force the next depth-basis batch to wipe the WHOLE write buffer instead of
+        /// the touched-blocks-only fast clear. Needed after anything writes voxels
+        /// outside the touched-set bookkeeping — e.g. TSDFHoldBeautify's median repair
+        /// on a SINGLE-buffered volume (front == write there, and its smeared voxels
+        /// land in blocks the partial clear never resets, ghosting the held frame
+        /// into live forever).
+        /// </summary>
+        public void RequestFullClearNextBatch() => _fullClearPending = true;
+        private bool _fullClearPending;
+
+        /// <summary>
         /// Event-path entry: integrate one cam frame AND drive the live-follow
         /// batch state machine (clear the back buffer at batch start, publish it
         /// to the front once <see cref="expectedCamCount"/> unique cams have
@@ -677,7 +688,11 @@ namespace TSDF
             // TSDFTrailBaker) can stamp geometry into the write buffer WITHOUT marking the
             // touched set, so its residue would ghost through the ping-pong — fall back to a
             // full write clear when any subscriber is attached (correct, forgoes the speedup).
-            if (BeforePublishCompleteBatch != null) volume.ClearWriteFull();
+            if (BeforePublishCompleteBatch != null || _fullClearPending)
+            {
+                volume.ClearWriteFull();
+                _fullClearPending = false;
+            }
             else volume.ClearWriteActiveBlocks();
 
             // Volume-level uniforms (global scalars, shared by both kernels).
