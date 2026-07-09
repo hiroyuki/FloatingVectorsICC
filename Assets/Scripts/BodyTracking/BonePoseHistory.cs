@@ -287,11 +287,6 @@ namespace BodyTracking
                 _havePoseVersion = true;
             }
 
-            // No new pose this frame: bleed the measured bone speeds out (~0.15s time constant)
-            // so speed-widened tolerances relax once the pose stream stalls or pauses — the
-            // tracked bone has caught up, the extra margin is no longer owed.
-            if (!newFrame) DecayTipSpeeds();
-
             if (newFrame)
             {
                 // New pose (play / frame-step): push fresh samples, reset bones that went invalid/stale.
@@ -482,17 +477,14 @@ namespace BodyTracking
         }
 
         /// <summary>Endpoint speed (m/s) of a bone measured between its two newest ring
-        /// ingests; 0 when unknown. Decays while no new pose arrives (pause / stall) so a
-        /// speed-widened tolerance relaxes back once the tracked bone has caught up.</summary>
+        /// ingests; 0 when unknown. HELD (not decayed) between ingests: ingests arrive at the
+        /// BT rate (~19Hz) so most render frames see no new pose, and on an intentional pause
+        /// the last mid-motion speed must survive the post-pause convergence rebuilds — a
+        /// decay shrank the tolerance before the pose caught up, and the pause auto-hold then
+        /// froze that reduced build (visible as "lines disappear on pause"). A stalled or lost
+        /// bone goes through ResetBone, which zeroes the speed.</summary>
         public float GetTipSpeed(int bone)
             => (_tipSpeed != null && bone >= 0 && bone < _tipSpeed.Length) ? _tipSpeed[bone] : 0f;
-
-        private void DecayTipSpeeds()
-        {
-            if (_tipSpeed == null) return;
-            float k = Mathf.Exp(-Time.deltaTime / 0.15f);
-            for (int b = 0; b < _tipSpeed.Length; b++) _tipSpeed[b] *= k;
-        }
 
         private void ResetAll()
         {
