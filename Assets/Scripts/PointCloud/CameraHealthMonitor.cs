@@ -103,6 +103,15 @@ namespace PointCloud
                 LogTransition();
                 return;
             }
+            if (_recorder != null && _recorder.IsPaused)
+            {
+                // Live freeze (Space): frame consumption is intentionally held, so a
+                // frozen timestamp is not a fault. Forget progress so the first
+                // post-resume check re-seeds instead of flagging every camera stale.
+                _health.Clear();
+                LogTransition();
+                return;
+            }
             if (Time.unscaledTime - _enabledAt < startupGraceSeconds) return;
 
             ResolveExpected();

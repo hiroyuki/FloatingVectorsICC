@@ -144,13 +144,13 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 7740001}
   serializedVersion: 2
-  m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
+  m_LocalRotation: {x: 0, y: -0.38268343, z: 0, w: 0.92387956}
   m_LocalPosition: {x: -0.243, y: -0.9, z: 2.366}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 943244991}
-  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: -45, z: 0}
 --- !u!114 &7740003
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -462,19 +462,25 @@ MonoBehaviour:
   m_EditorClassIdentifier: BodyTracking::BodyTracking.PointCloudMotionCurves
   visible: 1
   history: {fileID: 1180694596}
+  recorder: {fileID: 0}
   sourceMeshes: []
   autoSourcePrefix: _Playback_
   seedFromTsdfMesh: 1
   seedCount: 60000
-  radiusScale: 1
+  radiusScale: 0.36
   surfaceMargin: 0.07
+  lagCompSeconds: 0.07
+  lagMarginMax: 0.25
+  envelopeMargin: 0.3
+  floorY: 0
+  floorBand: 0.05
   bboxPadding: 0.25
   boneBlendCount: 3
-  blendSharpness: 0.01
+  blendSharpness: 0.2
   smoothSubdiv: 4
   brightness: 1
   ribbonWidth: 0.006
-  round: 1
+  round: 0.375
   rimBoost: 0.5
   freeze: 0
   sanityRange: 100
@@ -677,6 +683,7 @@ MonoBehaviour:
   floorMargin: 0.03
   ankleEmbedDepth: 0.045
   footEmbedDepth: 0.025
+  kneeEmbedDepth: 0.06
   correctionEma: 0.5
   staleAfterSeconds: 0.25
   decaySeconds: 0.15
@@ -751,13 +758,13 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 814255262}
   serializedVersion: 2
-  m_LocalRotation: {x: 0.010463233, y: -0.28274354, z: 0.0030844624, w: 0.95913357}
-  m_LocalPosition: {x: 2.181476, y: -0.08234063, z: 0.13966489}
+  m_LocalRotation: {x: 0, y: -0.38268343, z: 0, w: 0.92387956}
+  m_LocalPosition: {x: 1.15, y: -0.22, z: 0.93}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 943244991}
-  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: -45, z: 0}
 --- !u!114 &814255264
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -1054,7 +1061,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 96892899ec43f7246a88f0b3f63d9e67, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::PointCloud.PointCloudCameraManager
-  playbackOnly: 1
+  playbackOnly: 0
   defaultPointMaterial: {fileID: 0}
   depthWidth: 320
   depthHeight: 288
@@ -1161,6 +1168,7 @@ GameObject:
   m_Component:
   - component: {fileID: 1097749075}
   - component: {fileID: 1097749074}
+  - component: {fileID: 1097749076}
   m_Layer: 0
   m_Name: Display1 Black
   m_TagString: Untagged
@@ -1234,6 +1242,23 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &1097749076
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1097749073}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 94e0dcae9f914674f921f9874ff545c5, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: BodyTracking::BodyTracking.HistorySamplesHud
+  history: {fileID: 0}
+  visible: 1
+  position: {x: 24, y: 24}
+  width: 420
+  uiScale: 2
 --- !u!1 &1105748081
 GameObject:
   m_ObjectHideFlags: 0
@@ -1463,6 +1488,7 @@ GameObject:
   - component: {fileID: 1147706882}
   - component: {fileID: 1147706885}
   - component: {fileID: 1147706887}
+  - component: {fileID: 1147706888}
   m_Layer: 0
   m_Name: Main Camera
   m_TagString: MainCamera
@@ -1537,13 +1563,13 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1147706881}
   serializedVersion: 2
-  m_LocalRotation: {x: -0.009050649, y: -0.8872422, z: -0.017423224, w: 0.46088585}
-  m_LocalPosition: {x: 4.2488775, y: -0.047714144, z: 5.522939}
+  m_LocalRotation: {x: 0, y: -0.92387956, z: 0, w: 0.38268343}
+  m_LocalPosition: {x: 2.07, y: -0.29, z: 4.74}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 943244991}
-  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: -135, z: 0}
 --- !u!114 &1147706885
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -1619,6 +1645,20 @@ MonoBehaviour:
     m_VarianceClampScale: 0.9
     m_ContrastAdaptiveSharpening: 0
   m_Version: 2
+--- !u!114 &1147706888
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1147706881}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 5cd1ae4784013fc4b9f61375d0c9b7f0, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::CameraControl.PauseOrbitGate
+  recorder: {fileID: 0}
+  orbit: {fileID: 0}
 --- !u!1 &1151541766
 GameObject:
   m_ObjectHideFlags: 0
@@ -1931,7 +1971,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: BodyTracking::BodyTracking.BonePoseHistory
   bodyTracking: {fileID: 1180694595}
   recorder: {fileID: 86788058}
-  historySamples: 24
+  historySamples: 14
   freshWindowFrames: 30
   handExtension: 0.18
   crownExtension: 0.18
