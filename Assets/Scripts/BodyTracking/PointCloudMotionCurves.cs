@@ -68,6 +68,13 @@ namespace BodyTracking
         [Tooltip("Bone pose history source. Auto-resolves the first BonePoseHistory at OnEnable.")]
         public BonePoseHistory history;
 
+        [Tooltip("Playback recorder, used only to detect an intentional pause. While paused with " +
+                 "an unchanged pose and unchanged build parameters, the last built curves are held " +
+                 "instead of rebuilt: the seed pool outnumbers the seed budget and the GPU collect " +
+                 "order is nondeterministic, so rebuilding a static frame re-picks a different seed " +
+                 "subset every frame and the paused sculpture shimmers. Auto-resolves at OnEnable.")]
+        public PointCloud.SensorRecorder recorder;
+
         [Header("Seed source")]
         [Tooltip("Explicit point-cloud MeshFilters to seed from. If empty, all _Playback_* meshes " +
                  "and live PointCloudRenderer meshes in the scene are used automatically.")]
@@ -77,6 +84,14 @@ namespace BodyTracking
                  "with this prefix (the recorder's per-device playback meshes) plus any live " +
                  "PointCloudRenderer meshes, each frame.")]
         public string autoSourcePrefix = "_Playback_";
+
+        [Tooltip("Also seed curves from the displayed TSDF mesh surface (its marching-cubes " +
+                 "triangles), not just the raw point clouds. The TSDF surface can sit a few cm " +
+                 "proud of the raw depth points (truncation inflation + temporal hole fill) — " +
+                 "e.g. the cap on top of the head — and without this the visible mesh there " +
+                 "grows no curves. Ignored while the TSDF mesh view is hidden (its triangle " +
+                 "buffer goes stale).")]
+        public bool seedFromTsdfMesh = true;
 
         [Header("Seeds / curves")]
         [Min(64)]
@@ -88,7 +103,10 @@ namespace BodyTracking
         public float radiusScale = 1f;
 
         [Range(0f, 0.3f)]
-        [Tooltip("Cull a seed as background if its nearest bone surface distance exceeds this (m).")]
+        [Tooltip("Cull a seed as background if its nearest bone surface distance exceeds this (m). " +
+                 "Applies only in the floor band (below floorY + floorBand); everything higher uses " +
+                 "envelopeMargin. Strict here so the floor ring around the feet grows no curves " +
+                 "while the feet themselves (within radius+margin of the foot bones) survive.")]
         public float surfaceMargin = 0.05f;
 
         [Range(0f, 0.2f)]
@@ -103,6 +121,22 @@ namespace BodyTracking
         [Tooltip("Cap (m) on the per-bone speed-adaptive tolerance, so a tracking glitch (teleporting " +
                  "bone) can't open the gate to the whole cloud.")]
         public float lagMarginMax = 0.25f;
+
+        [Range(0f, 0.5f)]
+        [Tooltip("Cull distance (m) for seeds ABOVE the floor band. Generous on purpose: hair, " +
+                 "loose clothing and BT lag put real body surface 15-30cm from every skeleton bone " +
+                 "(measured on the bowed head), and a strict margin left the top of the visible " +
+                 "mesh curve-less. Away from the floor, everything within reach of the bone AABB " +
+                 "bbox is the body anyway, so the wide margin grabs no junk.")]
+        public float envelopeMargin = 0.30f;
+
+        [Tooltip("World Y of the floor plane (FloorOrigin aligns it to 0). Seeds below " +
+                 "floorY + floorBand are 'floor band' and use the strict surfaceMargin.")]
+        public float floorY = 0f;
+
+        [Range(0f, 0.2f)]
+        [Tooltip("Height (m) of the floor band above floorY.")]
+        public float floorBand = 0.05f;
 
         [Range(0f, 0.6f)]
         [Tooltip("Padding (m) added around the bone AABB when collecting seed candidates. Seeds are " +
@@ -158,8 +192,14 @@ namespace BodyTracking
         // --- GPU ---
         private ComputeShader _shader;
         private int _collectKernel = -1;
+        private int _collectTrisKernel = -1;   // CSCollectTris (TSDF-mesh triangle soup)
         private int _buildKernel = -1;
         private int _emitKernel = -1;   // CSEmitSegs (print export)
+        // Displayed TSDF surface to seed from (Shared.ITriangleSeedSource, implemented by
+        // TSDFView). Discovered through the interface because TSDF already references this
+        // assembly — a direct TSDFView reference would be circular. Re-resolved lazily when
+        // the cached component dies (scene reload).
+        private global::Shared.ITriangleSeedSource _triSource;
         private Material _mat;
         private GraphicsBuffer _outBuf;      // LineVert[seedCount*(K-1)*2]
         private GraphicsBuffer _argsBuf;     // 4-uint indirect args
@@ -197,11 +237,15 @@ namespace BodyTracking
         private static readonly int kRingLen = Shader.PropertyToID("_RingLen");
         private static readonly int kRadiusScale = Shader.PropertyToID("_RadiusScale");
         private static readonly int kSurfaceMargin = Shader.PropertyToID("_SurfaceMargin");
+        private static readonly int kEnvelopeMargin = Shader.PropertyToID("_EnvelopeMargin");
+        private static readonly int kFloorCutY = Shader.PropertyToID("_FloorCutY");
         private static readonly int kSanityRange = Shader.PropertyToID("_SanityRange");
         private static readonly int kBlendCount = Shader.PropertyToID("_BlendCount");
         private static readonly int kBlendSigma = Shader.PropertyToID("_BlendSigma");
         private static readonly int kCurveSamples = Shader.PropertyToID("_CurveSamples");
         private static readonly int kSubdiv = Shader.PropertyToID("_Subdiv");
+        private static readonly int kSrcTris = Shader.PropertyToID("_SrcTris");
+        private static readonly int kSrcTriArgs = Shader.PropertyToID("_SrcTriArgs");
         private static readonly int kCollectOut = Shader.PropertyToID("_CollectOut");
         private static readonly int kCollectCounter = Shader.PropertyToID("_CollectCounter");
         private static readonly int kCollectCap = Shader.PropertyToID("_CollectCap");
@@ -223,12 +267,14 @@ namespace BodyTracking
         private void OnEnable()
         {
             if (history == null) history = FindFirstObjectByType<BonePoseHistory>();
+            if (recorder == null) recorder = FindFirstObjectByType<PointCloud.SensorRecorder>();
             if (_shader == null)
             {
                 _shader = Resources.Load<ComputeShader>("MotionCurvesBuild");
                 if (_shader != null)
                 {
                     _collectKernel = _shader.FindKernel("CSCollect");
+                    _collectTrisKernel = _shader.FindKernel("CSCollectTris");
                     _buildKernel = _shader.FindKernel("CSBuild");
                     _emitKernel = _shader.FindKernel("CSEmitSegs");
                 }
@@ -278,7 +324,25 @@ namespace BodyTracking
                 return;
             }
 
+            // Auto-hold on pause: with the pose AND build params unchanged there is nothing new to
+            // build, and rebuilding anyway is actively harmful — collected sites outnumber the seed
+            // budget (TSDF mesh seeding) and GPU append order is nondeterministic, so each rebuild
+            // seeds a DIFFERENT subset and the paused sculpture shimmers. Any parameter tweak or
+            // frame-step (PoseVersion change) rebuilds normally.
+            bool paused = recorder != null && recorder.IsPaused;
+            int paramHash = BuildParamsHash();
+            ulong poseVersion = history != null && history.bodyTracking != null
+                ? history.bodyTracking.PoseVersion : 0UL;
+            if (paused && _hasBuilt && _outBuf != null
+                && paramHash == _lastBuildParamHash && poseVersion == _lastBuildPoseVersion)
+            {
+                DrawCurves();
+                return;
+            }
+
             if (!CollectSeeds(out _)) return;
+            _lastBuildParamHash = paramHash;
+            _lastBuildPoseVersion = poseVersion;
 
             // --- build: one dispatch, seeds strided over the compacted points ---
             BindBuildParams(_buildKernel);
@@ -287,6 +351,23 @@ namespace BodyTracking
 
             _hasBuilt = true;
             DrawCurves();
+        }
+
+        private int _lastBuildParamHash;
+        private ulong _lastBuildPoseVersion;
+
+        // Hash of every field that changes what CollectSeeds/CSBuild produce (draw-time
+        // material knobs like brightness/ribbonWidth are excluded — they apply to the held
+        // buffer anyway). Used by the pause auto-hold to notice live tuning.
+        private int BuildParamsHash()
+        {
+            var hash = new System.HashCode();
+            hash.Add(seedCount); hash.Add(radiusScale); hash.Add(surfaceMargin);
+            hash.Add(envelopeMargin); hash.Add(floorY); hash.Add(floorBand);
+            hash.Add(bboxPadding); hash.Add(boneBlendCount); hash.Add(blendSharpness);
+            hash.Add(smoothSubdiv); hash.Add(sanityRange); hash.Add(seedFromTsdfMesh);
+            hash.Add(history != null ? history.CurveSamples : 0);
+            return hash.ToHashCode();
         }
 
         // Shared front half of Update() and EmitPrintSegs(): validates inputs,
@@ -311,9 +392,13 @@ namespace BodyTracking
 
             // Resolve source meshes and size the collect buffer to their total vertex count.
             var sources = ResolveSources();
-            if (sources.Count == 0) { reason = "no usable point-cloud source meshes"; return false; }
+            var tri = seedFromTsdfMesh && _collectTrisKernel >= 0 ? ResolveTriSource() : null;
+            bool triReady = tri != null && tri.TrianglesReady;
+            if (sources.Count == 0 && !triReady)
+            { reason = "no usable point-cloud source meshes"; return false; }
             int totalSrcVerts = 0;
             foreach (var mf in sources) totalSrcVerts += mf.sharedMesh.vertexCount;
+            if (triReady) totalSrcVerts += tri.MaxTriangles; // CSCollectTris appends 1 site per triangle
 
             EnsureBuffers(boneCount, ringLen, subdiv, totalSrcVerts);
             UpdateExtraMargins(boneCount);
@@ -351,7 +436,21 @@ namespace BodyTracking
                 _shader.Dispatch(_collectKernel, (mesh.vertexCount + 63) / 64, 1, 1);
             }
             foreach (var vb in borrowed) vb.Dispose();
-            if (borrowed.Count == 0) { reason = "source mesh vertex buffers unavailable"; return false; }
+
+            // --- prepass, TSDF surface: append one seed site per displayed triangle ---
+            // Dispatched over the buffer CAPACITY; the kernel early-outs past the live
+            // triangle count it reads from the draw args, so no CPU readback is needed.
+            if (triReady)
+            {
+                _shader.SetBuffer(_collectTrisKernel, kCollectOut, _collectBuf);
+                _shader.SetBuffer(_collectTrisKernel, kCollectCounter, _collectCounter);
+                _shader.SetBuffer(_collectTrisKernel, kSrcTris, tri.TriangleBuffer);
+                _shader.SetBuffer(_collectTrisKernel, kSrcTriArgs, tri.TriangleArgsBuffer);
+                _shader.Dispatch(_collectTrisKernel, (tri.MaxTriangles + 63) / 64, 1, 1);
+            }
+
+            if (borrowed.Count == 0 && !triReady)
+            { reason = "source mesh vertex buffers unavailable"; return false; }
             return true;
         }
 
@@ -370,6 +469,18 @@ namespace BodyTracking
             _extraMarginBuf.SetData(_extraMargin);
         }
 
+        // Find the scene's displayed TSDF surface via Shared.ITriangleSeedSource (a direct
+        // TSDFView reference would make the assembly graph circular). Cached; re-scans only
+        // while nothing is cached or the cached component was destroyed.
+        private global::Shared.ITriangleSeedSource ResolveTriSource()
+        {
+            if (_triSource is MonoBehaviour alive && alive != null) return _triSource;
+            _triSource = null;
+            foreach (var mb in FindObjectsByType<MonoBehaviour>(FindObjectsSortMode.None))
+                if (mb is global::Shared.ITriangleSeedSource ts) { _triSource = ts; break; }
+            return _triSource;
+        }
+
         // Bind the collect/history/radius inputs + classify/reproject scalars shared
         // by CSBuild and CSEmitSegs. CollectSeeds() must have succeeded this frame.
         private void BindBuildParams(int kernel)
@@ -386,6 +497,8 @@ namespace BodyTracking
             _shader.SetInt(kRingLen, _ringLen);
             _shader.SetFloat(kRadiusScale, radiusScale);
             _shader.SetFloat(kSurfaceMargin, surfaceMargin);
+            _shader.SetFloat(kEnvelopeMargin, Mathf.Max(envelopeMargin, surfaceMargin));
+            _shader.SetFloat(kFloorCutY, floorY + floorBand);
             _shader.SetInt(kBlendCount, Mathf.Clamp(boneBlendCount, 1, 4));
             _shader.SetFloat(kBlendSigma, blendSharpness);
             _shader.SetInt(kCurveSamples, history.CurveSamples);
@@ -594,9 +707,13 @@ namespace BodyTracking
                 {
                     if (b < bones.Length) { DefaultRadius(bones[b].a, bones[b].b, out rA[b], out rB[b]); continue; }
                     int v = b - bones.Length;
-                    bool crown = v < BonePoseHistory.VirtualTipSources.Length
-                                 && BonePoseHistory.VirtualTipSources[v] == k4abt_joint_id_t.K4ABT_JOINT_HEAD;
-                    if (crown) { rA[b] = 0.09f; rB[b] = 0.05f; }   // skull -> crown taper
+                    bool skull = v < BonePoseHistory.VirtualTips.Length && BonePoseHistory.VirtualTipIsSkull(v);
+                    // Skull tips (crown / occiput) stay skull-radius to the tip (no taper):
+                    // when the head bows, the real skull top sits well off the neck->head
+                    // axis (measured ~15-19cm at a crouch) and a tapered tip left the topmost
+                    // mesh curve-less. Nothing but hair/air is up there, so the fat capsules
+                    // grab no junk.
+                    if (skull) { rA[b] = 0.10f; rB[b] = 0.09f; }
                     else { rA[b] = 0.05f; rB[b] = 0.035f; }        // palm -> fingertip taper
                 }
                 _radiusABuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, boneCount, sizeof(float));

@@ -528,6 +528,35 @@ namespace PointCloud
         public bool IsLiveMode => ResolveManager() != null && ResolveManager().Renderers.Count > 0;
 
         /// <summary>
+        /// Startup mode selector, backed by SensorManager.playbackOnly. Set this
+        /// BEFORE entering Play mode: true → the scene auto-starts in PLAYBACK
+        /// (Start() auto-plays the recording folder), false → LIVE capture. The
+        /// Control Panel exposes it as a checkbox so the operator confirms the
+        /// mode before pressing Play, without switching mid-session.
+        /// </summary>
+        public bool StartInPlaybackMode
+        {
+            get { var m = ResolveManager(); return m != null && m.playbackOnly; }
+            set
+            {
+                var m = ResolveManager();
+                if (m == null)
+                {
+                    SetStatus("Startup mode: no SensorManager in scene.", warn: true);
+                    return;
+                }
+                if (m.playbackOnly == value) return;
+                m.playbackOnly = value;
+#if UNITY_EDITOR
+                UnityEditor.EditorUtility.SetDirty(m);
+                if (!Application.isPlaying)
+                    UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(m.gameObject.scene);
+#endif
+                SetStatus($"Startup mode = {(value ? "PLAYBACK" : "LIVE")} (applies on next Play).");
+            }
+        }
+
+        /// <summary>
         /// One-button live ⇄ playback switch. Live → playback: TogglePlay
         /// (auto-Loads folderPath; Load frees the live cameras). Playback →
         /// live: stop playback, drop the loaded tracks + _Playback_* GOs, and
@@ -1680,7 +1709,8 @@ namespace PointCloud
             // instead"). StartPlayback auto-Reads, so pressing Editor Play "just
             // works". Otherwise the scene starts LIVE and the operator switches to
             // playback from the Control Panel when they want it.
-            if (cameraManager != null && cameraManager.playbackOnly)
+            var mgr = ResolveManager();
+            if (mgr != null && mgr.playbackOnly)
                 TogglePlay();
         }
 

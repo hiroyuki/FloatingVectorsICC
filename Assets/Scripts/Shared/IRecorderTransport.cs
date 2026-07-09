@@ -28,6 +28,15 @@ namespace Shared
         /// <summary>True while live camera renderers exist; false in playback mode.</summary>
         bool IsLiveMode { get; }
 
+        /// <summary>
+        /// Startup mode selector, backed by SensorManager.playbackOnly. Set before
+        /// entering Play mode: true → the scene auto-starts in PLAYBACK (plays the
+        /// recording folder), false → LIVE capture. The Control Panel exposes this
+        /// as a checkbox so the operator confirms the mode before pressing Play,
+        /// without needing to switch mid-session.
+        /// </summary>
+        bool StartInPlaybackMode { get; set; }
+
         void ToggleRecord();
         void TogglePlay();
         void TogglePause();

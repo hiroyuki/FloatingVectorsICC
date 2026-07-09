@@ -51,8 +51,10 @@ namespace BodyTracking
         [Tooltip("Length (m) of the virtual crown bone appended past the HEAD joint. HEAD sits " +
                  "near the head's centre, so points on top of the skull were beyond every bone's " +
                  "reach and got no motion curves; this extends the neck->head bone rigidly by " +
-                 "this much so crown points inherit the head's motion. 0 disables it.")]
-        public float crownExtension = 0.12f;
+                 "this much so crown points inherit the head's motion. 0 disables it. Sized so " +
+                 "the skull top stays in reach even when the head bows and the real crown drifts " +
+                 "off the neck->head axis (measured ~15cm off at a crouch).")]
+        public float crownExtension = 0.18f;
 
         [Header("Debug gizmos (Phase 1 validation)")]
         [Tooltip("Draw each bone's reprojected curve in the Scene view to verify arcs form.")]
@@ -105,26 +107,37 @@ namespace BodyTracking
         // Virtual tip bones appended after the real Bones table, for body extremities the
         // skeleton doesn't reach: the hands (HAND/HANDTIP/THUMB joints are dropped
         // project-wide — BodyTrackingShared.IsDrawnJoint — so the arm ends at the wrist) and
-        // the crown (HEAD sits near the head's centre, nothing spans the top of the skull).
-        // Point-cloud seeds there had no bone within surfaceMargin, so motion curves stopped
-        // short. Each virtual bone rigidly extends the real bone whose CHILD joint is the
-        // listed tip (forearm past the wrist, neck->head past the crown) along that bone's
-        // axis, reusing its stable frame (U/V/W), so tip points sweep with the parent bone's
-        // motion. Indices [_realBoneCount ..] in every per-bone array / the GPU buffers;
-        // consumers see them only as extra bones (PointCloudMotionCurves picks their radii
-        // off this table).
-        public static readonly k4abt_joint_id_t[] VirtualTipSources =
+        // the skull (k4abt puts HEAD at the head's BASE and clusters the rest of the head
+        // joints on the FACE, so nothing spans the top or back of the skull — measured
+        // 15-19cm from every bone when the head bows). Point-cloud seeds there had no bone
+        // within surfaceMargin, so motion curves stopped short. Each virtual bone rigidly
+        // extends the real bone whose CHILD joint is srcChild, reusing its stable frame, so
+        // tip points sweep with the parent bone's motion. reverse=false extends past the
+        // child (forearm past the wrist, neck->head past the crown); reverse=true extends
+        // backward from the PARENT end (head->nose reversed = through the skull to the
+        // occiput — when the head bows, the nose points down-forward, so this tracks
+        // exactly where the skull top/back drifts). Indices [_realBoneCount ..] in every
+        // per-bone array / the GPU buffers; PointCloudMotionCurves picks radii via
+        // VirtualTipIsSkull.
+        public static readonly (k4abt_joint_id_t srcChild, bool reverse)[] VirtualTips =
         {
-            k4abt_joint_id_t.K4ABT_JOINT_WRIST_LEFT,
-            k4abt_joint_id_t.K4ABT_JOINT_WRIST_RIGHT,
-            k4abt_joint_id_t.K4ABT_JOINT_HEAD,
+            (k4abt_joint_id_t.K4ABT_JOINT_WRIST_LEFT, false),
+            (k4abt_joint_id_t.K4ABT_JOINT_WRIST_RIGHT, false),
+            (k4abt_joint_id_t.K4ABT_JOINT_HEAD, false),   // crown: up along neck->head
+            (k4abt_joint_id_t.K4ABT_JOINT_NOSE, true),    // occiput: back along nose->head
         };
         private int[] _virtualSrcBone; // per virtual bone: index of the real bone it extends
         private int _realBoneCount;
 
-        // Per-virtual-bone extension length (m): the crown uses its own, shorter knob.
+        /// <summary>Whether virtual tip <paramref name="i"/> is part of the skull (crown /
+        /// occiput) — consumers give those skull-sized radii instead of the hand taper.</summary>
+        public static bool VirtualTipIsSkull(int i)
+            => VirtualTips[i].srcChild == k4abt_joint_id_t.K4ABT_JOINT_HEAD
+            || VirtualTips[i].srcChild == k4abt_joint_id_t.K4ABT_JOINT_NOSE;
+
+        // Per-virtual-bone extension length (m): both skull tips share the crown knob.
         private float VirtualTipLength(int i)
-            => VirtualTipSources[i] == k4abt_joint_id_t.K4ABT_JOINT_HEAD ? crownExtension : handExtension;
+            => VirtualTipIsSkull(i) ? crownExtension : handExtension;
 
         // GPU mirror of the ring, consumed by the motion-curves compute. Sample is 5 * Vector3 = 60
         // bytes, tightly packed, matching an HLSL struct of 5 float3. Per bone b, samples are written
@@ -189,7 +202,7 @@ namespace BodyTracking
         {
             var bones = BodyTrackingShared.Bones;
             int real = bones.Length;
-            int n = real + VirtualTipSources.Length; // + virtual tip bones (hands, crown)
+            int n = real + VirtualTips.Length; // + virtual tip bones (hands, crown, occiput)
             // The ring is ALWAYS MAXK frames. historySamples doesn't size it — it selects, at draw time,
             // how many of the newest captured frames the curve uses (see CurveSamples). So tuning the
             // length (even while paused) shortens OR lengthens the curves instantly out of the already-
@@ -233,14 +246,14 @@ namespace BodyTracking
                 }
             }
 
-            // Virtual bone -> its source (the real bone whose child joint is that tip:
-            // forearm for the wrists, neck->head for the crown).
-            _virtualSrcBone = new int[VirtualTipSources.Length];
-            for (int i = 0; i < VirtualTipSources.Length; i++)
+            // Virtual bone -> its source (the real bone whose child joint is srcChild:
+            // forearm for the wrists, neck->head for the crown, head->nose for the occiput).
+            _virtualSrcBone = new int[VirtualTips.Length];
+            for (int i = 0; i < VirtualTips.Length; i++)
             {
                 _virtualSrcBone[i] = -1;
                 for (int b = 0; b < real; b++)
-                    if (bones[b].b == VirtualTipSources[i]) { _virtualSrcBone[i] = b; break; }
+                    if (bones[b].b == VirtualTips[i].srcChild) { _virtualSrcBone[i] = b; break; }
                 _parentBone[real + i] = _virtualSrcBone[i];
             }
 
@@ -341,7 +354,9 @@ namespace BodyTracking
 
             // Virtual tip bones: rigid extensions sharing their source bone's frame.
             // A source that failed above was reset (count 0), so count > 0 here means
-            // its newest ring sample is from THIS frame — extend that one.
+            // its newest ring sample is from THIS frame — extend that one. Reversed tips
+            // grow backward from the source's PARENT end; negating U and W (keeping V)
+            // preserves the right-handed frame.
             for (int i = 0; i < _virtualSrcBone.Length; i++)
             {
                 int vb = _realBoneCount + i;
@@ -349,7 +364,9 @@ namespace BodyTracking
                 float len = VirtualTipLength(i);
                 if (f < 0 || _count[f] == 0 || len <= Eps) { ResetBone(vb); continue; }
                 Sample s = _ring[f][_head[f]];
-                Push(vb, new Sample { A = s.B, B = s.B + s.U * len, U = s.U, V = s.V, W = s.W });
+                Push(vb, VirtualTips[i].reverse
+                    ? new Sample { A = s.A, B = s.A - s.U * len, U = -s.U, V = s.V, W = -s.W }
+                    : new Sample { A = s.B, B = s.B + s.U * len, U = s.U, V = s.V, W = s.W });
             }
         }
 

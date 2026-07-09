@@ -13,6 +13,7 @@
 // col12, 24B raw). See PointCloudMotionCurves.cs for the host side.
 
 #pragma kernel CSCollect
+#pragma kernel CSCollectTris
 #pragma kernel CSBuild
 #pragma kernel CSEmitSegs
 
@@ -42,7 +43,9 @@ uint  _SeedCount;     // seeds produced by this dispatch
 uint  _BoneCount;
 uint  _RingLen;       // K
 float _RadiusScale;
-float _SurfaceMargin; // cull seed if nearest surface distance exceeds this (background)
+float _SurfaceMargin;   // background cull inside the floor band (strict: keeps feet, kills floor)
+float _EnvelopeMargin;  // background cull above the floor band (generous: hair / clothes / BT lag)
+float _FloorCutY;       // world Y separating the two: floorY + floorBand
 float _SanityRange;   // |coord| above this => invalid-depth dummy, cull
 uint  _BlendCount;    // number of nearest bones to blend (1 = hard argmax)
 float _BlendSigma;    // rank falloff (m) for blend weights; smaller = sharper boundaries
@@ -100,6 +103,33 @@ void WriteDegenerate(uint slotBase, uint segs)
         _Out[slotBase + s * 2u]      = z;
         _Out[slotBase + s * 2u + 1u] = z;
     }
+}
+
+// ---- TSDF-mesh seed collect (CSCollectTris) ----
+// The displayed TSDF surface is an appended triangle soup (3 x {pos, colour} per entry,
+// WORLD space — see TSDFMarchingCubes.compute / Shared.ITriangleSeedSource). Its cap can
+// sit a few cm proud of the raw depth points (truncation inflation + temporal hole fill),
+// e.g. the top of the head, so seeding only from the clouds leaves the visible surface
+// there curve-less. One thread per triangle appends p0/c0 only: one seed site per
+// triangle is already voxel-density, and skipping p1/p2 avoids tripling the collect load
+// with shared-vertex duplicates.
+struct SrcTri { float3 p0; float3 c0; float3 p1; float3 c1; float3 p2; float3 c2; };
+StructuredBuffer<SrcTri> _SrcTris;
+StructuredBuffer<uint>   _SrcTriArgs;  // draw args: [0] = vertex count (triCount*3, capacity-clamped)
+
+[numthreads(64, 1, 1)]
+void CSCollectTris(uint3 id : SV_DispatchThreadID)
+{
+    uint triCount = _SrcTriArgs[0] / 3u;
+    if (id.x >= triCount) return;
+    float3 p = _SrcTris[id.x].p0;   // already world space
+    if (abs(p.x) > _SanityRange || abs(p.y) > _SanityRange || abs(p.z) > _SanityRange) return;
+    if (p.x < _BboxMin.x || p.y < _BboxMin.y || p.z < _BboxMin.z ||
+        p.x > _BboxMax.x || p.y > _BboxMax.y || p.z > _BboxMax.z) return;
+    float3 col = _SrcTris[id.x].c0;
+    uint idx;
+    InterlockedAdd(_CollectCounter[0], 1u, idx);
+    if (idx < _CollectCap) { SeedPoint sp; sp.pos = p; sp.col = col; _CollectOut[idx] = sp; }
 }
 
 // Prepass: one thread per source vertex. Transform to world, drop invalid-depth dummies and
@@ -188,11 +218,21 @@ uint ClassifyReproject(float3 p, out float3 pts[32], out float3 anchor)
         }
     }
 
-    // Background cull on the nearest bone's surface distance.
-    if (selN == 0u || selSurf[0] > _SurfaceMargin) return 0u;
+    // Background cull on the nearest bone's surface distance. Two-tier: strict inside the
+    // floor band (so the floor ring around the feet grows no curves) and generous above it
+    // (hair / loose clothes / BT lag put real body surface up to ~30cm from every bone —
+    // measured on a bowed head — and away from the floor there is nothing else in the
+    // seed bbox to grab).
+    float cullMargin = (p.y < _FloorCutY) ? _SurfaceMargin : _EnvelopeMargin;
+    if (selN == 0u || selSurf[0] > cullMargin) return 0u;
 
-    // Per-selected-bone weight + (t, cv, cw) in that bone's newest frame.
-    float w[4]; float tb[4]; float cvb[4]; float cwb[4]; uint baseB[4]; uint cntB[4];
+    // Per-selected-bone weight + (t, cu, cv, cw) in that bone's newest frame. cu is the
+    // along-axis residual: t is CLAMPED to the segment, so a point past the bone tip
+    // (hand past the wrist capsule end, skull top past the crown tip) has its overhang
+    // along U. Dropping it (the original t/cv/cw-only parameterisation) reprojected all
+    // tip points back onto the tip plane — the visible mesh cap ended up curve-less
+    // however far the virtual capsules reached.
+    float w[4]; float tb[4]; float cub[4]; float cvb[4]; float cwb[4]; uint baseB[4]; uint cntB[4];
     float wsum = 0.0; uint minCnt = 0xffffffffu;
     for (uint j = 0; j < selN; j++)
     {
@@ -204,7 +244,7 @@ uint ClassifyReproject(float3 p, out float3 pts[32], out float3 anchor)
         Sample sn = _History[baseB[j] + (cnt - 1u)];
         float t = selT[j];
         float3 rel = p - lerp(sn.A, sn.B, t);
-        tb[j] = t; cvb[j] = dot(rel, sn.V); cwb[j] = dot(rel, sn.W);
+        tb[j] = t; cub[j] = dot(rel, sn.U); cvb[j] = dot(rel, sn.V); cwb[j] = dot(rel, sn.W);
         w[j] = exp(-max(selSurf[j], 0.0) / max(_BlendSigma, 1e-4));
         wsum += w[j];
     }
@@ -230,7 +270,8 @@ uint ClassifyReproject(float3 p, out float3 pts[32], out float3 anchor)
         {
             // Read the newest m samples of this bone: offset by (cnt - m).
             Sample sk = _History[baseB[jb] + (cntB[jb] - m) + k];
-            xk += (w[jb] * invW) * (lerp(sk.A, sk.B, tb[jb]) + cvb[jb] * sk.V + cwb[jb] * sk.W);
+            xk += (w[jb] * invW) * (lerp(sk.A, sk.B, tb[jb])
+                                    + cub[jb] * sk.U + cvb[jb] * sk.V + cwb[jb] * sk.W);
         }
         pts[k] = xk;
     }
