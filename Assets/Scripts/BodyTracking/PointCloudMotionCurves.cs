@@ -601,7 +601,11 @@ namespace BodyTracking
                     int v = b - bones.Length;
                     bool crown = v < BonePoseHistory.VirtualTipSources.Length
                                  && BonePoseHistory.VirtualTipSources[v] == k4abt_joint_id_t.K4ABT_JOINT_HEAD;
-                    if (crown) { rA[b] = 0.09f; rB[b] = 0.05f; }   // skull -> crown taper
+                    // Crown stays skull-radius to the tip (no taper): when the head bows, the
+                    // real skull top sits well off the neck->head axis (measured ~15cm at a
+                    // crouch) and a tapered tip left the topmost mesh curve-less. Nothing but
+                    // hair/air is above the head, so the fat capsule grabs no junk.
+                    if (crown) { rA[b] = 0.10f; rB[b] = 0.09f; }
                     else { rA[b] = 0.05f; rB[b] = 0.035f; }        // palm -> fingertip taper
                 }
                 _radiusABuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, boneCount, sizeof(float));

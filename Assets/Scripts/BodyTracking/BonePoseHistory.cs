@@ -51,8 +51,10 @@ namespace BodyTracking
         [Tooltip("Length (m) of the virtual crown bone appended past the HEAD joint. HEAD sits " +
                  "near the head's centre, so points on top of the skull were beyond every bone's " +
                  "reach and got no motion curves; this extends the neck->head bone rigidly by " +
-                 "this much so crown points inherit the head's motion. 0 disables it.")]
-        public float crownExtension = 0.12f;
+                 "this much so crown points inherit the head's motion. 0 disables it. Sized so " +
+                 "the skull top stays in reach even when the head bows and the real crown drifts " +
+                 "off the neck->head axis (measured ~15cm off at a crouch).")]
+        public float crownExtension = 0.18f;
 
         [Header("Debug gizmos (Phase 1 validation)")]
         [Tooltip("Draw each bone's reprojected curve in the Scene view to verify arcs form.")]

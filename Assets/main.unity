@@ -464,6 +464,7 @@ MonoBehaviour:
   history: {fileID: 1180694596}
   sourceMeshes: []
   autoSourcePrefix: _Playback_
+  seedFromTsdfMesh: 1
   seedCount: 60000
   radiusScale: 1
   surfaceMargin: 0.07
@@ -473,6 +474,8 @@ MonoBehaviour:
   smoothSubdiv: 4
   brightness: 1
   ribbonWidth: 0.006
+  round: 1
+  rimBoost: 0.5
   freeze: 0
   sanityRange: 100
 --- !u!4 &333033384
@@ -547,6 +550,8 @@ MonoBehaviour:
   meshSaturation: 1.4
   meshBrightness: 1
   meshGamma: 1
+  meshGradNormals: 1
+  meshRimBoost: 0.5
   meshMaxTriangles: 2000000
   meshIsoLevel: 0
   meshMinWeight: 0.5
@@ -1075,6 +1080,7 @@ MonoBehaviour:
   markerBaseHalfHeight: 0.09
   applyExtrinsics: 1
   extrinsicsRoot: 
+  targetFrameRate: 30
   verboseLogging: 0
 --- !u!4 &925702424
 Transform:
@@ -1927,6 +1933,8 @@ MonoBehaviour:
   recorder: {fileID: 86788058}
   historySamples: 24
   freshWindowFrames: 30
+  handExtension: 0.18
+  crownExtension: 0.18
   drawGizmos: 0
   gizmoOffset: 0.12
   gizmoColor: {r: 1, g: 0.55, b: 0.1, a: 1}
