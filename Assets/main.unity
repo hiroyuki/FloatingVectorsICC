@@ -467,17 +467,17 @@ MonoBehaviour:
   autoSourcePrefix: _Playback_
   seedFromTsdfMesh: 1
   seedCount: 60000
-  radiusScale: 0.36
+  radiusScale: 0.8
   surfaceMargin: 0.07
   lagCompSeconds: 0.07
   lagMarginMax: 0.25
-  envelopeMargin: 0.3
+  envelopeMargin: 0.1
   floorY: 0
   floorBand: 0.05
-  bboxPadding: 0.25
-  boneBlendCount: 3
-  blendSharpness: 0.2
-  smoothSubdiv: 4
+  bboxPadding: 0.1
+  boneBlendCount: 2
+  blendSharpness: 0.05
+  smoothSubdiv: 2
   brightness: 1
   ribbonWidth: 0.006
   round: 0.375
@@ -1254,11 +1254,12 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 94e0dcae9f914674f921f9874ff545c5, type: 3}
   m_Name: 
   m_EditorClassIdentifier: BodyTracking::BodyTracking.HistorySamplesHud
-  history: {fileID: 0}
+  history: {fileID: 1180694596}
   visible: 1
   position: {x: 24, y: 24}
   width: 420
   uiScale: 2
+  orbits: []
 --- !u!1 &1105748081
 GameObject:
   m_ObjectHideFlags: 0
@@ -1659,6 +1660,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::CameraControl.PauseOrbitGate
   recorder: {fileID: 0}
   orbit: {fileID: 0}
+  autoOrbitOverride: 0
 --- !u!1 &1151541766
 GameObject:
   m_ObjectHideFlags: 0
