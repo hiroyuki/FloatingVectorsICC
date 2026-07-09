@@ -110,20 +110,27 @@ namespace Shared.EditorTools
                 if (!string.IsNullOrEmpty(t.ResolvedRecordingFolder))
                     EditorGUILayout.LabelField(" ", t.ResolvedRecordingFolder, EditorStyles.miniLabel);
 
-                // One-button live ⇄ playback switch. Playback → live reconnects the
-                // cameras via SensorManager.StartLive, no scene reload needed.
-                // Disabled while recording (stop recording first).
-                using (new EditorGUI.DisabledScope(!Application.isPlaying || t.IsRecording))
+                // Startup mode selector (SensorManager.playbackOnly). Set BEFORE
+                // pressing Play: the scene then starts in the chosen mode. Editable
+                // only outside Play mode — mid-session use the runtime switch below.
+                using (new EditorGUI.DisabledScope(Application.isPlaying))
                 using (new EditorGUILayout.HorizontalScope())
                 {
-                    bool live = Application.isPlaying && t.IsLiveMode;
-                    GUILayout.Label(
-                        "Mode: " + (!Application.isPlaying ? "-" : live ? "LIVE (realtime)" : "PLAYBACK"),
-                        EditorStyles.miniBoldLabel, GUILayout.Width(150));
-                    if (GUILayout.Button(live ? "Switch to PLAYBACK ▶" : "Switch to LIVE ⦿",
-                                         GUILayout.Height(24)))
-                        t.SwitchMode();
+                    GUILayout.Label(new GUIContent("起動モード (Startup)",
+                        "Play を押す前に選ぶ起動時のモード（SensorManager.playbackOnly）。" +
+                        "PLAYBACK = 録画フォルダを再生 / LIVE = カメラ接続。Play 中は変更不可。"),
+                        GUILayout.Width(150));
+                    int cur = t.StartInPlaybackMode ? 1 : 0;
+                    int sel = GUILayout.Toolbar(cur, new[] { "LIVE ⦿", "PLAYBACK ▶" }, GUILayout.Height(22));
+                    if (sel != cur) t.StartInPlaybackMode = sel == 1;
                 }
+
+                // While playing, just show which mode is actually running. Mid-session
+                // switching isn't needed, so no switch button here — the startup mode
+                // above is the single point of control.
+                if (Application.isPlaying)
+                    EditorGUILayout.LabelField("Now",
+                        t.IsLiveMode ? "LIVE (realtime)" : "PLAYBACK", EditorStyles.miniBoldLabel);
 
                 using (new EditorGUI.DisabledScope(!Application.isPlaying))
                 using (new EditorGUILayout.HorizontalScope())
