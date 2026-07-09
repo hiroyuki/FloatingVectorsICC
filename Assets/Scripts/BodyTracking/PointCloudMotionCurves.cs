@@ -22,7 +22,7 @@ using UnityEngine.Rendering;
 namespace BodyTracking
 {
     [DisallowMultipleComponent]
-    public class PointCloudMotionCurves : MonoBehaviour, global::Shared.IViewToggle
+    public class PointCloudMotionCurves : MonoBehaviour, global::Shared.IViewToggle, global::Shared.IPanelTunable
     {
         [Tooltip("Show/hide the motion curves. Exposed in the unified Views panel as \"Motion lines\", " +
                  "independent of the BT skeleton toggle.")]
@@ -31,6 +31,35 @@ namespace BodyTracking
         // ---- Shared.IViewToggle (unified Views panel) ----
         public string ViewLabel => "Motion lines";
         public bool Visible { get => visible; set => visible = value; }
+
+        // ---- Shared.IPanelTunable (one-stop Control Panel) ----
+        // Look knobs so the curves can be dialled in at runtime, not just the Inspector.
+        public string TuningLabel => "Motion lines";
+        public int TunableCount => 4;
+        public string TunableName(int i) =>
+            i == 0 ? "Brightness" :
+            i == 1 ? "Ribbon Width (m)" :
+            i == 2 ? "Round shading" : "Rim Boost";
+        public float TunableValue(int i) =>
+            i == 0 ? brightness :
+            i == 1 ? ribbonWidth :
+            i == 2 ? round : rimBoost;
+        public void SetTunableValue(int i, float value)
+        {
+            switch (i)
+            {
+                case 0: brightness = Mathf.Clamp(value, 0f, 3f); break;
+                case 1: ribbonWidth = Mathf.Clamp(value, 0f, 0.05f); break;
+                case 2: round = Mathf.Clamp01(value); break;
+                default: rimBoost = Mathf.Clamp(value, 0f, 2f); break;
+            }
+        }
+        public float TunableMin(int i) => 0f;
+        public float TunableMax(int i) =>
+            i == 0 ? 3f :
+            i == 1 ? 0.05f :
+            i == 2 ? 1f : 2f;
+        public bool TunableIsInt(int i) => false;
 
         [Tooltip("Bone pose history source. Auto-resolves the first BonePoseHistory at OnEnable.")]
         public BonePoseHistory history;
@@ -87,6 +116,16 @@ namespace BodyTracking
         [Tooltip("Ribbon width (m). Each curve is drawn as a camera-facing ribbon of this width; " +
                  "0 collapses to a thin line. Wider ribbons make the smoothing / colour read clearly.")]
         public float ribbonWidth = 0.006f;
+
+        [Range(0f, 1f)]
+        [Tooltip("Round shading. 0 = flat emissive ribbon (original), 1 = shaded as a cylinder " +
+                 "(fake round normal across the width) so the curve reads as a tube. No extra geometry.")]
+        public float round = 1f;
+
+        [Range(0f, 2f)]
+        [Tooltip("Rim boost. Brightens the tube edge in the curve's own colour (no white wash), so " +
+                 "rounding stays saturated. Only affects the look when round > 0.")]
+        public float rimBoost = 0.5f;
 
         [Header("Freeze")]
         [Tooltip("Hard hold: stop rebuilding and keep drawing the last curves, ignoring parameter and " +
@@ -150,6 +189,8 @@ namespace BodyTracking
         private static readonly int kVerts = Shader.PropertyToID("_Verts");
         private static readonly int kBrightness = Shader.PropertyToID("_Brightness");
         private static readonly int kWidth = Shader.PropertyToID("_Width");
+        private static readonly int kRound = Shader.PropertyToID("_Round");
+        private static readonly int kRimBoost = Shader.PropertyToID("_RimBoost");
         private static readonly int kSegsOut = Shader.PropertyToID("_SegsOut");
         private static readonly int kSegStats = Shader.PropertyToID("_SegStats");
         private static readonly int kSegCap = Shader.PropertyToID("_SegCap");
@@ -428,6 +469,8 @@ namespace BodyTracking
             _mat.SetBuffer(kVerts, _outBuf);
             _mat.SetFloat(kBrightness, brightness);
             _mat.SetFloat(kWidth, ribbonWidth);
+            _mat.SetFloat(kRound, round);
+            _mat.SetFloat(kRimBoost, rimBoost);
             var bounds = new Bounds(Vector3.zero, Vector3.one * 50f);
             Graphics.DrawProceduralIndirect(_mat, bounds, MeshTopology.Triangles, _argsBuf, 0,
                 camera: null, properties: null,

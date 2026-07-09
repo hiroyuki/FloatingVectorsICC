@@ -23,7 +23,7 @@ namespace TSDF
 {
     [AddComponentMenu("TSDF/View")]
     [DefaultExecutionOrder(10)]
-    public sealed class TSDFView : MonoBehaviour, Shared.IViewToggle
+    public sealed class TSDFView : MonoBehaviour, Shared.IViewToggle, Shared.IPanelTunable
     {
         public enum ViewMode
         {
@@ -50,6 +50,39 @@ namespace TSDF
         // ---- Shared.IViewToggle (unified Views panel) ----
         public string ViewLabel => "TSDF mesh";
         public bool Visible { get => showMesh; set => showMesh = value; }
+
+        // ---- Shared.IPanelTunable (one-stop Control Panel) ----
+        // Mesh look knobs so the surface can be graded at runtime, not just the Inspector.
+        public string TuningLabel => "TSDF mesh";
+        public int TunableCount => 5;
+        public string TunableName(int i) =>
+            i == 0 ? "Brightness" :
+            i == 1 ? "Saturation" :
+            i == 2 ? "Gamma" :
+            i == 3 ? "Gradient normals" : "Rim Boost";
+        public float TunableValue(int i) =>
+            i == 0 ? meshBrightness :
+            i == 1 ? meshSaturation :
+            i == 2 ? meshGamma :
+            i == 3 ? meshGradNormals : meshRimBoost;
+        public void SetTunableValue(int i, float value)
+        {
+            switch (i)
+            {
+                case 0: meshBrightness = Mathf.Clamp(value, 0f, 3f); break;
+                case 1: meshSaturation = Mathf.Clamp(value, 0f, 3f); break;
+                case 2: meshGamma = Mathf.Clamp(value, 0.2f, 3f); break;
+                case 3: meshGradNormals = Mathf.Clamp01(value); break;
+                default: meshRimBoost = Mathf.Clamp(value, 0f, 2f); break;
+            }
+        }
+        public float TunableMin(int i) => i == 2 ? 0.2f : 0f;
+        public float TunableMax(int i) =>
+            i == 0 ? 3f :
+            i == 1 ? 3f :
+            i == 2 ? 3f :
+            i == 3 ? 1f : 2f;
+        public bool TunableIsInt(int i) => false;
 
         // ---------- Voxel mode ----------
         [Header("Voxel view")]
@@ -102,6 +135,10 @@ namespace TSDF
                  "facets, 1 = smooth. Samples the displayed front SDF buffer per " +
                  "fragment; falls back to flat where a neighbour voxel is unobserved.")]
         public float meshGradNormals = 1f;
+        [Range(0f, 2f)]
+        [Tooltip("Rim boost. Brightens the silhouette in the surface's own colour " +
+                 "(no white wash) so shading stays saturated instead of greying out.")]
+        public float meshRimBoost = 0.5f;
         [Tooltip("Max triangles the MC output buffer can hold. 333k tris = 1 M " +
                  "vertices, ~12 MB at 36 bytes per triangle (= 3 × float3).")]
         [Min(1024)] public int meshMaxTriangles = 333_333;
@@ -403,6 +440,7 @@ namespace TSDF
             // Gradient-normal inputs: sample the same displayed front SDF buffer the
             // mesh was extracted from. Cheap to keep bound even when the toggle is 0.
             meshMaterial.SetFloat("_GradNormals", meshGradNormals);
+            meshMaterial.SetFloat("_RimBoost", meshRimBoost);
             meshMaterial.SetBuffer("_Voxels", volume.FrontBuffer);
             meshMaterial.SetMatrix("_WorldFromVoxel", volume.WorldFromVoxel);
             meshMaterial.SetMatrix("_VoxelFromWorld", volume.WorldFromVoxel.inverse);
