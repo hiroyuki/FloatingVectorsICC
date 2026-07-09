@@ -9,8 +9,10 @@ Shader "TSDF/TSDFMesh"
     Properties
     {
         _Color      ("Base Color (tint)", Color)  = (1, 1, 1, 1)
-        _RimColor   ("Rim Color",  Color)  = (1, 1, 1, 1)
+        // Rim lifts the silhouette in the surface's own colour (no white add),
+        // so shading stays saturated instead of washing to grey.
         _RimPower   ("Rim Power",  Float)  = 2.5
+        _RimBoost   ("Rim Boost",  Range(0, 2)) = 0.5
         _Saturation ("Saturation", Range(0, 3))   = 1.0
         _Brightness ("Brightness", Range(0, 3))   = 1.0
         _Gamma      ("Gamma",      Range(0.2, 3)) = 1.0
@@ -45,8 +47,8 @@ Shader "TSDF/TSDFMesh"
             StructuredBuffer<Tri> _Triangles;
 
             float4 _Color;
-            float4 _RimColor;
             float  _RimPower;
+            float  _RimBoost;
             float  _Saturation;
             float  _Brightness;
             float  _Gamma;
@@ -138,11 +140,15 @@ Shader "TSDF/TSDFMesh"
                 if (dot(N, i.viewDir) < 0) N = -N;
 
                 float3 L = normalize(float3(0.35, 0.85, 0.40));
-                float diffuse = saturate(dot(N, L)) * 0.7 + 0.3;
+                // Value-only shading: RGB * scalar preserves HSV saturation, and
+                // the rim lifts the silhouette in the surface's own colour (no
+                // white add), so smooth normals read as form without washing to
+                // grey. Higher ambient floor (0.4) keeps the shaded side vivid.
+                float shade = saturate(dot(N, L)) * 0.6 + 0.4;   // 0.4..1.0
                 float rim = pow(1.0 - saturate(dot(N, i.viewDir)), _RimPower);
 
                 // Per-vertex camera colour (baked at integration), colour-graded
-                // then shaded by the flat normal. Grading order: gamma (fix
+                // then shaded by the normal. Grading order: gamma (fix
                 // sRGB/linear darkness) -> saturation (luma-preserving boost) ->
                 // tint -> brightness, then lighting.
                 float3 albedo = saturate(i.vcol);
@@ -150,7 +156,7 @@ Shader "TSDF/TSDFMesh"
                 float luma = dot(albedo, float3(0.2126, 0.7152, 0.0722));
                 albedo = max(0.0, lerp(float3(luma, luma, luma), albedo, _Saturation));
                 albedo *= _Color.rgb;
-                float3 rgb = albedo * diffuse * _Brightness + _RimColor.rgb * rim * 0.35;
+                float3 rgb = albedo * _Brightness * (shade + rim * _RimBoost);
                 return fixed4(rgb, 1.0);
             }
             ENDCG

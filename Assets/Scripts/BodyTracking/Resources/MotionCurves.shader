@@ -18,8 +18,10 @@ Shader "Orbbec/MotionCurves"
         // 0 = original flat emissive look, 1 = full rounded shading. Lets the
         // artist A/B against the old look (see realtime-performance-tuning.md).
         _Round      ("Round shading", Range(0, 1)) = 1.0
-        _RimColor   ("Rim Color", Color) = (1, 1, 1, 1)
+        // Rim brightens the tube edge in the curve's OWN colour (no white add),
+        // so rounding stays saturated instead of washing out.
         _RimPower   ("Rim Power", Float) = 2.5
+        _RimBoost   ("Rim Boost", Range(0, 2)) = 0.5
     }
     SubShader
     {
@@ -44,8 +46,8 @@ Shader "Orbbec/MotionCurves"
             float _Brightness;
             float _Width;
             float _Round;
-            float4 _RimColor;
             float _RimPower;
+            float _RimBoost;
 
             struct V2F
             {
@@ -130,11 +132,15 @@ Shader "Orbbec/MotionCurves"
                 float uu = clamp(i.u, -1.0, 1.0);
                 float3 N = normalize(sideUnit * uu + view * sqrt(saturate(1.0 - uu * uu)));
 
-                // Same self-contained lighting convention as TSDF/TSDFMesh.
+                // Value-only shading: RGB * scalar preserves HSV saturation, so
+                // the tube reads round via brightness variation without dulling
+                // the colour. The rim lifts the edge in the curve's own colour
+                // (never adds white), keeping it vivid. High ambient floor (0.55)
+                // so the shaded side stays close to the original emissive look.
                 float3 L = normalize(float3(0.35, 0.85, 0.40));
-                float diffuse = saturate(dot(N, L)) * 0.7 + 0.3;
-                float rim = pow(1.0 - saturate(dot(N, view)), _RimPower);
-                float3 rounded = albedo * diffuse * _Brightness + _RimColor.rgb * rim * 0.35;
+                float shade = saturate(dot(N, L)) * 0.45 + 0.55;   // 0.55..1.0
+                float rim   = pow(1.0 - saturate(dot(N, view)), _RimPower);
+                float3 rounded = albedo * _Brightness * (shade + rim * _RimBoost);
 
                 float3 rgb = lerp(flatCol, rounded, saturate(_Round));
                 return fixed4(rgb, 1.0);
