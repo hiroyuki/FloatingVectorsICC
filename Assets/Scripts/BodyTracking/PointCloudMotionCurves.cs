@@ -35,19 +35,21 @@ namespace BodyTracking
         // ---- Shared.IPanelTunable (one-stop Control Panel) ----
         // Look knobs so the curves can be dialled in at runtime, not just the Inspector.
         public string TuningLabel => "Motion lines";
-        public int TunableCount => 6;
+        public int TunableCount => 7;
         public string TunableName(int i) =>
             i == 0 ? "Brightness" :
             i == 1 ? "Ribbon Width (m)" :
             i == 2 ? "Round shading" :
             i == 3 ? "Rim Boost" :
-            i == 4 ? "Lag Comp (s)" : "Tail Alpha";
+            i == 4 ? "Lag Comp (s)" :
+            i == 5 ? "Tail Alpha" : "Tail Fade Length";
         public float TunableValue(int i) =>
             i == 0 ? brightness :
             i == 1 ? ribbonWidth :
             i == 2 ? round :
             i == 3 ? rimBoost :
-            i == 4 ? lagCompSeconds : tailAlpha;
+            i == 4 ? lagCompSeconds :
+            i == 5 ? tailAlpha : tailFadePow;
         public void SetTunableValue(int i, float value)
         {
             switch (i)
@@ -57,16 +59,18 @@ namespace BodyTracking
                 case 2: round = Mathf.Clamp01(value); break;
                 case 3: rimBoost = Mathf.Clamp(value, 0f, 2f); break;
                 case 4: lagCompSeconds = Mathf.Clamp(value, 0f, 0.2f); break;
-                default: tailAlpha = Mathf.Clamp01(value); break;
+                case 5: tailAlpha = Mathf.Clamp01(value); break;
+                default: tailFadePow = Mathf.Clamp(value, 0.5f, 6f); break;
             }
         }
-        public float TunableMin(int i) => 0f;
+        public float TunableMin(int i) => i == 6 ? 0.5f : 0f;
         public float TunableMax(int i) =>
             i == 0 ? 3f :
             i == 1 ? 0.05f :
             i == 2 ? 1f :
             i == 3 ? 2f :
-            i == 4 ? 0.2f : 1f;
+            i == 4 ? 0.2f :
+            i == 5 ? 1f : 6f;
         public bool TunableIsInt(int i) => false;
 
         [Tooltip("Bone pose history source. Auto-resolves the first BonePoseHistory at OnEnable.")]
@@ -187,6 +191,11 @@ namespace BodyTracking
                  "past tip dissolves completely, so the trail fades in from the past like a stroke.")]
         public float tailAlpha = 0f;
 
+        [Range(0.5f, 6f)]
+        [Tooltip("Fade curve exponent (alpha = age^pow). 1 = linear; higher keeps more of the trail " +
+                 "transparent and pushes full opacity toward the newest end — a longer gradient.")]
+        public float tailFadePow = 2.5f;
+
         [Header("Freeze")]
         [Tooltip("Hard hold: stop rebuilding and keep drawing the last curves, ignoring parameter and " +
                  "pose changes. For holding the sculpture during live play. NOTE: pausing playback " +
@@ -266,6 +275,7 @@ namespace BodyTracking
         private static readonly int kRound = Shader.PropertyToID("_Round");
         private static readonly int kRimBoost = Shader.PropertyToID("_RimBoost");
         private static readonly int kTailAlpha = Shader.PropertyToID("_TailAlpha");
+        private static readonly int kTailFadePow = Shader.PropertyToID("_TailFadePow");
         private static readonly int kSegsOut = Shader.PropertyToID("_SegsOut");
         private static readonly int kSegStats = Shader.PropertyToID("_SegStats");
         private static readonly int kSegCap = Shader.PropertyToID("_SegCap");
@@ -638,6 +648,7 @@ namespace BodyTracking
             _mat.SetFloat(kRound, round);
             _mat.SetFloat(kRimBoost, rimBoost);
             _mat.SetFloat(kTailAlpha, tailAlpha);
+            _mat.SetFloat(kTailFadePow, tailFadePow);
             var bounds = new Bounds(Vector3.zero, Vector3.one * 50f);
             Graphics.DrawProceduralIndirect(_mat, bounds, MeshTopology.Triangles, _argsBuf, 0,
                 camera: null, properties: null,

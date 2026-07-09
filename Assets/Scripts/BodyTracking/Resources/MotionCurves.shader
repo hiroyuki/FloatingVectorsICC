@@ -25,6 +25,10 @@ Shader "Orbbec/MotionCurves"
         // Alpha at the OLD end of each curve (age 0). 1 = no fade; 0 = the past
         // tip dissolves completely, so trails read as fading in from the past.
         _TailAlpha  ("Tail Alpha (past end)", Range(0, 1)) = 0.0
+        // Fade curve exponent: alpha follows age^pow. 1 = linear; higher pushes
+        // full opacity toward the newest end, so the transparent gradient reads
+        // longer along the trail.
+        _TailFadePow ("Tail Fade Length (pow)", Range(0.5, 6)) = 2.5
     }
     SubShader
     {
@@ -56,6 +60,7 @@ Shader "Orbbec/MotionCurves"
             float _RimPower;
             float _RimBoost;
             float _TailAlpha;
+            float _TailFadePow;
 
             struct V2F
             {
@@ -156,8 +161,10 @@ Shader "Orbbec/MotionCurves"
                 float3 rgb = lerp(flatCol, rounded, saturate(_Round));
                 // Tail fade: alpha ramps from _TailAlpha at the oldest history
                 // point up to opaque at the newest, so the trail dissolves into
-                // the past instead of ending in a hard cut.
-                float alpha = lerp(saturate(_TailAlpha), 1.0, saturate(i.age));
+                // the past instead of ending in a hard cut. The exponent shapes
+                // how far along the trail the gradient reaches (see property).
+                float ramp = pow(saturate(i.age), max(_TailFadePow, 0.01));
+                float alpha = lerp(saturate(_TailAlpha), 1.0, ramp);
                 return fixed4(rgb, alpha);
             }
             ENDCG
