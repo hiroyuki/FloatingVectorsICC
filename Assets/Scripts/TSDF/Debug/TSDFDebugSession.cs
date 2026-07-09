@@ -602,7 +602,7 @@ namespace TSDF.DebugTools
             }
             integrator.BeginFreshBatch();                                                // reset instant/batch tracking + clear write for a clean start
             integrator.integrationEnabled = true;                                        // integrate every played frame
-            if (recorder.IsPaused) recorder.ResumePlayback();                            // let frames advance
+            if (recorder.IsPaused) recorder.ResumeFrames();                              // let frames advance (playback resume OR live unfreeze)
             IsAccumulating = true;
             lastReplayKind = "accumulating…";
             Debug.Log("[TSDFDebugSession] START accumulate: every played frame now folds into one " +
@@ -615,7 +615,7 @@ namespace TSDF.DebugTools
         {
             if (integrator != null) integrator.integrationEnabled = false;   // freeze the result
             if (volume != null) volume.Publish();   // single-buffer: bump PublishVersion -> re-extract the final mesh
-            if (recorder != null && !recorder.IsPaused) recorder.PausePlayback();
+            if (recorder != null && !recorder.IsPaused) recorder.HoldFrames();
             // Deliberately DO NOT restore clearVolumeOnNewBatch / doubleBuffered. The
             // integrator keeps volume.doubleBuffered == clearVolumeOnNewBatch, so flipping
             // clearVolumeOnNewBatch back to true would make it re-enable double-buffering,
@@ -677,7 +677,7 @@ namespace TSDF.DebugTools
                 else if (volume.doubleBuffered) volume.ForceRebuild();
                 else { volume.ClearWrite(); volume.Publish(); }
 
-                if (recorder != null && recorder.IsPaused) recorder.ResumePlayback();
+                if (recorder != null && recorder.IsPaused) recorder.ResumeFrames();
             }
 
             lastReplayKind = "normal playback";
@@ -946,7 +946,7 @@ namespace TSDF.DebugTools
                 volume.accumulationMode = _accumBeforeCompare;
                 _haveAccumBackup = false;
             }
-            if (recorder != null && recorder.IsPaused) recorder.ResumePlayback();
+            if (recorder != null && recorder.IsPaused) recorder.ResumeFrames();
             IsComparing = false;
         }
     }

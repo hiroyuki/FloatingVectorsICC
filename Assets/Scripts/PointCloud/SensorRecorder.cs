@@ -649,6 +649,29 @@ namespace PointCloud
             IsPaused = false;
         }
 
+        /// <summary>
+        /// Resume frame flow on whichever transport is holding it: a playback pause
+        /// resumes playback, a live freeze unfreezes. For callers that only know
+        /// "IsPaused is true and frames must advance" (e.g. TSDFDebugSession) —
+        /// calling ResumePlayback directly no-ops on a live freeze and would leave
+        /// every renderer's holdLiveFrame stuck. No-op when nothing is held.
+        /// </summary>
+        public void ResumeFrames()
+        {
+            if (CurrentState == State.Playing) ResumePlayback();
+            else UnfreezeLiveIfFrozen();
+        }
+
+        /// <summary>
+        /// Hold frame flow on whichever transport is active: playing pauses playback,
+        /// idle live freezes intake. No-op when already held or recording.
+        /// </summary>
+        public void HoldFrames()
+        {
+            if (CurrentState == State.Playing) PausePlayback();
+            else if (!IsPaused) ToggleLiveFreeze();
+        }
+
         public void PausePlayback()
         {
             if (CurrentState != State.Playing || IsPaused) return;
