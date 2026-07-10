@@ -690,8 +690,29 @@ namespace Experience
                 yield break;
             }
 
-            ISculptureResultPublisher publisher = new DryRunPublisher(config.dryRunDelaySeconds);
-            // Phase 7 swaps in LfksUploadPublisher when config.dryRunPublish is off.
+            ISculptureResultPublisher publisher;
+            if (config.dryRunPublish)
+            {
+                publisher = new DryRunPublisher(config.dryRunDelaySeconds);
+            }
+            else
+            {
+                string token = ResolveLfksToken();
+                if (string.IsNullOrEmpty(token))
+                {
+                    Debug.LogError($"[{nameof(ExperienceDirector)}] no LFKS token " +
+                                   "(persistentDataPath/lfks-token.txt or LFKS_TOKEN env) — " +
+                                   $"files kept locally: {glbPath}", this);
+                    _exportFailed = true;
+                    ShowExportFailed();
+                    _exportRoutine = null;
+                    yield break;
+                }
+                publisher = new LfksUploadPublisher(
+                    Path.Combine(Application.streamingAssetsPath, "lfks", "upload.ps1"),
+                    config.uploadScriptSha256, token,
+                    config.lfksRemoteDirectory, config.publishTimeoutSeconds);
+            }
             _cts = new CancellationTokenSource();
             _publishTask = publisher.PublishAsync(glbPath, usdzPath, _cts.Token);
             while (!_publishTask.IsCompleted) yield return null;
@@ -722,6 +743,26 @@ namespace Experience
         }
 
         private void ShowExportFailed() => _ui.ShowMessage(config.exportFailedText);
+
+        // Token lives OUTSIDE the repo/assets: a user-local file first, the
+        // environment second. Trimmed; empty = not configured.
+        private static string ResolveLfksToken()
+        {
+            try
+            {
+                string path = Path.Combine(Application.persistentDataPath, "lfks-token.txt");
+                if (File.Exists(path))
+                {
+                    string fromFile = File.ReadAllText(path).Trim();
+                    if (fromFile.Length > 0) return fromFile;
+                }
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[{nameof(ExperienceDirector)}] token file read failed: {e.Message}");
+            }
+            return Environment.GetEnvironmentVariable("LFKS_TOKEN")?.Trim();
+        }
 
         private void CancelPublish()
         {
