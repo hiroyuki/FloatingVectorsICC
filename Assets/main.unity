@@ -268,6 +268,13 @@ MonoBehaviour:
   folderPathMacOverride: /Users/horihiroyuki/Dropbox/projects/ICC/Recordings/Rec2_jump
   playbackFolderPath: D:\FloatingVectorsICC\RecordingBase\2026-07-08_12-50-09
   playbackFolderPathMacOverride: /Users/horihiroyuki/Dropbox/projects/ICC/Recordings/rec2_turn
+  applyWorldRebase: 1
+  rigSerialOrder:
+  - CL8F253004N
+  - CL8F253004L
+  - CL8F25300EG
+  - CL8F253004Z
+  keepLiveRenderersOnLoad: 0
   datasetName: 
   autoTimestampFolder: 1
   recordKey: 290
@@ -1106,6 +1113,12 @@ MonoBehaviour:
   markerBaseHalfHeight: 0.09
   applyExtrinsics: 1
   extrinsicsRoot: 
+  applyWorldRebase: 1
+  rigSerialOrder:
+  - CL8F253004N
+  - CL8F253004L
+  - CL8F25300EG
+  - CL8F253004Z
   targetFrameRate: 30
   verboseLogging: 0
 --- !u!4 &925702424
@@ -1140,6 +1153,8 @@ MonoBehaviour:
   startupGraceSeconds: 15
   staleFrameSeconds: 3
   checkIntervalSeconds: 1
+  detectIdenticalContent: 0
+  identicalContentSeconds: 10
   showAlert: 1
   logAlerts: 1
 --- !u!1 &943244990
@@ -1280,6 +1295,10 @@ MonoBehaviour:
   uiScale: 2
   orbits: []
   exporter: {fileID: 0}
+  debugView: {fileID: 0}
+  experienceDirector: {fileID: 0}
+  viewSwitchKey: 9
+  exclusiveWithDebugView: 1
 --- !u!1 &1105748081
 GameObject:
   m_ObjectHideFlags: 0
@@ -1722,9 +1741,9 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1151541766}
   serializedVersion: 2
-  m_LocalRotation: {x: -0, y: 0.34070775, z: -0, w: 0.94016933}
-  m_LocalPosition: {x: -0.243, y: 0.168, z: 2.366}
-  m_LocalScale: {x: 2.49, y: 2.136, z: 3.4}
+  m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
+  m_LocalPosition: {x: 0, y: 0.35, z: 0}
+  m_LocalScale: {x: 3.2, y: 2.5, z: 3.2}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 894098144}
