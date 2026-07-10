@@ -38,9 +38,13 @@ namespace PointCloud
         /// so the base reapplies the vertex colour. Default: static mesh, no-op.</summary>
         protected virtual bool UpdateMesh(Mesh mesh) => false;
 
-        private void OnEnable() => SyncVisualization();
-        private void OnDisable() => DestroyVisualization();
-        private void OnDestroy() => DestroyVisualization();
+        // Protected virtual so subclasses can extend teardown (e.g. DwellSphere's
+        // own material) — a subclass defining these privately would HIDE the base
+        // message and silently kill the visualization lifecycle. Update stays
+        // private on purpose: per-frame subclass work goes through UpdateMesh.
+        protected virtual void OnEnable() => SyncVisualization();
+        protected virtual void OnDisable() => DestroyVisualization();
+        protected virtual void OnDestroy() => DestroyVisualization();
         private void Update() => SyncVisualization();
 
         private void OnValidate()

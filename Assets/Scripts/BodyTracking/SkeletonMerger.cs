@@ -367,6 +367,76 @@ namespace BodyTracking
             Joints = new k4abt_joint_t[K4ABTConsts.K4ABT_JOINT_COUNT],
         };
 
+        // ---- merged-person read API (experience flow / PresenceDetector) ----
+        // Filled once per Update from the final merged skeletons; consumers get
+        // world-space positions with no k4a types leaking out.
+        //
+        // Coordinate contract: _mergedSkel.Joints[].Position holds SYNTHETIC
+        // k4a-mm values — merged Unity WORLD positions encoded via UnityToK4Amm.
+        // Recover them ONLY with BodyTrackingShared.K4AmmToUnity. Never run them
+        // through SkeletonWorldTransform.ToWorld (that is for raw per-worker
+        // snapshots and would double-transform).
+        public struct PersonSample
+        {
+            public uint Id;
+            public Vector3 PelvisWorld;
+            public Vector3 HandLeftWorld, HandRightWorld;
+            public bool HandLeftTracked, HandRightTracked; // confidence != NONE
+        }
+
+        private readonly List<PersonSample> _persons = new List<PersonSample>(4);
+
+        /// <summary>Merged persons this frame (post-debounceless raw output —
+        /// consumers add their own hysteresis).</summary>
+        public IReadOnlyList<PersonSample> Persons => _persons;
+
+        /// <summary>Merged person count this frame (raw, no debounce).</summary>
+        public int PersonCount => _persons.Count;
+
+        /// <summary>Crowd condition (&gt;1 merged person), with the existing
+        /// alertOn/OffDelaySeconds debounce the on-screen warning uses.</summary>
+        public bool CrowdActive => _alertActive;
+
+        /// <summary>First merged person (single-person installation: the one
+        /// visitor). False when nobody is tracked this frame.</summary>
+        public bool TryGetPrimaryPerson(out PersonSample person)
+        {
+            if (_persons.Count > 0) { person = _persons[0]; return true; }
+            person = default;
+            return false;
+        }
+
+        private void RecordPersonSample(uint id, in k4abt_skeleton_t skel)
+        {
+            // k4abt's HAND joints are frequently NONE even while the WRIST is
+            // MEDIUM (measured on the 12-50-09 take: hands NONE the whole time).
+            // For touch purposes the wrist is ~8 cm from the palm — well inside
+            // a dwell-sphere radius — so fall back to it.
+            ResolveHand(in skel, k4abt_joint_id_t.K4ABT_JOINT_HAND_LEFT,
+                        k4abt_joint_id_t.K4ABT_JOINT_WRIST_LEFT, out var handL, out bool trackedL);
+            ResolveHand(in skel, k4abt_joint_id_t.K4ABT_JOINT_HAND_RIGHT,
+                        k4abt_joint_id_t.K4ABT_JOINT_WRIST_RIGHT, out var handR, out bool trackedR);
+            _persons.Add(new PersonSample
+            {
+                Id = id,
+                PelvisWorld = BodyTrackingShared.K4AmmToUnity(skel.Joints[kPelvisIdx].Position),
+                HandLeftWorld = handL,
+                HandRightWorld = handR,
+                HandLeftTracked = trackedL,
+                HandRightTracked = trackedR,
+            });
+        }
+
+        private static void ResolveHand(in k4abt_skeleton_t skel, k4abt_joint_id_t hand,
+                                        k4abt_joint_id_t wrist, out Vector3 world, out bool tracked)
+        {
+            var j = skel.Joints[(int)hand];
+            if (j.ConfidenceLevel == k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_NONE)
+                j = skel.Joints[(int)wrist];
+            world = BodyTrackingShared.K4AmmToUnity(j.Position);
+            tracked = j.ConfidenceLevel != k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_NONE;
+        }
+
         // Per-worker debug pools + scratch skeleton for showPerWorkerSkeletons.
         // Each pool draws one camera's raw bodies in a serial-derived hue.
         private readonly Dictionary<string, BodyVisualPool> _perWorkerPools = new Dictionary<string, BodyVisualPool>();
@@ -506,6 +576,7 @@ namespace BodyTracking
                 if (r != null) r.OnRawFramesReady -= HandleRawFrame;
             }
             _pool?.DestroyAll();
+            _persons.Clear();
             _priorPelvisById.Clear();
             _priorMaxConfById.Clear();
             _gateStateById.Clear();
@@ -1079,6 +1150,7 @@ namespace BodyTracking
         private void ApplyMergedSkeletons()
         {
             var cfg = BuildVisualConfig();
+            _persons.Clear();
             for (int c = 0; c < _clusterCount; c++)
             {
                 var cluster = _clusterPool[c];
@@ -1087,6 +1159,7 @@ namespace BodyTracking
                 if (JointRefiner != null) RefineMergedJoints(cluster.Id, ref _mergedSkel);
                 _pool.Apply(cluster.Id, in _mergedSkel, cfg, OnVisualEvicted);
                 UpdateGateHistory(cluster, in _mergedSkel);
+                RecordPersonSample(cluster.Id, in _mergedSkel);
                 _diagPersonsOutput++;
             }
             LogGateDiagnosticsIfDue();
