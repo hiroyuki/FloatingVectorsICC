@@ -1,0 +1,43 @@
+// Occupancy counter for attract-mode presence (Phase 4,
+// Plans/phase4-presence-dwell-plan.md): counts live point-cloud points inside
+// the sensing OBB. Same source contract as MotionCurvesBuild's CSCollect —
+// ObColorPoint vertices (24B: pos12 + col12) read as a Raw buffer, transformed
+// by the source's localToWorld; the sanity range rejects the reconstructor's
+// 1e10 hole dummies.
+//
+// Inside predicate (must stay 1:1 with PresenceDetector.IsInsideSensingVolume):
+//   insideXZ     = abs(local.x) <= 0.5 - _InsetX && abs(local.z) <= 0.5 - _InsetZ
+//   insideBoxY   = abs(local.y) <= 0.5
+//   insideWorldY = _YBandMin <= world.y <= _YBandMax
+// The inset is XZ-ONLY (keeps visitors' feet/heads countable while trimming
+// carpet edges); the vertical trim is the explicit world-Y band.
+
+#pragma kernel CSCount
+
+ByteAddressBuffer _Src;                // source vertices, 24B stride (pos12 + col12)
+RWStructuredBuffer<uint> _Counter;     // [0] += points inside
+
+float4x4 _SrcLocalToWorld;
+float4x4 _WorldToBox;                  // sensing OBB inverse: box local = unit cube (±0.5)
+uint  _SrcCount;
+float _SanityRange;                    // reject |world| beyond this (hole dummies)
+float _InsetX;                         // XZ inset, normalized to box size (CPU-clamped >= 0, < 0.5)
+float _InsetZ;
+float _YBandMin;                       // world-space vertical band
+float _YBandMax;
+
+[numthreads(64, 1, 1)]
+void CSCount(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _SrcCount) return;
+    float3 pl = asfloat(_Src.Load3(id.x * 24u));
+    float3 p  = mul(_SrcLocalToWorld, float4(pl, 1.0)).xyz;
+    if (abs(p.x) > _SanityRange || abs(p.y) > _SanityRange || abs(p.z) > _SanityRange) return;
+
+    float3 b = mul(_WorldToBox, float4(p, 1.0)).xyz;
+    bool insideXZ     = abs(b.x) <= 0.5 - _InsetX && abs(b.z) <= 0.5 - _InsetZ;
+    bool insideBoxY   = abs(b.y) <= 0.5;
+    bool insideWorldY = p.y >= _YBandMin && p.y <= _YBandMax;
+    if (insideXZ && insideBoxY && insideWorldY)
+        InterlockedAdd(_Counter[0], 1u);
+}
