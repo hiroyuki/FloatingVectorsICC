@@ -84,6 +84,16 @@ namespace PointCloud
         [Tooltip("macOS-only override for playbackFolderPath (same rationale as folderPathMacOverride).")]
         public string playbackFolderPathMacOverride = "";
 
+        [Tooltip("Re-base the calibration world for playback GOs: origin = floor projection " +
+                 "of the 4-camera centroid, +X = camera1→2 (yaw + XZ only). Same contract as " +
+                 "SensorManager.applyWorldRebase so live and playback share one world. " +
+                 "Needs rigSerialOrder. Off → Dev mode unchanged.")]
+        public bool applyWorldRebase = false;
+
+        [Tooltip("The rig's 4 camera serials in order 1..4 (must match SensorManager.rigSerialOrder). " +
+                 "Rebase is skipped with a warning when these don't resolve against extrinsics.yaml.")]
+        public string[] rigSerialOrder = new string[0];
+
         [Tooltip("Dataset name written into dataset.yaml. Defaults to the recording folder name.")]
         public string datasetName = "";
 
@@ -1276,6 +1286,7 @@ namespace PointCloud
                 // can reconstruct point clouds without depending on a live renderer
                 // (per Plans/issue-9-multicam-extrinsic-calibration.md → Phase 4).
                 int extrinsicsApplied = LoadExtrinsicsFromYaml(root);
+                RecomputeWorldRebase();
 
                 // Free the live Femto Bolt pipelines now that the recording is on
                 // disk in memory — the user pressed Read to play back, so the live
@@ -1316,6 +1327,7 @@ namespace PointCloud
             string root = ResolvePlaybackRoot();
             int applied = LoadExtrinsicsFromYaml(root);
             if (applied == 0) return;
+            RecomputeWorldRebase();
             foreach (var kv in _tracks)
             {
                 var t = kv.Value;
@@ -1323,9 +1335,50 @@ namespace PointCloud
                 if (!t.GlobalTrColorCamera.HasValue) continue;
                 // ApplyToTransform sets localPosition/Rotation; localScale stays at
                 // the (1, -1, 1) Y-flip from EnsurePlaybackObject.
-                Calibration.ExtrinsicsApply.ApplyToTransform(
-                    t.PlaybackObject.transform, t.GlobalTrColorCamera.Value);
+                if (_worldRebaseValid)
+                    Calibration.ExtrinsicsApply.ApplyToTransform(
+                        t.PlaybackObject.transform, t.GlobalTrColorCamera.Value, _worldRebase);
+                else
+                    Calibration.ExtrinsicsApply.ApplyToTransform(
+                        t.PlaybackObject.transform, t.GlobalTrColorCamera.Value);
             }
+        }
+
+        // ---- world rebase (experience flow; see Calibration.WorldFrameRebase) ----
+        // Group-level decision cached per extrinsics load: either every playback GO
+        // composes the same rebase Pose or none does — never a mixed rig.
+        private Pose _worldRebase = Pose.identity;
+        private bool _worldRebaseValid;
+
+        private void RecomputeWorldRebase()
+        {
+            _worldRebase = Pose.identity;
+            _worldRebaseValid = false;
+            if (!applyWorldRebase) return;
+            // localPosition/localRotation composition equals a world rebase only
+            // under an identity parent (playback GOs sit directly under us).
+            if (!Calibration.WorldFrameRebase.ParentIsIdentity(transform))
+            {
+                Debug.LogWarning($"[{nameof(SensorRecorder)}] world rebase skipped: this GameObject's " +
+                                 "transform is not identity, so local-pose composition would not be a " +
+                                 "world rebase. Reset the SensorRecorder transform.", this);
+                return;
+            }
+            var cams = new List<(string serial, Vector3 posUnity)>(_tracks.Count);
+            foreach (var kv in _tracks)
+            {
+                if (!kv.Value.GlobalTrColorCamera.HasValue) continue;
+                Calibration.ExtrinsicsApply.ToUnityLocal(kv.Value.GlobalTrColorCamera.Value, out var pos, out _);
+                cams.Add((kv.Key, pos));
+            }
+            if (!Calibration.WorldFrameRebase.TryComputeFromCalibrations(
+                    cams, rigSerialOrder, out _worldRebase, out string reason))
+            {
+                Debug.LogWarning($"[{nameof(SensorRecorder)}] world rebase skipped: {reason}", this);
+                _worldRebase = Pose.identity;
+                return;
+            }
+            _worldRebaseValid = true;
         }
 
         /// <summary>
@@ -2068,7 +2121,13 @@ namespace PointCloud
             // loaded from extrinsics.yaml (issue #9 / Phase 5). Sets localPosition
             // and localRotation; localScale is the Y-flip above.
             if (track.GlobalTrColorCamera.HasValue)
-                Calibration.ExtrinsicsApply.ApplyToTransform(go.transform, track.GlobalTrColorCamera.Value);
+            {
+                if (_worldRebaseValid)
+                    Calibration.ExtrinsicsApply.ApplyToTransform(
+                        go.transform, track.GlobalTrColorCamera.Value, _worldRebase);
+                else
+                    Calibration.ExtrinsicsApply.ApplyToTransform(go.transform, track.GlobalTrColorCamera.Value);
+            }
             var mf = go.AddComponent<MeshFilter>();
             var mr = go.AddComponent<MeshRenderer>();
             PointCloudUtil.ConfigureUnlitRenderer(mr);

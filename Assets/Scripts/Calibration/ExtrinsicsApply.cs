@@ -91,5 +91,21 @@ namespace Calibration
             t.localPosition = pos;
             t.localRotation = rot;
         }
+
+        /// <summary>
+        /// Rebase-aware variant: same as above but left-composes the
+        /// <paramref name="unityRebase"/> world re-basing Pose AFTER the
+        /// OpenCV→Unity conversion (see WorldFrameRebase for the contract —
+        /// Unity-space composition only, localScale untouched, callers gate on
+        /// an identity parent at group level).
+        /// </summary>
+        public static void ApplyToTransform(Transform t, in ObExtrinsic ocv, in Pose unityRebase)
+        {
+            ToUnityLocal(in ocv, out var pos, out var rot);
+            WorldFrameRebase.ComposeUnityPoseAfterToUnityLocal(
+                new Pose(pos, rot), in unityRebase, out pos, out rot);
+            t.localPosition = pos;
+            t.localRotation = rot;
+        }
     }
 }
