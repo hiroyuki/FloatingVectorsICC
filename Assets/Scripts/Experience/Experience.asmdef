@@ -6,7 +6,8 @@
         "Orbbec",
         "Calibration",
         "PointCloud",
-        "BodyTracking"
+        "BodyTracking",
+        "UnityEngine.UI"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],

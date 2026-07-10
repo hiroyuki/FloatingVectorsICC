@@ -14,6 +14,7 @@
 // Assembly-CSharp can see both.
 
 using BodyTracking;
+using PointCloud;
 using TSDF;
 using UnityEngine;
 
@@ -47,6 +48,18 @@ namespace CameraControl
                  "the hitch doesn't show on the stage displays.")]
         public TSDFPrintExporter exporter;
 
+        [Tooltip("4-camera tile overlay the view-switch key swaps in for the HUD. " +
+                 "Auto-resolves the first MultiCameraDebugView when left empty.")]
+        public MultiCameraDebugView debugView;
+
+        [Tooltip("Key that switches the operator display between the HUD and the " +
+                 "4-camera tiles (drives debugView.Visible; the HUD mirrors off it).")]
+        public KeyCode viewSwitchKey = KeyCode.Tab;
+
+        [Tooltip("Keep HUD and 4-camera tiles mutually exclusive: the HUD hides itself " +
+                 "whenever the tiles are visible (whichever key toggled them).")]
+        public bool exclusiveWithDebugView = true;
+
         private bool _autoOrbit;
 
         private void OnEnable()
@@ -54,15 +67,34 @@ namespace CameraControl
             if (orbits == null || orbits.Length == 0)
                 orbits = FindObjectsByType<CameraOrbitController>(FindObjectsSortMode.None);
             if (exporter == null) exporter = FindFirstObjectByType<TSDFPrintExporter>();
+            if (debugView == null) debugView = FindFirstObjectByType<MultiCameraDebugView>();
             // Reflect an override that is already on (e.g. HUD re-enabled mid-session).
             foreach (var o in orbits)
                 if (o != null && o.TryGetComponent(out PauseOrbitGate g) && g.autoOrbitOverride)
                     _autoOrbit = true;
         }
 
+        private void Update()
+        {
+            // HUD <-> 4-camera tiles. debugView.Visible is the single source of
+            // truth; mirroring every frame keeps the pair exclusive no matter
+            // which key toggled the tiles (this one or the view's own).
+            if (debugView != null)
+            {
+                if (Input.GetKeyDown(viewSwitchKey)) debugView.Visible = !debugView.Visible;
+                if (exclusiveWithDebugView) visible = !debugView.Visible;
+            }
+            else if (Input.GetKeyDown(viewSwitchKey))
+            {
+                visible = !visible;
+            }
+        }
+
         private void OnGUI()
         {
             if (!visible) return;
+            // Full-screen operator alert owns the display — stand down.
+            if (Shared.OperatorOverlayGate.AlertActive) return;
             if (history == null)
             {
                 history = FindFirstObjectByType<BonePoseHistory>();

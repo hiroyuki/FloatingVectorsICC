@@ -51,6 +51,11 @@ namespace PointCloud
         }
 
         private bool _visible;
+
+        /// <summary>Overlay visibility — the operator HUD's Tab switch drives
+        /// this (and mirrors itself off it, so the local toggle key composes).</summary>
+        public bool Visible { get => _visible; set => _visible = value; }
+
         private readonly Dictionary<string, CamTextures> _cams = new Dictionary<string, CamTextures>();
         private readonly HashSet<PointCloudRenderer> _subRenderers = new HashSet<PointCloudRenderer>();
         private readonly HashSet<SensorRecorder> _subRecorders = new HashSet<SensorRecorder>();
@@ -211,6 +216,9 @@ namespace PointCloud
         private void OnGUI()
         {
             if (!_visible) return;
+            // Full-screen operator alert owns the display — stand down (IMGUI
+            // would draw over the alert otherwise).
+            if (Shared.OperatorOverlayGate.AlertActive) return;
 
             if (_labelStyle == null)
             {

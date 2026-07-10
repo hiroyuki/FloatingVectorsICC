@@ -11,9 +11,10 @@ namespace CameraControl
 {
     public class MultiDisplayActivator : MonoBehaviour
     {
-        [Tooltip("Total displays to use, including the primary one. 2 = main + " +
-                 "second display. Connected displays beyond this count stay off.")]
-        public int displayCount = 2;
+        [Tooltip("Total displays to use, including the primary one. 3 = operator + " +
+                 "two visitor displays (the experience-flow rig). Connected displays " +
+                 "beyond this count stay off.")]
+        public int displayCount = 3;
 
         void Start()
         {
