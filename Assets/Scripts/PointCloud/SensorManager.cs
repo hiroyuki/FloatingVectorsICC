@@ -123,6 +123,11 @@ namespace PointCloud
                  "these don't resolve against extrinsics.yaml.")]
         public string[] rigSerialOrder = new string[0];
 
+        [Tooltip("Physical floor height in the CALIBRATION frame (m) — the rebase shifts " +
+                 "Y so this becomes the new y=0 (measured -0.9 on the current rig, the " +
+                 "cameras sit ~1 m above the floor). 0 = keep calibrated heights.")]
+        public float rebaseFloorY = 0f;
+
         [Header("Frame rate")]
         [Tooltip("Cap the application frame rate via Application.targetFrameRate. " +
                  "vSync is disabled (QualitySettings.vSyncCount = 0) so the cap takes " +
@@ -370,7 +375,8 @@ namespace PointCloud
                 ExtrinsicsApply.ToUnityLocal(c.GlobalTrColorCamera.Value, out var pos, out _);
                 cams.Add((c.Serial, pos));
             }
-            if (!WorldFrameRebase.TryComputeFromCalibrations(cams, rigSerialOrder, out rebase, out string reason))
+            if (!WorldFrameRebase.TryComputeFromCalibrations(cams, rigSerialOrder, out rebase, out string reason,
+                                                             rebaseFloorY))
             {
                 Debug.LogWarning($"[{nameof(SensorManager)}] world rebase skipped: {reason}", this);
                 return false;

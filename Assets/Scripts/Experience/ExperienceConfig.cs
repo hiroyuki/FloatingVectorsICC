@@ -19,9 +19,9 @@ namespace Experience
         public string[] rigSerialOrder =
             { "CL8F253004N", "CL8F253004L", "CL8F25300EG", "CL8F253004Z" };
 
-        [Tooltip("Floor height in the calibration frame (SpaceBuilder.floorY; " +
-                 "measured -0.9 on the current rig).")]
-        public float floorY = -0.9f;
+        [Tooltip("Floor height in the REBASED world. With rebaseFloorY set on " +
+                 "SensorManager/SensorRecorder (always-on rebase), the floor IS y=0.")]
+        public float floorY = 0f;
 
         [Header("Timings / dev skips")]
         public ExperienceTimings timings = new ExperienceTimings();

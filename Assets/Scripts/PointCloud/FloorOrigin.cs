@@ -38,8 +38,15 @@ namespace PointCloud
         [Tooltip("Draw a wireframe grid at the floor plane.")]
         public bool showGrid = true;
 
+        [Tooltip("Fit the grid to the bounding box footprint: lines snapped to WORLD " +
+                 "multiples of gridSpacing (the world origin is always a line crossing) " +
+                 "and clipped to the box interior. Off = legacy free-floating square " +
+                 "grid of gridCells x gridSpacing centred on the anchor.")]
+        public bool fitToBoundingBox = false;
+
         [Tooltip("Number of grid cells along each side (the grid is square). " +
-                 "Total extent = gridCells * gridSpacing meters.")]
+                 "Total extent = gridCells * gridSpacing meters. Ignored when " +
+                 "fitToBoundingBox is on.")]
         [Min(1)]
         public int gridCells = 20;
 
@@ -111,6 +118,8 @@ namespace PointCloud
         private float _builtSpacing = -1f;
         private Color _builtGridColor;
         private Color _builtAxisColor;
+        private bool _builtFit;
+        private Vector3 _builtFitMin, _builtFitMax; // world AABB of the fitted grid
 
         // Cached list reused each LateUpdate to avoid the FindObjectsByType allocation.
         private static readonly List<PointCloudRenderer> s_rendererScratch = new List<PointCloudRenderer>(8);
@@ -178,9 +187,12 @@ namespace PointCloud
                 EnsureGridMaterial();
                 if (_gridMesh != null && _gridMaterial != null)
                 {
-                    // Grid mesh lives in this Transform's local space, so the grid follows the
-                    // anchor position and any rotation you give the FloorOrigin GameObject.
-                    Graphics.DrawMesh(_gridMesh, transform.localToWorldMatrix, _gridMaterial,
+                    // Fitted grid is built in WORLD space (lines snapped to world
+                    // coordinates), so it draws with identity; the legacy grid
+                    // lives in this Transform's local space and follows the anchor.
+                    Matrix4x4 m = fitToBoundingBox && boundingBox != null
+                        ? Matrix4x4.identity : transform.localToWorldMatrix;
+                    Graphics.DrawMesh(_gridMesh, m, _gridMaterial,
                                       renderLayer, null, 0, null, ShadowCastingMode.Off, false);
                 }
             }
@@ -203,11 +215,18 @@ namespace PointCloud
 
         private void EnsureGridMesh()
         {
+            bool fit = fitToBoundingBox && boundingBox != null;
+            Vector3 fitMin = Vector3.zero, fitMax = Vector3.zero;
+            if (fit) ComputeBoxFootprint(out fitMin, out fitMax);
+
             if (_gridMesh != null
+                && _builtFit == fit
                 && _builtCells == gridCells
                 && Mathf.Approximately(_builtSpacing, gridSpacing)
                 && _builtGridColor == gridColor
-                && _builtAxisColor == axisColor)
+                && _builtAxisColor == axisColor
+                && (!fit || ((_builtFitMin - fitMin).sqrMagnitude < 1e-8f &&
+                             (_builtFitMax - fitMax).sqrMagnitude < 1e-8f)))
             {
                 return;
             }
@@ -220,11 +239,31 @@ namespace PointCloud
                     hideFlags = HideFlags.DontSave,
                 };
             }
-            BuildGridMesh(_gridMesh, gridCells, gridSpacing, gridColor, axisColor);
+            if (fit) BuildFitGridMesh(_gridMesh, fitMin, fitMax, gridSpacing, gridColor, axisColor);
+            else BuildGridMesh(_gridMesh, gridCells, gridSpacing, gridColor, axisColor);
+            _builtFit = fit;
+            _builtFitMin = fitMin;
+            _builtFitMax = fitMax;
             _builtCells = gridCells;
             _builtSpacing = gridSpacing;
             _builtGridColor = gridColor;
             _builtAxisColor = axisColor;
+        }
+
+        // World AABB of the box's bottom face (handles a rotated OBB as its AABB;
+        // our rebased convention keeps the box axis-aligned anyway). Y = floor.
+        private void ComputeBoxFootprint(out Vector3 min, out Vector3 max)
+        {
+            var t = boundingBox.transform;
+            min = Vector3.positiveInfinity;
+            max = Vector3.negativeInfinity;
+            for (int i = 0; i < 4; i++)
+            {
+                var corner = new Vector3((i & 1) == 0 ? -0.5f : 0.5f, -0.5f, (i & 2) == 0 ? -0.5f : 0.5f);
+                Vector3 w = t.TransformPoint(corner);
+                min = Vector3.Min(min, w);
+                max = Vector3.Max(max, w);
+            }
         }
 
         private void EnsureGridMaterial()
@@ -437,6 +476,53 @@ namespace PointCloud
             }
             _builtCells = -1;
             _builtSpacing = -1f;
+        }
+
+        // WORLD-space grid clipped to the box footprint: interior lines sit on
+        // world multiples of `spacing` (so the world origin is always a line
+        // crossing when inside the box), plus the border rectangle. The world
+        // axis lines (x=0 / z=0) get axisColor.
+        private static void BuildFitGridMesh(Mesh mesh, Vector3 min, Vector3 max, float spacing,
+                                             Color gridColor, Color axisColor)
+        {
+            spacing = Mathf.Max(0.001f, spacing);
+            float y = min.y;
+            var verts = new List<Vector3>(128);
+            var colors = new List<Color>(128);
+
+            void AddLine(Vector3 a, Vector3 b, Color c)
+            {
+                verts.Add(a); verts.Add(b);
+                colors.Add(c); colors.Add(c);
+            }
+
+            // interior lines snapped to world multiples of spacing
+            for (int k = Mathf.CeilToInt(min.x / spacing); k * spacing <= max.x + 1e-4f; k++)
+            {
+                float x = k * spacing;
+                AddLine(new Vector3(x, y, min.z), new Vector3(x, y, max.z),
+                        k == 0 ? axisColor : gridColor);
+            }
+            for (int k = Mathf.CeilToInt(min.z / spacing); k * spacing <= max.z + 1e-4f; k++)
+            {
+                float z = k * spacing;
+                AddLine(new Vector3(min.x, y, z), new Vector3(max.x, y, z),
+                        k == 0 ? axisColor : gridColor);
+            }
+            // border rectangle so the grid reads as the sensing area's edge
+            AddLine(new Vector3(min.x, y, min.z), new Vector3(max.x, y, min.z), gridColor);
+            AddLine(new Vector3(min.x, y, max.z), new Vector3(max.x, y, max.z), gridColor);
+            AddLine(new Vector3(min.x, y, min.z), new Vector3(min.x, y, max.z), gridColor);
+            AddLine(new Vector3(max.x, y, min.z), new Vector3(max.x, y, max.z), gridColor);
+
+            var indices = new int[verts.Count];
+            for (int i = 0; i < indices.Length; i++) indices[i] = i;
+
+            mesh.Clear();
+            mesh.SetVertices(verts);
+            mesh.SetColors(colors);
+            mesh.SetIndices(indices, MeshTopology.Lines, 0);
+            mesh.RecalculateBounds();
         }
 
         // Square line grid centered on (0,0,0) in the local XZ plane. The two axis lines

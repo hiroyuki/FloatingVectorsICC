@@ -35,12 +35,15 @@ namespace Calibration
         /// Compute the rebase Pose from the four camera positions (Unity space,
         /// i.e. already through <see cref="ExtrinsicsApply.ToUnityLocal"/>) in
         /// rig serial order 1..4. On success <paramref name="rebase"/> maps the
-        /// old world to the new one (yaw + XZ translation, zero Y component).
-        /// On failure nothing may be applied — callers keep every camera on the
-        /// non-rebased pose (no partial application).
+        /// old world to the new one: yaw + XZ translation to the rig centroid,
+        /// and Y shifted so the calibration-frame height <paramref name="floorY"/>
+        /// (the measured physical floor) becomes the new y=0. floorY 0 keeps the
+        /// calibrated heights untouched. On failure nothing may be applied —
+        /// callers keep every camera on the non-rebased pose (no partial
+        /// application).
         /// </summary>
         public static bool TryCompute(IReadOnlyList<Vector3> camPosUnity,
-                                      out Pose rebase, out string reason)
+                                      out Pose rebase, out string reason, float floorY = 0f)
         {
             rebase = Pose.identity;
             if (camPosUnity == null || camPosUnity.Count != 4)
@@ -77,8 +80,13 @@ namespace Calibration
                 return false;
             }
 
+            if (!float.IsFinite(floorY) || Mathf.Abs(floorY) > kMaxPositionMagnitude)
+            { reason = $"floorY implausible: {floorY}"; return false; }
+
             Vector3 centroid = (camPosUnity[0] + camPosUnity[1] + camPosUnity[2] + camPosUnity[3]) * 0.25f;
-            var rigPos = new Vector3(centroid.x, 0f, centroid.z); // floor projection: Y stays calibrated
+            // XZ: rig centroid becomes the origin. Y: the measured physical
+            // floor (calib-frame height floorY) becomes the new y=0.
+            var rigPos = new Vector3(centroid.x, floorY, centroid.z);
             var rigRot = Quaternion.LookRotation(zAxis, Vector3.up);
 
             var invRot = Quaternion.Inverse(rigRot);
@@ -95,7 +103,7 @@ namespace Calibration
         public static bool TryComputeFromCalibrations(
             IReadOnlyList<(string serial, Vector3 posUnity)> cams,
             IReadOnlyList<string> rigSerialOrder,
-            out Pose rebase, out string reason)
+            out Pose rebase, out string reason, float floorY = 0f)
         {
             rebase = Pose.identity;
             if (rigSerialOrder == null || rigSerialOrder.Count != 4)
@@ -130,7 +138,7 @@ namespace Calibration
                 if (!found)
                 { reason = $"serial {serial} has no extrinsics entry"; return false; }
             }
-            return TryCompute(ordered, out rebase, out reason);
+            return TryCompute(ordered, out rebase, out reason, floorY);
         }
 
         /// <summary>
