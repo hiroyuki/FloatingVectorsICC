@@ -70,7 +70,19 @@ namespace Experience
 
         // ---------------- lifecycle ----------------
 
-        private void OnEnable() => EnsureBuilt();
+        private void OnEnable()
+        {
+            EnsureBuilt();
+            // Re-raise an alert this instance still owns (disable/enable cycle).
+            if (_alertOwned) Shared.OperatorOverlayGate.AlertActive = true;
+        }
+
+        private void OnDisable()
+        {
+            // While disabled we can't draw the operator alert — release the gate
+            // so the HUD/tiles aren't suppressed behind an invisible alert.
+            if (_alertOwned) Shared.OperatorOverlayGate.AlertActive = false;
+        }
 
         private void OnDestroy()
         {

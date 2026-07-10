@@ -1316,6 +1316,10 @@ namespace PointCloud
             }
         }
 
+        /// <summary>Public entry for the experience director: re-read extrinsics
+        /// and re-place playback GOs (used to apply/undo the world rebase).</summary>
+        public void ReapplyExtrinsics() => RefreshExtrinsicsAndReapply();
+
         /// <summary>
         /// Re-read extrinsics.yaml and push the latest <c>global_tr_colorCamera</c>
         /// to any existing <c>_Playback_*</c> GameObject's transform. Called from

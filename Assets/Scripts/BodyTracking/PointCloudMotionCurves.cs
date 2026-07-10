@@ -371,8 +371,14 @@ namespace BodyTracking
             _shader.Dispatch(_buildKernel, (_capacity + 63) / 64, 1, 1);
 
             _hasBuilt = true;
+            BuildVersion++;
             DrawCurves();
         }
+
+        /// <summary>Incremented after every successful curve rebuild. The
+        /// experience capture waits for +2 after changing historySamples so the
+        /// exported trail window is guaranteed rebuilt (Phase 5 readiness).</summary>
+        public int BuildVersion { get; private set; }
 
         private int _lastBuildParamHash;
         private ulong _lastBuildPoseVersion;
