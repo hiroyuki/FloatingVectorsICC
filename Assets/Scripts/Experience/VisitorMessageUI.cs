@@ -200,6 +200,7 @@ namespace Experience
             {
                 alignment = TextAnchor.MiddleCenter,
                 wordWrap = true,
+                fontStyle = FontStyle.Bold,
                 normal = { textColor = Color.red }
             };
             _operatorAlertStyle.fontSize = Mathf.RoundToInt(alertFontSize * Screen.height / 1080f);
@@ -318,6 +319,7 @@ namespace Experience
 
             ui.alertText = MakeText(ui.alertGroup.transform, "AlertText", alertFontSize, Color.red,
                                     new Vector2(1700f, 800f));
+            ui.alertText.fontStyle = FontStyle.Bold; // fault text carries weight
             ui.alertGroup.SetActive(false);
 
             return ui;

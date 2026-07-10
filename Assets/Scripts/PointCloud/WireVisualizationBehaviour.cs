@@ -56,6 +56,12 @@ namespace PointCloud
             // just let the next tick pick up the new Inspector value.
         }
 
+        /// <summary>Colour pass after a rebuild / WireColor change. Default =
+        /// uniform vertex colour; subclasses with multi-part meshes (e.g.
+        /// DwellSphere's progress ring) override to colour regions separately.</summary>
+        protected virtual void ApplyMeshColors(Mesh mesh, Color color) =>
+            ApplyVertexColor(mesh, color);
+
         private void SyncVisualization()
         {
             if (Show)
@@ -63,12 +69,12 @@ namespace PointCloud
                 if (_vizObject == null) CreateVisualization();
                 if (_vizMesh != null && UpdateMesh(_vizMesh))
                 {
-                    ApplyVertexColor(_vizMesh, WireColor);
+                    ApplyMeshColors(_vizMesh, WireColor);
                     _lastAppliedColor = WireColor;
                 }
                 if (_vizMesh != null && _lastAppliedColor != WireColor)
                 {
-                    ApplyVertexColor(_vizMesh, WireColor);
+                    ApplyMeshColors(_vizMesh, WireColor);
                     _lastAppliedColor = WireColor;
                 }
             }
@@ -91,7 +97,7 @@ namespace PointCloud
             PointCloudUtil.ConfigureUnlitRenderer(_vizRenderer);
 
             _vizMesh = CreateMesh();
-            ApplyVertexColor(_vizMesh, WireColor);
+            ApplyMeshColors(_vizMesh, WireColor);
             _lastAppliedColor = WireColor;
             _vizFilter.sharedMesh = _vizMesh;
 

@@ -15,6 +15,7 @@
 // the whole GameObject instead).
 
 using System;
+using System.Collections.Generic;
 using PointCloud;
 using UnityEngine;
 using UnityEngine.Events;
@@ -35,14 +36,20 @@ namespace Experience
         [Tooltip("Seconds a hand must stay inside to select.")]
         public float dwellSeconds = 1f;
 
-        [Range(0f, 0.9f)]
-        [Tooltip("Arc fraction shown while idle (0.25 = quarter circles). Dwell " +
-                 "progress sweeps this to full circles.")]
-        public float idleArcFraction = 0.25f;
+        [Range(1.02f, 1.6f)]
+        [Tooltip("Progress ring radius as a multiple of the sphere radius. The sphere " +
+                 "wireframe is always complete; the dwell draws this horizontal ring " +
+                 "around it from 0 to a full circle — full circle = selected.")]
+        public float progressRingScale = 1.15f;
 
         [Min(8)]
         [Tooltip("Line segments per full circle.")]
         public int segmentsPerCircle = 64;
+
+        [Range(0, 3)]
+        [Tooltip("Icosphere subdivision level for the wireframe (Blender's Ico " +
+                 "Sphere): 0 = icosahedron (30 edges), 1 = 120, 2 = 480 edges.")]
+        public int icoSubdivisions = 1;
 
         [Header("Colors / glow")]
         public Color idleColor = new Color(1f, 1f, 1f, 0.6f);
@@ -86,9 +93,9 @@ namespace Experience
         protected override string VizObjectName => "_DwellSphereViz";
         protected override string MaterialName => "DwellSphere Wire (auto)";
 
-        // Vertex colours stay <= 1 (UNorm8); the glow is the material tint.
-        protected override Color WireColor =>
-            Locked ? activeColor : Color.LerpUnclamped(idleColor, activeColor, Progress);
+        // Base-sphere tone (the progress ring is coloured separately in
+        // ApplyMeshColors). Vertex colours stay <= 1; the glow is the material tint.
+        protected override Color WireColor => Locked ? activeColor : idleColor;
 
         protected override Mesh CreateMesh()
         {
@@ -205,45 +212,135 @@ namespace Experience
             OnSelected?.Invoke(this);
         }
 
-        // ---- geometry: three orthogonal circles, arc length = progress ----
+        // ---- geometry: icosphere wireframe + a growing progress ring ----
+        //
+        // The sphere wireframe is ALWAYS complete (it marks the touch target):
+        // a triangle-mesh icosphere (Blender's Ico Sphere), rendered as its
+        // unique edges. Dwell progress draws a separate horizontal ring around
+        // it (radius * progressRingScale) from 0 to a full circle — full circle
+        // = selected. Horizontal so it reads from both visitor displays.
 
-        private float CurrentArcFraction() =>
-            Locked ? 1f : Mathf.Lerp(idleArcFraction, 1f, Progress);
+        private int _baseVertCount;
+        private int _builtSubdivisions = -1;
+        private readonly List<Vector3> _icoEdgeVerts = new List<Vector3>(1024); // unit sphere, line pairs
 
-        // Rebuild only when the drawn segment count changes (quantized progress),
-        // so slow dwell doesn't rewrite the mesh every frame.
+        private int RingSegments() =>
+            Locked ? segmentsPerCircle
+                   : Mathf.Clamp(Mathf.RoundToInt(segmentsPerCircle * Progress), 0, segmentsPerCircle);
+
+        // Rebuild only when the ring's drawn segment count changes (quantized
+        // progress), so slow dwell doesn't rewrite the mesh every frame.
         private bool RebuildArcs(Mesh mesh)
         {
-            int segs = Mathf.Clamp(Mathf.RoundToInt(segmentsPerCircle * CurrentArcFraction()),
-                                   1, segmentsPerCircle);
-            if (segs == _builtSegments) return false;
-            _builtSegments = segs;
+            int ringSegs = RingSegments();
+            if (ringSegs == _builtSegments && _builtSubdivisions == icoSubdivisions
+                && mesh.vertexCount > 0) return false;
+            _builtSegments = ringSegs;
 
-            int vertsPerArc = segs * 2; // Lines topology: 2 verts per segment
-            var verts = new Vector3[vertsPerArc * 3];
-            var idx = new int[vertsPerArc * 3];
-            int w = 0;
-            AppendArc(verts, ref w, segs, (c, s) => new Vector3(c, s, 0f)); // XY
-            AppendArc(verts, ref w, segs, (c, s) => new Vector3(0f, c, s)); // YZ
-            AppendArc(verts, ref w, segs, (c, s) => new Vector3(s, 0f, c)); // ZX
+            if (_builtSubdivisions != icoSubdivisions)
+            {
+                BuildIcosphereEdges(icoSubdivisions, _icoEdgeVerts);
+                _builtSubdivisions = icoSubdivisions;
+            }
+
+            var verts = new List<Vector3>(_icoEdgeVerts.Count + ringSegs * 2);
+            for (int i = 0; i < _icoEdgeVerts.Count; i++)
+                verts.Add(_icoEdgeVerts[i] * radius);
+            _baseVertCount = verts.Count;
+
+            // Progress ring (XZ, slightly larger).
+            AppendArc(verts, ringSegs, radius * progressRingScale,
+                      (c, s) => new Vector3(c, 0f, s));
+
+            var idx = new int[verts.Count];
             for (int i = 0; i < idx.Length; i++) idx[i] = i;
 
             mesh.Clear();
-            mesh.vertices = verts;
+            mesh.SetVertices(verts);
             mesh.SetIndices(idx, MeshTopology.Lines, 0);
             mesh.RecalculateBounds();
             return true;
         }
 
-        private void AppendArc(Vector3[] verts, ref int w, int segs, Func<float, float, Vector3> plane)
+        // Unit icosphere as unique wire edges (line vertex pairs): icosahedron
+        // subdivided N times, midpoints pushed onto the sphere.
+        private static void BuildIcosphereEdges(int subdivisions, List<Vector3> outLinePairs)
         {
-            float step = 2f * Mathf.PI / segmentsPerCircle; // full-circle step: arcs grow, density stays
+            float t = (1f + Mathf.Sqrt(5f)) / 2f;
+            var v = new List<Vector3>
+            {
+                new Vector3(-1,  t,  0), new Vector3( 1,  t,  0), new Vector3(-1, -t,  0), new Vector3( 1, -t,  0),
+                new Vector3( 0, -1,  t), new Vector3( 0,  1,  t), new Vector3( 0, -1, -t), new Vector3( 0,  1, -t),
+                new Vector3( t,  0, -1), new Vector3( t,  0,  1), new Vector3(-t,  0, -1), new Vector3(-t,  0,  1),
+            };
+            for (int i = 0; i < v.Count; i++) v[i] = v[i].normalized;
+            var faces = new List<(int a, int b, int c)>
+            {
+                (0,11,5), (0,5,1), (0,1,7), (0,7,10), (0,10,11),
+                (1,5,9), (5,11,4), (11,10,2), (10,7,6), (7,1,8),
+                (3,9,4), (3,4,2), (3,2,6), (3,6,8), (3,8,9),
+                (4,9,5), (2,4,11), (6,2,10), (8,6,7), (9,8,1),
+            };
+
+            var midCache = new Dictionary<long, int>();
+            int Midpoint(int a, int b)
+            {
+                long key = a < b ? ((long)a << 32) | (uint)b : ((long)b << 32) | (uint)a;
+                if (midCache.TryGetValue(key, out int m)) return m;
+                m = v.Count;
+                v.Add(((v[a] + v[b]) * 0.5f).normalized);
+                midCache.Add(key, m);
+                return m;
+            }
+
+            for (int s = 0; s < subdivisions; s++)
+            {
+                var next = new List<(int, int, int)>(faces.Count * 4);
+                foreach (var (a, b, c) in faces)
+                {
+                    int ab = Midpoint(a, b), bc = Midpoint(b, c), ca = Midpoint(c, a);
+                    next.Add((a, ab, ca)); next.Add((b, bc, ab));
+                    next.Add((c, ca, bc)); next.Add((ab, bc, ca));
+                }
+                faces = next;
+            }
+
+            var edges = new HashSet<long>();
+            void Edge(int a, int b)
+            {
+                long key = a < b ? ((long)a << 32) | (uint)b : ((long)b << 32) | (uint)a;
+                edges.Add(key);
+            }
+            foreach (var (a, b, c) in faces) { Edge(a, b); Edge(b, c); Edge(c, a); }
+
+            outLinePairs.Clear();
+            foreach (long key in edges)
+            {
+                outLinePairs.Add(v[(int)(key >> 32)]);
+                outLinePairs.Add(v[(int)(key & 0xFFFFFFFF)]);
+            }
+        }
+
+        private void AppendArc(List<Vector3> verts, int segs, float r,
+                               Func<float, float, Vector3> shape)
+        {
+            float step = 2f * Mathf.PI / segmentsPerCircle; // constant density: arcs grow
             for (int i = 0; i < segs; i++)
             {
                 float a0 = i * step, a1 = (i + 1) * step;
-                verts[w++] = plane(Mathf.Cos(a0), Mathf.Sin(a0)) * radius;
-                verts[w++] = plane(Mathf.Cos(a1), Mathf.Sin(a1)) * radius;
+                verts.Add(shape(Mathf.Cos(a0), Mathf.Sin(a0)) * r);
+                verts.Add(shape(Mathf.Cos(a1), Mathf.Sin(a1)) * r);
             }
+        }
+
+        // Base sphere = the WireColor tone; the progress ring is always the
+        // active colour so the sweep pops against the idle sphere.
+        protected override void ApplyMeshColors(Mesh mesh, Color color)
+        {
+            var colors = new Color[mesh.vertexCount];
+            for (int i = 0; i < colors.Length; i++)
+                colors[i] = i < _baseVertCount ? color : activeColor;
+            mesh.SetColors(colors);
         }
     }
 }
