@@ -29,7 +29,7 @@
 |---|---|
 | `ExperienceDirector.cs` | ショーの単一オーナー。モードスイッチ（`IViewToggle` 実装 "Experience mode" で Control Panel に自動出現 + Inspector + HUD トグル）。Enter 時に既存コンポーネントの値をスナップショットし Exit 時に全復元（非破壊） |
 | `ExperienceStateMachine.cs` | 純C#。状態: Attract / Welcome / FreePlay / Ready / PromptAnimal / PromptMantis / PromptFree / Select / Exporting / QrShow / Fault |
-| `ExperienceConfig.cs` (ScriptableObject) | serial順(カメラ1-4)、各タイミング、文言バリアント配列(4,5用)、球の半径/位置、dryRun フラグ、アトラクト収録ルート、占有閾値。**token はアセットに含めない**（下記 Publishing 参照） |
+| `ExperienceConfig.cs` (ScriptableObject) | serial順(カメラ1-4)、各タイミング、文言バリアント配列(4,5用)、球の半径/位置、dryRun フラグ、アトラクト収録ルート、占有閾値。**token はアセットに含めない**（下記 Publishing 参照）。**開発用ステージスキップ**: 各ステートに debug skip フラグ（skipAttract / skipWelcome / skipFreePlay / captureCount 短縮 / skipExportUpload=dryRun / skipQr）+ タイミング倍率 — ステートマシンは Enter 時に skip 指定なら即次ステートへ遷移（遷移ロジック自体は通るので E2E 検証の抜けにならない） |
 | `VisitorMessageUI.cs` | Display1,2 それぞれに Canvas(targetDisplay)。API: ShowMessage / ShowCountdown / ShowAlert(赤) / ShowQr / ClearAll。フォント = `Font.CreateDynamicFontFromOSFont("Yu Gothic Medium", ...)`（uGUI Text、白。Mac では LegacyRuntime.ttf フォールバック + ログ） |
 | `PresenceDetector.cs` + `PresenceOccupancy.compute` | `PersonCount` / `IsPersonInside` / `TryGetHands`。体験中 = BT（SkeletonMerger 経由、骨盤が OBB 内、デバウンス付き）。アトラクト中 = live 点群のOBB内占有カウント（compute + AsyncGPUReadback、`PointCloudMotionCurves` の vertex buffer bind パターン流用）。`debugForcePresence` で Mac 検証 |
 | `AttractPlaybackController.cs` | 収録フォルダ列挙→ランダム選択→ `recorder.Load()` + 再生。ループ時に別収録へ再抽選 |

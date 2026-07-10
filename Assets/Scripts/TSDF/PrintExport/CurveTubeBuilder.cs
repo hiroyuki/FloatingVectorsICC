@@ -17,10 +17,13 @@ namespace TSDF
         // tipTaper: radius scale at the OLD end of the polyline (index 0 — curve
         // history runs oldest -> newest), lerped up to the full radius at the new
         // end, so trails read as strokes that fade in from the past. 1 = constant.
+        // exportSpace false = keep the polylines' world space (no mirror, no
+        // recentre; center/minY unused) for in-scene display meshes. Winding is
+        // then mirrored relative to Unity's front faces — render with Cull Off.
         public static int AppendCurveTubes(List<Vector3[]> lines, List<Vector3> lineCols, float brightness,
                                            float radius, int sides, float tolerance, Vector3 center, float minY,
                                            List<Vector3> pos, List<Vector3> nrm, List<Vector3> col,
-                                           List<int> idx, float tipTaper = 1f)
+                                           List<int> idx, float tipTaper = 1f, bool exportSpace = true)
         {
             int tubes = 0;
             var p = new List<Vector3>(256);
@@ -31,7 +34,7 @@ namespace TSDF
                 p.Clear();
                 foreach (var w in lines[li])
                 {
-                    var e = new Vector3(-(w.x - center.x), w.y - minY, w.z - center.z);
+                    var e = exportSpace ? new Vector3(-(w.x - center.x), w.y - minY, w.z - center.z) : w;
                     if (p.Count == 0 || (e - p[p.Count - 1]).sqrMagnitude > 1e-10f) p.Add(e);
                 }
                 if (tolerance > 0f && p.Count > 2) MeshOps.SimplifyPolyline(p, tolerance);
