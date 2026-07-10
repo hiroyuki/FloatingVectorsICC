@@ -51,10 +51,23 @@ namespace Experience
         public string attractRecordingRoot = "";
 
         [Header("Publishing")]
-        [Tooltip("Use the dry-run publisher (fake URLs, no network). Phase 7 wires LFKS.")]
+        [Tooltip("Use the dry-run publisher (fake URLs, no network). Off = real LFKS " +
+                 "upload via the pinned StreamingAssets/lfks/upload.ps1.")]
         public bool dryRunPublish = true;
         [Min(0f)] public float dryRunDelaySeconds = 1f;
         public QrUrlKind qrUrlKind = QrUrlKind.First;
+
+        [Tooltip("SHA-256 (hex) of StreamingAssets/lfks/upload.ps1 — the publisher " +
+                 "refuses to run a script whose bytes changed. Not a secret.")]
+        public string uploadScriptSha256 =
+            "2f9e84376551e547198576a65562d1829796cba36d99daf7fd6aac84fafcce96";
+
+        [Tooltip("Remote subfolder in the LFKS directory the sculptures land in.")]
+        public string lfksRemoteDirectory = "sculptures";
+
+        [Min(5f)]
+        [Tooltip("Per-file upload timeout (s); one retry after a failure.")]
+        public float publishTimeoutSeconds = 60f;
 
         [Header("Visitor texts (hiragana)")]
         [TextArea] public string attractText = "あそびに　きてね！";
