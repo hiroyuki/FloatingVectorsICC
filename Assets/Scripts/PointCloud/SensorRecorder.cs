@@ -94,6 +94,10 @@ namespace PointCloud
                  "Rebase is skipped with a warning when these don't resolve against extrinsics.yaml.")]
         public string[] rigSerialOrder = new string[0];
 
+        [Tooltip("Physical floor height in the CALIBRATION frame (m) — must match " +
+                 "SensorManager.rebaseFloorY. The rebase shifts Y so this becomes y=0.")]
+        public float rebaseFloorY = 0f;
+
         [Tooltip("Skip destroying the live renderers when a recording is loaded. The " +
                  "experience flow's attract playback coexists with the live rig (device " +
                  "re-enumeration costs ~15 s, unacceptable at the attract→visitor moment). " +
@@ -1384,7 +1388,7 @@ namespace PointCloud
                 cams.Add((kv.Key, pos));
             }
             if (!Calibration.WorldFrameRebase.TryComputeFromCalibrations(
-                    cams, rigSerialOrder, out _worldRebase, out string reason))
+                    cams, rigSerialOrder, out _worldRebase, out string reason, rebaseFloorY))
             {
                 Debug.LogWarning($"[{nameof(SensorRecorder)}] world rebase skipped: {reason}", this);
                 _worldRebase = Pose.identity;

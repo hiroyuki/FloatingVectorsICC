@@ -63,10 +63,29 @@ namespace Calibration.Tests
         {
             var moved = TransformRig(Quaternion.Euler(0f, -70f, 0f), new Vector3(-3f, 1.2f, 8f));
             Assert.IsTrue(WorldFrameRebase.TryCompute(moved, out var rebase, out _));
-            Assert.AreEqual(0f, rebase.position.y, 1e-5f, "rebase must not move the floor height");
+            Assert.AreEqual(0f, rebase.position.y, 1e-5f, "floorY 0 must not move the floor height");
             var e = rebase.rotation.eulerAngles;
             Assert.Less(Mathf.DeltaAngle(0f, e.x), 0.01f);
             Assert.Less(Mathf.DeltaAngle(0f, e.z), 0.01f);
+        }
+
+        [Test]
+        public void FloorY_ShiftsCalibFloorToZero()
+        {
+            // Cameras 1.8 m above a floor that sits at -0.9 in the calib frame:
+            // with floorY = -0.9 the rebased cameras must land at y = 2.7 and a
+            // point ON the physical floor must land at y = 0.
+            Assert.IsTrue(WorldFrameRebase.TryCompute(kCanonical, out var rebase, out string reason, -0.9f), reason);
+            foreach (var cam in kCanonical)
+            {
+                Vector3 moved = rebase.rotation * cam + rebase.position;
+                Assert.AreEqual(1.8f + 0.9f, moved.y, 1e-4f, "camera height above the floor");
+            }
+            Vector3 floorPoint = rebase.rotation * new Vector3(0.4f, -0.9f, 0.7f) + rebase.position;
+            Assert.AreEqual(0f, floorPoint.y, 1e-4f, "calib floor maps to y=0");
+
+            Assert.IsFalse(WorldFrameRebase.TryCompute(kCanonical, out _, out _, float.NaN),
+                "non-finite floorY must fail");
         }
 
         [Test]
