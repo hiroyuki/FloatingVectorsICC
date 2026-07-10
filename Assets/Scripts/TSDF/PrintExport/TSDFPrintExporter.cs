@@ -28,7 +28,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Threading.Tasks;
 using BodyTracking;
 using UnityEngine;
 
@@ -153,9 +152,6 @@ namespace TSDF
         private int _kBuildMask = -1, _kDilate = -1, _kSeedOutside = -1, _kPropagate = -1,
                     _kMarkFilled = -1, _kErode = -1, _kFillWrite = -1, _kCapBoundary = -1,
                     _kCullMask = -1;
-        private ComputeShader _mcShader;     // Resources/TSDFMarchingCubes
-        private int _mcKernel = -1;
-
         private static readonly Vector3 kFillColor = new Vector3(0.5f, 0.5f, 0.5f);
 
         // ---------------- panel surface (PrintExportPanel) ----------------
@@ -494,235 +490,54 @@ namespace TSDF
         //  physical print run ever comes back.)
 
         /// <summary>Web/AR export: .glb (vertex colours, web viewers) and .usdz
-        /// (texture-atlas colours, iPhone AR Quick Look), both real-world metres.</summary>
+        /// (texture-atlas colours, iPhone AR Quick Look), both real-world metres.
+        /// The heavy lifting (MC readback, weld/smooth/decimate, curve tubes,
+        /// file writing) lives in TSDFSnapshotBuilder — this wires the panel
+        /// settings through and reports the timings.</summary>
         public void ExportWeb()
         {
             if (!Guard(needCurves: false)) return;
-            if (!EnsureMcShader()) return;
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var slabs = RunMarchingCubes(out long totalTris);
-            if (slabs == null) return;
-            WriteWebFiles(slabs, sw.ElapsedMilliseconds);
-        }
-
-        // Full-grid Marching Cubes in Z slabs with CPU readback: the shared front
-        // half of every mesh export. Returns the per-slab triangle soup
-        // (Tri = 18 floats each), or null after Fail().
-        private List<(float[] data, int tris)> RunMarchingCubes(out long totalTris)
-        {
-            totalTris = 0;
-            var dim = volume.Dim;
-            // Match what the user sees: reuse the view's iso/weight gates if present.
-            var view = FindFirstObjectByType<TSDFView>();
-            float iso = view != null ? view.meshIsoLevel : 0f;
-            float minWeight = view != null ? view.meshMinWeight : 0.5f;
-
-            int triCap = Mathf.Max(100_000, triangleBudgetPerSlab);
-            var triBuf = new ComputeBuffer(triCap, 72, ComputeBufferType.Append); // Tri
-            var countBuf = new ComputeBuffer(1, sizeof(uint), ComputeBufferType.Raw);
-            var slabs = new List<(float[] data, int tris)>();
-            try
+            var snap = TSDFSnapshotBuilder.Capture(volume, curves, new TSDFSnapshotBuilder.CaptureOptions
             {
-                _mcShader.SetInts("_Dim", dim.x, dim.y, dim.z);
-                _mcShader.SetMatrix("_WorldFromVoxel", volume.WorldFromVoxel);
-                _mcShader.SetFloat("_IsoLevel", iso);
-                _mcShader.SetFloat("_MinWeight", minWeight);
-                _mcShader.SetBuffer(_mcKernel, "_Voxels", volume.FrontBuffer);
-                _mcShader.SetBuffer(_mcKernel, "_Colors", volume.FrontColorBuffer);
-                _mcShader.SetBuffer(_mcKernel, "_Triangles", triBuf);
-
-                int gx = Mathf.Max(1, Mathf.CeilToInt((dim.x - 1) / 4f));
-                int gy = Mathf.Max(1, Mathf.CeilToInt((dim.y - 1) / 4f));
-                int cellsZ = Mathf.Max(1, dim.z - 1);
-                var countHost = new uint[1];
-
-                int zBase = 0, thickness = 32; // multiple of 4: dispatch covers exactly gz*4 cells
-                while (zBase < cellsZ)
-                {
-                    int gz = Mathf.Max(1, Mathf.CeilToInt(Mathf.Min(thickness, cellsZ - zBase) / 4f));
-                    triBuf.SetCounterValue(0);
-                    _mcShader.SetInt("_CellZBase", zBase);
-                    _mcShader.Dispatch(_mcKernel, gx, gy, gz);
-                    ComputeBuffer.CopyCount(triBuf, countBuf, 0);
-                    countBuf.GetData(countHost);
-                    int n = (int)countHost[0];
-
-                    if (n >= triCap)
-                    {
-                        if (thickness <= 4)
-                        {
-                            Fail($"slab at z={zBase} overflows {triCap} triangles even at minimum thickness — " +
-                                 "raise triangleBudgetPerSlab");
-                            return null;
-                        }
-                        thickness = Mathf.Max(4, thickness / 2);
-                        continue; // retry the same slab thinner
-                    }
-
-                    if (n > 0)
-                    {
-                        var data = new float[n * 18]; // Tri = 18 floats
-                        triBuf.GetData(data, 0, 0, n * 18);
-                        slabs.Add((data, n));
-                        totalTris += n;
-                    }
-                    zBase += gz * 4;
-                    thickness = 32;
-                    // Progress heartbeat: a long export must stay diagnosable from
-                    // Editor.log (the editor blocks while this runs).
-                    if (slabs.Count % 5 == 0)
-                        Debug.Log($"[TSDFPrintExporter] MC slab {zBase}/{cellsZ} — {totalTris} tris so far", this);
-                }
-                _mcShader.SetInt("_CellZBase", 0); // hygiene: shared shader asset state
-
-                if (totalTris == 0) { Fail("Marching Cubes produced 0 triangles — empty volume?"); return null; }
-                Debug.Log($"[TSDFPrintExporter] MC done: {totalTris} tris — welding...", this);
-                return slabs;
-            }
-            finally
-            {
-                triBuf.Release(); countBuf.Release();
-            }
-        }
-
-        // ---------------- web/AR export (.glb + .usdz) ----------------
-        // Same weld+smooth as the STL path, then written at real-world scale:
-        // metres, XZ centred on the origin, base on y=0 (AR Quick Look places the
-        // model on the floor). Unity is left-handed, glTF/USD are right-handed
-        // Y-up, so X is mirrored and the winding re-checked by signed volume
-        // (CCW = outward in RH; negative volume means flip on write).
-        private void WriteWebFiles(List<(float[] data, int tris)> slabs, long mcMs)
-        {
-            var total = System.Diagnostics.Stopwatch.StartNew();
-            var phase = System.Diagnostics.Stopwatch.StartNew();
-            MeshOps.WeldSlabs(slabs, out var pos, out var col, out var tri);
-            slabs.Clear(); // free the soup copies before smoothing allocates
-            long weldMs = phase.ElapsedMilliseconds;
-            Debug.Log($"[TSDFPrintExporter] welded to {pos.Length} verts in {weldMs} ms " +
-                      $"— smoothing x{smoothIterations}...", this);
-            phase.Restart();
-            if (smoothIterations > 0)
-                MeshOps.TaubinSmooth(pos, tri, smoothIterations);
-            long smoothMs = phase.ElapsedMilliseconds;
-
-            // Decimate to the web triangle budget (web files only; the STL path
-            // keeps the full MC resolution).
-            long decimateMs = 0;
-            int trisBeforeDec = tri.Length / 3;
-            if (webMeshTargetTris > 0 && trisBeforeDec > webMeshTargetTris)
-            {
-                phase.Restart();
-                MeshDecimator.Simplify(ref pos, ref col, ref tri, webMeshTargetTris);
-                decimateMs = phase.ElapsedMilliseconds;
-                Debug.Log($"[TSDFPrintExporter] decimated {trisBeforeDec} -> {tri.Length / 3} tris " +
-                          $"({pos.Length} verts) in {decimateMs} ms", this);
-            }
-            int meshTris = tri.Length / 3;
-            phase.Restart();
-
-            Vector3 min = Vector3.positiveInfinity, max = Vector3.negativeInfinity;
-            foreach (var p in pos) { min = Vector3.Min(min, p); max = Vector3.Max(max, p); }
-            Vector3 center = (min + max) * 0.5f;
-            if ((max - min).y < 1e-4f) { Fail("degenerate mesh bounds"); return; }
-
-            for (int i = 0; i < pos.Length; i++)
-                pos[i] = new Vector3(-(pos[i].x - center.x), pos[i].y - min.y, pos[i].z - center.z);
-
-            // Drop weld-collapsed slivers, then orient: positive signed volume in
-            // the mirrored (right-handed) space means the winding is already
-            // CCW-outward; negative means every triangle flips.
-            var idxList = new List<int>(tri.Length);
-            double signedVol = 0;
-            for (int t = 0; t < tri.Length; t += 3)
-            {
-                int i0 = tri[t], i1 = tri[t + 1], i2 = tri[t + 2];
-                if (i0 == i1 || i1 == i2 || i0 == i2) continue;
-                idxList.Add(i0); idxList.Add(i1); idxList.Add(i2);
-                signedVol += Vector3.Dot(pos[i0], Vector3.Cross(pos[i1], pos[i2])) / 6.0;
-            }
-            var idx = idxList.ToArray();
-            if (idx.Length == 0) { Fail("no non-degenerate triangles after weld"); return; }
-            bool flip = signedVol < 0;
-            if (flip)
-                for (int t = 0; t < idx.Length; t += 3)
-                    (idx[t + 1], idx[t + 2]) = (idx[t + 2], idx[t + 1]);
-
-            var nrm = MeshOps.ComputeVertexNormals(pos, idx);
-
-            // ---- curved lines: direct tube meshes at display resolution ----
-            // NOT the Fuse-curves voxel path: the drawn Catmull-Rom polylines are
-            // read back and swept into tubes, so the curves keep their on-screen
-            // smoothness instead of being quantised to voxel size.
-            int curveCount = 0;
-            long curveMs = 0;
-            phase.Restart();
-            if (webIncludeCurves && curves != null)
-            {
-                var lines = new List<Vector3[]>();
-                var lineCols = new List<Vector3>();
-                if (curves.TryReadCurvePolylines(webCurveStride, lines, lineCols, out string why))
-                {
-                    var tp = new List<Vector3>(); var tn = new List<Vector3>();
-                    var tc = new List<Vector3>(); var ti = new List<int>();
-                    curveCount = CurveTubeBuilder.AppendCurveTubes(lines, lineCols, curves.brightness,
-                        Mathf.Max(0.0005f, curves.ribbonWidth * 0.5f),
-                        Mathf.Clamp(webCurveSides, 3, 12), webCurveTolerance, center, min.y, tp, tn, tc, ti,
-                        webCurveTipTaper);
-                    if (curveCount > 0)
-                    {
-                        int vOff = pos.Length, iOff = idx.Length;
-                        Array.Resize(ref pos, vOff + tp.Count);
-                        Array.Resize(ref nrm, vOff + tn.Count);
-                        Array.Resize(ref col, vOff + tc.Count);
-                        Array.Resize(ref idx, iOff + ti.Count);
-                        tp.CopyTo(pos, vOff); tn.CopyTo(nrm, vOff); tc.CopyTo(col, vOff);
-                        for (int i = 0; i < ti.Count; i++) idx[iOff + i] = ti[i] + vOff;
-                        Debug.Log($"[TSDFPrintExporter] curves: {curveCount} tubes, " +
-                                  $"{tp.Count} verts / {ti.Count / 3} tris (stride {webCurveStride})", this);
-                    }
-                }
-                else
-                    Debug.LogWarning($"[TSDFPrintExporter] web export: curves skipped — {why}", this);
-            }
-            curveMs = phase.ElapsedMilliseconds;
+                smoothIterations = smoothIterations,
+                triangleBudgetPerSlab = triangleBudgetPerSlab,
+                meshTargetTris = webMeshTargetTris,
+                includeCurves = webIncludeCurves,
+                curveStride = webCurveStride,
+                curveSides = webCurveSides,
+                curveTipTaper = webCurveTipTaper,
+                curveTolerance = webCurveTolerance,
+            }, out string err);
+            if (snap == null) { Fail(err); return; }
 
             string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
                                       "Documents", "FloatingVectorsPrints");
             string stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
             string glbPath = Path.Combine(dir, $"web_{stamp}.glb");
             string usdzPath = Path.Combine(dir, $"web_{stamp}.usdz");
-            try
-            {
-                Directory.CreateDirectory(dir);
-                phase.Restart();
-                long glbBytes = GlbWriter.Write(glbPath, pos, nrm, col, idx);
-                long glbMs = phase.ElapsedMilliseconds;
-                phase.Restart();
-                var ur = UsdzWriter.Write(usdzPath, pos, nrm, col, idx, usdPythonPath);
-                long usdzMs = phase.ElapsedMilliseconds;
-                if (!ur.binaryUsdc)
-                    Debug.LogWarning("[TSDFPrintExporter] USDZ written as ASCII usda (no python with " +
-                                     "usd-core found — 3-4x larger than binary usdc). One-time setup: " +
-                                     "macOS: python3 -m venv ~/.venvs/usd && ~/.venvs/usd/bin/pip install usd-core / " +
-                                     "Windows: py -3 -m venv %USERPROFILE%\\.venvs\\usd + " +
-                                     "%USERPROFILE%\\.venvs\\usd\\Scripts\\pip install usd-core — " +
-                                     "or set Usd Python Path on the exporter.", this);
-                _status = $"Web: {idx.Length / 3} tris / {pos.Length} verts " +
-                          $"(mesh {meshTris} + {curveCount} tubes) — " +
-                          $"GLB {glbBytes / 1048576.0:0.0} MB + USDZ {ur.bytes / 1048576.0:0.0} MB " +
-                          $"({(ur.binaryUsdc ? "usdc" : "usda fallback")}, atlas {ur.texSize}px) -> {dir} | " +
-                          $"time: MC {mcMs / 1000.0:0.0}s, weld {weldMs / 1000.0:0.0}s, " +
-                          $"smooth {smoothMs / 1000.0:0.0}s, decimate {decimateMs / 1000.0:0.0}s " +
-                          $"({trisBeforeDec / 1000}k->{meshTris / 1000}k), curves {curveMs / 1000.0:0.0}s, " +
-                          $"GLB {glbMs / 1000.0:0.0}s, USDZ {usdzMs / 1000.0:0.0}s" +
-                          $"{(ur.binaryUsdc ? $" (usdc conv {ur.convertMs / 1000.0:0.0}s)" : "")}, " +
-                          $"total {(total.ElapsedMilliseconds + mcMs) / 1000.0:0.0}s";
-                Debug.Log("[TSDFPrintExporter] " + _status, this);
-            }
-            catch (Exception e)
-            {
-                Fail($"web export failed: {e.Message}");
-            }
+            if (!TSDFSnapshotBuilder.ExportFiles(snap, glbPath, usdzPath, usdPythonPath,
+                                                 out var st, out err))
+            { Fail(err); return; }
+
+            if (!st.usdzBinary)
+                Debug.LogWarning("[TSDFPrintExporter] USDZ written as ASCII usda (no python with " +
+                                 "usd-core found — 3-4x larger than binary usdc). One-time setup: " +
+                                 "macOS: python3 -m venv ~/.venvs/usd && ~/.venvs/usd/bin/pip install usd-core / " +
+                                 "Windows: py -3 -m venv %USERPROFILE%\\.venvs\\usd + " +
+                                 "%USERPROFILE%\\.venvs\\usd\\Scripts\\pip install usd-core — " +
+                                 "or set Usd Python Path on the exporter.", this);
+            _status = $"Web: {st.finalTris} tris / {st.finalVerts} verts " +
+                      $"(mesh {snap.MeshTris} + {st.curveCount} tubes) — " +
+                      $"GLB {st.glbBytes / 1048576.0:0.0} MB + USDZ {st.usdzBytes / 1048576.0:0.0} MB " +
+                      $"({(st.usdzBinary ? "usdc" : "usda fallback")}, atlas {st.usdzTexSize}px) -> {dir} | " +
+                      $"time: MC {snap.mcMs / 1000.0:0.0}s, weld {snap.weldMs / 1000.0:0.0}s, " +
+                      $"smooth {snap.smoothMs / 1000.0:0.0}s, decimate {snap.decimateMs / 1000.0:0.0}s " +
+                      $"({snap.trisBeforeDecimate / 1000}k->{snap.MeshTris / 1000}k), curves {st.curveMs / 1000.0:0.0}s, " +
+                      $"GLB {st.glbMs / 1000.0:0.0}s, USDZ {st.usdzMs / 1000.0:0.0}s" +
+                      $"{(st.usdzBinary ? $" (usdc conv {st.usdzConvertMs / 1000.0:0.0}s)" : "")}, " +
+                      $"total {sw.ElapsedMilliseconds / 1000.0:0.0}s";
+            Debug.Log("[TSDFPrintExporter] " + _status, this);
         }
 
         // ---------------- shared ----------------
@@ -764,15 +579,6 @@ namespace TSDF
             _kCapBoundary = _floodShader.FindKernel("CapBoundary");
             _kCullMask = _floodShader.FindKernel("CullMask");
             return true;
-        }
-
-        private bool EnsureMcShader()
-        {
-            if (_mcShader != null && _mcKernel >= 0) return true;
-            if (!TSDFComputeUtil.TryLoad(ref _mcShader, "TSDFMarchingCubes", "TSDFPrintExporter", this))
-            { Fail("Resources/TSDFMarchingCubes.compute not found"); return false; }
-            _mcKernel = _mcShader.FindKernel("MarchCubes");
-            return _mcKernel >= 0;
         }
 
         private void Dispatch3D(int kernel, Vector3Int dim)
