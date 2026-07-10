@@ -113,6 +113,16 @@ namespace PointCloud
                  "SensorRecorder.folderPath. Empty → Application.persistentDataPath/Recordings/recording.")]
         public string extrinsicsRoot = string.Empty;
 
+        [Header("World rebase (experience flow)")]
+        [Tooltip("Re-base the calibration world when applying extrinsics: origin = floor " +
+                 "projection of the 4-camera centroid, +X = camera1→2 (yaw + XZ only, floor " +
+                 "height stays calibrated). Needs rigSerialOrder. Off → Dev mode unchanged.")]
+        public bool applyWorldRebase = false;
+        [Tooltip("The rig's 4 camera serials in order 1..4 (defines the rebased axes: " +
+                 "+X = camera1→2, +Z ≈ camera2→3). Rebase is skipped with a warning when " +
+                 "these don't resolve against extrinsics.yaml.")]
+        public string[] rigSerialOrder = new string[0];
+
         [Header("Frame rate")]
         [Tooltip("Cap the application frame rate via Application.targetFrameRate. " +
                  "vSync is disabled (QualitySettings.vSyncCount = 0) so the cap takes " +
@@ -309,18 +319,63 @@ namespace PointCloud
                 return;
             }
 
+            // World rebase is a group-level decision: either every camera gets
+            // the rebased pose or none does (a failed resolve must not leave a
+            // mixed rig). Resolved once here, before any ApplyToTransform.
+            Pose rebase = Pose.identity;
+            bool useRebase = applyWorldRebase &&
+                             TryResolveWorldRebase(calibrations, out rebase);
+
             int applied = 0;
             foreach (var c in calibrations)
             {
                 var renderer = FindRendererBySerial(c.Serial);
                 if (renderer == null) continue;
                 if (!c.GlobalTrColorCamera.HasValue) continue;
-                ExtrinsicsApply.ApplyToTransform(renderer.transform, c.GlobalTrColorCamera.Value);
+                if (useRebase)
+                    ExtrinsicsApply.ApplyToTransform(renderer.transform, c.GlobalTrColorCamera.Value, rebase);
+                else
+                    ExtrinsicsApply.ApplyToTransform(renderer.transform, c.GlobalTrColorCamera.Value);
                 applied++;
             }
             if (verboseLogging)
                 Debug.Log(
-                    $"[{nameof(SensorManager)}] applyExtrinsics: applied to {applied}/{_renderers.Count} renderer(s) from {path}.");
+                    $"[{nameof(SensorManager)}] applyExtrinsics: applied to {applied}/{_renderers.Count} renderer(s) from {path}" +
+                    $"{(applyWorldRebase ? (useRebase ? " (world rebase ON)" : " (world rebase REQUESTED but skipped)") : "")}.");
+        }
+
+        /// <summary>
+        /// Compute the world-rebase Pose for the whole rig (see WorldFrameRebase).
+        /// False (with a warning) when the serials don't resolve, the layout is
+        /// degenerate, or this manager's transform isn't identity — in which
+        /// case the caller applies plain extrinsics to EVERY camera.
+        /// </summary>
+        private bool TryResolveWorldRebase(
+            IReadOnlyList<PointCloudRecording.DeviceCalibration> calibrations, out Pose rebase)
+        {
+            rebase = Pose.identity;
+            // localPosition/localRotation composition equals a world rebase only
+            // under an identity parent (the renderers sit directly under us).
+            if (!WorldFrameRebase.ParentIsIdentity(transform))
+            {
+                Debug.LogWarning($"[{nameof(SensorManager)}] world rebase skipped: this GameObject's " +
+                                 "transform is not identity, so local-pose composition would not be a " +
+                                 "world rebase. Reset the SensorManager transform.", this);
+                return false;
+            }
+            var cams = new List<(string serial, Vector3 posUnity)>(calibrations.Count);
+            foreach (var c in calibrations)
+            {
+                if (!c.GlobalTrColorCamera.HasValue) continue;
+                ExtrinsicsApply.ToUnityLocal(c.GlobalTrColorCamera.Value, out var pos, out _);
+                cams.Add((c.Serial, pos));
+            }
+            if (!WorldFrameRebase.TryComputeFromCalibrations(cams, rigSerialOrder, out rebase, out string reason))
+            {
+                Debug.LogWarning($"[{nameof(SensorManager)}] world rebase skipped: {reason}", this);
+                return false;
+            }
+            return true;
         }
 
         /// <summary>
