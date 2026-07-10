@@ -587,6 +587,25 @@ namespace BodyTracking
         private void OnDestroy() => OnDisable();
         private void OnApplicationQuit() => OnDisable();
 
+        /// <summary>Stop every k4abt worker and clear merge state WITHOUT
+        /// unbinding renderer/recorder subscriptions — bound sources keep
+        /// feeding frames, so fresh workers respawn immediately. The experience
+        /// flow calls this at the attract→visitor moment: the recorded-clock →
+        /// live-clock timestamp jump would otherwise trip the loop-seam guard.</summary>
+        public void RestartWorkers()
+        {
+            foreach (var serial in new List<string>(_latestBySerial.Keys))
+            {
+                if (workerHost != null) workerHost.StopWorker(serial);
+            }
+            _latestBySerial.Clear();
+            _persons.Clear();
+            _priorPelvisById.Clear();
+            _priorMaxConfById.Clear();
+            _gateStateById.Clear();
+            Debug.Log($"[{nameof(SkeletonMerger)}] workers restarted (attract→live handoff).", this);
+        }
+
         /// <summary>Current merged WORLD position of one joint (single-person: first visual),
         /// read straight from the per-frame smoothed pose — NOT the fading-trail buffer. Returns
         /// false if no body or the joint isn't currently valid. Used by the TSDF trail capture so

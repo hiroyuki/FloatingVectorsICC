@@ -66,6 +66,12 @@ namespace PointCloud
         [Tooltip("Serial number of the Femto Bolt to open. Set by SensorManager.")]
         public string deviceSerial = string.Empty;
 
+        [Tooltip("Exclude this live renderer from the SCULPTURE sources (TSDF " +
+                 "integration + motion-curve seeding) — attract playback owns the " +
+                 "sculpture while the ghost plays. Frame capture, BT worker feed, " +
+                 "presence occupancy and visibility are all unaffected.")]
+        public bool suppressAsSource = false;
+
         [Header("Streams")]
         public uint depthWidth = 640;
         public uint depthHeight = 576;

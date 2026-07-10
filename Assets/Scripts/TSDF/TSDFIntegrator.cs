@@ -330,6 +330,9 @@ namespace TSDF
         private void HandleLiveRawFrame(PointCloudRenderer r, RawFrameData raw)
         {
             if (r == null) return;
+            // Attract mode: the ghost playback owns the sculpture — a suppressed
+            // live renderer keeps streaming (BT / occupancy) but must not integrate.
+            if (r.suppressAsSource) return;
             // Live renderer's own GameObject transform IS the source — its
             // localToWorldMatrix encodes the extrinsics + Y-flip baked in by
             // ExtrinsicsApply.ToUnityLocal.
@@ -722,13 +725,17 @@ namespace TSDF
             _depthShader.SetInt("_EdgeColorBorrow", edgeColorBorrow ? 1 : 0);
 
             // Pass A: settle the per-voxel |sdf|-min across every camera of the batch.
+            // st.SourceTransform can die between enqueue and dispatch (the attract
+            // playback's StopAndUnload destroys the _Playback_* GOs) — skip those.
             foreach (var s in _batchSerials)
-                if (_states.TryGetValue(s, out var st) && st.HasCamParam && st.DepthBuf != null)
+                if (_states.TryGetValue(s, out var st) && st.HasCamParam && st.DepthBuf != null
+                    && st.SourceTransform != null)
                     { EnsureRayLut(st); BindDepthCam(_kScatterMin, st); DispatchDepth(_kScatterMin, st); }
 
             // Pass B: materialise the winning observation (sdf + colour) into _Voxels.
             foreach (var s in _batchSerials)
-                if (_states.TryGetValue(s, out var st) && st.HasCamParam && st.DepthBuf != null)
+                if (_states.TryGetValue(s, out var st) && st.HasCamParam && st.DepthBuf != null
+                    && st.SourceTransform != null)
                     { BindDepthCam(_kScatterWrite, st); DispatchDepth(_kScatterWrite, st); }
 
             CompletedBatchCount++;
