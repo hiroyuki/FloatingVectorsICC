@@ -22,28 +22,29 @@ Shader "Orbbec/MotionCurves"
         // so rounding stays saturated instead of washing out.
         _RimPower   ("Rim Power", Float) = 2.5
         _RimBoost   ("Rim Boost", Range(0, 2)) = 0.5
-        // Alpha at the OLD end of each curve (age 0). 1 = no fade; 0 = the past
+        // Coverage at the OLD end of each curve (age 0). 1 = no fade; 0 = the past
         // tip dissolves completely, so trails read as fading in from the past.
         _TailAlpha  ("Tail Alpha (past end)", Range(0, 1)) = 0.0
-        // Fade curve exponent: alpha follows age^pow. 1 = linear; higher pushes
-        // full opacity toward the newest end, so the transparent gradient reads
+        // Fade curve exponent: coverage follows age^pow. 1 = linear; higher pushes
+        // full opacity toward the newest end, so the dissolve gradient reads
         // longer along the trail.
         _TailFadePow ("Tail Fade Length (pow)", Range(0.5, 6)) = 2.5
     }
     SubShader
     {
-        // Transparent so the tail fade actually blends over the mesh/cloud behind
-        // it. ZWrite off (standard for transparents); ribbons stop occluding each
-        // other, which for thin dense strokes reads fine and avoids sort artefacts.
-        Tags { "RenderType" = "Transparent" "Queue" = "Transparent" "IgnoreProjector" = "True" }
+        // Opaque + ZWrite On: ribbons occlude each other, which the fake-round
+        // shading needs to read as tubes (alpha blending averaged crossing strokes
+        // flat). The tail fade is screen-door dither (Bayer discard) instead of
+        // blending, so the past end dissolves into sparse pixels with no sorting
+        // or blend artefacts.
+        Tags { "RenderType" = "TransparentCutout" "Queue" = "AlphaTest" "IgnoreProjector" = "True" }
         LOD 100
 
         Pass
         {
             Cull Off
-            ZWrite Off
+            ZWrite On
             ZTest LEqual
-            Blend SrcAlpha OneMinusSrcAlpha
 
             CGPROGRAM
             #pragma vertex   vert
@@ -135,6 +136,20 @@ Shader "Orbbec/MotionCurves"
                 return o;
             }
 
+            // Ordered-dither threshold: 8x8 Bayer value for a pixel coordinate,
+            // in (0, 1). Computed from the bits of (x^y, y) — the reversed
+            // interleave is the classic recursive Bayer construction, giving 64
+            // evenly distributed levels without a lookup table.
+            float Bayer8x8(uint2 p)
+            {
+                uint x = (p.x ^ p.y) & 7u;
+                uint y = p.y & 7u;
+                uint v = ((y & 1u) << 5) | ((x & 1u) << 4)
+                       | ((y & 2u) << 2) | ((x & 2u) << 1)
+                       | ((y & 4u) >> 1) | ((x & 4u) >> 2);
+                return (v + 0.5) / 64.0;
+            }
+
             fixed4 frag(V2F i) : SV_Target
             {
                 float3 albedo = saturate(i.vcol);
@@ -159,13 +174,17 @@ Shader "Orbbec/MotionCurves"
                 float3 rounded = albedo * _Brightness * (shade + rim * _RimBoost);
 
                 float3 rgb = lerp(flatCol, rounded, saturate(_Round));
-                // Tail fade: alpha ramps from _TailAlpha at the oldest history
-                // point up to opaque at the newest, so the trail dissolves into
+                // Tail fade: coverage ramps from _TailAlpha at the oldest history
+                // point up to full at the newest, so the trail dissolves into
                 // the past instead of ending in a hard cut. The exponent shapes
                 // how far along the trail the gradient reaches (see property).
+                // Realised as screen-door dither: an 8x8 Bayer threshold on the
+                // pixel position drops fragments below the coverage, keeping the
+                // pass opaque (ZWrite On) so ribbons still occlude each other.
                 float ramp = pow(saturate(i.age), max(_TailFadePow, 0.01));
-                float alpha = lerp(saturate(_TailAlpha), 1.0, ramp);
-                return fixed4(rgb, alpha);
+                float coverage = lerp(saturate(_TailAlpha), 1.0, ramp);
+                if (coverage < Bayer8x8(uint2(i.pos.xy))) discard;
+                return fixed4(rgb, 1.0);
             }
             ENDCG
         }

@@ -187,13 +187,14 @@ namespace BodyTracking
         public float rimBoost = 0.5f;
 
         [Range(0f, 1f)]
-        [Tooltip("Ribbon alpha at the OLD end of each curve. 1 = constant (previous look); 0 = the " +
-                 "past tip dissolves completely, so the trail fades in from the past like a stroke.")]
+        [Tooltip("Ribbon coverage at the OLD end of each curve. 1 = constant (no fade); 0 = the past " +
+                 "tip dissolves completely. Rendered as a dither dissolve (not alpha blending), so " +
+                 "the ribbons stay opaque and keep occluding each other — the tube look survives.")]
         public float tailAlpha = 0f;
 
         [Range(0.5f, 6f)]
-        [Tooltip("Fade curve exponent (alpha = age^pow). 1 = linear; higher keeps more of the trail " +
-                 "transparent and pushes full opacity toward the newest end — a longer gradient.")]
+        [Tooltip("Fade curve exponent (coverage = age^pow). 1 = linear; higher keeps more of the trail " +
+                 "dissolved and pushes full coverage toward the newest end — a longer gradient.")]
         public float tailFadePow = 2.5f;
 
         [Header("Freeze")]

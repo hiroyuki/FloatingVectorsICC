@@ -480,9 +480,10 @@ MonoBehaviour:
   smoothSubdiv: 2
   brightness: 1
   ribbonWidth: 0.006
-  round: 0.375
+  round: 1
   rimBoost: 0.5
   tailAlpha: 0
+  tailFadePow: 2.5
   freeze: 0
   sanityRange: 100
 --- !u!4 &333033384
@@ -907,6 +908,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::CameraControl.PauseOrbitGate
   recorder: {fileID: 0}
   orbit: {fileID: 0}
+  baker: {fileID: 0}
   autoOrbitOverride: 0
 --- !u!1 &836522994
 GameObject:
@@ -1678,6 +1680,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::CameraControl.PauseOrbitGate
   recorder: {fileID: 0}
   orbit: {fileID: 0}
+  baker: {fileID: 0}
   autoOrbitOverride: 0
 --- !u!1 &1151541766
 GameObject:
