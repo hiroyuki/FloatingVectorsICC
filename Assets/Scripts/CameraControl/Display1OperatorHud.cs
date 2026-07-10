@@ -52,6 +52,10 @@ namespace CameraControl
                  "Auto-resolves the first MultiCameraDebugView when left empty.")]
         public MultiCameraDebugView debugView;
 
+        [Tooltip("Experience-flow director driven by the Experience Mode checkbox. " +
+                 "Auto-resolves when left empty.")]
+        public Experience.ExperienceDirector experienceDirector;
+
         [Tooltip("Key that switches the operator display between the HUD and the " +
                  "4-camera tiles (drives debugView.Visible; the HUD mirrors off it).")]
         public KeyCode viewSwitchKey = KeyCode.Tab;
@@ -68,6 +72,8 @@ namespace CameraControl
                 orbits = FindObjectsByType<CameraOrbitController>(FindObjectsSortMode.None);
             if (exporter == null) exporter = FindFirstObjectByType<TSDFPrintExporter>();
             if (debugView == null) debugView = FindFirstObjectByType<MultiCameraDebugView>();
+            if (experienceDirector == null)
+                experienceDirector = FindFirstObjectByType<Experience.ExperienceDirector>();
             // Reflect an override that is already on (e.g. HUD re-enabled mid-session).
             foreach (var o in orbits)
                 if (o != null && o.TryGetComponent(out PauseOrbitGate g) && g.autoOrbitOverride)
@@ -104,7 +110,7 @@ namespace CameraControl
             GUI.matrix = Matrix4x4.Scale(Vector3.one * uiScale);
 
             // Panel backdrop so the widgets read against the black operator display.
-            GUI.Box(new Rect(position.x - 12, position.y - 10, width + 24, 130), GUIContent.none);
+            GUI.Box(new Rect(position.x - 12, position.y - 10, width + 24, 150), GUIContent.none);
 
             // Tunable 0 is History Samples (frames) — same knob as the Control Panel.
             float min = history.TunableMin(0);
@@ -135,6 +141,14 @@ namespace CameraControl
                     exporter.ExportWeb();
                 GUI.Label(new Rect(position.x + 198, position.y + 84, width - 198, 44),
                           exporter.StatusText);
+            }
+
+            if (experienceDirector != null)
+            {
+                bool exp = GUI.Toggle(new Rect(position.x, position.y + 112, width, 24),
+                                      experienceDirector.Visible,
+                                      $" Experience Mode ({experienceDirector.CurrentState})");
+                if (exp != experienceDirector.Visible) experienceDirector.Visible = exp;
             }
 
             GUI.matrix = Matrix4x4.identity;
