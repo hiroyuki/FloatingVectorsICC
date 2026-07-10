@@ -40,6 +40,15 @@ namespace PointCloud
         [Tooltip("Seconds between health checks.")]
         public float checkIntervalSeconds = 1f;
 
+        [Header("Identical-content detection (experimental, default off)")]
+        [Tooltip("Flag a camera whose depth payload hashes identically for the window " +
+                 "below — a frozen USB device can keep advancing timestamps while " +
+                 "delivering the same image. Verify against real hardware before " +
+                 "trusting it on site.")]
+        public bool detectIdenticalContent = false;
+        [Min(1f)]
+        public float identicalContentSeconds = 10f;
+
         [Header("Display")]
         [Tooltip("Draw the on-screen alert banner (IMGUI, same style as the crowd alert).")]
         public bool showAlert = true;
@@ -48,6 +57,18 @@ namespace PointCloud
 
         /// <summary>Current alert lines (empty = all expected cameras healthy).</summary>
         public IReadOnlyList<string> CurrentAlerts => _alerts;
+
+        /// <summary>True while every expected camera is healthy (or checks are
+        /// suppressed). The experience director feeds this into the Fault state.</summary>
+        public bool IsHealthy => _alerts.Count == 0;
+
+        /// <summary>Fired when IsHealthy flips (arg = new health).</summary>
+        public event Action<bool> OnHealthChanged;
+
+        /// <summary>Kids-facing text for the full-screen fault alert: names the
+        /// first faulty camera as "カメラ（ID n）が　いじょうです".</summary>
+        public string KidsAlertText =>
+            _alerts.Count == 0 ? "" : $"カメラ（{_firstFaultyLabel}）が　いじょうです";
 
         private struct ExpectedCam
         {
@@ -60,6 +81,11 @@ namespace PointCloud
             public ulong LastTs;
             public float LastProgressAt;
             public bool Seen;
+            // identical-content detection
+            public ulong LastContentHash;
+            public float LastContentChangeAt;
+            public float NextHashAt;
+            public bool ContentSeen;
         }
 
         private SensorManager _manager;
@@ -71,7 +97,14 @@ namespace PointCloud
         private float _enabledAt;
         private float _nextCheckAt;
         private string _lastLoggedState = string.Empty;
+        private string _firstFaultyLabel = "";
+        private bool _lastHealthy = true;
         private GUIStyle _alertStyle;
+        // identical-content subscriptions (resynced every RunCheck so renderer
+        // churn — keepLiveRenderersOnLoad, reconnects — never leaks handlers)
+        private readonly Dictionary<PointCloudRenderer, Action<PointCloudRenderer, RawFrameData>>
+            _contentHandlers = new Dictionary<PointCloudRenderer, Action<PointCloudRenderer, RawFrameData>>();
+        private readonly List<PointCloudRenderer> _handlerScratch = new List<PointCloudRenderer>();
 
         private void OnEnable()
         {
@@ -79,6 +112,18 @@ namespace PointCloud
             _nextCheckAt = 0f;
             _health.Clear();
             _alerts.Clear();
+            _firstFaultyLabel = "";
+            _lastHealthy = true;
+        }
+
+        private void OnDisable() => UnsubscribeAllContent();
+        private void OnDestroy() => UnsubscribeAllContent();
+
+        private void UnsubscribeAllContent()
+        {
+            foreach (var kv in _contentHandlers)
+                if (kv.Key != null) kv.Key.OnRawFramesReady -= kv.Value;
+            _contentHandlers.Clear();
         }
 
         private void Update()
@@ -92,22 +137,34 @@ namespace PointCloud
         private void RunCheck()
         {
             _alerts.Clear();
+            _firstFaultyLabel = "";
 
+            // Suppression truth table (Plans/phase6-attract-watchdog-plan.md):
+            //   playbackOnly                          -> suppress (dev, no live rig by design)
+            //   recorder Playing/Paused AND 0 live    -> suppress (live torn down on purpose)
+            //   recorder Playing/Paused AND live >= 1 -> MONITOR (attract coexistence)
+            //   otherwise                             -> monitor
             if (_manager == null || _manager.playbackOnly) { LogTransition(); return; }
             if (_recorder == null) _recorder = FindFirstObjectByType<SensorRecorder>();
-            if (_recorder != null && _recorder.IsPlaying)
+            int liveCount = 0;
+            var renderersEarly = _manager.Renderers;
+            for (int i = 0; i < renderersEarly.Count; i++)
+                if (renderersEarly[i] != null) liveCount++;
+            if (_recorder != null && (_recorder.IsPlaying || _recorder.IsPaused) && liveCount == 0)
             {
-                // Live renderers are deliberately torn down for playback; forget the
-                // per-camera progress so nothing is flagged stale when live resumes.
+                // Playback-only usage (live renderers deliberately torn down /
+                // frame consumption held): forget progress so nothing is flagged
+                // stale when live resumes.
                 _health.Clear();
                 LogTransition();
                 return;
             }
-            if (_recorder != null && _recorder.IsPaused)
+            if (_recorder != null && _recorder.IsPaused && liveCount > 0)
             {
-                // Live freeze (Space): frame consumption is intentionally held, so a
-                // frozen timestamp is not a fault. Forget progress so the first
-                // post-resume check re-seeds instead of flagging every camera stale.
+                // Live freeze (Space): frame consumption is intentionally held
+                // even though the rig is up — a frozen timestamp is not a fault.
+                // (Refines the plan's table: Paused+live>=1 suppresses, only
+                // Playing+live>=1 — the attract case — keeps monitoring.)
                 _health.Clear();
                 LogTransition();
                 return;
@@ -116,6 +173,7 @@ namespace PointCloud
 
             ResolveExpected();
             var renderers = _manager.Renderers;
+            SyncContentSubscriptions(renderers);
 
             if (_expected.Count > 0)
             {
@@ -126,9 +184,10 @@ namespace PointCloud
                     if (r == null)
                     {
                         _alerts.Add($"カメラ {name} が異常です。接続を確認してください。（未検出）");
+                        NoteFault(cam.Label);
                         continue;
                     }
-                    CheckStreaming(r, name);
+                    CheckStreaming(r, name, cam.Label);
                 }
             }
             else if (expectedCameraCount > 0)
@@ -137,25 +196,35 @@ namespace PointCloud
                 for (int i = 0; i < renderers.Count; i++)
                     if (renderers[i] != null) live++;
                 if (live < expectedCameraCount)
+                {
                     _alerts.Add($"カメラが {live}/{expectedCameraCount} 台しか接続されていません。接続を確認してください。");
+                    NoteFault($"{live}/{expectedCameraCount}");
+                }
                 for (int i = 0; i < renderers.Count; i++)
                 {
                     var r = renderers[i];
                     if (r == null) continue;
-                    CheckStreaming(r, PointCloudUtil.TailSerial(r.deviceSerial, 2));
+                    string tail = PointCloudUtil.TailSerial(r.deviceSerial, 2);
+                    CheckStreaming(r, tail, tail);
                 }
             }
 
             LogTransition();
         }
 
+        private void NoteFault(string label)
+        {
+            if (string.IsNullOrEmpty(_firstFaultyLabel)) _firstFaultyLabel = label;
+        }
+
         // Flags a live renderer whose capture thread died or whose frame timestamp
         // stopped advancing (USB drop mid-run leaves the GO alive but frameless).
-        private void CheckStreaming(PointCloudRenderer r, string name)
+        private void CheckStreaming(PointCloudRenderer r, string name, string label)
         {
             if (!r.IsCapturing)
             {
                 _alerts.Add($"カメラ {name} が異常です。接続を確認してください。（キャプチャ停止）");
+                NoteFault(label);
                 return;
             }
 
@@ -174,7 +243,91 @@ namespace PointCloud
             else if (Time.unscaledTime - h.LastProgressAt > staleFrameSeconds)
             {
                 _alerts.Add($"カメラ {name} が異常です。接続を確認してください。（フレーム停止）");
+                NoteFault(label);
             }
+
+            // A frozen device can keep advancing timestamps while delivering the
+            // same image — the payload hash (fed by OnRawFramesReady) must move.
+            if (detectIdenticalContent && h.ContentSeen &&
+                Time.unscaledTime - h.LastContentChangeAt > identicalContentSeconds)
+            {
+                _alerts.Add($"カメラ {name} が異常です。接続を確認してください。（映像フリーズ）");
+                NoteFault(label);
+            }
+        }
+
+        // ---- identical-content detection (subscription lifecycle) ----
+
+        private void SyncContentSubscriptions(IReadOnlyList<PointCloudRenderer> renderers)
+        {
+            if (!detectIdenticalContent)
+            {
+                if (_contentHandlers.Count > 0) UnsubscribeAllContent();
+                return;
+            }
+            // Drop dead / no-longer-managed renderers.
+            _handlerScratch.Clear();
+            foreach (var kv in _contentHandlers)
+                if (kv.Key == null || !Contains(renderers, kv.Key)) _handlerScratch.Add(kv.Key);
+            foreach (var dead in _handlerScratch)
+            {
+                if (dead != null) dead.OnRawFramesReady -= _contentHandlers[dead];
+                _contentHandlers.Remove(dead);
+            }
+            // Subscribe new ones.
+            for (int i = 0; i < renderers.Count; i++)
+            {
+                var r = renderers[i];
+                if (r == null || _contentHandlers.ContainsKey(r)) continue;
+                Action<PointCloudRenderer, RawFrameData> handler = HandleRawFramesForContent;
+                r.OnRawFramesReady += handler;
+                _contentHandlers[r] = handler;
+            }
+        }
+
+        private static bool Contains(IReadOnlyList<PointCloudRenderer> list, PointCloudRenderer r)
+        {
+            for (int i = 0; i < list.Count; i++)
+                if (ReferenceEquals(list[i], r)) return true;
+            return false;
+        }
+
+        private void HandleRawFramesForContent(PointCloudRenderer r, RawFrameData raw)
+        {
+            if (!detectIdenticalContent || r == null) return;
+            if (!_health.TryGetValue(r.deviceSerial, out var h))
+            {
+                h = new Health();
+                _health[r.deviceSerial] = h;
+            }
+            float now = Time.unscaledTime;
+            if (now < h.NextHashAt) return; // hash at most once per check interval
+            h.NextHashAt = now + Mathf.Max(0.2f, checkIntervalSeconds);
+            ulong hash = HashDepthPayload(in raw);
+            if (!h.ContentSeen || hash != h.LastContentHash)
+            {
+                h.ContentSeen = true;
+                h.LastContentHash = hash;
+                h.LastContentChangeAt = now;
+            }
+        }
+
+        // Stride-sampled FNV-1a over the depth payload — cheap (64 samples), and
+        // any real scene motion flips at least one sampled depth byte.
+        private static ulong HashDepthPayload(in RawFrameData raw)
+        {
+            var bytes = raw.DepthBytes;
+            int count = raw.DepthByteCount;
+            if (bytes == null || count <= 0) return 0UL;
+            count = Math.Min(count, bytes.Length);
+            ulong h = 14695981039346656037UL;
+            int stride = Math.Max(1, count / 64);
+            for (int i = 0; i < count; i += stride)
+            {
+                h ^= bytes[i];
+                h *= 1099511628211UL;
+            }
+            return h;
         }
 
         // Inspector override wins; otherwise cameras.yaml is read once (list order is
@@ -229,6 +382,13 @@ namespace PointCloud
 
         private void LogTransition()
         {
+            bool healthy = _alerts.Count == 0;
+            if (healthy != _lastHealthy)
+            {
+                _lastHealthy = healthy;
+                try { OnHealthChanged?.Invoke(healthy); }
+                catch (Exception e) { Debug.LogException(e, this); }
+            }
             if (!logAlerts) return;
             string state = _alerts.Count == 0 ? string.Empty : string.Join("\n", _alerts);
             if (state == _lastLoggedState) return;
@@ -242,6 +402,8 @@ namespace PointCloud
         private void OnGUI()
         {
             if (!showAlert || _alerts.Count == 0) return;
+            // The full-screen operator alert (VisitorMessageUI) owns the display.
+            if (Shared.OperatorOverlayGate.AlertActive) return;
             if (_alertStyle == null)
             {
                 _alertStyle = new GUIStyle(GUI.skin.label)

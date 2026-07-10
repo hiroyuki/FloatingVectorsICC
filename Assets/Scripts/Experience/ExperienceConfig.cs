@@ -45,6 +45,11 @@ namespace Experience
         [Tooltip("Miniature sculpture scale above each sphere.")]
         [Range(0.05f, 1f)] public float displayMiniatureScale = 0.25f;
 
+        [Header("Attract playback")]
+        [Tooltip("Folder containing recorded take folders for the attract-mode ghost " +
+                 "(e.g. D:\\FloatingVectorsICC\\RecordingBase). Empty = attract is text-only.")]
+        public string attractRecordingRoot = "";
+
         [Header("Publishing")]
         [Tooltip("Use the dry-run publisher (fake URLs, no network). Phase 7 wires LFKS.")]
         public bool dryRunPublish = true;

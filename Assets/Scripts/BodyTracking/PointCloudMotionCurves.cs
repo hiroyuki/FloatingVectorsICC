@@ -683,7 +683,14 @@ namespace BodyTracking
                 if (!IsUsableSource(mf)) continue;
                 bool prefixed = string.IsNullOrEmpty(autoSourcePrefix)
                                 || mf.gameObject.name.StartsWith(autoSourcePrefix);
-                if (!prefixed && !mf.TryGetComponent(out PointCloud.PointCloudRenderer _)) continue;
+                if (mf.TryGetComponent(out PointCloud.PointCloudRenderer live))
+                {
+                    // Attract mode: a suppressed live renderer must not seed the
+                    // curves (the ghost playback owns the sculpture) — regardless
+                    // of the name prefix. Default off, so Dev mode is unchanged.
+                    if (live.suppressAsSource) continue;
+                }
+                else if (!prefixed) continue;
                 _srcScratch.Add(mf);
             }
             return _srcScratch;

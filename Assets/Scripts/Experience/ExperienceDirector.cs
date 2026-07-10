@@ -44,10 +44,11 @@ namespace Experience
         public PointCloudMotionCurves motionCurves;
         public BonePoseHistory poseHistory;
         public TSDFPrintExporter printExporter; // capture/export settings source
+        public CameraHealthMonitor healthMonitor; // fault source (auto-resolved)
 
         [Header("Debug")]
-        [Tooltip("Force the Fault state (full-screen red alert). Phase 6 wires " +
-                 "CameraHealthMonitor here.")]
+        [Tooltip("Force the Fault state (full-screen red alert) regardless of the " +
+                 "health monitor.")]
         public bool debugForceFault;
 
         // ---- IViewToggle ("Experience mode" in the Views panel) ----
@@ -77,6 +78,19 @@ namespace Experience
         private bool _savedCurvesVisible, _savedCurvesFreeze;
         private bool _savedMgrRebase, _savedRecRebase;
         private string[] _savedMgrOrder, _savedRecOrder;
+        private bool _savedKeepLive;
+        private string _savedPlaybackFolder;
+        private bool _savedCumulativeNoErase;
+        private PointCloudCumulative _cumulative;
+        private readonly System.Collections.Generic.Dictionary<string, bool> _savedLiveVisible =
+            new System.Collections.Generic.Dictionary<string, bool>();
+        private readonly System.Collections.Generic.Dictionary<string, bool> _savedLiveSuppress =
+            new System.Collections.Generic.Dictionary<string, bool>();
+
+        // attract playback (Phase 6)
+        private AttractPlaybackController _attract;
+        private bool _attractOwnsPlayback;
+        private bool _devFallbackLogged;
 
         // per-run state
         private readonly TSDFSnapshot[] _snapshots = new TSDFSnapshot[3];
@@ -104,6 +118,15 @@ namespace Experience
             if (motionCurves == null) motionCurves = FindFirstObjectByType<PointCloudMotionCurves>();
             if (poseHistory == null) poseHistory = FindFirstObjectByType<BonePoseHistory>();
             if (printExporter == null) printExporter = FindFirstObjectByType<TSDFPrintExporter>();
+            if (healthMonitor == null) healthMonitor = FindFirstObjectByType<CameraHealthMonitor>();
+        }
+
+        private bool HasLiveRenderers()
+        {
+            if (sensorManager == null) return false;
+            foreach (var r in sensorManager.Renderers)
+                if (r != null) return true;
+            return false;
         }
 
         private void OnDisable()
@@ -118,7 +141,7 @@ namespace Experience
             var inputs = new ExperienceInputs
             {
                 Present = _presence != null && _presence.IsPresent,
-                Fault = debugForceFault,
+                Fault = debugForceFault || (healthMonitor != null && !healthMonitor.IsHealthy),
                 CaptureDone = _captureDone,
                 SelectedIndex = _selectedIndex,
                 ExportDone = _exportDone,
@@ -192,6 +215,43 @@ namespace Experience
             _presence.occupancyThreshold = config.occupancyThreshold;
             SpawnSpheres();
 
+            // 4b) attract coexistence (Phase 6): keep the live rig through
+            // playback loads, hide the raw clouds (the TSDF mesh is the star),
+            // pause cumulative snapshots, spawn the attract controller.
+            if (sensorRecorder != null)
+            {
+                _savedKeepLive = sensorRecorder.keepLiveRenderersOnLoad;
+                _savedPlaybackFolder = sensorRecorder.playbackFolderPath;
+                sensorRecorder.keepLiveRenderersOnLoad = true;
+            }
+            _savedLiveVisible.Clear();
+            _savedLiveSuppress.Clear();
+            if (sensorManager != null)
+            {
+                foreach (var r in sensorManager.Renderers)
+                {
+                    if (r == null) continue;
+                    if (r.TryGetComponent(out MeshRenderer mr))
+                        _savedLiveVisible[r.deviceSerial] = mr.enabled;
+                    _savedLiveSuppress[r.deviceSerial] = r.suppressAsSource;
+                }
+                sensorManager.SetLiveVisualsVisible(false);
+            }
+            _cumulative = FindFirstObjectByType<PointCloudCumulative>();
+            if (_cumulative != null)
+            {
+                _savedCumulativeNoErase = _cumulative.noErase;
+                _cumulative.noErase = false;
+            }
+            if (!string.IsNullOrEmpty(config.attractRecordingRoot) && sensorRecorder != null)
+            {
+                _attract = gameObject.AddComponent<AttractPlaybackController>();
+                _attract.sensorRecorder = sensorRecorder;
+                _attract.attractRootPath = config.attractRecordingRoot;
+            }
+            _attractOwnsPlayback = false;
+            _devFallbackLogged = false;
+
             // 5) run.
             ResetRunState();
             _fsm = new ExperienceStateMachine();
@@ -222,6 +282,38 @@ namespace Experience
             if (_miniatureMat != null) { Destroy(_miniatureMat); _miniatureMat = null; }
             if (_ui != null) { _ui.ClearEverything(); Destroy(_ui.gameObject); _ui = null; }
             if (_presence != null) { Destroy(_presence.gameObject); _presence = null; }
+
+            // attract coexistence teardown (before space/rebase restore)
+            if (_attract != null)
+            {
+                if (_attractOwnsPlayback) _attract.Stop();
+                Destroy(_attract);
+                _attract = null;
+                _attractOwnsPlayback = false;
+            }
+            if (sensorRecorder != null)
+            {
+                sensorRecorder.keepLiveRenderersOnLoad = _savedKeepLive;
+                sensorRecorder.playbackFolderPath = _savedPlaybackFolder;
+            }
+            if (sensorManager != null)
+            {
+                foreach (var r in sensorManager.Renderers)
+                {
+                    if (r == null) continue;
+                    // Per-renderer restore of the saved dev state; renderers born
+                    // during the session (no saved entry) fall back to defaults.
+                    r.suppressAsSource = _savedLiveSuppress.TryGetValue(r.deviceSerial, out bool sup) && sup;
+                    if (r.TryGetComponent(out MeshRenderer mr) &&
+                        _savedLiveVisible.TryGetValue(r.deviceSerial, out bool vis))
+                        mr.enabled = vis;
+                }
+            }
+            if (_cumulative != null)
+            {
+                _cumulative.noErase = _savedCumulativeNoErase;
+                _cumulative = null;
+            }
 
             if (_space != null) { _space.Restore(); Destroy(_space); _space = null; }
 
@@ -273,6 +365,34 @@ namespace Experience
             if (from == ExperienceState.Exporting && to == ExperienceState.Attract)
                 CancelPublish(); // fail path or skip; success path already completed
 
+            // Attract → visitor handoff: the ghost stops, live becomes the
+            // sculpture source, k4abt workers restart (clock jump guard). Only
+            // when a live rig exists — the dev/Mac fallback keeps the playback
+            // running as the only source (Phase 5 E2E behaviour).
+            if (from == ExperienceState.Attract && to == ExperienceState.Welcome)
+            {
+                if (HasLiveRenderers())
+                {
+                    _attract?.Stop();
+                    _attractOwnsPlayback = false;
+                    sensorManager?.SetLiveSuppressedAsSource(false);
+                    if (merger != null) merger.RestartWorkers();
+                }
+                else
+                {
+                    // Dev/Mac fallback: the ghost stays the only sculpture source
+                    // — keep it playing but freeze take rotation until the next
+                    // Attract (a mid-experience switch would yank the source).
+                    if (_attract != null) _attract.RotationEnabled = false;
+                    if (!_devFallbackLogged)
+                    {
+                        Debug.Log($"[{nameof(ExperienceDirector)}] no live rig — attract playback keeps " +
+                                  "running through the experience (dev fallback).", this);
+                        _devFallbackLogged = true;
+                    }
+                }
+            }
+
             if (to == ExperienceState.Attract || from == ExperienceState.QrShow)
                 ResetRunState();
 
@@ -295,6 +415,7 @@ namespace Experience
                     _ui.ClearAll();
                     SetSpheresActive(false);
                     SetMiniaturesActive(false);
+                    StartAttractPlayback();
                     break;
                 case ExperienceState.PromptAnimal:
                     StartPrompt(0, config.promptAnimalText);
@@ -313,11 +434,25 @@ namespace Experience
                     _exportRoutine = StartCoroutine(ExportAndPublish());
                     break;
                 case ExperienceState.Fault:
-                    _ui.ShowAlert("カメラが　いじょうです");
+                    string kids = healthMonitor != null ? healthMonitor.KidsAlertText : "";
+                    _ui.ShowAlert(string.IsNullOrEmpty(kids) ? "カメラが　いじょうです" : kids);
                     break;
             }
             if (state != ExperienceState.Fault) _ui.ClearAlert();
             ShowStateMessage(state);
+        }
+
+        // Attract ghost: start only when the recorder is idle (a dev playback
+        // session already running is left untouched) or when the attract
+        // controller already owns the playback (loop re-roll case).
+        private void StartAttractPlayback()
+        {
+            if (_attract == null || sensorRecorder == null) return;
+            _attract.RotationEnabled = true;
+            if (sensorRecorder.IsPlaying && !_attractOwnsPlayback) return;
+            if (HasLiveRenderers()) sensorManager?.SetLiveSuppressedAsSource(true);
+            _attract.PlayRandomTake();
+            _attractOwnsPlayback = _attract.IsRunning;
         }
 
         // Idempotent message repaint for the current state (also used when the

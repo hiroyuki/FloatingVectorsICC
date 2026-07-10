@@ -94,6 +94,12 @@ namespace PointCloud
                  "Rebase is skipped with a warning when these don't resolve against extrinsics.yaml.")]
         public string[] rigSerialOrder = new string[0];
 
+        [Tooltip("Skip destroying the live renderers when a recording is loaded. The " +
+                 "experience flow's attract playback coexists with the live rig (device " +
+                 "re-enumeration costs ~15 s, unacceptable at the attract→visitor moment). " +
+                 "Off = legacy behavior (playback frees the live pipelines).")]
+        public bool keepLiveRenderersOnLoad = false;
+
         [Tooltip("Dataset name written into dataset.yaml. Defaults to the recording folder name.")]
         public string datasetName = "";
 
@@ -1293,8 +1299,10 @@ namespace PointCloud
                 // cameras compete for USB bandwidth and double-render the same
                 // subjects. Live capture resumes via SwitchToLive (Switch Mode
                 // button), which re-enumerates the devices.
+                // keepLiveRenderersOnLoad: the experience flow keeps the live rig
+                // running through attract playback instead.
                 int liveDestroyed = 0;
-                if (cameraManager != null)
+                if (cameraManager != null && !keepLiveRenderersOnLoad)
                 {
                     liveDestroyed = cameraManager.Renderers.Count;
                     cameraManager.DestroyAllRenderers();
@@ -1808,6 +1816,16 @@ namespace PointCloud
             CurrentState = State.Idle;
             IsPaused = false;
             SetStatus("Playback stopped.");
+        }
+
+        /// <summary>Stop playback (if running) and tear the whole session down:
+        /// playback GOs, reconstructors, file handles. The experience flow calls
+        /// this at the attract→visitor moment; the live rig (kept alive via
+        /// keepLiveRenderersOnLoad) takes over as the only source.</summary>
+        public void StopAndUnload()
+        {
+            if (CurrentState == State.Playing) StopPlayback();
+            ClearTracks();
         }
 
         private void Awake()

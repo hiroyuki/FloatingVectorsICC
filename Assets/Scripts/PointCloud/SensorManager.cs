@@ -389,6 +389,27 @@ namespace PointCloud
         public string ResolveExtrinsicsRoot() =>
             PointCloudRecording.ResolveRecordingRoot(extrinsicsRoot);
 
+        /// <summary>Show/hide every live renderer's mesh. Frame capture, BT feed
+        /// and occupancy keep running — this is purely visual (the experience
+        /// hides the raw clouds while the TSDF mesh is the star).</summary>
+        public void SetLiveVisualsVisible(bool visible)
+        {
+            foreach (var r in _renderers)
+            {
+                if (r == null) continue;
+                if (r.TryGetComponent(out MeshRenderer mr)) mr.enabled = visible;
+            }
+        }
+
+        /// <summary>Include/exclude every live renderer from the sculpture
+        /// sources (TSDF integration + curve seeding). Independent of visibility:
+        /// attract = hidden AND suppressed, experience = hidden but ACTIVE.</summary>
+        public void SetLiveSuppressedAsSource(bool suppressed)
+        {
+            foreach (var r in _renderers)
+                if (r != null) r.suppressAsSource = suppressed;
+        }
+
         private PointCloudRenderer FindRendererBySerial(string serial)
         {
             for (int i = 0; i < _renderers.Count; i++)
