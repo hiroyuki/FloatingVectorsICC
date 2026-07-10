@@ -135,3 +135,6 @@ InitTestScene*.unity*
 IMPLEMENTATION_NOTES.md
 .DS_Store
 AGENTS.md
+
+# LFKS upload guide contains the access token — never commit.
+lfks-upload-guide.md
