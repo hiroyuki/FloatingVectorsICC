@@ -30,7 +30,9 @@ namespace Experience
 
         [Header("Sensing overrides (pushed into PresenceDetector on enter)")]
         [Min(0f)] public float insetMeters = 0f;
-        public float yBandMin = -100f;
+        [Tooltip("Ignore points below this world height (m). 0.15 skips the floor " +
+                 "surface itself — measured live: empty-area occupancy 2358 -> 140.")]
+        public float yBandMin = 0.15f;
         public float yBandMax = 100f;
         [Min(1)] public int occupancyThreshold = 1500;
 
@@ -40,7 +42,7 @@ namespace Experience
         public float sphereHeight = 1.2f;
         [Tooltip("Sphere row Z in the rebased frame (m, + = toward camera 3).")]
         public float sphereZ = 0.9f;
-        [Min(0.05f)] public float sphereRadius = 0.18f;
+        [Min(0.05f)] public float sphereRadius = 0.25f; // user-tuned live 2026-07-10
         [Min(0.1f)] public float sphereDwellSeconds = 1f;
         [Tooltip("Miniature sculpture scale above each sphere.")]
         [Range(0.05f, 1f)] public float displayMiniatureScale = 0.25f;
@@ -82,7 +84,11 @@ namespace Experience
         [TextArea] public string selectText = "すきな　かたちを　えらんで　てを　いれてね";
         [TextArea] public string exportingText = "いま　じゅんびしているよ　まってね";
         [TextArea] public string exportFailedText = "うまくいかなかったみたい　ごめんね";
-        [TextArea] public string qrCaption = "おうちで　みられるよ！";
+        [TextArea]
+        [Tooltip("Optional caption under the QR. Empty = QR only (the in-Unity QR is " +
+                 "interim — the final URL presentation moves to a separate machine via " +
+                 "an IUrlPresenter swap).")]
+        public string qrCaption = "";
         [TextArea] public string crowdText = "じゅうたんのうえは　ひとりだけ　にしてね";
     }
 }

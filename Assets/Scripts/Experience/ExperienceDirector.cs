@@ -434,8 +434,8 @@ namespace Experience
                     _exportRoutine = StartCoroutine(ExportAndPublish());
                     break;
                 case ExperienceState.Fault:
-                    string kids = healthMonitor != null ? healthMonitor.KidsAlertText : "";
-                    _ui.ShowAlert(string.IsNullOrEmpty(kids) ? "カメラが　いじょうです" : kids);
+                    string fault = healthMonitor != null ? healthMonitor.FaultAlertText : "";
+                    _ui.ShowAlert(string.IsNullOrEmpty(fault) ? "カメラが異常です" : fault);
                     break;
             }
             if (state != ExperienceState.Fault) _ui.ClearAlert();
@@ -783,7 +783,8 @@ namespace Experience
         private void ShowQr()
         {
             var tex = new QrUrlPresenter().Present(_qrUrl);
-            if (tex != null) _ui.ShowQr(tex, config.qrCaption + "\n" + _qrUrl);
+            string caption = string.IsNullOrEmpty(config.qrCaption) ? "" : config.qrCaption;
+            if (tex != null) _ui.ShowQr(tex, caption);
             else _ui.ShowMessage(_qrUrl ?? "");
         }
 

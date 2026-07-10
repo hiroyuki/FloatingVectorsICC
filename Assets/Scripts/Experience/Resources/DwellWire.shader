@@ -10,6 +10,7 @@ Shader "Experience/DwellWire"
     Properties
     {
         _Tint ("Tint (HDR)", Color) = (1, 1, 1, 1)
+        _BackFade ("Back-side fade", Range(0, 1)) = 0.25
     }
     SubShader
     {
@@ -29,6 +30,7 @@ Shader "Experience/DwellWire"
             #include "UnityCG.cginc"
 
             float4 _Tint;
+            float _BackFade;
 
             struct appdata
             {
@@ -47,6 +49,15 @@ Shader "Experience/DwellWire"
                 v2f o;
                 o.pos = UnityObjectToClipPos(v.vertex);
                 o.color = v.color;
+                // Depth cue: sphere wires whose outward radial points away from
+                // the camera (the far hemisphere) fade toward _BackFade. Runs
+                // per camera, so each display gets its own correct back side.
+                float3 worldPos = mul(unity_ObjectToWorld, v.vertex).xyz;
+                float3 centerWS = mul(unity_ObjectToWorld, float4(0, 0, 0, 1)).xyz;
+                float3 n = normalize(worldPos - centerWS + 1e-6);
+                float3 viewDir = normalize(_WorldSpaceCameraPos - worldPos);
+                float facing = saturate(dot(n, viewDir) * 0.5 + 0.5); // 1 front, 0 back
+                o.color.a *= lerp(_BackFade, 1.0, facing);
                 return o;
             }
 

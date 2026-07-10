@@ -65,10 +65,10 @@ namespace PointCloud
         /// <summary>Fired when IsHealthy flips (arg = new health).</summary>
         public event Action<bool> OnHealthChanged;
 
-        /// <summary>Kids-facing text for the full-screen fault alert: names the
-        /// first faulty camera as "カメラ（ID n）が　いじょうです".</summary>
-        public string KidsAlertText =>
-            _alerts.Count == 0 ? "" : $"カメラ（{_firstFaultyLabel}）が　いじょうです";
+        /// <summary>Text for the full-screen fault alert (operator/adult-facing,
+        /// so kanji): names the first faulty camera as "カメラ（ID n）が異常です".</summary>
+        public string FaultAlertText =>
+            _alerts.Count == 0 ? "" : $"カメラ（{_firstFaultyLabel}）が異常です";
 
         private struct ExpectedCam
         {
