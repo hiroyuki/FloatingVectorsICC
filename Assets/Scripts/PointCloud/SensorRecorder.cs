@@ -78,7 +78,9 @@ namespace PointCloud
         [Tooltip("PLAYBACK root — the specific recording Read/Play loads. Point this at a " +
                  "single take folder (e.g. <recordingRoot>/2026-07-08_12-50-09). Kept " +
                  "separate from folderPath so playing an old take never overwrites where " +
-                 "new recordings are written. Leave empty to fall back to folderPath.")]
+                 "new recordings are written. Leave empty to fall back to folderPath. " +
+                 "Changing it while playing (or idle without live cameras) re-Reads and " +
+                 "restarts playback automatically.")]
         public string playbackFolderPath = "";
 
         [Tooltip("macOS-only override for playbackFolderPath (same rationale as folderPathMacOverride).")]
@@ -139,6 +141,14 @@ namespace PointCloud
                  "body and depth tracks are 1:1. Playback only.")]
         public int bodyLeadFrames = 0;
         private int _lastBodyLeadFrames;
+
+        // Playback-path hot-swap poll (see Update): last resolved playback root the
+        // poll acted on. Polled rather than OnValidate so path edits from the Control
+        // Panel / code are caught too, not just the Inspector. Not serialized — it
+        // re-seeds on the first poll after entering Play mode, so simply starting
+        // the app never counts as a "change".
+        private string _watchedPlaybackRoot;
+        private float _nextPlaybackPathCheckTime;
 
         /// <summary>
         /// Fires once per advanced playback frame per device, with the same payload
@@ -1855,6 +1865,35 @@ namespace PointCloud
 
         private void Update()
         {
+            // Hot-swap: when the playback path changes while running (Inspector edit,
+            // Control Panel, code), re-Read and restart playback automatically —
+            // otherwise the old take keeps playing (or nothing shows) and the change
+            // silently does nothing until a manual Read. Guards: while Recording, or
+            // while Idle with live cameras attached, the transport is left alone so a
+            // path edit can never yank a live session into playback; the next Play
+            // picks the new path up via its auto-Read.
+            if (Time.unscaledTime >= _nextPlaybackPathCheckTime)
+            {
+                _nextPlaybackPathCheckTime = Time.unscaledTime + 0.5f;
+                string playbackRoot = ResolvePlaybackRoot();
+                if (_watchedPlaybackRoot == null)
+                {
+                    _watchedPlaybackRoot = playbackRoot;
+                }
+                else if (!string.Equals(playbackRoot, _watchedPlaybackRoot, StringComparison.Ordinal))
+                {
+                    _watchedPlaybackRoot = playbackRoot;
+                    bool wasPlaying = CurrentState == State.Playing;
+                    if (wasPlaying || (CurrentState == State.Idle && !IsLiveMode))
+                    {
+                        SetStatus($"Playback path changed → reloading {playbackRoot}");
+                        if (wasPlaying) StopPlayback();
+                        Load();
+                        if (_tracks.Count > 0) StartPlayback();
+                    }
+                }
+            }
+
             // Rec toggle hotkey — works from Idle (start) or Recording (stop). Suppressed
             // during playback so it can't clobber a playback session. bodies_main is captured
             // automatically by SkeletonMerger for the duration of State.Recording.
