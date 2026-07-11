@@ -266,9 +266,9 @@ MonoBehaviour:
   jointMotionField: {fileID: 0}
   cumulative: {fileID: 18533122}
   folderPath: D:\FloatingVectorsICC\RecordingBase
-  folderPathMacOverride: /Users/horihiroyuki/Dropbox/projects/ICC/Recordings/Rec2_jump
+  folderPathMacOverride: /Volumes/horristicSSD2T/Dropbox/projects/ICC/Recordings/Rec2_jump
   playbackFolderPath: D:\FloatingVectorsICC\RecordingBase\2026-07-08_12-50-09
-  playbackFolderPathMacOverride: /Users/horihiroyuki/Dropbox/projects/ICC/Recordings/rec2_turn
+  playbackFolderPathMacOverride: /Volumes/horristicSSD2T/Dropbox/projects/ICC/Recordings/rec2_turn
   applyWorldRebase: 1
   rigSerialOrder:
   - CL8F253004N
@@ -918,7 +918,7 @@ MonoBehaviour:
   recorder: {fileID: 0}
   orbit: {fileID: 0}
   baker: {fileID: 0}
-  autoOrbitOverride: 0
+  autoOrbitOverride: 1
 --- !u!1 &836522994
 GameObject:
   m_ObjectHideFlags: 0
@@ -1703,7 +1703,7 @@ MonoBehaviour:
   recorder: {fileID: 0}
   orbit: {fileID: 0}
   baker: {fileID: 0}
-  autoOrbitOverride: 0
+  autoOrbitOverride: 1
 --- !u!1 &1151541766
 GameObject:
   m_ObjectHideFlags: 0
