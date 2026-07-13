@@ -38,9 +38,23 @@ namespace Experience
 
         [Range(1.02f, 1.6f)]
         [Tooltip("Progress ring radius as a multiple of the sphere radius. The sphere " +
-                 "wireframe is always complete; the dwell draws this horizontal ring " +
-                 "around it from 0 to a full circle — full circle = selected.")]
+                 "wireframe is always complete; the dwell draws this camera-facing ring " +
+                 "over it from 0 to a full circle — full circle = selected.")]
         public float progressRingScale = 1.15f;
+
+        [Range(0.005f, 0.1f)]
+        [Tooltip("Progress ring width (m) — drawn as a solid ribbon, not a 1px line.")]
+        public float progressRingWidth = 0.03f;
+
+        [Tooltip("Opaque core inside the wireframe: hides the far-side wires and " +
+                 "occludes the point cloud when a hand goes BEHIND the sphere — " +
+                 "that occlusion is what sells the depth.")]
+        public Color coreColor = Color.black;
+
+        [Range(0.8f, 1f)]
+        [Tooltip("Core diameter as a fraction of the wire sphere (slightly inside " +
+                 "so the front wires stay crisp).")]
+        public float coreScale = 0.97f;
 
         [Min(8)]
         [Tooltip("Line segments per full circle.")]
@@ -124,6 +138,11 @@ namespace Experience
         {
             base.OnDestroy();
             if (_wireMat != null) { Destroy(_wireMat); _wireMat = null; }
+            if (_ringMat != null) { Destroy(_ringMat); _ringMat = null; }
+            if (_ringMesh != null) { Destroy(_ringMesh); _ringMesh = null; }
+            if (_ringGo != null) { Destroy(_ringGo); _ringGo = null; }
+            if (_coreMat != null) { Destroy(_coreMat); _coreMat = null; }
+            if (_coreGo != null) { Destroy(_coreGo); _coreGo = null; }
         }
 
         // Swap the base's default wire material for our HDR-tint one (the base
@@ -148,7 +167,9 @@ namespace Experience
 
             float t = Locked && glowSeconds > 0f ? Mathf.Clamp01(_glowRemaining / glowSeconds) : 0f;
             float gain = Mathf.LerpUnclamped(1f, glowBrightness, t);
-            _wireMat.SetColor(kTintId, new Color(gain, gain, gain, 1f));
+            var tint = new Color(gain, gain, gain, 1f);
+            _wireMat.SetColor(kTintId, tint);
+            if (_ringMat != null) _ringMat.SetColor(kTintId, tint); // ring glows with the sphere
         }
 
         /// <summary>Back to idle (director calls this between visitors/states).</summary>
@@ -212,54 +233,160 @@ namespace Experience
             OnSelected?.Invoke(this);
         }
 
-        // ---- geometry: icosphere wireframe + a growing progress ring ----
+        // ---- geometry: icosphere wireframe + a billboard progress ring ----
         //
         // The sphere wireframe is ALWAYS complete (it marks the touch target):
         // a triangle-mesh icosphere (Blender's Ico Sphere), rendered as its
-        // unique edges. Dwell progress draws a separate horizontal ring around
-        // it (radius * progressRingScale) from 0 to a full circle — full circle
-        // = selected. Horizontal so it reads from both visitor displays.
+        // unique edges. Dwell progress draws a separate CAMERA-FACING ring
+        // (clock-style, 12 o'clock start, clockwise) over the sphere — a
+        // billboard shader re-expands it per display camera, so both visitor
+        // screens see the circle face-on. Full circle = selected.
 
-        private int _baseVertCount;
         private int _builtSubdivisions = -1;
+        private float _builtRadius = -1f;
         private readonly List<Vector3> _icoEdgeVerts = new List<Vector3>(1024); // unit sphere, line pairs
+        // Smallest edge-midpoint radius on the unit sphere: icosphere edges are
+        // CHORDS that dip below the surface, so the opaque core must stay under
+        // this or it swallows the wireframe (bit us live at subdiv 1 / core 0.97).
+        private float _chordMinRadius = 0.85f; // icosahedron worst case until measured
+
+        // Ring child (own mesh + billboard material — see DwellRing.shader).
+        private GameObject _ringGo;
+        private Mesh _ringMesh;
+        private Material _ringMat;
+
+        // Opaque occluder core (primitive sphere, URP unlit).
+        private GameObject _coreGo;
+        private Material _coreMat;
 
         private int RingSegments() =>
             Locked ? segmentsPerCircle
                    : Mathf.Clamp(Mathf.RoundToInt(segmentsPerCircle * Progress), 0, segmentsPerCircle);
 
-        // Rebuild only when the ring's drawn segment count changes (quantized
-        // progress), so slow dwell doesn't rewrite the mesh every frame.
+        // Base sphere mesh: rebuilt when the subdivision level OR radius changes.
         private bool RebuildArcs(Mesh mesh)
         {
-            int ringSegs = RingSegments();
-            if (ringSegs == _builtSegments && _builtSubdivisions == icoSubdivisions
-                && mesh.vertexCount > 0) return false;
-            _builtSegments = ringSegs;
-
-            if (_builtSubdivisions != icoSubdivisions)
+            UpdateRing();
+            bool rebuilt = false;
+            if (_builtSubdivisions != icoSubdivisions
+                || !Mathf.Approximately(_builtRadius, radius)
+                || mesh.vertexCount == 0)
             {
-                BuildIcosphereEdges(icoSubdivisions, _icoEdgeVerts);
-                _builtSubdivisions = icoSubdivisions;
+                if (_builtSubdivisions != icoSubdivisions)
+                {
+                    BuildIcosphereEdges(icoSubdivisions, _icoEdgeVerts);
+                    _builtSubdivisions = icoSubdivisions;
+                    // Measure how deep the chords dip (unit sphere) — the core
+                    // clamp in UpdateCore depends on it.
+                    float min = 1f;
+                    for (int i = 0; i < _icoEdgeVerts.Count; i += 2)
+                        min = Mathf.Min(min, ((_icoEdgeVerts[i] + _icoEdgeVerts[i + 1]) * 0.5f).magnitude);
+                    _chordMinRadius = min;
+                }
+                _builtRadius = radius;
+
+                var verts = new List<Vector3>(_icoEdgeVerts.Count);
+                for (int i = 0; i < _icoEdgeVerts.Count; i++)
+                    verts.Add(_icoEdgeVerts[i] * radius);
+
+                var idx = new int[verts.Count];
+                for (int i = 0; i < idx.Length; i++) idx[i] = i;
+
+                mesh.Clear();
+                mesh.SetVertices(verts);
+                mesh.SetIndices(idx, MeshTopology.Lines, 0);
+                mesh.RecalculateBounds();
+                rebuilt = true;
             }
+            UpdateCore(); // after the rebuild so the chord clamp uses fresh data
+            return rebuilt;
+        }
 
-            var verts = new List<Vector3>(_icoEdgeVerts.Count + ringSegs * 2);
-            for (int i = 0; i < _icoEdgeVerts.Count; i++)
-                verts.Add(_icoEdgeVerts[i] * radius);
-            _baseVertCount = verts.Count;
+        // Opaque core: hides far-side wires and occludes anything (hands, point
+        // cloud) that moves behind the sphere — the depth cue.
+        private void UpdateCore()
+        {
+            if (_coreGo == null)
+            {
+                _coreGo = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+                _coreGo.name = "_DwellCore";
+                _coreGo.hideFlags = HideFlags.DontSave;
+                Destroy(_coreGo.GetComponent<Collider>());
+                _coreGo.transform.SetParent(transform, false);
+                var shader = Shader.Find("Universal Render Pipeline/Unlit");
+                if (shader != null)
+                {
+                    _coreMat = new Material(shader) { name = "DwellCore (auto)", hideFlags = HideFlags.DontSave };
+                    _coreMat.SetColor("_BaseColor", coreColor);
+                    _coreGo.GetComponent<MeshRenderer>().sharedMaterial = _coreMat;
+                }
+                var mr = _coreGo.GetComponent<MeshRenderer>();
+                mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            }
+            _coreGo.SetActive(Show);
+            // The wire edges are chords that dip inside the sphere — clamp the
+            // core under the shallowest chord or it swallows the wireframe.
+            float effective = Mathf.Min(coreScale, _chordMinRadius * 0.99f);
+            float d = radius * 2f * effective;
+            if (!Mathf.Approximately(_coreGo.transform.localScale.x, d))
+                _coreGo.transform.localScale = Vector3.one * d;
+        }
 
-            // Progress ring (XZ, slightly larger).
-            AppendArc(verts, ringSegs, radius * progressRingScale,
-                      (c, s) => new Vector3(c, 0f, s));
+        // Clock-style arc in LOCAL XY meters (the billboard shader re-expands it
+        // along each camera's right/up). Rebuilt when the segment count changes.
+        private void UpdateRing()
+        {
+            int segs = RingSegments();
+            if (_ringGo == null)
+            {
+                _ringGo = new GameObject("_DwellRing") { hideFlags = HideFlags.DontSave };
+                _ringGo.transform.SetParent(transform, false);
+                _ringMesh = new Mesh { name = "_DwellRing", hideFlags = HideFlags.DontSave };
+                _ringGo.AddComponent<MeshFilter>().sharedMesh = _ringMesh;
+                var mr = _ringGo.AddComponent<MeshRenderer>();
+                mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                var shader = Resources.Load<Shader>("DwellRing");
+                if (shader != null)
+                {
+                    _ringMat = new Material(shader) { name = "DwellRing (auto)", hideFlags = HideFlags.DontSave };
+                    mr.sharedMaterial = _ringMat;
+                }
+                _builtSegments = -1;
+            }
+            _ringGo.SetActive(segs > 0 && Show);
+            if (segs == _builtSegments) return;
+            _builtSegments = segs;
+            if (segs == 0) { _ringMesh.Clear(); return; }
 
-            var idx = new int[verts.Count];
-            for (int i = 0; i < idx.Length; i++) idx[i] = i;
-
-            mesh.Clear();
-            mesh.SetVertices(verts);
-            mesh.SetIndices(idx, MeshTopology.Lines, 0);
-            mesh.RecalculateBounds();
-            return true;
+            // Solid ribbon arc (triangles): inner/outer vertex pair per step,
+            // 12 o'clock start, clockwise on screen (x = sin, y = cos).
+            float rOuter = radius * progressRingScale + progressRingWidth * 0.5f;
+            float rInner = rOuter - progressRingWidth;
+            float step = 2f * Mathf.PI / segmentsPerCircle;
+            var verts = new Vector3[(segs + 1) * 2];
+            var colors = new Color[verts.Length];
+            for (int i = 0; i <= segs; i++)
+            {
+                float a = i * step;
+                var dir = new Vector3(Mathf.Sin(a), Mathf.Cos(a), 0f);
+                verts[i * 2] = dir * rInner;
+                verts[i * 2 + 1] = dir * rOuter;
+                colors[i * 2] = activeColor;
+                colors[i * 2 + 1] = activeColor;
+            }
+            var tris = new int[segs * 6];
+            for (int i = 0; i < segs; i++)
+            {
+                int v = i * 2, t = i * 6;
+                tris[t] = v; tris[t + 1] = v + 1; tris[t + 2] = v + 2;
+                tris[t + 3] = v + 1; tris[t + 4] = v + 3; tris[t + 5] = v + 2;
+            }
+            _ringMesh.Clear();
+            _ringMesh.vertices = verts;
+            _ringMesh.colors = colors;
+            _ringMesh.SetTriangles(tris, 0);
+            // Bounds must survive billboarding from any angle.
+            _ringMesh.bounds = new Bounds(Vector3.zero, Vector3.one * (rOuter * 2.2f));
         }
 
         // Unit icosphere as unique wire edges (line vertex pairs): icosahedron
@@ -321,26 +448,5 @@ namespace Experience
             }
         }
 
-        private void AppendArc(List<Vector3> verts, int segs, float r,
-                               Func<float, float, Vector3> shape)
-        {
-            float step = 2f * Mathf.PI / segmentsPerCircle; // constant density: arcs grow
-            for (int i = 0; i < segs; i++)
-            {
-                float a0 = i * step, a1 = (i + 1) * step;
-                verts.Add(shape(Mathf.Cos(a0), Mathf.Sin(a0)) * r);
-                verts.Add(shape(Mathf.Cos(a1), Mathf.Sin(a1)) * r);
-            }
-        }
-
-        // Base sphere = the WireColor tone; the progress ring is always the
-        // active colour so the sweep pops against the idle sphere.
-        protected override void ApplyMeshColors(Mesh mesh, Color color)
-        {
-            var colors = new Color[mesh.vertexCount];
-            for (int i = 0; i < colors.Length; i++)
-                colors[i] = i < _baseVertCount ? color : activeColor;
-            mesh.SetColors(colors);
-        }
     }
 }
