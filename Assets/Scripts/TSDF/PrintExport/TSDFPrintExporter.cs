@@ -19,10 +19,13 @@
 //                  AR Quick Look — Quick Look ignores vertex colours, so the
 //                  .usdz bakes them into a per-triangle texture atlas
 //                  (GlbWriter / UsdzWriter).
+//   [Export STL]   the MC mesh (full resolution, no curve tubes — fuse them
+//                  first) as binary STL scaled to targetHeightMm (mm units,
+//                  slicer convention) with a signed-volume winding check.
+//                  Removed 2026-07-09, restored 2026-07-13 for the dancer-
+//                  session print run (the colour-PLY variant stayed in history).
 //   [Restore]      put the pre-print front buffer back (undo all of the above).
 //
-// (The binary STL / colour PLY physical-print path was removed 2026-07-09 —
-//  restore from git history if a print run ever comes back.)
 // All ops are one-shot and synchronous (GPU readbacks): export path, not per-frame.
 
 using System;
@@ -80,6 +83,10 @@ namespace TSDF
         public bool keepLargestOnly = true;
 
         [Header("Export")]
+        [Range(50f, 1000f)]
+        [Tooltip("Printed height (mm) of the sculpture's bounding box — STL is written in mm.")]
+        public float targetHeightMm = 300f;
+
         [Range(0, 30)]
         [Tooltip("Taubin smoothing iterations on export (0 = off). Non-shrinking smoothing " +
                  "that removes the Marching-Cubes staircase from tubes and surfaces; ~10 is " +
@@ -484,10 +491,83 @@ namespace TSDF
         }
 
         // ---------------- 3: exports ----------------
-        // (The binary STL / colour PLY print path was removed 2026-07-09 by owner
-        //  decision — glTF (.glb) + .usdz are the only export targets. Restore
-        //  ExportStl/WriteMeshFiles + StlWriter/PlyWriter from git history if a
-        //  physical print run ever comes back.)
+
+        /// <summary>Print export: binary STL scaled to targetHeightMm (mm units,
+        /// slicer convention) with a signed-volume winding check. Uses the same
+        /// MC + weld + Taubin pipeline as the web export (TSDFSnapshotBuilder) but
+        /// at full resolution (no decimation) and without curve tubes — for print
+        /// the curves go through [Fuse curves] into the volume so they're solid.
+        /// (Removed 2026-07-09, restored 2026-07-13 for the dancer-session print
+        /// run — the colour-PLY variant stayed in git history.)</summary>
+        public void ExportStl()
+        {
+            if (!Guard(needCurves: false)) return;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var opt = WebCaptureOptions();
+            opt.meshTargetTris = 0;    // print wants full resolution
+            opt.includeCurves = false; // tubes are display-only; print fuses them
+            var snap = TSDFSnapshotBuilder.Capture(volume, null, opt, out string err);
+            if (snap == null) { Fail(err); return; }
+
+            Vector3 min = Vector3.positiveInfinity, max = Vector3.negativeInfinity;
+            foreach (var p in snap.pos) { min = Vector3.Min(min, p); max = Vector3.Max(max, p); }
+            Vector3 center = (min + max) * 0.5f;
+            Vector3 size = max - min;
+            if (size.y < 1e-4f) { Fail("degenerate mesh bounds"); return; }
+
+            // Count non-degenerate triangles (the 0.1 mm weld can collapse slivers)
+            // and measure the signed volume: MC emits inside = sdf < iso, so a
+            // negative volume means the winding faces inward — flip on write.
+            int triCount = snap.tri.Length / 3;
+            int written = 0;
+            double signedVol = 0;
+            for (int t = 0; t < triCount; t++)
+            {
+                int i0 = snap.tri[t * 3], i1 = snap.tri[t * 3 + 1], i2 = snap.tri[t * 3 + 2];
+                if (i0 == i1 || i1 == i2 || i0 == i2) continue;
+                written++;
+                Vector3 a = snap.pos[i0] - center, b = snap.pos[i1] - center, c = snap.pos[i2] - center;
+                signedVol += Vector3.Dot(a, Vector3.Cross(b, c)) / 6.0;
+            }
+            bool flip = signedVol < 0;
+
+            float scale = targetHeightMm / size.y; // metres -> printed mm
+            string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                                      "Documents", "FloatingVectorsPrints");
+            string stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            string stlPath = Path.Combine(dir, $"print_{stamp}.stl");
+            try
+            {
+                Directory.CreateDirectory(dir);
+                StlWriter.Write(stlPath, snap.pos, snap.tri, written, center, scale, flip);
+                long bytes = new FileInfo(stlPath).Length;
+                _status = $"STL: {written} tris / {snap.pos.Length} welded verts, " +
+                          $"{bytes / (1024 * 1024)} MB -> {stlPath} " +
+                          $"(height {targetHeightMm:0} mm, smooth x{smoothIterations}, " +
+                          $"winding {(flip ? "flipped" : "ok")}, " +
+                          $"signedVol {(signedVol >= 0 ? "+" : "")}{signedVol:0.0000} m^3, " +
+                          $"total {sw.ElapsedMilliseconds / 1000.0:0.0}s)";
+                Debug.Log("[TSDFPrintExporter] " + _status, this);
+            }
+            catch (Exception e)
+            {
+                Fail($"write failed: {e.Message}");
+            }
+        }
+
+        /// <summary>The web/AR capture options from the panel-tuned fields —
+        /// shared by ExportWeb and the operator publish flow (OperatorPublisher).</summary>
+        public TSDFSnapshotBuilder.CaptureOptions WebCaptureOptions() => new TSDFSnapshotBuilder.CaptureOptions
+        {
+            smoothIterations = smoothIterations,
+            triangleBudgetPerSlab = triangleBudgetPerSlab,
+            meshTargetTris = webMeshTargetTris,
+            includeCurves = webIncludeCurves,
+            curveStride = webCurveStride,
+            curveSides = webCurveSides,
+            curveTipTaper = webCurveTipTaper,
+            curveTolerance = webCurveTolerance,
+        };
 
         /// <summary>Web/AR export: .glb (vertex colours, web viewers) and .usdz
         /// (texture-atlas colours, iPhone AR Quick Look), both real-world metres.
@@ -498,17 +578,7 @@ namespace TSDF
         {
             if (!Guard(needCurves: false)) return;
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var snap = TSDFSnapshotBuilder.Capture(volume, curves, new TSDFSnapshotBuilder.CaptureOptions
-            {
-                smoothIterations = smoothIterations,
-                triangleBudgetPerSlab = triangleBudgetPerSlab,
-                meshTargetTris = webMeshTargetTris,
-                includeCurves = webIncludeCurves,
-                curveStride = webCurveStride,
-                curveSides = webCurveSides,
-                curveTipTaper = webCurveTipTaper,
-                curveTolerance = webCurveTolerance,
-            }, out string err);
+            var snap = TSDFSnapshotBuilder.Capture(volume, curves, WebCaptureOptions(), out string err);
             if (snap == null) { Fail(err); return; }
 
             string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),

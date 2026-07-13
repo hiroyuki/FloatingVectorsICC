@@ -333,6 +333,9 @@ namespace TSDF
             // Attract mode: the ghost playback owns the sculpture — a suppressed
             // live renderer keeps streaming (BT / occupancy) but must not integrate.
             if (r.suppressAsSource) return;
+            // Live freeze: raw frames keep flowing (recording / health monitor)
+            // but the sculpture must hold the frozen moment.
+            if (r.holdLiveFrame) return;
             // Live renderer's own GameObject transform IS the source — its
             // localToWorldMatrix encodes the extrinsics + Y-flip baked in by
             // ExtrinsicsApply.ToUnityLocal.

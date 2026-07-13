@@ -122,6 +122,16 @@ namespace PointCloud
                  "Set to None to disable the hotkey.")]
         public KeyCode recordKey = KeyCode.F9;
 
+        [Min(0f)]
+        [Tooltip("Seconds between Space and the live freeze actually engaging, with a big " +
+                 "on-screen countdown — gives a dancer/operator time to hit the pose. " +
+                 "0 = freeze immediately (old behaviour). Unfreeze is always immediate; " +
+                 "Space during the countdown cancels it. Playback pause is unaffected.")]
+        public float liveFreezeCountdownSeconds = 5f;
+
+        // Wall-clock (Time.timeAsDouble) when the pending live freeze fires; < 0 = none.
+        private double _freezeCountdownEnd = -1.0;
+
         [Header("Playback")]
         public bool loop = true;
 
@@ -653,19 +663,49 @@ namespace PointCloud
         /// curves — holds the current moment. Reuses <see cref="IsPaused"/> as the signal so
         /// every downstream pause consumer (BonePoseHistory ring hold, PointCloudMotionCurves
         /// auto-hold, SkeletonMerger staleness skip, WorkerGapMonitor suppression,
-        /// TSDFHoldBeautify) behaves exactly as in a playback pause. No-op unless idle in
-        /// live mode. Starting Rec or Play unfreezes first.
+        /// TSDFHoldBeautify) behaves exactly as in a playback pause. Works while idle OR
+        /// recording in live mode (the renderers keep tapping raw frames to the recorder
+        /// during a hold, so REC continues across a freeze). Starting Rec or Play
+        /// unfreezes first.
         /// </summary>
         public void ToggleLiveFreeze()
         {
-            if (CurrentState != State.Idle || !IsLiveMode) return;
+            if (CurrentState == State.Playing || !IsLiveMode) return;
             bool freeze = !IsPaused;
             var mgr = ResolveManager();
             foreach (var r in mgr.Renderers)
                 if (r != null) r.holdLiveFrame = freeze;
             IsPaused = freeze;
-            SetStatus(freeze ? "Live frozen — Space resumes."
+            SetStatus(freeze ? (CurrentState == State.Recording
+                                   ? "Live frozen (REC continues) — Space resumes."
+                                   : "Live frozen — Space resumes.")
                              : $"Live mode: {mgr.Renderers.Count} camera(s) connected.");
+        }
+
+        /// <summary>Seconds until a pending Space-initiated live freeze fires; 0 = none.</summary>
+        public float FreezeCountdownRemaining =>
+            _freezeCountdownEnd < 0.0 ? 0f : Mathf.Max(0f, (float)(_freezeCountdownEnd - Time.timeAsDouble));
+
+        private GUIStyle _countdownStyle;
+
+        // Big centre-screen countdown so the dancer can see the freeze coming.
+        private void OnGUI()
+        {
+            float remain = FreezeCountdownRemaining;
+            if (remain <= 0f) return;
+            if (_countdownStyle == null)
+                _countdownStyle = new GUIStyle
+                {
+                    alignment = TextAnchor.MiddleCenter,
+                    fontStyle = FontStyle.Bold,
+                };
+            _countdownStyle.fontSize = Screen.height / 3;
+            string text = Mathf.CeilToInt(remain).ToString();
+            var rect = new Rect(0, 0, Screen.width, Screen.height);
+            _countdownStyle.normal.textColor = new Color(0f, 0f, 0f, 0.8f);
+            GUI.Label(new Rect(rect.x + 6, rect.y + 6, rect.width, rect.height), text, _countdownStyle);
+            _countdownStyle.normal.textColor = Color.white;
+            GUI.Label(rect, text, _countdownStyle);
         }
 
         // Rec/Play must consume fresh frames; drop a live freeze before either starts.
@@ -1902,15 +1942,39 @@ namespace PointCloud
                 ToggleRecord();
 
             // Spacebar in LIVE mode freezes/unfreezes the whole visual — the live
-            // counterpart of the playback pause toggle below. No-op unless live.
+            // counterpart of the playback pause toggle below. Works from Idle AND
+            // Recording (REC keeps writing through a freeze). Freezing goes through
+            // the countdown (liveFreezeCountdownSeconds) so a dancer can hit the
+            // pose; unfreezing and cancelling a pending countdown are immediate.
             // Always log the keypress with the guard state: "Space did nothing" has
             // two very different causes — a state guard rejecting it (logged here)
             // or the app not having keyboard focus (no log at all; runInBackground
             // keeps the visuals moving, so focus loss is invisible otherwise).
             if (Input.GetKeyDown(KeyCode.Space))
-                Debug.Log($"[SensorRecorder] Space: state={CurrentState} live={IsLiveMode} paused={IsPaused}");
-            if (CurrentState == State.Idle && Input.GetKeyDown(KeyCode.Space))
-                ToggleLiveFreeze();
+                Debug.Log($"[SensorRecorder] Space: state={CurrentState} live={IsLiveMode} " +
+                          $"paused={IsPaused} countdown={_freezeCountdownEnd >= 0.0}");
+            if (CurrentState != State.Playing && Input.GetKeyDown(KeyCode.Space))
+            {
+                if (_freezeCountdownEnd >= 0.0)
+                {
+                    _freezeCountdownEnd = -1.0;
+                    SetStatus("Freeze countdown cancelled.");
+                }
+                else if (IsPaused || liveFreezeCountdownSeconds <= 0f)
+                {
+                    ToggleLiveFreeze();
+                }
+                else if (IsLiveMode)
+                {
+                    _freezeCountdownEnd = Time.timeAsDouble + liveFreezeCountdownSeconds;
+                    SetStatus($"Freezing in {liveFreezeCountdownSeconds:0}s… (Space cancels)");
+                }
+            }
+            if (_freezeCountdownEnd >= 0.0 && Time.timeAsDouble >= _freezeCountdownEnd)
+            {
+                _freezeCountdownEnd = -1.0;
+                if (!IsPaused) ToggleLiveFreeze();
+            }
 
             // Recording has no per-tick work, but we still want the per-second
             // diag heartbeat to log capture-side fps / drops while it's happening.

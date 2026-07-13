@@ -697,7 +697,7 @@ namespace Experience
             }
             else
             {
-                string token = ResolveLfksToken();
+                string token = LfksToken.Resolve();
                 if (string.IsNullOrEmpty(token))
                 {
                     Debug.LogError($"[{nameof(ExperienceDirector)}] no LFKS token " +
@@ -743,26 +743,6 @@ namespace Experience
         }
 
         private void ShowExportFailed() => _ui.ShowMessage(config.exportFailedText);
-
-        // Token lives OUTSIDE the repo/assets: a user-local file first, the
-        // environment second. Trimmed; empty = not configured.
-        private static string ResolveLfksToken()
-        {
-            try
-            {
-                string path = Path.Combine(Application.persistentDataPath, "lfks-token.txt");
-                if (File.Exists(path))
-                {
-                    string fromFile = File.ReadAllText(path).Trim();
-                    if (fromFile.Length > 0) return fromFile;
-                }
-            }
-            catch (Exception e)
-            {
-                Debug.LogWarning($"[{nameof(ExperienceDirector)}] token file read failed: {e.Message}");
-            }
-            return Environment.GetEnvironmentVariable("LFKS_TOKEN")?.Trim();
-        }
 
         private void CancelPublish()
         {

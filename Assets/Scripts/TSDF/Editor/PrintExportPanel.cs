@@ -115,6 +115,9 @@ namespace TSDF.EditorTools
 
             EditorGUILayout.Space(4);
             EditorGUILayout.LabelField("Export", EditorStyles.miniBoldLabel);
+            float heightMm = EditorGUILayout.Slider(
+                new GUIContent("Target Height Mm", "プリント時の高さ。STL は mm 単位で書き出される。"),
+                pe.targetHeightMm, 50f, 1000f);
             int smooth = EditorGUILayout.IntSlider(
                 new GUIContent("Smooth Iterations", "書き出し時の Taubin 平滑化（縮まない）。0=OFF。" +
                     "MC の階段状ガタつきを除去する。表示中の TSDF mesh には影響しない。"),
@@ -158,6 +161,7 @@ namespace TSDF.EditorTools
                 pe.maxBridgeLength = maxBridge;
                 pe.closeRadiusVoxels = closeR;
                 pe.keepLargestOnly = keepLargest;
+                pe.targetHeightMm = heightMm;
                 pe.smoothIterations = smooth;
                 pe.webIncludeCurves = webCurves;
                 pe.webCurveStride = webStride;
@@ -189,12 +193,27 @@ namespace TSDF.EditorTools
                     if (GUILayout.Button(new GUIContent("Close holes",
                             "穴塞ぎ＋未接続チェック"), GUILayout.Height(26)))
                         pe.CloseHoles();
+                    if (GUILayout.Button(new GUIContent("Export STL",
+                            "~/Documents/FloatingVectorsPrints/ に書き出し"), GUILayout.Height(26)))
+                        pe.ExportStl();
                 }
                 using (new EditorGUI.DisabledScope(!ready || !pe.HasSnapshot))
                 {
                     if (GUILayout.Button(new GUIContent("Restore",
                             "全プリント操作を取り消して融合前に戻す"), GUILayout.Height(26)))
                         pe.RestoreSnapshot();
+                }
+            }
+
+            using (new EditorGUI.DisabledScope(!ready))
+            {
+                if (GUILayout.Button(new GUIContent("Fuse → Close → Export STL (ワンクリック)",
+                        "3Dプリント一連: カーブ融合 → 穴塞ぎ → STL 書き出しを連続実行。" +
+                        "やり直しは Restore で融合前に戻せる。"), GUILayout.Height(30)))
+                {
+                    if (pe.curves != null) pe.FuseCurves();
+                    pe.CloseHoles();
+                    pe.ExportStl();
                 }
             }
 
@@ -217,6 +236,14 @@ namespace TSDF.EditorTools
             using (new EditorGUILayout.HorizontalScope())
             {
                 GUILayout.FlexibleSpace();
+                if (GUILayout.Button("出力フォルダを開く", GUILayout.Width(130)))
+                {
+                    string dir = System.IO.Path.Combine(
+                        System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile),
+                        "Documents", "FloatingVectorsPrints");
+                    System.IO.Directory.CreateDirectory(dir);
+                    EditorUtility.RevealInFinder(dir);
+                }
                 if (GUILayout.Button("Select exporter", GUILayout.Width(110)))
                 {
                     Selection.activeGameObject = pe.gameObject;

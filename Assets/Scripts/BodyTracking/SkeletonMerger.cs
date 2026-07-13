@@ -835,6 +835,9 @@ namespace BodyTracking
         // know depth/IR/color resolution and CameraParam is populated.
         private void HandleRawFrame(PointCloudRenderer src, RawFrameData frame)
         {
+            // Live freeze: raw frames keep flowing (recording / health monitor)
+            // but the skeleton + curves must hold the frozen moment.
+            if (src.holdLiveFrame) return;
             string serial = string.IsNullOrEmpty(src.deviceSerial) ? src.gameObject.name : src.deviceSerial;
             // While a recording that contains this serial is being played back, the
             // playback stream owns the worker feed. Letting the live camera enqueue

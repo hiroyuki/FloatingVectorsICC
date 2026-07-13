@@ -195,11 +195,12 @@ namespace PointCloud
         public bool logFps = false;
 
         /// <summary>
-        /// While true, Update stops consuming capture slots: the displayed mesh, TSDF
-        /// integration and BT feeds all hold the last consumed frame. The capture thread
-        /// keeps draining the SDK into the slot ring, so no backpressure builds and
-        /// clearing the flag resumes instantly. Driven by SensorRecorder.ToggleLiveFreeze
-        /// (Space in live mode); not serialized.
+        /// While true, Update keeps draining capture slots but skips the visual path
+        /// (mesh upload / GPU reconstruction / cumulative / OnFrameUploaded): the
+        /// displayed mesh holds the last consumed frame. OnRawFramesReady keeps firing
+        /// so recording and the health monitor continue across a freeze — TSDFIntegrator
+        /// and SkeletonMerger check this flag in their live handlers and hold instead.
+        /// Driven by SensorRecorder.ToggleLiveFreeze (Space in live mode); not serialized.
         /// </summary>
         [System.NonSerialized] public bool holdLiveFrame;
 
@@ -350,46 +351,52 @@ namespace PointCloud
             _stageSw.Stop();
             if (logFps) _shaderTicks += _stageSw.ElapsedTicks;
 
-            var slot = holdLiveFrame ? null : _slots?.TryAcquireRead();
+            var slot = _slots?.TryAcquireRead();
             if (slot != null)
             {
                 try
                 {
-                    int n;
-                    if (useGpuReconstruction)
+                    // Live freeze: keep draining slots + raising the raw tap below
+                    // (recording / health monitor), but hold everything visual.
+                    if (!holdLiveFrame)
                     {
-                        _stageSw.Restart();
-                        n = DispatchGpuReconstruction(slot);
-                        _stageSw.Stop();
-                        if (logFps) _meshTicks += _stageSw.ElapsedTicks;
-                    }
-                    else
-                    {
-                        n = Math.Min(slot.PointCount, maxPoints);
+                        int n;
+                        if (useGpuReconstruction)
+                        {
+                            _stageSw.Restart();
+                            n = DispatchGpuReconstruction(slot);
+                            _stageSw.Stop();
+                            if (logFps) _meshTicks += _stageSw.ElapsedTicks;
+                        }
+                        else
+                        {
+                            n = Math.Min(slot.PointCount, maxPoints);
 
-                        _stageSw.Restart();
-                        cumulative?.OnFrame(slot.Buffer, n, transform, pointMaterial, boundingBox, decimater);
-                        _stageSw.Stop();
-                        if (logFps) _cumulTicks += _stageSw.ElapsedTicks;
+                            _stageSw.Restart();
+                            cumulative?.OnFrame(slot.Buffer, n, transform, pointMaterial, boundingBox, decimater);
+                            _stageSw.Stop();
+                            if (logFps) _cumulTicks += _stageSw.ElapsedTicks;
 
-                        _stageSw.Restart();
-                        _mesh.SetVertexBufferData(slot.Buffer, 0, 0, n,
-                            flags: MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
-                        _mesh.SetSubMesh(0, new SubMeshDescriptor(0, n, MeshTopology.Points),
-                            MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
-                        _stageSw.Stop();
-                        if (logFps) _meshTicks += _stageSw.ElapsedTicks;
-                    }
+                            _stageSw.Restart();
+                            _mesh.SetVertexBufferData(slot.Buffer, 0, 0, n,
+                                flags: MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
+                            _mesh.SetSubMesh(0, new SubMeshDescriptor(0, n, MeshTopology.Points),
+                                MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontValidateIndices);
+                            _stageSw.Stop();
+                            if (logFps) _meshTicks += _stageSw.ElapsedTicks;
+                        }
 
-                    LastPointCount = n;
-                    LastTimestampUs = slot.TimestampUs;
-                    _consumedCount++;
+                        LastPointCount = n;
+                        LastTimestampUs = slot.TimestampUs;
 #pragma warning disable CS0618 // internal raise site of the [Obsolete] event
-                    if (!useGpuReconstruction)
-                        OnFrameUploaded?.Invoke(this, slot.Buffer, n, slot.TimestampUs);
-                    else if (OnFrameUploaded != null) WarnGpuModeSkipsCpuFeatures(ref _warnedOnFrameUploaded, "OnFrameUploaded");
+                        if (!useGpuReconstruction)
+                            OnFrameUploaded?.Invoke(this, slot.Buffer, n, slot.TimestampUs);
+                        else if (OnFrameUploaded != null) WarnGpuModeSkipsCpuFeatures(ref _warnedOnFrameUploaded, "OnFrameUploaded");
 #pragma warning restore CS0618
-                    if (useGpuReconstruction && cumulative != null) WarnGpuModeSkipsCpuFeatures(ref _warnedCumulative, $"cumulative ({cumulative.name})");
+                        if (useGpuReconstruction && cumulative != null) WarnGpuModeSkipsCpuFeatures(ref _warnedCumulative, $"cumulative ({cumulative.name})");
+                    }
+
+                    _consumedCount++;
 
                     if (OnRawFramesReady != null && slot.DepthByteCount > 0 && slot.ColorByteCount > 0)
                     {
