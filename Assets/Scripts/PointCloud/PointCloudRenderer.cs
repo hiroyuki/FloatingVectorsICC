@@ -4,6 +4,7 @@
 using System;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Threading.Tasks;
 using Orbbec;
 using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
@@ -286,6 +287,7 @@ namespace PointCloud
 
         // Periodic timer sync.
         private Coroutine _timerSyncCoro;
+        private Task _timerSyncTask; // in-flight background sync; ShutdownCapture waits on it before disposing _device
 
         // --- FPS counters ---
         private long _capturedCount;          // capture thread: Interlocked.Increment on Publish
@@ -1023,6 +1025,19 @@ namespace PointCloud
             _colorFormatConverter?.Dispose(); _colorFormatConverter = null;
             _pipeline?.Dispose(); _pipeline = null;
             _config?.Dispose(); _config = null;
+
+            // A background TimerSyncWithHost may still hold the device handle; disposing
+            // mid-call would crash in native code. Waiting bounds at the same 2s as the
+            // capture-thread join; on timeout, leak the handle rather than race Dispose.
+            var syncTask = _timerSyncTask;
+            _timerSyncTask = null;
+            if (syncTask != null && !syncTask.IsCompleted && !syncTask.Wait(2000))
+            {
+                Debug.LogWarning($"[{nameof(PointCloudRenderer)}] in-flight TimerSyncWithHost did not " +
+                                 "finish within 2s; leaking the device handle.", this);
+                _device = null;
+                return;
+            }
             _device?.Dispose(); _device = null;
         }
 
@@ -1034,14 +1049,24 @@ namespace PointCloud
             while (true)
             {
                 yield return wait;
-                if (_device == null) yield break;
-                try { _device.TimerSyncWithHost(); }
-                catch (Exception e)
+                var device = _device;
+                if (device == null) yield break;
+                // The sync is a blocking USB round-trip (~330ms measured on Femto Bolt), so it
+                // must not run on the main thread — it would hitch rendering once per interval
+                // per device.
+                string serial = deviceSerial;
+                _timerSyncTask = Task.Run(() =>
                 {
-                    Debug.LogWarning(
-                        $"[{nameof(PointCloudRenderer)}] periodic TimerSyncWithHost failed on " +
-                        $"{deviceSerial}: {e.Message}", this);
-                }
+                    try { device.TimerSyncWithHost(); }
+                    catch (Exception e)
+                    {
+                        Debug.LogWarning(
+                            $"[{nameof(PointCloudRenderer)}] periodic TimerSyncWithHost failed on " +
+                            $"{serial}: {e.Message}");
+                    }
+                });
+                while (!_timerSyncTask.IsCompleted) yield return null;
+                _timerSyncTask = null;
             }
         }
 
