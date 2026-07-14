@@ -10,6 +10,7 @@
 | **Space** | live: カウントダウン（既定 5 秒、画面中央に大表示）→ freeze。**Rec 中でも有効**（録画は継続、描画/TSDF/BT だけ静止）。再度 Space で解除は即時、カウントダウン中の Space はキャンセル。playback 中は従来通り即 pause |
 | **F10** | `OperatorPublisher`: capture（trail 長は Inspector の `trailSamples`）→ GLB+USDZ 書き出し → LFKS upload → **Display 2・3 の右上に QR**（Display 1 のメイン view は邪魔しない。出し先は `QrOverlay.targetDisplays`）。freeze/pause 中に実行するのが基本 |
 | **F11** | QR オーバーレイを消す |
+| **F12** | **書き出しデータのプレビュー切替**。F10 の capture 直後に自動で「USDZ/GLB に実際に入る形状」（デシメート済メッシュ+trail チューブ）がその場に差し替え表示される。F12 で live 表示に戻る / 再表示。**注意: プレビュー中は curves が非表示 → STL チェーンの前に F12 で閉じる**（F10 再押しは自動で閉じてから capture する） |
 
 ## trail 長の変え方
 

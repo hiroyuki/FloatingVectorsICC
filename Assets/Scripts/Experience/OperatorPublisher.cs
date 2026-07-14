@@ -51,13 +51,29 @@ namespace Experience
         [Tooltip("Hide the QR overlay. None disables the hotkey.")]
         public KeyCode hideQrKey = KeyCode.F11;
 
+        [Tooltip("Toggle the export-data preview: the captured snapshot (decimated " +
+                 "mesh + trail tubes — exactly what the GLB/USDZ contain) swapped in " +
+                 "place of the live TSDF mesh + curves. Shown automatically after each " +
+                 "capture; toggle off to get the live view back. None disables the hotkey.")]
+        public KeyCode previewToggleKey = KeyCode.F12;
+
         public string StatusText => _status;
         public bool IsBusy => _routine != null;
+        public bool PreviewShowing => _previewRoot != null;
 
         private string _status = "";
         private Coroutine _routine;
         private CancellationTokenSource _cts;
         private int _savedHistorySamples = -1;
+
+        // export-data preview (in-place swap)
+        private TSDFSnapshot _lastSnap;
+        private GameObject _previewRoot;
+        private Material _previewMat;
+        private readonly System.Collections.Generic.List<TSDFView> _hiddenViews =
+            new System.Collections.Generic.List<TSDFView>();
+        private bool _savedCurvesVisible;
+        private PointCloudMotionCurves _curvesHidden;
 
         private void OnEnable()
         {
@@ -73,12 +89,102 @@ namespace Experience
             if (_cts != null) { _cts.Cancel(); _cts.Dispose(); _cts = null; }
             if (_routine != null) { StopCoroutine(_routine); _routine = null; }
             RestoreHistorySamples();
+            HidePreview();
+            _lastSnap = null;
+        }
+
+        private void OnDestroy()
+        {
+            if (_previewMat != null) Destroy(_previewMat);
         }
 
         private void Update()
         {
             if (publishKey != KeyCode.None && Input.GetKeyDown(publishKey)) GenerateAndPublish();
             if (hideQrKey != KeyCode.None && Input.GetKeyDown(hideQrKey)) qrOverlay?.Hide();
+            if (previewToggleKey != KeyCode.None && Input.GetKeyDown(previewToggleKey))
+            {
+                if (PreviewShowing) HidePreview();
+                else ShowPreview();
+            }
+        }
+
+        // ---------------- export-data preview ----------------
+
+        /// <summary>Swap the live sculpture visuals (TSDF mesh + curves) for the last
+        /// captured snapshot's display meshes — exactly the geometry the GLB/USDZ
+        /// contain (decimated, smoothed, trail tubes), rendered where it stood.</summary>
+        public void ShowPreview()
+        {
+            if (_lastSnap == null)
+            {
+                Debug.LogWarning($"[{nameof(OperatorPublisher)}] no snapshot captured yet — " +
+                                 "press the publish key first.", this);
+                return;
+            }
+            HidePreview();
+
+            TSDFSnapshotBuilder.BuildDisplayMeshes(_lastSnap, out Mesh surface, out Mesh tubes);
+            if (surface == null) { Debug.LogWarning($"[{nameof(OperatorPublisher)}] snapshot has no mesh.", this); return; }
+            if (_previewMat == null)
+            {
+                var shader = Resources.Load<Shader>("SnapshotVertexColor");
+                if (shader == null)
+                {
+                    Debug.LogError($"[{nameof(OperatorPublisher)}] Resources/SnapshotVertexColor " +
+                                   "shader missing — cannot preview.", this);
+                    Destroy(surface); if (tubes != null) Destroy(tubes);
+                    return;
+                }
+                _previewMat = new Material(shader)
+                { name = "Snapshot preview (auto)", hideFlags = HideFlags.DontSave };
+            }
+
+            _previewRoot = new GameObject("_SnapshotPreview");
+            _previewRoot.transform.SetParent(transform, false); // meshes are world-space
+            AddMeshChild(surface, "surface");
+            if (tubes != null) AddMeshChild(tubes, "tubes");
+
+            // hide what the preview replaces, remember what we touched
+            foreach (var v in FindObjectsByType<TSDFView>(FindObjectsInactive.Exclude, FindObjectsSortMode.None))
+                if (v.Visible) { v.Visible = false; _hiddenViews.Add(v); }
+            if (motionCurves != null)
+            {
+                _savedCurvesVisible = motionCurves.visible;
+                motionCurves.visible = false;
+                _curvesHidden = motionCurves;
+            }
+            SetStatus($"preview: {surface.triangles.Length / 3 / 1000}k tris" +
+                      (tubes != null ? " + tubes" : "") + $" (t{trailSamples}) — toggle {previewToggleKey}");
+        }
+
+        public void HidePreview()
+        {
+            if (_previewRoot != null)
+            {
+                foreach (var mf in _previewRoot.GetComponentsInChildren<MeshFilter>())
+                    if (mf.sharedMesh != null) Destroy(mf.sharedMesh);
+                Destroy(_previewRoot);
+                _previewRoot = null;
+            }
+            foreach (var v in _hiddenViews)
+                if (v != null) v.Visible = true;
+            _hiddenViews.Clear();
+            if (_curvesHidden != null)
+            {
+                _curvesHidden.visible = _savedCurvesVisible;
+                _curvesHidden = null;
+            }
+        }
+
+        private void AddMeshChild(Mesh mesh, string name)
+        {
+            var go = new GameObject(name);
+            go.transform.SetParent(_previewRoot.transform, false);
+            go.AddComponent<MeshFilter>().sharedMesh = mesh;
+            var mr = go.AddComponent<MeshRenderer>();
+            mr.sharedMaterial = _previewMat;
+            mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
         }
 
         [ContextMenu("Generate And Publish")]
@@ -96,6 +202,9 @@ namespace Experience
         private IEnumerator PublishRoutine()
         {
             var sw = System.Diagnostics.Stopwatch.StartNew();
+            // A visible preview hides the curves, which also stops their rebuild —
+            // restore the live visuals before capturing the next snapshot.
+            HidePreview();
             if (printExporter == null || printExporter.volume == null || !printExporter.VolumeReady)
             {
                 Fail("no initialised TSDFPrintExporter/volume in the scene");
@@ -129,6 +238,11 @@ namespace Experience
                                                    printExporter.WebCaptureOptions(), out string err);
             RestoreHistorySamples();
             if (snap == null) { Fail(err); yield break; }
+
+            // in-place preview of exactly what the files will contain, while the
+            // export + upload continue below
+            _lastSnap = snap;
+            ShowPreview();
 
             // -- export --
             SetStatus("export GLB + USDZ…");
