@@ -56,6 +56,14 @@ namespace CameraControl
                  "Auto-resolves when left empty.")]
         public Experience.ExperienceDirector experienceDirector;
 
+        [Tooltip("Operator publisher (F10/F11/F12) whose live values the hotkey cheat " +
+                 "sheet shows. Auto-resolves when left empty.")]
+        public Experience.OperatorPublisher publisher;
+
+        [Tooltip("Recorder whose countdown/auto-stop seconds the cheat sheet shows. " +
+                 "Auto-resolves when left empty.")]
+        public SensorRecorder recorder;
+
         [Tooltip("Key that switches the operator display between the HUD and the " +
                  "4-camera tiles (drives debugView.Visible; the HUD mirrors off it).")]
         public KeyCode viewSwitchKey = KeyCode.Tab;
@@ -74,6 +82,8 @@ namespace CameraControl
             if (debugView == null) debugView = FindFirstObjectByType<MultiCameraDebugView>();
             if (experienceDirector == null)
                 experienceDirector = FindFirstObjectByType<Experience.ExperienceDirector>();
+            if (publisher == null) publisher = FindFirstObjectByType<Experience.OperatorPublisher>();
+            if (recorder == null) recorder = FindFirstObjectByType<SensorRecorder>();
             // Reflect an override that is already on (e.g. HUD re-enabled mid-session).
             foreach (var o in orbits)
                 if (o != null && o.TryGetComponent(out PauseOrbitGate g) && g.autoOrbitOverride)
@@ -110,7 +120,7 @@ namespace CameraControl
             GUI.matrix = Matrix4x4.Scale(Vector3.one * uiScale);
 
             // Panel backdrop so the widgets read against the black operator display.
-            GUI.Box(new Rect(position.x - 12, position.y - 10, width + 24, 150), GUIContent.none);
+            GUI.Box(new Rect(position.x - 12, position.y - 10, width + 24, 296), GUIContent.none);
 
             // Tunable 0 is History Samples (frames) — same knob as the Control Panel.
             float min = history.TunableMin(0);
@@ -150,6 +160,28 @@ namespace CameraControl
                                       $" Experience Mode ({experienceDirector.CurrentState})");
                 if (exp != experienceDirector.Visible) experienceDirector.Visible = exp;
             }
+
+            // Hotkey cheat sheet (dancer-session workflow) with the live values.
+            float cd = recorder != null ? recorder.liveFreezeCountdownSeconds : 5f;
+            float stop = recorder != null ? recorder.stopRecAfterFreezeSeconds : 0f;
+            int trail = publisher != null ? publisher.trailSamples : 0;
+            string recStop = stop > 0f ? $" (REC: auto-stops {stop:0}s later)" : "";
+            string busy = publisher != null && publisher.IsBusy ? "  [PUBLISHING…]" : "";
+            GUI.color = new Color(1f, 1f, 1f, 0.35f);
+            GUI.DrawTexture(new Rect(position.x, position.y + 142, width, 2), Texture2D.whiteTexture);
+            GUI.color = Color.white;
+            GUI.Label(new Rect(position.x, position.y + 150, width, 136),
+                      $"F9      REC start / stop\n" +
+                      $"Space   freeze in {cd:0}s{recStop}\n" +
+                      $"F10     export -> upload -> QR on disp 2/3 (trail {trail}){busy}\n" +
+                      $"F12     toggle: export preview <-> live\n" +
+                      $"F11     hide QR\n" +
+                      $"</>   step frame (paused)      Tab  HUD <-> 4cam");
+            if (publisher != null && !string.IsNullOrEmpty(publisher.StatusText))
+                GUI.Label(new Rect(position.x, position.y + 268, width, 22),
+                          publisher.StatusText.Length > 60
+                              ? publisher.StatusText.Substring(0, 60) + "…"
+                              : publisher.StatusText);
 
             GUI.matrix = Matrix4x4.identity;
         }
