@@ -12,7 +12,13 @@
 //
 // Chunked (same pattern as RtmposeCompareChunked):
 //   Start(sessionRoot, outDir, maxFramesPerDevice)  -> Step(150) ... -> Finish()
-// Writes <outDir>/FemtoBolt_<serial>_bodies_main per device.
+//
+// Output mirrors the session-root layout the replay path actually reads
+// (SensorRecorder.Load / PointCloudRecording.EnumerateDevices):
+//   <outDir>/dataset/<host>/FemtoBolt_<serial>/bodies_main
+// plus copies of the small session yamls + calibration, so <outDir> becomes a
+// playable root once the big depth/color/ir streams are hardlinked/copied in
+// (see eval docs — they are deliberately NOT duplicated here).
 
 using System;
 using System.Collections.Generic;
@@ -51,6 +57,30 @@ namespace BodyTracking.Eval.Rtmpose
                 : outDir;
             Directory.CreateDirectory(_outDir);
 
+            // Map serial -> device dir RELATIVE to the session root, so the output
+            // mirrors the dataset/<host>/FemtoBolt_<serial>/ layout the replay reads.
+            var relDeviceDir = new Dictionary<string, string>();
+            string rootFull = Path.GetFullPath(sessionRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            foreach (var (serial, deviceDir) in PointCloudRecording.EnumerateDevices(sessionRoot))
+            {
+                string devFull = Path.GetFullPath(deviceDir);
+                if (devFull.StartsWith(rootFull, StringComparison.OrdinalIgnoreCase))
+                    relDeviceDir[serial] = devFull.Substring(rootFull.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            }
+
+            // Copy the small session metadata so <outDir> is a near-ready replay root.
+            foreach (var yaml in new[] { "configuration.yaml", "dataset.yaml", "sensor_node_config.yaml" })
+            {
+                string src = Path.Combine(sessionRoot, yaml);
+                if (File.Exists(src)) File.Copy(src, Path.Combine(_outDir, yaml), true);
+            }
+            string calSrc = Path.Combine(PointCloudRecording.CalibrationDir(sessionRoot), "extrinsics.yaml");
+            if (File.Exists(calSrc))
+            {
+                Directory.CreateDirectory(PointCloudRecording.CalibrationDir(_outDir));
+                File.Copy(calSrc, Path.Combine(PointCloudRecording.CalibrationDir(_outDir), "extrinsics.yaml"), true);
+            }
+
             _go = new GameObject("RtmposeBodiesExport");
             _driver = _go.AddComponent<EvalReplayDriver>();
             _driver.loadColor = true; _driver.loadIR = false;
@@ -71,8 +101,14 @@ namespace BodyTracking.Eval.Rtmpose
                 var ctx = new EvalCameraContext(dev.Serial, dev.DepthW, dev.DepthH, dev.ColorW, dev.ColorH, dev.CameraParam);
                 _adapter.Configure(ctx);
                 if (dev.CameraParam.HasValue) _d2c[dev.Serial] = dev.CameraParam.Value.Transform;
+                // Write into the mirrored dataset layout (fall back to a flat file
+                // only if the device dir couldn't be resolved).
+                string devOut = relDeviceDir.TryGetValue(dev.Serial, out var rel)
+                    ? Path.Combine(_outDir, rel)
+                    : _outDir;
+                Directory.CreateDirectory(devOut);
                 _writers[dev.Serial] = new PointCloudRecording.RcsvStreamWriter(
-                    Path.Combine(_outDir, $"FemtoBolt_{dev.Serial}_bodies_main"),
+                    Path.Combine(devOut, PointCloudRecording.BodiesSensorName),
                     PointCloudRecording.BuildBodiesHeaderYaml(dev.Serial));
             }
             try

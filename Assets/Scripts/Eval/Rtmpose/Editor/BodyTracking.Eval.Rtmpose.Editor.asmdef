@@ -1,15 +1,17 @@
 {
-    "name": "BodyTracking.Eval.Rtmpose",
+    "name": "BodyTracking.Eval.Rtmpose.Editor",
     "rootNamespace": "BodyTracking.Eval.Rtmpose",
     "references": [
+        "BodyTracking.Eval.Rtmpose",
         "BodyTracking.Eval",
         "BodyTracking",
         "PointCloud",
         "Orbbec",
-        "com.github.asus4.onnxruntime",
-        "com.github.asus4.onnxruntime.unity"
+        "Calibration"
     ],
-    "includePlatforms": [],
+    "includePlatforms": [
+        "Editor"
+    ],
     "excludePlatforms": [],
     "allowUnsafeCode": true,
     "overrideReferences": false,
