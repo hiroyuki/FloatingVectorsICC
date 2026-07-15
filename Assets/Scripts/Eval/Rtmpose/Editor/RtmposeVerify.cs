@@ -21,8 +21,12 @@ namespace BodyTracking.Eval.Rtmpose
 {
     public static class RtmposeVerify
     {
+        // Keeps GPU-backed reconstructor meshes alive (their vertex buffers are
+        // freed when the reconstructor is disposed/GC'd).
+        static readonly System.Collections.Generic.List<IDisposable> _keep = new System.Collections.Generic.List<IDisposable>();
+
         public static string Run(string sessionRoot, string host, string serial, int frameIndex,
-                                 bool yoloxBgr = true, float conf = 0.3f, bool spawnViz = true)
+                                 bool yoloxBgr = true, float conf = 0.3f, bool spawnViz = true, bool spawnCloud = true)
         {
             var sb = new StringBuilder();
             try
@@ -128,9 +132,11 @@ namespace BodyTracking.Eval.Rtmpose
                 if (spawnViz)
                 {
                     var parent = new GameObject($"RtmposeVerify_{serial}_{frameIndex}");
+                    if (spawnCloud && cam.HasValue && depth != null)
+                        SpawnCloud(parent.transform, depth, dw, dh, color, cw, ch, cam.Value);
                     SpawnJoints(parent.transform, "rtmpose", pos3d, has3d, EvalSkeletonMap.CameraMmToUnity, new Color(1f, 0.4f, 0.1f));
-                    SpawnK4abt(parent.transform, sessionRoot, host, serial, colorTs, bodiesPath);
-                    sb.AppendLine($"spawned viz under '{parent.name}' (rtmpose=orange, k4abt=cyan)");
+                    SpawnK4abt(parent.transform, bodiesPath, colorTs, cam);
+                    sb.AppendLine($"spawned viz under '{parent.name}' (point cloud + rtmpose=orange + k4abt=cyan, all color-cam space)");
                 }
 
                 backend.Dispose();
@@ -153,7 +159,26 @@ namespace BodyTracking.Eval.Rtmpose
             }
         }
 
-        static void SpawnK4abt(Transform parent, string root, string host, string serial, ulong colorTs, string bodiesPath)
+        // Point cloud reconstructed for this frame in color-camera space (meters),
+        // rendered with the project's point shader. localScale flips Y to match the
+        // joints' CameraMmToUnity convention.
+        static void SpawnCloud(Transform parent, byte[] depth, int dw, int dh, byte[] color, int cw, int ch, ObCameraParam cam)
+        {
+            var recon = new PointCloudReconstructor("verify");
+            if (!recon.Dispatch(depth, depth.Length, dw, dh, color, color.Length, cw, ch, cam)) { recon.Dispose(); return; }
+            _keep.Add(recon);
+            var go = new GameObject("PointCloud");
+            go.transform.SetParent(parent, false);
+            go.transform.localScale = new Vector3(1f, -1f, 1f);
+            go.AddComponent<MeshFilter>().sharedMesh = recon.Mesh;
+            var mr = go.AddComponent<MeshRenderer>();
+            var sh = Shader.Find("Orbbec/PointCloudUnlit");
+            if (sh != null) mr.sharedMaterial = new Material(sh);
+        }
+
+        // k4abt joints are in the DEPTH camera frame; transform to the COLOR frame
+        // (via the D2C extrinsic) so they share the point cloud / RTMPose space.
+        static void SpawnK4abt(Transform parent, string bodiesPath, ulong colorTs, ObCameraParam? cam)
         {
             if (!File.Exists(bodiesPath)) return;
             using var bs = new PointCloudRecording.RcsvFrameStream(bodiesPath);
@@ -169,10 +194,21 @@ namespace BodyTracking.Eval.Rtmpose
                 if (!BodyTrackingShared.IsDrawnJoint((k4abt_joint_id_t)ji)) continue;
                 var jt = body.Joints[ji];
                 if (jt.ConfidenceLevel <= k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_NONE) continue;
+                Vector3 posMm;
+                if (cam.HasValue)
+                {
+                    var R = cam.Value.Transform.Rot; var T = cam.Value.Transform.Trans;
+                    var p = jt.Position;
+                    posMm = new Vector3(
+                        R[0] * p.X + R[1] * p.Y + R[2] * p.Z + T[0],
+                        R[3] * p.X + R[4] * p.Y + R[5] * p.Z + T[1],
+                        R[6] * p.X + R[7] * p.Y + R[8] * p.Z + T[2]);
+                }
+                else posMm = new Vector3(jt.Position.X, jt.Position.Y, jt.Position.Z);
                 var s = GameObject.CreatePrimitive(PrimitiveType.Sphere);
                 s.name = $"k4abt_{(k4abt_joint_id_t)ji}";
                 s.transform.SetParent(parent, false);
-                s.transform.localPosition = BodyTrackingShared.K4AmmToUnity(jt.Position);
+                s.transform.localPosition = EvalSkeletonMap.CameraMmToUnity(posMm);
                 s.transform.localScale = Vector3.one * 0.04f;
                 var r = s.GetComponent<Renderer>(); if (r != null) r.material.color = Color.cyan;
             }
