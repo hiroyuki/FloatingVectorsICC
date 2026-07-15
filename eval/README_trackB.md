@@ -17,6 +17,35 @@ real backend is wired and a calibrated recording is used.
 - YOLOX-m person (Human-Art): `yolox-m/20230928/yolox_onnx/yolox_m_8xb8-300e_humanart-c2c7a14a/end2end.onnx`
 - (RTMPose-l available to swap in if accuracy is short.)
 
+## Backend implementation spec (confirmed, ready to code)
+
+**Install** — add to `Packages/manifest.json`:
+```json
+"scopedRegistries": [{ "name": "NPM", "url": "https://registry.npmjs.com", "scopes": ["com.github.asus4"] }],
+"dependencies": {
+  "com.github.asus4.onnxruntime": "0.4.8",
+  "com.github.asus4.onnxruntime.unity": "0.4.8"
+}
+```
+(win-x64-gpu package only for CUDA/TensorRT; DirectML ships in core.) API namespace is
+`Microsoft.ML.OnnxRuntime` (asus4 core = vendored Microsoft ORT).
+
+**Session** (DirectML):
+```csharp
+var o = new SessionOptions(); o.AppendExecutionProvider_DML(0);
+var session = new InferenceSession(File.ReadAllBytes(path), o);
+using var input = OrtValue.CreateTensorValueFromMemory(chw, new long[]{1,3,H,W});
+using var res = session.Run(null, new[]{"input"}, new[]{input}, outputNames);
+ReadOnlySpan<float> x = res[0].GetTensorDataAsSpan<float>();
+```
+
+**Model I/O (verified from the .onnx):**
+- RTMPose `end2end.onnx`: input `input` [1,3,256,192] → `simcc_x` [1,17,384], `simcc_y` [1,17,512] (split ratio 2).
+- YOLOX `end2end.onnx`: input `input` [1,3,640,640] → `dets` [1,N,5] (x1,y1,x2,y2,score, in letterboxed 640 coords), `labels` [1,N]. NMS is baked in → detection = read dets, keep label==0 (person) & score>thr, undo letterbox (subtract pad / divide scale) to original px.
+- Verify at runtime with `session.InputNames`/`OutputNames`; check `labels` dtype (int32/int64).
+
+**Preprocess gotchas:** RTMPose = ImageNet mean/std, RGB (already in RtmposePipeline). YOLOX = letterbox to 640, likely raw 0-255 (verify BGR vs RGB and normalization empirically — silent-accuracy risk).
+
 ## Remaining work
 1. **ORT plugin + real backend** — add `asus4/onnxruntime-unity` (UPM, ORT 1.26; DirectML GPU out of the box), implement `IRtmposeBackend` (YOLOX decode + RTMPose SimCC) against it. CUDA/TensorRT EP later (needs CUDA 12.x + cuDNN 9.x; box currently has 11.6/cuDNN8).
 2. **Calibrated recording** — 3D lift needs `ObCameraParam` (intrinsics + D2C). Current local recordings lack `extrinsics.yaml`, so lift yields nothing. Needs the long calibrated recording.
