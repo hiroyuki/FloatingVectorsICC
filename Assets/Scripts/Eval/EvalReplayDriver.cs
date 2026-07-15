@@ -177,6 +177,9 @@ namespace BodyTracking.Eval
         /// ignoring the Update clock. For headless / batch metric runs where each adapter
         /// processes frames synchronously. Raises OnLoopComplete once at the end.
         /// </summary>
+        /// <summary>Emit one frame by (device index, master frame index). For chunked/stepped drivers.</summary>
+        public void EmitAt(int deviceIndex, int frameIndex) => EmitFrame(_devices[deviceIndex], frameIndex);
+
         public void RunToEndSync(int maxFramesPerDevice = 0)
         {
             if (_devices.Count == 0) return;
