@@ -1,0 +1,20 @@
+{
+    "name": "BodyTracking.Eval.Editor",
+    "rootNamespace": "BodyTracking.Eval.Editor",
+    "references": [
+        "BodyTracking.Eval",
+        "PointCloud",
+        "Orbbec"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
