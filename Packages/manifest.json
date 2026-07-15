@@ -1,5 +1,14 @@
 {
+  "scopedRegistries": [
+    {
+      "name": "NPM",
+      "url": "https://registry.npmjs.com",
+      "scopes": [ "com.github.asus4" ]
+    }
+  ],
   "dependencies": {
+    "com.github.asus4.onnxruntime": "0.4.8",
+    "com.github.asus4.onnxruntime.unity": "0.4.8",
     "com.coplaydev.unity-mcp": "https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity",
     "com.unity.ai.assistant": "2.12.0-pre.2",
     "com.unity.multiplayer.center": "1.0.1",
