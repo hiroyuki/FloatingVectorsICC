@@ -39,6 +39,7 @@ namespace BodyTracking.Eval.Rtmpose
         private readonly long[] _yoloxShape = { 1, 3, YoloxSize, YoloxSize };
         private readonly long[] _poseShape;
         private readonly OrtValue[] _in1 = new OrtValue[1];
+        private readonly RunOptions _runOpt = new RunOptions(); // vendored ORT NREs on a null RunOptions
 
         private float _lbScale; private int _lbPadX, _lbPadY;
 
@@ -69,7 +70,7 @@ namespace BodyTracking.Eval.Rtmpose
             Letterbox(rgb, w, h, _yoloxInput, out _lbScale, out _lbPadX, out _lbPadY);
             using var inp = OrtValue.CreateTensorValueFromMemory(_yoloxInput, _yoloxShape);
             _in1[0] = inp;
-            using var res = _yolox.Run(null, _yolox.InputNames, _in1, _yolox.OutputNames);
+            using var res = _yolox.Run(_runOpt, _yolox.InputNames, _in1, _yolox.OutputNames);
 
             var dets = res[_detsIdx].GetTensorDataAsSpan<float>();
             var shape = res[_detsIdx].GetTensorTypeAndShape().Shape; // [1,N,5]
@@ -104,7 +105,7 @@ namespace BodyTracking.Eval.Rtmpose
             if (!Ready) return false;
             using var inp = OrtValue.CreateTensorValueFromMemory(nchwInput, _poseShape);
             _in1[0] = inp;
-            using var res = _rtmpose.Run(null, _rtmpose.InputNames, _in1, _rtmpose.OutputNames);
+            using var res = _rtmpose.Run(_runOpt, _rtmpose.InputNames, _in1, _rtmpose.OutputNames);
             var sx = res[_simccXIdx].GetTensorDataAsSpan<float>();
             var sy = res[_simccYIdx].GetTensorDataAsSpan<float>();
             if (sx.Length > simccX.Length || sy.Length > simccY.Length) return false;
@@ -117,6 +118,7 @@ namespace BodyTracking.Eval.Rtmpose
         {
             _yolox?.Dispose();
             _rtmpose?.Dispose();
+            _runOpt?.Dispose();
             _opt?.Dispose();
         }
 

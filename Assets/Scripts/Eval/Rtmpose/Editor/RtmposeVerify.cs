@@ -1,0 +1,225 @@
+// Single-frame, single-camera RTMPose verification driver, callable from the
+// MCP execute_code console. Runs the pipeline stages directly (detect -> pose ->
+// SimCC decode -> COCO map -> depth lift) so it can report detection, 2D
+// keypoints, scores, depths and 3D positions, and optionally spawn spheres in the
+// scene for both RTMPose and the recorded k4abt baseline at the same frame.
+//
+// Usage (MCP execute_code):
+//   return BodyTracking.Eval.Rtmpose.RtmposeVerify.Run(
+//       "D:/Dropbox/projects/ICC/Recordings/RecordingBase/2026-07-14_15-50-24",
+//       "PAN-SHI", "CL8F253004N", 800, /*yoloxBgr*/ true, /*conf*/ 0.3f, /*spawn*/ true);
+
+using System;
+using System.IO;
+using System.Text;
+using BodyTracking;
+using Orbbec;
+using PointCloud;
+using UnityEngine;
+
+namespace BodyTracking.Eval.Rtmpose
+{
+    public static class RtmposeVerify
+    {
+        public static string Run(string sessionRoot, string host, string serial, int frameIndex,
+                                 bool yoloxBgr = true, float conf = 0.3f, bool spawnViz = true)
+        {
+            var sb = new StringBuilder();
+            try
+            {
+                // ---- models ----
+                string modelsDir = Path.GetFullPath(Path.Combine(Application.dataPath, "..", "eval", "models"));
+                string yoloxPath = FirstOnnx(Path.Combine(modelsDir, "yolox-m"));
+                string rtmPath = FirstOnnx(Path.Combine(modelsDir, "rtmpose-m"));
+                if (yoloxPath == null || rtmPath == null) return $"model onnx not found under {modelsDir}";
+
+                // ---- calibration ----
+                ObCameraParam? cam = LoadCameraParam(sessionRoot, serial);
+                if (cam == null) sb.AppendLine("WARN: no ObCameraParam for serial (3D lift disabled)");
+
+                // ---- frames ----
+                string colorPath = PointCloudRecording.SensorFilePath(sessionRoot, host, serial, PointCloudRecording.ColorSensorName);
+                string depthPath = PointCloudRecording.SensorFilePath(sessionRoot, host, serial, PointCloudRecording.DepthSensorName);
+                string bodiesPath = PointCloudRecording.SensorFilePath(sessionRoot, host, serial, PointCloudRecording.BodiesSensorName);
+                if (!File.Exists(colorPath)) return $"color_main not found: {colorPath}";
+
+                byte[] color; int cw, ch; ulong colorTs;
+                using (var cs = new PointCloudRecording.RcsvFrameStream(colorPath))
+                {
+                    if (frameIndex < 0 || frameIndex >= cs.Count) return $"frameIndex {frameIndex} out of range (0..{cs.Count - 1})";
+                    var f = cs[frameIndex];
+                    color = Copy(f); colorTs = f.TimestampNs;
+                }
+                (cw, ch) = PointCloudRecording.ReadRcsvHeaderDimensions(colorPath);
+
+                byte[] depth = null; int dw = 0, dh = 0;
+                if (File.Exists(depthPath))
+                {
+                    using var ds = new PointCloudRecording.RcsvFrameStream(depthPath);
+                    int di = NearestByTs(ds, colorTs);
+                    if (di >= 0) depth = Copy(ds[di]);
+                    (dw, dh) = PointCloudRecording.ReadRcsvHeaderDimensions(depthPath);
+                }
+
+                sb.AppendLine($"session={Path.GetFileName(sessionRoot)} serial={serial} frame={frameIndex} colorTs={colorTs}");
+                sb.AppendLine($"color {cw}x{ch} depth {dw}x{dh} yoloxBgr={yoloxBgr} conf={conf}");
+
+                // ---- backend ----
+                var backend = new OrtRtmposeBackend(yoloxPath, rtmPath, useDirectML: true) { yoloxBgr = yoloxBgr, detScoreThreshold = 0.3f };
+                var spec = backend.Spec;
+
+                // ---- detect ----
+                var boxes = new DetBox[8];
+                int nDet = backend.Detect(color, cw, ch, boxes);
+                sb.AppendLine($"YOLOX detections={nDet}");
+                if (nDet <= 0) { backend.Dispose(); return sb.ToString(); }
+                int best = 0; for (int i = 1; i < nDet; i++) if (boxes[i].Score > boxes[best].Score) best = i;
+                var box = boxes[best];
+                sb.AppendLine($"best box score={box.Score:F3} x1={box.X1:F0} y1={box.Y1:F0} x2={box.X2:F0} y2={box.Y2:F0}");
+
+                // ---- pose ----
+                int k = backend.NumKeypoints;
+                var roi = RtmposePreprocess.RoiFromBox(box.X1, box.Y1, box.X2, box.Y2, spec);
+                var input = RtmposePreprocess.BuildInput(color, cw, ch, roi, spec, null);
+                var simccX = new float[k * Mathf.RoundToInt(spec.InW * spec.SplitRatio)];
+                var simccY = new float[k * Mathf.RoundToInt(spec.InH * spec.SplitRatio)];
+                bool posed = backend.Pose(input, simccX, simccY);
+                sb.AppendLine($"RTMPose ran={posed}");
+                if (!posed) { backend.Dispose(); return sb.ToString(); }
+
+                var coco = new Vector2[k]; var cocoScore = new float[k];
+                SimccDecoder.Decode(simccX, simccY, k, roi, spec, coco, cocoScore);
+
+                // score distribution
+                float smin = float.MaxValue, smax = float.MinValue, ssum = 0;
+                for (int i = 0; i < k; i++) { smin = Mathf.Min(smin, cocoScore[i]); smax = Mathf.Max(smax, cocoScore[i]); ssum += cocoScore[i]; }
+                sb.AppendLine($"COCO score min={smin:F3} max={smax:F3} mean={ssum / k:F3}");
+                string[] cocoNames = { "nose", "Leye", "Reye", "Lear", "Rear", "Lsho", "Rsho", "Lelb", "Relb", "Lwri", "Rwri", "Lhip", "Rhip", "Lkne", "Rkne", "Lank", "Rank" };
+                for (int i = 0; i < k; i++)
+                    sb.AppendLine($"  {cocoNames[i],-5} uv=({coco[i].x:F0},{coco[i].y:F0}) s={cocoScore[i]:F3} inImg={(coco[i].x >= 0 && coco[i].x < cw && coco[i].y >= 0 && coco[i].y < ch)}");
+
+                // ---- map to 15 + depth lift ----
+                var xy = new Vector2[EvalSkeleton.JointCount]; var esc = new float[EvalSkeleton.JointCount]; var valid = new bool[EvalSkeleton.JointCount];
+                CocoToEval.Map(coco, cocoScore, conf, xy, esc, valid);
+
+                var lift = new DepthLift();
+                bool have3d = cam.HasValue && depth != null && lift.BuildAligned(depth, dw, dh, cw, ch, cam.Value);
+                sb.AppendLine($"have3d={have3d}");
+                var pos3d = new Vector3[EvalSkeleton.JointCount]; var has3d = new bool[EvalSkeleton.JointCount];
+                int validCount = 0, lifted = 0;
+                for (int j = 0; j < EvalSkeleton.JointCount; j++)
+                {
+                    if (valid[j]) validCount++;
+                    if (!valid[j] || !have3d) continue;
+                    float d = lift.SampleMm(Mathf.RoundToInt(xy[j].x), Mathf.RoundToInt(xy[j].y), 3);
+                    if (d <= 0f) continue;
+                    pos3d[j] = DepthLift.Backproject(xy[j].x, xy[j].y, d, cw, ch, cam.Value);
+                    has3d[j] = true; lifted++;
+                }
+                sb.AppendLine($"eval joints valid={validCount}/15 lifted3d={lifted}/15");
+                for (int j = 0; j < EvalSkeleton.JointCount; j++)
+                    sb.AppendLine($"  {((EvalJointId)j),-10} valid={valid[j]} s={esc[j]:F3} d={(has3d[j] ? pos3d[j].z.ToString("F0") : "-")}mm 3d={(has3d[j] ? $"({pos3d[j].x:F0},{pos3d[j].y:F0},{pos3d[j].z:F0})" : "-")}");
+
+                // anatomical sanity (image v grows downward): head above hips above ankles
+                if (valid[(int)EvalJointId.Head] && valid[(int)EvalJointId.HipL] && valid[(int)EvalJointId.AnkleL])
+                    sb.AppendLine($"anatomy(headV<hipV<ankleV)={xy[(int)EvalJointId.Head].y < xy[(int)EvalJointId.HipL].y && xy[(int)EvalJointId.HipL].y < xy[(int)EvalJointId.AnkleL].y}");
+
+                // ---- viz ----
+                if (spawnViz)
+                {
+                    var parent = new GameObject($"RtmposeVerify_{serial}_{frameIndex}");
+                    SpawnJoints(parent.transform, "rtmpose", pos3d, has3d, EvalSkeletonMap.CameraMmToUnity, new Color(1f, 0.4f, 0.1f));
+                    SpawnK4abt(parent.transform, sessionRoot, host, serial, colorTs, bodiesPath);
+                    sb.AppendLine($"spawned viz under '{parent.name}' (rtmpose=orange, k4abt=cyan)");
+                }
+
+                backend.Dispose();
+            }
+            catch (Exception e) { sb.AppendLine("EXCEPTION: " + e); }
+            return sb.ToString();
+        }
+
+        static void SpawnJoints(Transform parent, string tag, Vector3[] posMm, bool[] has, Func<Vector3, Vector3> toUnity, Color col)
+        {
+            for (int j = 0; j < posMm.Length; j++)
+            {
+                if (!has[j]) continue;
+                var s = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+                s.name = $"{tag}_{(EvalJointId)j}";
+                s.transform.SetParent(parent, false);
+                s.transform.localPosition = toUnity(posMm[j]);
+                s.transform.localScale = Vector3.one * 0.05f;
+                var r = s.GetComponent<Renderer>(); if (r != null) r.material.color = col;
+            }
+        }
+
+        static void SpawnK4abt(Transform parent, string root, string host, string serial, ulong colorTs, string bodiesPath)
+        {
+            if (!File.Exists(bodiesPath)) return;
+            using var bs = new PointCloudRecording.RcsvFrameStream(bodiesPath);
+            int bi = NearestByTs(bs, colorTs);
+            if (bi < 0) return;
+            var f = bs[bi];
+            var buf = new BodySnapshot[6]; for (int i = 0; i < buf.Length; i++) buf[i] = new BodySnapshot();
+            int n = RecordedBodySerializer.Decode(f.Bytes, f.ByteCount, buf);
+            if (n <= 0) return;
+            var body = buf[0];
+            for (int ji = 0; ji < K4ABTConsts.K4ABT_JOINT_COUNT; ji++)
+            {
+                if (!BodyTrackingShared.IsDrawnJoint((k4abt_joint_id_t)ji)) continue;
+                var jt = body.Joints[ji];
+                if (jt.ConfidenceLevel <= k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_NONE) continue;
+                var s = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+                s.name = $"k4abt_{(k4abt_joint_id_t)ji}";
+                s.transform.SetParent(parent, false);
+                s.transform.localPosition = BodyTrackingShared.K4AmmToUnity(jt.Position);
+                s.transform.localScale = Vector3.one * 0.04f;
+                var r = s.GetComponent<Renderer>(); if (r != null) r.material.color = Color.cyan;
+            }
+        }
+
+        static string FirstOnnx(string dir)
+        {
+            if (!Directory.Exists(dir)) return null;
+            var f = Directory.GetFiles(dir, "end2end.onnx", SearchOption.AllDirectories);
+            return f.Length > 0 ? f[0] : null;
+        }
+
+        static byte[] Copy(PointCloudRecording.Frame f) { var b = new byte[f.ByteCount]; Buffer.BlockCopy(f.Bytes, 0, b, 0, f.ByteCount); return b; }
+
+        static int NearestByTs(PointCloudRecording.RcsvFrameStream s, ulong ts)
+        {
+            int best = -1; ulong bd = ulong.MaxValue;
+            for (int i = 0; i < s.Count; i++)
+            {
+                ulong t = s.TimestampNsAt(i); ulong d = t > ts ? t - ts : ts - t;
+                if (d < bd) { bd = d; best = i; }
+            }
+            return best;
+        }
+
+        static ObCameraParam? LoadCameraParam(string root, string serial)
+        {
+            try
+            {
+                var calib = PointCloudRecording.ReadExtrinsicsYaml(root);
+                if (calib == null) return null;
+                foreach (var c in calib)
+                {
+                    if (!string.Equals(c.Serial, serial, StringComparison.OrdinalIgnoreCase)) continue;
+                    return new ObCameraParam
+                    {
+                        DepthIntrinsic = c.DepthIntrinsic,
+                        RgbIntrinsic = c.ColorIntrinsic,
+                        DepthDistortion = c.DepthDistortion,
+                        RgbDistortion = c.ColorDistortion,
+                        Transform = c.DepthToColor,
+                        IsMirrored = false,
+                    };
+                }
+            }
+            catch { }
+            return null;
+        }
+    }
+}
