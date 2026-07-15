@@ -60,6 +60,22 @@ namespace BodyTracking.Eval.Rtmpose
                     baseline.Configure(ctx);
                     rtmpose.Configure(ctx);
                 }
+
+                // Same capture-volume person selection as the chunked runner —
+                // without it, recordings with bystanders reproduce the known
+                // person-switching jitter instead of tracking the performer.
+                try
+                {
+                    var calib = PointCloudRecording.ReadExtrinsicsYaml(sessionRoot);
+                    if (calib != null)
+                        foreach (var dc in calib)
+                            if (dc.GlobalTrColorCamera.HasValue)
+                                rtmpose.SetWorldTransform(dc.Serial, dc.GlobalTrColorCamera.Value);
+                }
+                catch { }
+                rtmpose.SetCaptureVolume(
+                    new Vector3(RtmposeCompareChunked.volCx, RtmposeCompareChunked.volCy, RtmposeCompareChunked.volCz),
+                    new Vector3(RtmposeCompareChunked.volHx, RtmposeCompareChunked.volHy, RtmposeCompareChunked.volHz));
                 driver.RunToEndSync(maxFramesPerDevice);
                 sw.Stop();
 
