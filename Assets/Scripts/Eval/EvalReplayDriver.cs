@@ -37,6 +37,10 @@ namespace BodyTracking.Eval
                  "register in the continuity/occlusion metric. Ignored when bodies is the master timeline.")]
         public float bodyMatchSkewMs = 40f;
 
+        [Tooltip("Load the color / IR streams. Turn off for baseline-only runs.")]
+        public bool loadColor = true;
+        public bool loadIR = true;
+
         public event Action<string, RawFrameData, ObCameraParam?, ulong> OnFrame;
         public event Action<string, byte[], int, ulong> OnRecordedBodies;
         public event Action OnLoaded;
@@ -103,8 +107,8 @@ namespace BodyTracking.Eval
 
                 var dev = new Device { Serial = serial };
                 dev.Depth = OpenIfExists(depthPath);   // may be null (baseline-only recordings have no depth)
-                dev.Color = OpenIfExists(Path.Combine(deviceDir, PointCloudRecording.ColorSensorName));
-                dev.IR = OpenIfExists(Path.Combine(deviceDir, PointCloudRecording.IRSensorName));
+                dev.Color = loadColor ? OpenIfExists(Path.Combine(deviceDir, PointCloudRecording.ColorSensorName)) : null;
+                dev.IR = loadIR ? OpenIfExists(Path.Combine(deviceDir, PointCloudRecording.IRSensorName)) : null;
                 dev.Bodies = OpenIfExists(Path.Combine(deviceDir, PointCloudRecording.BodiesSensorName));
 
                 // Master timeline: depth when present, else bodies (a bodies-only
@@ -173,14 +177,16 @@ namespace BodyTracking.Eval
         /// ignoring the Update clock. For headless / batch metric runs where each adapter
         /// processes frames synchronously. Raises OnLoopComplete once at the end.
         /// </summary>
-        public void RunToEndSync()
+        public void RunToEndSync(int maxFramesPerDevice = 0)
         {
             if (_devices.Count == 0) return;
+            int cap = maxFramesPerDevice > 0 ? maxFramesPerDevice : int.MaxValue;
             var order = new List<(ulong ts, int dev, int idx)>();
             for (int d = 0; d < _devices.Count; d++)
             {
                 var dev = _devices[d];
-                for (int i = 0; i < dev.MasterTs.Length; i++) order.Add((dev.MasterTs[i], d, i));
+                int m = Math.Min(dev.MasterTs.Length, cap);
+                for (int i = 0; i < m; i++) order.Add((dev.MasterTs[i], d, i));
             }
             order.Sort((a, b) => a.ts.CompareTo(b.ts));
             foreach (var o in order) EmitFrame(_devices[o.dev], o.idx);
