@@ -32,6 +32,11 @@ namespace BodyTracking.Eval
         public bool loop = true;
         public bool autoPlayOnStart = false;
 
+        [Tooltip("Max time gap (ms) for matching a recorded bodies frame to a depth frame. " +
+                 "Beyond this the depth frame is treated as having no body, so tracking gaps " +
+                 "register in the continuity/occlusion metric. Ignored when bodies is the master timeline.")]
+        public float bodyMatchSkewMs = 40f;
+
         public event Action<string, RawFrameData, ObCameraParam?, ulong> OnFrame;
         public event Action<string, byte[], int, ulong> OnRecordedBodies;
         public event Action OnLoaded;
@@ -112,10 +117,15 @@ namespace BodyTracking.Eval
                 if (dev.IR != null) (dev.IRW, dev.IRH) = ReadDims(Path.Combine(deviceDir, PointCloudRecording.IRSensorName));
 
                 dev.MasterTs = TimestampArray(master);
-                dev.NearestColor = NearestMap(dev.MasterTs, dev.Color);
-                dev.NearestIR = NearestMap(dev.MasterTs, dev.IR);
-                // When bodies IS the master, each master index maps to itself.
-                dev.NearestBodies = (dev.Depth != null) ? NearestMap(dev.MasterTs, dev.Bodies) : IdentityMap(dev.MasterTs.Length, dev.Bodies);
+                // Color / IR are per-frame streams (~depth rate): nearest match, no skew limit.
+                dev.NearestColor = NearestMap(dev.MasterTs, dev.Color, ulong.MaxValue);
+                dev.NearestIR = NearestMap(dev.MasterTs, dev.IR, ulong.MaxValue);
+                // Bodies: bound the match so a depth frame with no body near it in time
+                // registers as a tracking gap. When bodies IS the master, index maps to itself.
+                ulong bodySkewNs = (ulong)Math.Max(0f, bodyMatchSkewMs) * 1_000_000UL;
+                dev.NearestBodies = (dev.Depth != null)
+                    ? NearestMap(dev.MasterTs, dev.Bodies, bodySkewNs)
+                    : IdentityMap(dev.MasterTs.Length, dev.Bodies);
 
                 // Buffers grow lazily in CopyFrame — avoids reading a (possibly
                 // truncated) payload at load time just to size them.
@@ -305,10 +315,13 @@ namespace BodyTracking.Eval
             }
         }
 
-        /// <summary>For each depth ts, the nearest index in the (sorted) other stream, or -1 if none.</summary>
-        private static int[] NearestMap(ulong[] depthTs, PointCloudRecording.RcsvFrameStream other)
+        /// <summary>
+        /// For each master ts, the nearest index in the (sorted) other stream, or -1
+        /// if none exists within <paramref name="maxSkewNs"/> (use ulong.MaxValue for no limit).
+        /// </summary>
+        private static int[] NearestMap(ulong[] masterTs, PointCloudRecording.RcsvFrameStream other, ulong maxSkewNs)
         {
-            var map = new int[depthTs.Length];
+            var map = new int[masterTs.Length];
             if (other == null || other.Count == 0)
             {
                 for (int i = 0; i < map.Length; i++) map[i] = -1;
@@ -316,11 +329,11 @@ namespace BodyTracking.Eval
             }
             int n = other.Count;
             int j = 0;
-            for (int i = 0; i < depthTs.Length; i++)
+            for (int i = 0; i < masterTs.Length; i++)
             {
-                ulong t = depthTs[i];
+                ulong t = masterTs[i];
                 while (j + 1 < n && AbsDiff(other.TimestampNsAt(j + 1), t) <= AbsDiff(other.TimestampNsAt(j), t)) j++;
-                map[i] = j;
+                map[i] = AbsDiff(other.TimestampNsAt(j), t) <= maxSkewNs ? j : -1;
             }
             return map;
         }

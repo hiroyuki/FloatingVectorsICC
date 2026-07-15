@@ -175,6 +175,10 @@ namespace BodyTracking.Eval
 
         private void HandleLoopComplete()
         {
+            // Timestamps recur on the next pass — drop the latency bookkeeping so it
+            // doesn't grow unbounded across a long looping run.
+            _submitTicks.Clear();
+
             // One full pass is enough for a metric run; stop looping and finalize.
             if (IsRunning && !_driver.loop)
                 Finish();

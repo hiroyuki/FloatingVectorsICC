@@ -95,11 +95,15 @@ namespace BodyTracking.Eval
             Bodies.Clear();
         }
 
-        /// <summary>Body with the most valid joints, or null when empty.</summary>
+        /// <summary>
+        /// Body with the most valid joints, or null when there is no body with at
+        /// least one valid joint (an all-invalid body is not a tracked pose and
+        /// must not count toward continuity).
+        /// </summary>
         public EvalSkeleton Primary()
         {
             EvalSkeleton best = null;
-            int bestN = -1;
+            int bestN = 0; // require >=1 valid joint
             for (int i = 0; i < Bodies.Count; i++)
             {
                 int n = Bodies[i].ValidCount();
