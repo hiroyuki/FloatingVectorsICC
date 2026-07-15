@@ -75,8 +75,12 @@ namespace BodyTracking.Eval.Rtmpose
         public void SubmitFrame(string serial, in RawFrameData frame, ulong tsNs)
         {
             if (!_backend.Ready) return;
-            if (frame.ColorBytes == null || frame.ColorByteCount <= 0 || frame.ColorWidth <= 0) return;
             int cw = frame.ColorWidth, ch = frame.ColorHeight;
+            // Require a FULL RGB payload: on a truncated/skipped color record the
+            // driver reuses its buffer with a short/zero ColorByteCount, and running
+            // inference on stale tail data would corrupt the metrics.
+            if (frame.ColorBytes == null || cw <= 0 || ch <= 0 ||
+                frame.ColorByteCount < cw * ch * 3) return;
 
             ObCameraParam? cam = _cam.TryGetValue(serial, out var c) ? c : null;
             // Guard on the ACTUAL byte count: the replay driver reuses its depth
