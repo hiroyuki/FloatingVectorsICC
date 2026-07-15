@@ -64,18 +64,23 @@ namespace BodyTracking.Eval.Rtmpose
                 // Same capture-volume person selection as the chunked runner —
                 // without it, recordings with bystanders reproduce the known
                 // person-switching jitter instead of tracking the performer.
-                try
+                // Mirror its disabled-volume guard too: any volH* == 0 means
+                // "no volume filtering" (a zero-sized box would reject everyone).
+                if (RtmposeCompareChunked.volHx > 0 && RtmposeCompareChunked.volHy > 0 && RtmposeCompareChunked.volHz > 0)
                 {
-                    var calib = PointCloudRecording.ReadExtrinsicsYaml(sessionRoot);
-                    if (calib != null)
-                        foreach (var dc in calib)
-                            if (dc.GlobalTrColorCamera.HasValue)
-                                rtmpose.SetWorldTransform(dc.Serial, dc.GlobalTrColorCamera.Value);
+                    try
+                    {
+                        var calib = PointCloudRecording.ReadExtrinsicsYaml(sessionRoot);
+                        if (calib != null)
+                            foreach (var dc in calib)
+                                if (dc.GlobalTrColorCamera.HasValue)
+                                    rtmpose.SetWorldTransform(dc.Serial, dc.GlobalTrColorCamera.Value);
+                    }
+                    catch { }
+                    rtmpose.SetCaptureVolume(
+                        new Vector3(RtmposeCompareChunked.volCx, RtmposeCompareChunked.volCy, RtmposeCompareChunked.volCz),
+                        new Vector3(RtmposeCompareChunked.volHx, RtmposeCompareChunked.volHy, RtmposeCompareChunked.volHz));
                 }
-                catch { }
-                rtmpose.SetCaptureVolume(
-                    new Vector3(RtmposeCompareChunked.volCx, RtmposeCompareChunked.volCy, RtmposeCompareChunked.volCz),
-                    new Vector3(RtmposeCompareChunked.volHx, RtmposeCompareChunked.volHy, RtmposeCompareChunked.volHz));
                 driver.RunToEndSync(maxFramesPerDevice);
                 sw.Stop();
 
