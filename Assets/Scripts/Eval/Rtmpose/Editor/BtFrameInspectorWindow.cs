@@ -30,7 +30,10 @@ namespace BodyTracking.Eval.Rtmpose
         string _root = "D:/Dropbox/projects/ICC/Recordings/RecordingBase/2026-07-14_15-50-24";
         string _host = "PAN-SHI";
         int _frame = 800;
-        bool _showCloud = true, _showK4abt = true, _showRtmpose = true, _worldSpace = false;
+        // worldSpace defaults ON so inspection viz lands where the playback clouds
+        // are — with it OFF the viz sits at the origin in camera-local coords and
+        // looks like a misaligned "second person" next to the playback.
+        bool _showCloud = true, _showK4abt = true, _showRtmpose = true, _worldSpace = true;
         Vector2 _scroll;
         string _log = "";
 
@@ -65,7 +68,11 @@ namespace BodyTracking.Eval.Rtmpose
                 _frame = EditorGUILayout.IntField("Frame Index", _frame);
                 if (GUILayout.Button("Grab & Freeze", GUILayout.Width(110))) GrabPlaybackFrame();
                 using (new EditorGUI.DisabledScope(!EditorApplication.isPaused))
-                    if (GUILayout.Button("Resume ▶", GUILayout.Width(80))) EditorApplication.isPaused = false;
+                    if (GUILayout.Button("Resume ▶", GUILayout.Width(80)))
+                    {
+                        ClearViz(); // inspection viz would linger over the playback as a "second person"
+                        EditorApplication.isPaused = false;
+                    }
             }
             if (Application.isPlaying)
                 EditorGUILayout.LabelField(EditorApplication.isPaused
