@@ -6,6 +6,7 @@
         "BodyTracking",
         "PointCloud",
         "Orbbec",
+        "Calibration",
         "com.github.asus4.onnxruntime",
         "com.github.asus4.onnxruntime.unity"
     ],
