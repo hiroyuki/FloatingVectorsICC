@@ -30,6 +30,11 @@ namespace BodyTracking.Eval.Rtmpose
         string _root = "D:/Dropbox/projects/ICC/Recordings/RecordingBase/2026-07-14_15-50-24";
         string _host = "PAN-SHI";
         int _frame = 800;
+        // Frame indices are NOT comparable across cameras (each stream drops a
+        // different number of frames), so inspection resolves frames by TIMESTAMP.
+        // _frame is defined on the reference timeline = first device's depth stream;
+        // grab stores the exact timestamp alongside it.
+        ulong _grabTsNs; int _grabFrame = -1;
         // worldSpace defaults ON so inspection viz lands where the playback clouds
         // are — with it OFF the viz sits at the origin in camera-local coords and
         // looks like a misaligned "second person" next to the playback.
@@ -135,6 +140,8 @@ namespace BodyTracking.Eval.Rtmpose
                 if (d < bd) { bd = d; best = i; }
             }
             _frame = best;
+            _grabFrame = best;
+            _grabTsNs = frames[best].TimestampNs;
             _log = $"grabbed playback frame: {sec:F2}s -> frame {best} (Δ{bd * 1000:F0}ms)" +
                    (Application.isPlaying ? "\neditor FROZEN — inspect cameras now; Resume ▶ to continue playback" : "");
         }
@@ -148,7 +155,11 @@ namespace BodyTracking.Eval.Rtmpose
                 var calib = PointCloudRecording.ReadExtrinsicsYaml(_root);
                 var parent = new GameObject("BTInspect");
                 var sb = new System.Text.StringBuilder();
-                sb.AppendLine($"frame={_frame} world={_worldSpace}");
+
+                // Resolve the target TIMESTAMP for _frame (indices differ per camera).
+                ulong targetTs = ResolveTargetTs();
+                if (targetTs == 0) { _log = "could not resolve a timestamp for the frame index"; DestroyImmediate(parent); return; }
+                sb.AppendLine($"frame={_frame} ts={targetTs} world={_worldSpace}");
 
                 // configure adapter volume selection once (world transforms from calib)
                 var adapter = new RtmPoseAdapter(s_backend) { confThreshold = 0.3f, redetectEveryN = 1 };
@@ -181,10 +192,11 @@ namespace BodyTracking.Eval.Rtmpose
 
                     byte[] color, depth; ulong ts;
                     int cw, ch, dw, dh;
+                    int colorIdx;
                     using (var cs = new PointCloudRecording.RcsvFrameStream(colorPath))
                     {
-                        int fi = Mathf.Clamp(_frame, 0, cs.Count - 1);
-                        var f = cs[fi]; color = Copy(f); ts = f.TimestampNs;
+                        colorIdx = Nearest(cs, targetTs);           // per-camera index differs!
+                        var f = cs[colorIdx]; color = Copy(f); ts = f.TimestampNs;
                     }
                     (cw, ch) = PointCloudRecording.ReadRcsvHeaderDimensions(colorPath);
                     using (var ds = new PointCloudRecording.RcsvFrameStream(depthPath)) { depth = Copy(ds[Nearest(ds, ts)]); }
@@ -222,13 +234,32 @@ namespace BodyTracking.Eval.Rtmpose
                         adapter.SubmitFrame(serial, raw, ts);
                         if (lastSkel != null) rtn = SpawnRtmpose(camGo.transform, lastSkel);
                     }
-                    sb.AppendLine($"{serial}: k4abt joints={k4n}, rtmpose joints={rtn}");
+                    double skewMs = (ts > targetTs ? ts - targetTs : targetTs - ts) / 1e6;
+                    sb.AppendLine($"{serial}: colorIdx={colorIdx} (Δ{skewMs:F0}ms) k4abt joints={k4n}, rtmpose joints={rtn}");
                 }
 
                 FrameSceneView(parent);
                 _log = sb.ToString() + "\ncyan=k4abt orange=RTMPose. Rotate the Scene view; use toggles + camera buttons to isolate.";
             }
             catch (Exception e) { _log = "EXCEPTION: " + e.Message + "\n" + e.StackTrace; }
+        }
+
+        /// <summary>
+        /// Timestamp for _frame: the grabbed timestamp when unchanged, otherwise
+        /// _frame looked up on the reference timeline (first device's depth stream).
+        /// </summary>
+        ulong ResolveTargetTs()
+        {
+            if (_grabTsNs != 0 && _frame == _grabFrame) return _grabTsNs;
+            foreach (var (serial, deviceDir) in PointCloudRecording.EnumerateDevices(_root))
+            {
+                string depthPath = Path.Combine(deviceDir, PointCloudRecording.DepthSensorName);
+                if (!File.Exists(depthPath)) continue;
+                using var ds = new PointCloudRecording.RcsvFrameStream(depthPath);
+                if (ds.Count == 0) continue;
+                return ds.TimestampNsAt(Mathf.Clamp(_frame, 0, ds.Count - 1));
+            }
+            return 0;
         }
 
         void EnsureBackend()
