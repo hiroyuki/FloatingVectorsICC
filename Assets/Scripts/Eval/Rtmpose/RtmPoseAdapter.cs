@@ -80,7 +80,9 @@ namespace BodyTracking.Eval.Rtmpose
 
             // 3D lift via aligned depth (needs calibration)
             ObCameraParam? cam = _cam.TryGetValue(serial, out var c) ? c : null;
-            bool have3d = cam.HasValue && _lift.BuildAligned(frame.DepthBytes, frame.DepthWidth, frame.DepthHeight, cam.Value);
+            bool have3d = cam.HasValue && _lift.BuildAligned(
+                frame.DepthBytes, frame.DepthWidth, frame.DepthHeight,
+                frame.ColorWidth, frame.ColorHeight, cam.Value);
 
             _skel.Reset(0, tsNs);
             for (int j = 0; j < EvalSkeleton.JointCount; j++)
@@ -91,7 +93,7 @@ namespace BodyTracking.Eval.Rtmpose
                 int u = Mathf.RoundToInt(_xy[j].x), v = Mathf.RoundToInt(_xy[j].y);
                 float d = _lift.SampleMm(u, v, depthWindowHalf);
                 if (d <= 0f) { oj.Valid = false; continue; }
-                oj.PositionMm = DepthLift.Backproject(_xy[j].x, _xy[j].y, d, cam.Value);
+                oj.PositionMm = DepthLift.Backproject(_xy[j].x, _xy[j].y, d, frame.ColorWidth, frame.ColorHeight, cam.Value);
                 oj.Valid = true;
             }
 

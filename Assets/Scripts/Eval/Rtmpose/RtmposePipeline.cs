@@ -125,8 +125,15 @@ namespace BodyTracking.Eval.Rtmpose
                 ArgMax(simccY, j * wy, wy, out int yi, out float ymax);
                 float mx = xi / spec.SplitRatio; // model-input px [0,InW]
                 float my = yi / spec.SplitRatio; // model-input px [0,InH]
-                // invert the top-down affine (axis-aligned crop+resize)
-                kpts[j] = new Vector2(x0 + mx / spec.InW * roi.Bw, y0 + my / spec.InH * roi.Bh);
+                // invert the top-down affine using the SAME pixel-center convention
+                // as BuildInput (which samples at (d+0.5)/N*B - 0.5), so forward and
+                // inverse are exact inverses (no systematic half-pixel bias).
+                kpts[j] = new Vector2(
+                    x0 + (mx + 0.5f) / spec.InW * roi.Bw - 0.5f,
+                    y0 + (my + 0.5f) / spec.InH * roi.Bh - 0.5f);
+                // Score is the larger of the two SimCC axis peaks. NOTE: this is the
+                // raw SimCC head activation, not a softmaxed 0..1 probability — its
+                // scale must be checked empirically before trusting confThreshold.
                 scores[j] = Mathf.Max(xmax, ymax);
             }
         }

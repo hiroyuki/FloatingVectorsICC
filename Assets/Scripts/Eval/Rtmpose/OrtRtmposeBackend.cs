@@ -33,7 +33,12 @@ namespace BodyTracking.Eval.Rtmpose
         private readonly SessionOptions _opt;
         private readonly InferenceSession _yolox, _rtmpose;
         private readonly float[] _yoloxInput = new float[3 * YoloxSize * YoloxSize];
-        private readonly int _detsIdx, _labelsIdx;
+        // Output indices resolved by NAME (output order is not guaranteed).
+        private readonly int _detsIdx, _labelsIdx, _simccXIdx, _simccYIdx;
+        // Hoisted allocations (reused every frame to avoid GC in the hot path).
+        private readonly long[] _yoloxShape = { 1, 3, YoloxSize, YoloxSize };
+        private readonly long[] _poseShape;
+        private readonly OrtValue[] _in1 = new OrtValue[1];
 
         private float _lbScale; private int _lbPadX, _lbPadY;
 
@@ -47,10 +52,14 @@ namespace BodyTracking.Eval.Rtmpose
             }
             _yolox = new InferenceSession(File.ReadAllBytes(yoloxPath), _opt);
             _rtmpose = new InferenceSession(File.ReadAllBytes(rtmposePath), _opt);
-            _detsIdx = Mathf.Max(0, IndexOf(_yolox.OutputNames, "dets"));
-            _labelsIdx = Mathf.Max(0, IndexOf(_yolox.OutputNames, "labels"));
-            Debug.Log($"[rtmpose] yolox in={Join(_yolox.InputNames)} out={Join(_yolox.OutputNames)}; " +
-                      $"rtmpose in={Join(_rtmpose.InputNames)} out={Join(_rtmpose.OutputNames)}");
+            _detsIdx = FindOr(_yolox.OutputNames, "dets", 0);
+            _labelsIdx = FindOr(_yolox.OutputNames, "labels", 1);
+            _simccXIdx = FindOr(_rtmpose.OutputNames, "simcc_x", 0);
+            _simccYIdx = FindOr(_rtmpose.OutputNames, "simcc_y", 1);
+            _poseShape = new long[] { 1, 3, Spec.InH, Spec.InW };
+            Debug.Log($"[rtmpose] yolox in={Join(_yolox.InputNames)} out={Join(_yolox.OutputNames)} " +
+                      $"(dets@{_detsIdx},labels@{_labelsIdx}); rtmpose in={Join(_rtmpose.InputNames)} " +
+                      $"out={Join(_rtmpose.OutputNames)} (x@{_simccXIdx},y@{_simccYIdx})");
             Ready = true;
         }
 
@@ -58,8 +67,9 @@ namespace BodyTracking.Eval.Rtmpose
         {
             if (!Ready) return 0;
             Letterbox(rgb, w, h, _yoloxInput, out _lbScale, out _lbPadX, out _lbPadY);
-            using var inp = OrtValue.CreateTensorValueFromMemory(_yoloxInput, new long[] { 1, 3, YoloxSize, YoloxSize });
-            using var res = _yolox.Run(null, _yolox.InputNames, new[] { inp }, _yolox.OutputNames);
+            using var inp = OrtValue.CreateTensorValueFromMemory(_yoloxInput, _yoloxShape);
+            _in1[0] = inp;
+            using var res = _yolox.Run(null, _yolox.InputNames, _in1, _yolox.OutputNames);
 
             var dets = res[_detsIdx].GetTensorDataAsSpan<float>();
             var shape = res[_detsIdx].GetTensorTypeAndShape().Shape; // [1,N,5]
@@ -67,15 +77,15 @@ namespace BodyTracking.Eval.Rtmpose
 
             var lblVal = res[_labelsIdx];
             var lblType = lblVal.GetTensorTypeAndShape().ElementDataType;
+            ReadOnlySpan<long> lblL = lblType == TensorElementType.Int64 ? lblVal.GetTensorDataAsSpan<long>() : default;
+            ReadOnlySpan<int> lblI = lblType == TensorElementType.Int64 ? default : lblVal.GetTensorDataAsSpan<int>();
 
             int count = 0;
             for (int i = 0; i < n && count < outBoxes.Length; i++)
             {
                 float score = dets[i * 5 + 4];
                 if (score < detScoreThreshold) continue;
-                long label = lblType == TensorElementType.Int64
-                    ? lblVal.GetTensorDataAsSpan<long>()[i]
-                    : lblVal.GetTensorDataAsSpan<int>()[i];
+                long label = lblType == TensorElementType.Int64 ? lblL[i] : lblI[i];
                 if (label != PersonLabel) continue;
                 outBoxes[count++] = new DetBox
                 {
@@ -92,10 +102,11 @@ namespace BodyTracking.Eval.Rtmpose
         public bool Pose(float[] nchwInput, float[] simccX, float[] simccY)
         {
             if (!Ready) return false;
-            using var inp = OrtValue.CreateTensorValueFromMemory(nchwInput, new long[] { 1, 3, Spec.InH, Spec.InW });
-            using var res = _rtmpose.Run(null, _rtmpose.InputNames, new[] { inp }, _rtmpose.OutputNames);
-            var sx = res[0].GetTensorDataAsSpan<float>();
-            var sy = res[1].GetTensorDataAsSpan<float>();
+            using var inp = OrtValue.CreateTensorValueFromMemory(nchwInput, _poseShape);
+            _in1[0] = inp;
+            using var res = _rtmpose.Run(null, _rtmpose.InputNames, _in1, _rtmpose.OutputNames);
+            var sx = res[_simccXIdx].GetTensorDataAsSpan<float>();
+            var sy = res[_simccYIdx].GetTensorDataAsSpan<float>();
             if (sx.Length > simccX.Length || sy.Length > simccY.Length) return false;
             sx.CopyTo(simccX);
             sy.CopyTo(simccY);
@@ -118,7 +129,6 @@ namespace BodyTracking.Eval.Rtmpose
             int newW = Mathf.RoundToInt(w * scale), newH = Mathf.RoundToInt(h * scale);
             padX = (YoloxSize - newW) / 2; padY = (YoloxSize - newH) / 2;
             int plane = YoloxSize * YoloxSize;
-            // channel target order
             int c0 = yoloxBgr ? 2 : 0, c2 = yoloxBgr ? 0 : 2; // swap R/B if BGR
             for (int dy = 0; dy < YoloxSize; dy++)
             {
@@ -134,17 +144,17 @@ namespace BodyTracking.Eval.Rtmpose
                         int si = (iy * w + ix) * 3;
                         r = rgb[si]; g = rgb[si + 1]; b = rgb[si + 2];
                     }
-                    dst[c0 * plane + o] = r;   // channel 0 (B if bgr)
+                    dst[c0 * plane + o] = r;
                     dst[1 * plane + o] = g;
-                    dst[c2 * plane + o] = b;   // channel 2 (R if bgr)
+                    dst[c2 * plane + o] = b;
                 }
             }
         }
 
-        private static int IndexOf(IReadOnlyList<string> names, string name)
+        private static int FindOr(IReadOnlyList<string> names, string name, int fallback)
         {
             for (int i = 0; i < names.Count; i++) if (names[i] == name) return i;
-            return -1;
+            return Mathf.Clamp(fallback, 0, Mathf.Max(0, names.Count - 1));
         }
 
         private static string Join(IReadOnlyList<string> names)
