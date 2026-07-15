@@ -63,8 +63,14 @@ namespace BodyTracking.Eval.Rtmpose
             using (new EditorGUILayout.HorizontalScope())
             {
                 _frame = EditorGUILayout.IntField("Frame Index", _frame);
-                if (GUILayout.Button("Grab playback frame", GUILayout.Width(150))) GrabPlaybackFrame();
+                if (GUILayout.Button("Grab & Freeze", GUILayout.Width(110))) GrabPlaybackFrame();
+                using (new EditorGUI.DisabledScope(!EditorApplication.isPaused))
+                    if (GUILayout.Button("Resume ▶", GUILayout.Width(80))) EditorApplication.isPaused = false;
             }
+            if (Application.isPlaying)
+                EditorGUILayout.LabelField(EditorApplication.isPaused
+                    ? "⏸ FROZEN — ribbons/point cloud held at this instant"
+                    : "▶ playing — Grab & Freeze pauses everything at the moment you click", EditorStyles.miniLabel);
 
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("Show", EditorStyles.boldLabel);
@@ -100,6 +106,10 @@ namespace BodyTracking.Eval.Rtmpose
 
         void GrabPlaybackFrame()
         {
+            // Freeze the WHOLE editor first (recorder pause alone lets the ribbon
+            // effects keep fading in real time), THEN read the frozen playhead.
+            if (Application.isPlaying) EditorApplication.isPaused = true;
+
             var recs = FindObjectsByType<SensorRecorder>(FindObjectsSortMode.None);
             if (recs.Length == 0) { _log = "no SensorRecorder (enter Play + load a recording first)"; return; }
             var rec = recs[0];
@@ -118,7 +128,8 @@ namespace BodyTracking.Eval.Rtmpose
                 if (d < bd) { bd = d; best = i; }
             }
             _frame = best;
-            _log = $"grabbed playback frame: {sec:F2}s -> frame {best} (Δ{bd * 1000:F0}ms)";
+            _log = $"grabbed playback frame: {sec:F2}s -> frame {best} (Δ{bd * 1000:F0}ms)" +
+                   (Application.isPlaying ? "\neditor FROZEN — inspect cameras now; Resume ▶ to continue playback" : "");
         }
 
         void Inspect(string[] serials)
