@@ -35,10 +35,10 @@ namespace BodyTracking.Eval.Rtmpose
         // _frame is defined on the reference timeline = first device's depth stream;
         // grab stores the exact timestamp alongside it.
         ulong _grabTsNs; int _grabFrame = -1;
-        // worldSpace defaults ON so inspection viz lands where the playback clouds
-        // are — with it OFF the viz sits at the origin in camera-local coords and
-        // looks like a misaligned "second person" next to the playback.
-        bool _showCloud = true, _showK4abt = true, _showRtmpose = true, _worldSpace = true;
+        // Placement is ALWAYS world space + production rebase (floor levelling) —
+        // same as the playback clouds. Not an option: anything else just looks like
+        // a misaligned duplicate next to the real scene.
+        bool _showCloud = true, _showK4abt = true, _showRtmpose = true;
         Vector2 _scroll;
         string _log = "";
 
@@ -89,7 +89,6 @@ namespace BodyTracking.Eval.Rtmpose
             _showCloud = EditorGUILayout.Toggle("Point cloud", _showCloud);
             _showK4abt = EditorGUILayout.Toggle("k4abt (cyan)", _showK4abt);
             _showRtmpose = EditorGUILayout.Toggle("RTMPose (orange)", _showRtmpose);
-            _worldSpace = EditorGUILayout.Toggle("World space (extrinsics)", _worldSpace);
 
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("Inspect camera", EditorStyles.boldLabel);
@@ -99,7 +98,7 @@ namespace BodyTracking.Eval.Rtmpose
                 foreach (var s in serials)
                     if (GUILayout.Button(s.Substring(Mathf.Max(0, s.Length - 4)))) Inspect(new[] { s });
             }
-            if (GUILayout.Button("All cameras (world fused)")) { _worldSpace = true; Inspect(serials.ToArray()); }
+            if (GUILayout.Button("All cameras (fused)")) Inspect(serials.ToArray());
             if (GUILayout.Button("Clear scene viz")) ClearViz();
 
             EditorGUILayout.Space();
@@ -159,7 +158,27 @@ namespace BodyTracking.Eval.Rtmpose
                 // Resolve the target TIMESTAMP for _frame (indices differ per camera).
                 ulong targetTs = ResolveTargetTs();
                 if (targetTs == 0) { _log = "could not resolve a timestamp for the frame index"; DestroyImmediate(parent); return; }
-                sb.AppendLine($"frame={_frame} ts={targetTs} world={_worldSpace}");
+
+                // World placement must match the PRODUCTION path exactly: extrinsic
+                // global_tr_colorCamera composed with the SensorManager's world rebase
+                // (floor levelling) — otherwise the viz sits tilted/offset relative to
+                // the scene floor and bounding volume.
+                Pose rebase = Pose.identity; bool useRebase = false;
+                var sm = FindObjectsByType<SensorManager>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+                if (sm.Length > 0 && sm[0].applyWorldRebase && calib != null)
+                {
+                    var cams = new List<(string serial, Vector3 posUnity)>();
+                    foreach (var c in calib)
+                    {
+                        if (!c.GlobalTrColorCamera.HasValue) continue;
+                        ExtrinsicsApply.ToUnityLocal(c.GlobalTrColorCamera.Value, out var pos, out _);
+                        cams.Add((c.Serial, pos));
+                    }
+                    useRebase = WorldFrameRebase.TryComputeFromCalibrations(
+                        cams, sm[0].rigSerialOrder, out rebase, out string reason, sm[0].rebaseFloorY);
+                    if (!useRebase) sb.AppendLine($"world rebase skipped: {reason}");
+                }
+                sb.AppendLine($"frame={_frame} ts={targetTs} rebase={useRebase}");
 
                 // configure adapter volume selection once (world transforms from calib)
                 var adapter = new RtmPoseAdapter(s_backend) { confThreshold = 0.3f, redetectEveryN = 1 };
@@ -205,8 +224,11 @@ namespace BodyTracking.Eval.Rtmpose
                     // per-camera parent (world extrinsic or identity), flipY like the renderer
                     var camGo = new GameObject($"cam_{serial}");
                     camGo.transform.SetParent(parent.transform, false);
-                    if (_worldSpace && dc.GlobalTrColorCamera.HasValue)
-                        ExtrinsicsApply.ApplyToTransform(camGo.transform, dc.GlobalTrColorCamera.Value);
+                    if (dc.GlobalTrColorCamera.HasValue)
+                    {
+                        if (useRebase) ExtrinsicsApply.ApplyToTransform(camGo.transform, dc.GlobalTrColorCamera.Value, rebase);
+                        else ExtrinsicsApply.ApplyToTransform(camGo.transform, dc.GlobalTrColorCamera.Value);
+                    }
                     camGo.transform.localScale = new Vector3(1f, -1f, 1f);
 
                     if (_showCloud)
