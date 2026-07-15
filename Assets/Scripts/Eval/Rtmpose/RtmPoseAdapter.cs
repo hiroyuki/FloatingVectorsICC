@@ -176,14 +176,39 @@ namespace BodyTracking.Eval.Rtmpose
             int sel = -1; float selScore = -1f;
             for (int i = 0; i < nDet; i++)
             {
-                float bx = 0.5f * (_boxes[i].X1 + _boxes[i].X2), by = 0.5f * (_boxes[i].Y1 + _boxes[i].Y2);
-                float d = _lift.SampleMm(Mathf.RoundToInt(bx), Mathf.RoundToInt(by), 5);
+                // A single box-center sample can fall through a body gap and hit
+                // the BACKGROUND (e.g. legs apart -> center samples the far wall,
+                // person gets rejected). Sample a coarse grid over the inner box
+                // and take the median of valid depths instead.
+                float d = MedianBoxDepthMm(_boxes[i]);
                 if (d <= 0f) continue;
+                float bx = 0.5f * (_boxes[i].X1 + _boxes[i].X2), by = 0.5f * (_boxes[i].Y1 + _boxes[i].Y2);
                 Vector3 world = ToWorld(DepthLift.Backproject(bx, by, d, cw, ch, cam.Value), e);
                 if (!InVolume(world)) continue;
                 if (_boxes[i].Score > selScore) { selScore = _boxes[i].Score; sel = i; }
             }
             return sel;
+        }
+
+        /// <summary>Median of valid depths over a 5x5 grid spanning the inner 60% of the box.</summary>
+        private float MedianBoxDepthMm(in DetBox b)
+        {
+            float cx = 0.5f * (b.X1 + b.X2), cy = 0.5f * (b.Y1 + b.Y2);
+            float hw = 0.3f * (b.X2 - b.X1), hh = 0.3f * (b.Y2 - b.Y1);
+            Span<float> vals = stackalloc float[25];
+            int n = 0;
+            for (int gy = -2; gy <= 2; gy++)
+                for (int gx = -2; gx <= 2; gx++)
+                {
+                    float d = _lift.SampleMm(
+                        Mathf.RoundToInt(cx + gx * 0.5f * hw),
+                        Mathf.RoundToInt(cy + gy * 0.5f * hh), 2);
+                    if (d > 0f) vals[n++] = d;
+                }
+            if (n == 0) return 0f;
+            // insertion sort + median (n <= 25)
+            for (int i = 1; i < n; i++) { float k = vals[i]; int j = i - 1; while (j >= 0 && vals[j] > k) { vals[j + 1] = vals[j]; j--; } vals[j + 1] = k; }
+            return vals[n / 2];
         }
 
         private bool InVolume(Vector3 pMm) =>
