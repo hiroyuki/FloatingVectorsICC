@@ -23,24 +23,32 @@ Bolt, Unity 6 / Windows). Recommendation is separated from measured facts.
 
 ## Results (per camera, 150 frames each)
 
+RTMPose numbers below are with the **optimized** pipeline (capture-volume person
+selection + detect-once-then-track; see Latency finding).
+
 | cam | tracker | continuity | valid joints | spike% | jitter (mm) | latency mean / p95 (ms) |
 |-----|---------|-----------:|-------------:|-------:|------------:|------------------------:|
 | N  | k4abt   | 100% | 15.0 | 6.9% | 124 | — (recorded) |
-| N  | rtmpose | 95%  | 14.8 | 5.0% | 191 | 291 / 375 |
+| N  | rtmpose | 97%  | 14.8 | 4.9% | 158 | **44 / 87** |
 | L  | k4abt   | 100% | 15.0 | 8.6% | 122 | — |
-| L  | rtmpose | 100% | 14.6 | 5.3% | **118** | 284 / 356 |
+| L  | rtmpose | 100% | 14.6 | 5.4% | **118** | **45 / 94** |
 | EG | k4abt   | 100% | 15.0 | 9.1% | 127 | — |
-| EG | rtmpose | 98%  | 14.6 | 4.8% | 285 | 290 / 354 |
+| EG | rtmpose | 100% | 14.6 | 4.3% | 296 | **44 / 87** |
 | Z  | k4abt   | 100% | 15.0 | 8.6% | 117 | — |
-| Z  | rtmpose | 100% | 14.1 | 5.0% | 158 | 285 / 358 |
+| Z  | rtmpose | 100% | 14.2 | 4.7% | 130 | **44 / 78** |
 
 k4abt latency is N/A here (replayed recorded output); live k4abt is typically
 ~15–30 ms/frame. idSwaps = 0 for both (single tracked person after volume selection).
 
 ## Findings (measured)
-- **Latency**: RTMPose ≈ **285 ms/frame** (p95 ≈ 360 ms) as implemented — YOLOX-640 +
-  RTMPose + a CPU/C# depth-align (92k-px loop). Roughly **10× slower than live
-  k4abt**. Not real-time (~3.5 fps) without optimization.
+- **Latency**: per-stage breakdown showed **YOLOX detection = 126 ms** dominates
+  (RTMPose 20 ms, depth-align 2 ms). Naive detect-every-frame ran ~285 ms/frame.
+  With **detect-once-then-track** (re-detect only every 30 frames / on lost track /
+  on leaving the volume, else derive the box from the previous keypoints), RTMPose is
+  **≈ 44 ms mean / ~90 ms p95 (~23 fps)** — a **~6× speedup** with **no accuracy or
+  continuity loss** (continuity even improved). Still ~1.5–3× slower than live k4abt;
+  further gains need a **CUDA/TensorRT EP** for YOLOX (requires CUDA 12.x + cuDNN 9.x;
+  box currently has 11.6/cuDNN8) or a smaller detector (YOLOX-nano/tiny).
 - **Accuracy (whole-range jitter)**: RTMPose ≈ k4abt on the frontal camera **L (118 vs
   122 mm)**; noisier on oblique/edge views (Z 158, N 191, **EG 285** vs k4abt
   117–127). k4abt is more **viewpoint-consistent** (117–127 across all cameras).
@@ -68,10 +76,12 @@ k4abt latency is N/A here (replayed recorded output); live k4abt is typically
   BGR-vs-RGB had to be verified (YOLOX BGR, RTMPose RGB); intrinsics must be scaled to
   the actual frame resolution; batchmode `-nographics` disables DirectML (runs needed
   the interactive Editor / GPU).
-- **To make RTMPose production-viable**: (1) **CUDA/TensorRT EP + GPU depth-align +
-  detection crop/skip** to hit real-time; (2) **per-camera capture ROI/volume** (done
-  in eval) for multi-person robustness *and* speed; (3) **multi-camera
-  confidence-weighted fusion** for edge coverage; (4) optional joint-center depth
+- **To make RTMPose production-viable**: (1) latency — mostly addressed by
+  detect-once-then-track (~44 ms, ~23 fps); a **CUDA/TensorRT EP** for YOLOX would take
+  it to true real-time (needs CUDA 12/cuDNN 9). Depth-align is already cheap (2 ms), no
+  GPU port needed. (2) **per-camera capture volume/ROI** (done in eval) — essential for
+  multi-person robustness *and* it enables the tracking speedup; (3) **multi-camera
+  confidence-weighted fusion** for edge coverage (EG); (4) optional joint-center depth
   correction.
 
 ## Recommendation (opinion, grounded in the above)
@@ -80,10 +90,12 @@ k4abt latency is N/A here (replayed recorded output); live k4abt is typically
   joint accuracy) is **not directly quantified** in this run — it needs ground truth;
   on jitter/continuity/stability k4abt is comparable-to-better than RTMPose *as
   implemented*.
-- **RTMPose** matches k4abt accuracy on good viewpoints and has a lower spike rate, but
-  is **~10× slower as-implemented** and only works cleanly with the capture volume +
-  (for full coverage) fusion. It is a viable path **if** the latency/ROI/fusion work is
-  funded; otherwise it does not beat k4abt on this data.
+- **RTMPose** matches k4abt accuracy on good viewpoints (L, Z) and has a lower spike
+  rate; with detect-once-then-track it now runs **~44 ms (~23 fps)** and needs the
+  capture volume + (for full coverage) multi-camera fusion. It is a **viable path**,
+  but carries higher engineering cost (volume/ROI, fusion, and an EP swap for full
+  real-time) than staying on k4abt; on this data it does not clearly beat k4abt on
+  accuracy, only on temporal smoothness.
 - **Nuitrack**: cannot be judged offline; schedule a **live trial** on the rig (trial
   license from cognitive.3divi.com; Femto Bolt officially supported; Unity 6 unverified
   by the vendor). Only then can it enter the comparison.

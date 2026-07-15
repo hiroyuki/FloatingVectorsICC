@@ -25,6 +25,52 @@ namespace BodyTracking.Eval.Rtmpose
         // freed when the reconstructor is disposed/GC'd).
         static readonly System.Collections.Generic.List<IDisposable> _keep = new System.Collections.Generic.List<IDisposable>();
 
+        /// <summary>Per-stage latency breakdown (YOLOX detect / RTMPose pose / depth align+lift).</summary>
+        public static string Measure(string sessionRoot, string host, string serial, int frameIndex, int iters)
+        {
+            string modelsDir = Path.GetFullPath(Path.Combine(Application.dataPath, "..", "eval", "models"));
+            string yoloxPath = FirstOnnx(Path.Combine(modelsDir, "yolox-m"));
+            string rtmPath = FirstOnnx(Path.Combine(modelsDir, "rtmpose-m"));
+            if (yoloxPath == null || rtmPath == null) return "models not found";
+            ObCameraParam? cam = LoadCameraParam(sessionRoot, serial);
+
+            string colorPath = PointCloudRecording.SensorFilePath(sessionRoot, host, serial, PointCloudRecording.ColorSensorName);
+            string depthPath = PointCloudRecording.SensorFilePath(sessionRoot, host, serial, PointCloudRecording.DepthSensorName);
+            byte[] color, depth; int cw, ch, dw, dh; ulong ts;
+            using (var cs = new PointCloudRecording.RcsvFrameStream(colorPath)) { var f = cs[frameIndex]; color = Copy(f); ts = f.TimestampNs; }
+            (cw, ch) = PointCloudRecording.ReadRcsvHeaderDimensions(colorPath);
+            using (var ds = new PointCloudRecording.RcsvFrameStream(depthPath)) { depth = Copy(ds[NearestByTs(ds, ts)]); }
+            (dw, dh) = PointCloudRecording.ReadRcsvHeaderDimensions(depthPath);
+
+            var backend = new OrtRtmposeBackend(yoloxPath, rtmPath, true);
+            var spec = backend.Spec;
+            var boxes = new DetBox[8];
+            var lift = new DepthLift();
+            var input = new float[3 * spec.InH * spec.InW];
+            var sx = new float[backend.NumKeypoints * Mathf.RoundToInt(spec.InW * spec.SplitRatio)];
+            var sy = new float[backend.NumKeypoints * Mathf.RoundToInt(spec.InH * spec.SplitRatio)];
+
+            // warmup
+            for (int i = 0; i < 5; i++) { backend.Detect(color, cw, ch, boxes); if (cam.HasValue) lift.BuildAligned(depth, dw, dh, cw, ch, cam.Value); backend.Pose(input, sx, sy); }
+
+            var sw = new System.Diagnostics.Stopwatch();
+            double tDet = 0, tPose = 0, tAlign = 0;
+            for (int i = 0; i < iters; i++) { sw.Restart(); backend.Detect(color, cw, ch, boxes); tDet += sw.Elapsed.TotalMilliseconds; }
+            int n = backend.Detect(color, cw, ch, boxes);
+            var box = boxes[0];
+            var roi = RtmposePreprocess.RoiFromBox(box.X1, box.Y1, box.X2, box.Y2, spec);
+            RtmposePreprocess.BuildInput(color, cw, ch, roi, spec, input);
+            for (int i = 0; i < iters; i++) { sw.Restart(); backend.Pose(input, sx, sy); tPose += sw.Elapsed.TotalMilliseconds; }
+            if (cam.HasValue) for (int i = 0; i < iters; i++) { sw.Restart(); lift.BuildAligned(depth, dw, dh, cw, ch, cam.Value); tAlign += sw.Elapsed.TotalMilliseconds; }
+            backend.Dispose();
+
+            return $"per-frame breakdown (iters={iters}, cam {serial}):\n" +
+                   $"  YOLOX detect  = {tDet / iters:F1} ms\n" +
+                   $"  RTMPose pose  = {tPose / iters:F1} ms\n" +
+                   $"  depth align   = {(cam.HasValue ? (tAlign / iters).ToString("F1") : "n/a")} ms (C# {dw}x{dh}->{cw}x{ch})\n" +
+                   $"  SUM           = {(tDet + tPose + tAlign) / iters:F1} ms";
+        }
+
         public static string Run(string sessionRoot, string host, string serial, int frameIndex,
                                  bool yoloxBgr = true, float conf = 0.3f, bool spawnViz = true, bool spawnCloud = true)
         {
