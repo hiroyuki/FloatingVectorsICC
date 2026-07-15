@@ -79,7 +79,13 @@ namespace BodyTracking.Eval.Rtmpose
             int cw = frame.ColorWidth, ch = frame.ColorHeight;
 
             ObCameraParam? cam = _cam.TryGetValue(serial, out var c) ? c : null;
-            bool have3d = cam.HasValue && _lift.BuildAligned(frame.DepthBytes, frame.DepthWidth, frame.DepthHeight, cw, ch, cam.Value);
+            // Guard on the ACTUAL byte count: the replay driver reuses its depth
+            // buffer, so a skipped/truncated record (DepthByteCount==0) would
+            // otherwise lift against the PREVIOUS frame's stale depth.
+            bool depthValid = frame.DepthBytes != null &&
+                              frame.DepthByteCount >= frame.DepthWidth * frame.DepthHeight * 2;
+            bool have3d = cam.HasValue && depthValid &&
+                          _lift.BuildAligned(frame.DepthBytes, frame.DepthWidth, frame.DepthHeight, cw, ch, cam.Value);
 
             // detect (to acquire) vs track (reuse previous keypoint box)
             DetBox box; bool tracking = false;
