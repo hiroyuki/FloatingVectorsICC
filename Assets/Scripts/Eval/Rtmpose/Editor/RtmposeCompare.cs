@@ -70,7 +70,7 @@ namespace BodyTracking.Eval.Rtmpose
                 Cleanup(go, rtmpose, baseline);
                 return $"devices={CountDevices(sessionRoot)} cap={maxFramesPerDevice} conf={conf} wall={sw.Elapsed.TotalSeconds:F1}s\nCSV: {resultsDir}\n{sum}";
             }
-            catch (Exception e) { Debug.LogError("[RtmposeCompare] " + e); Cleanup(go, rtmpose, baseline); return "EXCEPTION: " + e; }
+            catch (Exception e) { UnityEngine.Debug.LogError("[RtmposeCompare] " + e); Cleanup(go, rtmpose, baseline); return "EXCEPTION: " + e; }
         }
 
         static int CountDevices(string root)
