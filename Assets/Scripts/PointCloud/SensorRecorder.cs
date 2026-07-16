@@ -135,6 +135,14 @@ namespace PointCloud
         [Header("Playback")]
         public bool loop = true;
 
+        [Tooltip("Mask the depth pixels where a rival camera's IR projector appears. Facing " +
+                 "ToF pairs saturate each other's sensor there and the flare returns FALSE " +
+                 "mid-air depth (flickering speckle on the pair's sightline). Gated per frame " +
+                 "on IR brightness at the projector pixel, so a body occluding the projector " +
+                 "is never masked out. Applied to the raw depth before every consumer " +
+                 "(mesh, TSDF, BT, event subscribers).")]
+        public bool maskRivalProjectors = true;
+
         [Tooltip("Where to register playback meshes for visibility toggling. " +
                  "Auto-found via FindFirstObjectByType if left null.")]
         public PointCloudView view;
@@ -1020,6 +1028,12 @@ namespace PointCloud
                 int irIdx = Mathf.Min(cursor, track.IRFrames.Count - 1);
                 irFrame = track.IRFrames[irIdx];
             }
+            // Rival-projector mask: zero the flare disc in the raw depth BEFORE any
+            // consumer (mesh reconstruction, TSDF, BT, event subscribers) sees it.
+            if (maskRivalProjectors && depthFrame?.Bytes != null)
+                ProjectorMask.Apply(track.Serial, depthFrame.Bytes, depthFrame.ByteCount,
+                    track.DepthWidth, track.DepthHeight,
+                    irFrame?.Bytes, irFrame?.ByteCount ?? 0, track.IRWidth, track.IRHeight);
             ReconstructAndUpload(track, depthFrame, colorFrame);
             FirePlaybackEvent(track, depthFrame, colorFrame, irFrame);
             FeedCumulative(track);
@@ -1522,6 +1536,24 @@ namespace PointCloud
                     Debug.LogWarning($"[{nameof(SensorRecorder)}] live manager extrinsics fallback failed: {liveEx.Message}", this);
                 }
             }
+
+            // Register the rig with the projector mask: every camera that has both
+            // intrinsics and a world extrinsic can compute where the OTHER cameras'
+            // IR projectors land in its depth image.
+            var rig = new List<ProjectorMask.CameraPose>();
+            foreach (var kv in _tracks)
+            {
+                var tr = kv.Value;
+                if (!tr.CameraParam.HasValue || !tr.GlobalTrColorCamera.HasValue) continue;
+                rig.Add(new ProjectorMask.CameraPose
+                {
+                    Serial = kv.Key,
+                    Param = tr.CameraParam.Value,
+                    World = tr.GlobalTrColorCamera.Value,
+                });
+            }
+            ProjectorMask.Configure(rig);
+
             return withGlobal;
         }
 
