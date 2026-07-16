@@ -159,6 +159,20 @@ namespace BodyTracking.Eval.Rtmpose
         readonly EvalSkeletonFrame _frame = new();
         readonly EvalSkeleton _fused = new();
 
+        /// <summary>Fixed-lag median-of-3 output filter: emission is delayed by ONE
+        /// fused frame (~33 ms) so each emitted joint is the component-wise median
+        /// of (t-1, t, t+1). A single-frame out-and-back spike is structurally
+        /// removed (the middle value never wins), while sustained motion passes
+        /// undistorted (median of a monotone triple is its middle sample). This is
+        /// live-viable — the only cost is the one-frame latency.</summary>
+        public bool medianLagFilter = true;
+
+        // lag ring: 3 most recent fused skeletons (post length-projection)
+        readonly EvalSkeleton[] _lag = { new EvalSkeleton(), new EvalSkeleton(), new EvalSkeleton() };
+        readonly ulong[] _lagTs = new ulong[3];
+        int _lagCount;
+        readonly EvalSkeleton _emit = new();
+
         public event Action<EvalSkeletonFrame> OnSkeletons;
 
         // diagnostics (per session, read for reporting)
@@ -383,9 +397,79 @@ namespace BodyTracking.Eval.Rtmpose
                 _histPos[j] = fusedPos[j]; _histTs[j] = nowTs; _histHas[j] = true;
             }
 
-            _frame.Reset(Name, "fused", nowTs);
-            _frame.Bodies.Add(_fused);
+            if (!medianLagFilter)
+            {
+                _frame.Reset(Name, "fused", nowTs);
+                _frame.Bodies.Add(_fused);
+                OnSkeletons?.Invoke(_frame);
+                return;
+            }
+
+            // push into the lag ring (oldest.._lag[2]=newest)
+            if (_lagCount >= 3)
+            {
+                var tmp = _lag[0]; _lag[0] = _lag[1]; _lag[1] = _lag[2]; _lag[2] = tmp;
+                _lagTs[0] = _lagTs[1]; _lagTs[1] = _lagTs[2];
+            }
+            int newest = Mathf.Min(_lagCount, 2);
+            CopySkeleton(_fused, _lag[newest]);
+            _lagTs[newest] = nowTs;
+            if (_lagCount < 3) _lagCount++;
+
+            if (_lagCount == 2)
+            {
+                // warmup: emit the very first frame raw (lag settles at one frame)
+                EmitSkeleton(_lag[0], _lagTs[0]);
+            }
+            else if (_lagCount >= 3)
+            {
+                // median-of-3 centered on the middle frame
+                CopySkeleton(_lag[1], _emit);
+                for (int j = 0; j < (int)EvalJointId.Count; j++)
+                {
+                    if (!_lag[0].Joints[j].Valid || !_lag[1].Joints[j].Valid || !_lag[2].Joints[j].Valid) continue;
+                    var a = _lag[0].Joints[j].PositionMm;
+                    var b = _lag[1].Joints[j].PositionMm;
+                    var c = _lag[2].Joints[j].PositionMm;
+                    _emit.Joints[j].PositionMm = new Vector3(Med3(a.x, b.x, c.x), Med3(a.y, b.y, c.y), Med3(a.z, b.z, c.z));
+                }
+                ProjectBoneLengths(_emit); // median mixing can bend a length back out of tolerance
+                EmitSkeleton(_emit, _lagTs[1]);
+            }
+        }
+
+        void EmitSkeleton(EvalSkeleton s, ulong ts)
+        {
+            _frame.Reset(Name, "fused", ts);
+            _frame.Bodies.Add(s);
             OnSkeletons?.Invoke(_frame);
+        }
+
+        static void CopySkeleton(EvalSkeleton src, EvalSkeleton dst)
+        {
+            dst.Reset(src.PersonId, src.TimestampNs);
+            for (int j = 0; j < (int)EvalJointId.Count; j++) dst.Joints[j] = src.Joints[j];
+        }
+
+        static float Med3(float a, float b, float c) =>
+            Mathf.Max(Mathf.Min(a, b), Mathf.Min(Mathf.Max(a, b), c));
+
+        void ProjectBoneLengths(EvalSkeleton s)
+        {
+            if (Profile == null) return;
+            for (int b = 0; b < Bones.Length; b++)
+            {
+                float L = Profile.LengthMm[b];
+                if (L <= 0f) continue;
+                int ia = (int)Bones[b].a, ib = (int)Bones[b].b;
+                if (!s.Joints[ia].Valid || !s.Joints[ib].Valid) continue;
+                var dir = s.Joints[ib].PositionMm - s.Joints[ia].PositionMm;
+                float len = dir.magnitude;
+                if (Mathf.Abs(len - L) <= Mathf.Max(lenRelTol * L, lenAbsTolMm)) continue;
+                if (len < 1f) { s.Joints[ib].Valid = false; continue; }
+                s.Joints[ib].PositionMm = s.Joints[ia].PositionMm + dir * (L / len);
+                StatLenProjected++;
+            }
         }
 
         bool FuseJoint(int j, List<Vector3> pts, List<float> wts, List<int> srcSample,
