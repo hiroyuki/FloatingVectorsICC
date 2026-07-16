@@ -64,6 +64,13 @@ namespace BodyTracking
             false;
 #endif
 
+        [Tooltip("External body source mode (e.g. LiveFusedBodySource running the RTMPose " +
+                 "fusion). While true, skeletons arrive exclusively through " +
+                 "SubmitExternalBodies: k4abt workers are never spawned and recorded " +
+                 "bodies_main is ignored. LiveFusedBodySource sets/clears this on its own " +
+                 "enable/disable.")]
+        public bool useExternalBodies = false;
+
         [Range(0f, 30f)]
         [Tooltip("Cap on how many frames per second are sent to each k4abt worker (0 = every frame). " +
                  "BT inference is the dominant GPU cost with multiple workers; lowering this trades " +
@@ -539,13 +546,31 @@ namespace BodyTracking
         private void OnPlaybackBodies(string serial, ulong tsNs, byte[] bytes, int byteCount,
                                       Transform sourceTransform, ObCameraParam? cameraParam)
         {
+            // Forcing live k4abt on playback: drop the recorded bodies_main entirely so stale /
+            // mismatched recorded skeletons don't fill the slot and fight the worker output.
+            // External-source mode likewise owns the slots exclusively.
+            if (IgnoreRecordedActive || useExternalBodies) return;
+            IngestBodies(serial, tsNs, bytes, byteCount, sourceTransform, cameraParam);
+        }
+
+        /// <summary>External body-source entry (LiveFusedBodySource): same per-serial
+        /// slot path as recorded bodies_main, accepted only while
+        /// <see cref="useExternalBodies"/> is on so a stray feeder can never fight
+        /// the worker/recorded sources.</summary>
+        public void SubmitExternalBodies(string serial, ulong tsNs, byte[] bytes, int byteCount,
+                                         Transform sourceTransform, ObCameraParam? cameraParam)
+        {
+            if (!useExternalBodies) return;
+            IngestBodies(serial, tsNs, bytes, byteCount, sourceTransform, cameraParam);
+        }
+
+        private void IngestBodies(string serial, ulong tsNs, byte[] bytes, int byteCount,
+                                  Transform sourceTransform, ObCameraParam? cameraParam)
+        {
             // Data ingestion is independent of showBones now — that toggle only controls whether the
             // skeleton is DRAWN (bones + joints), so consumers like BonePoseHistory keep getting poses
             // while the skeleton is hidden.
             if (string.IsNullOrEmpty(serial)) return;
-            // Forcing live k4abt on playback: drop the recorded bodies_main entirely so stale /
-            // mismatched recorded skeletons don't fill the slot and fight the worker output.
-            if (IgnoreRecordedActive) return;
             if (!_latestBySerial.TryGetValue(serial, out var slot))
             {
                 slot = new WorkerLatest { Serial = serial, SourceTransform = sourceTransform };
@@ -888,6 +913,10 @@ namespace BodyTracking
             // Data ingestion is independent of showBones now — that toggle only controls whether the
             // skeleton is DRAWN (bones + joints), so consumers like BonePoseHistory keep getting poses
             // while the skeleton is hidden.
+
+            // External-source mode: skeletons arrive through SubmitExternalBodies;
+            // never spawn or feed k4abt workers.
+            if (useExternalBodies) return;
 
             // Recorded BT short-circuit: when the recorder is in Playing state AND
             // has a bodies_main track for this serial, skeletons flow in through

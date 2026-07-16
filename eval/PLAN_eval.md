@@ -61,6 +61,15 @@ harness-base を共通祖先にし、ハーネス修正は両トラックへ mer
 - **複数人**: 2 人以上での ID スワップ回数。※現データに 2 人シーン無し → 要長尺録画。
 
 ## Session refresh checkpoints
+### CP8 (2026-07-16 深夜) — codex-review 承認 → main マージ完了
+- codex-review(companion runtime, 2 ラウンド): BLOCKING 1 件 = IR 欠如時にマスクが無条件適用
+  → ProjectorVisible をフェイルクローズに修正（64a404e）→ APPROVED
+- **main へマージ済み（b0d5577, --no-ff, conflict なし）**。volume gate のチェリーピック(4c2d498)は
+  main の e8a0e6f と完全一致で吸収され、マージ後 main と worktree のコード差分ゼロ
+  = worktree エディタのクリーンコンパイルが main を担保。push はしていない
+- worktree は継続調整用に存続。**次: STL 作成（Window > Print Export → Pause → Fuse→Close→Export、
+  出力 ~/Documents/FloatingVectorsPrints/）**、その後 live-capture 統合（CP7c の TODO 一式）
+
 ### CP7c (2026-07-16 深夜) — TSDF ストロボ積層の整理・次回収録 TODO 確定
 - 55.46s の縞状多重残像 = **30fps ストロボ積層**: 高速の腕はフレーム間に 7-13cm 移動し、TSDF トレイルが
   各フレームの腕表面を離散コピーとして保持する（骨格は v11s で滑らか。データの時間解像度の限界）
