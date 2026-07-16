@@ -7,17 +7,26 @@
 // Threading: Unity main thread only copies each arriving frame into a
 // per-serial pending slot (latest wins) and drains fused results back into
 // the merger; ALL inference and fusion runs on one worker thread. The whole
-// adapter chain (ORT + pure C# math) has no Unity-API dependency, verified —
+// adapter chain (ORT + pure C# math) has no Unity-API dependency (verified),
 // and single-threaded use inside the worker keeps the adapter's state safe.
-// The GPU sets the achievable fusion rate (~10 Hz on DirectML with 4 cams;
-// CUDA/TensorRT EP is the path to 30 Hz); the adapter's temporal hold +
-// heartbeat keep the output cadence steady in between.
+// The GPU sets the achievable fusion rate (~10-25 Hz on DirectML with 4
+// cams; CUDA/TensorRT EP is the path to a locked 30 Hz); the adapter's
+// temporal hold + heartbeat keep the output cadence steady in between.
+//
+// Ownership: everything the worker thread touches lives in one Session
+// object. Disable joins the worker; if the join TIMES OUT (worker stuck in
+// a native inference call) the whole session — backend, adapter, slots,
+// queues, scratch — is abandoned as a unit and deliberately leaked, so the
+// stuck thread can never race against a re-enabled component's fresh
+// session. (Codex-reviewed shutdown contract.)
 //
 // Frame sources:
 //  - LIVE: every PointCloudRenderer.OnRawFramesReady in the scene.
 //  - usePlaybackFrames: SensorRecorder.OnPlaybackRawFrame too — the dev
 //    "live-sim" mode: recorded takes drive the exact live code path on
-//    machines without cameras.
+//    machines without cameras. Playback loops rewind timestamps, which the
+//    strictly-monotonic adapter would reject forever, so OnPlaybackLooped
+//    schedules an adapter rebuild on the worker thread.
 //
 // The fused skeleton (origin-camera world frame) is converted into each
 // camera's DEPTH frame and injected per serial — the merger then sees four
@@ -69,13 +78,14 @@ namespace BodyTracking.Eval.Rtmpose
         public int heartbeatMs = 40;
 
         /// <summary>Fused frames emitted per second (diagnostic, worker-thread rate).</summary>
-        public float FusedHz { get; private set; }
+        public float FusedHz => _session != null ? _session.FusedHz : 0f;
 
         // ---- per-serial frame slot (main thread writes, worker consumes) ----
-        // Double-buffered: Ingest writes the PENDING arrays under _slotLock; the
-        // worker SWAPS them with its processing arrays (still under the lock)
-        // and reads the swapped-out set outside the lock — the worker always
-        // owns immutable frame bytes, a later Ingest writes the other set.
+        // Double-buffered: Ingest writes the PENDING arrays under the session's
+        // slot lock; the worker SWAPS them with its processing arrays (still
+        // under the lock) and reads the swapped-out set outside the lock — the
+        // worker always owns immutable frame bytes, a later Ingest writes the
+        // other set.
         private sealed class Slot
         {
             public string Serial;
@@ -95,50 +105,54 @@ namespace BodyTracking.Eval.Rtmpose
             public bool Configured;              // adapter.Configure done (worker thread)
         }
 
-        private readonly Dictionary<string, Slot> _slots = new Dictionary<string, Slot>();
-        private readonly object _slotLock = new object();
-        private readonly AutoResetEvent _wake = new AutoResetEvent(false);
+        private sealed class CamXform { public ObExtrinsic D2C; public ObExtrinsic G; }
 
-        // ---- fused output queue (worker produces, main thread injects) ----
         private sealed class FusedResult
         {
             public ulong TsNs;
             public readonly Dictionary<string, byte[]> BytesBySerial = new Dictionary<string, byte[]>();
             public int ByteCount;
         }
-        private readonly Queue<FusedResult> _results = new Queue<FusedResult>();
-        private readonly object _resultLock = new object();
 
-        private OrtRtmposeBackend _backend;
-        private FusedRtmposeAdapter _fused;
-        private Thread _worker;
-        private volatile bool _stop;
-        private bool _mergerFlagOwned;
+        /// <summary>Everything the worker thread can touch, owned as a unit. On a
+        /// clean shutdown the session is disposed; on a stuck shutdown it is
+        /// abandoned whole (leaked), so the stuck thread can never observe a
+        /// later session's state.</summary>
+        private sealed class Session
+        {
+            public LiveFusedBodySource Owner; // config + Debug context only
+            public OrtRtmposeBackend Backend;
+            public FusedRtmposeAdapter Fused;
+            public Thread Worker;
+            public volatile bool Stop;
+            public volatile bool ResetPending;
+            public readonly AutoResetEvent Wake = new AutoResetEvent(false);
+            public readonly object SlotLock = new object();
+            public readonly Dictionary<string, Slot> Slots = new Dictionary<string, Slot>();
+            public readonly object ResultLock = new object();
+            public readonly Queue<FusedResult> Results = new Queue<FusedResult>();
+            public readonly Dictionary<string, CamXform> Xform = new Dictionary<string, CamXform>();
+            public BodySnapshot Snap;
+            public byte[] EncodeScratch;
+            public int FusedEmitted;
+            public float FusedHz;
+        }
 
-        // world -> per-camera depth conversion (worker thread reads only)
-        private sealed class CamXform { public ObExtrinsic D2C; public ObExtrinsic G; }
-        private readonly Dictionary<string, CamXform> _xform = new Dictionary<string, CamXform>();
-
+        private Session _session;
         private readonly List<PointCloudRenderer> _subscribedRenderers = new List<PointCloudRenderer>();
         private SensorRecorder _recorder;
-        private BodySnapshot _snap;
-        private byte[] _encodeScratch;
-
-        // Playback loop = timestamps jump BACKWARD, and the adapter is strictly
-        // monotonic (TryFuse rejects nowTs <= last) — without a reset, fusion is
-        // dead for good after the first loop. Live capture never loops; this is
-        // the dev live-sim plumbing. Rebuild happens on the worker thread.
-        private volatile bool _resetPending;
-        private int _fusedEmitted; // OnFusedSkeletons count (worker thread, Interlocked)
+        private bool _mergerFlagOwned;
 
         private void OnEnable()
         {
             if (merger == null) merger = FindFirstObjectByType<SkeletonMerger>();
-            if (merger != null && !merger.useExternalBodies)
+
+            var s = new Session
             {
-                merger.useExternalBodies = true;
-                _mergerFlagOwned = true;
-            }
+                Owner = this,
+                Snap = new BodySnapshot { Id = 1 },
+                EncodeScratch = new byte[RecordedBodySerializer.FrameSize(1)],
+            };
 
             try
             {
@@ -152,49 +166,44 @@ namespace BodyTracking.Eval.Rtmpose
                     enabled = false;
                     return;
                 }
-                _backend = new OrtRtmposeBackend(yolox, rtm);
-                _fused = new FusedRtmposeAdapter(_backend) { ConfThreshold = confThreshold };
+                s.Backend = new OrtRtmposeBackend(yolox, rtm);
+                s.Fused = new FusedRtmposeAdapter(s.Backend) { ConfThreshold = confThreshold };
                 string profile = Path.Combine(root, bodyProfilePath);
                 if (!string.IsNullOrEmpty(bodyProfilePath) && File.Exists(profile))
-                    _fused.Profile = BodyProfile.Load(profile);
-                _fused.SetCaptureVolume(captureVolumeCenterMm, captureVolumeHalfMm);
-                _fused.OnSkeletons += OnFusedSkeletons; // worker thread!
+                    s.Fused.Profile = BodyProfile.Load(profile);
+                s.Fused.SetCaptureVolume(captureVolumeCenterMm, captureVolumeHalfMm);
+                s.Fused.OnSkeletons += f => OnFusedSkeletons(s, f); // worker thread!
             }
             catch (Exception e)
             {
                 Debug.LogException(e, this);
+                s.Backend?.Dispose();
                 enabled = false;
                 return;
             }
 
-            _snap = new BodySnapshot { Id = 1 };
-            _encodeScratch = new byte[RecordedBodySerializer.FrameSize(1)];
-
-            if (!LoadCalibration())
+            if (!LoadCalibration(s))
             {
-                // no rig geometry -> no world transforms, no injection targets;
-                // tear the half-built state down and stay disabled
-                _fused.OnSkeletons -= OnFusedSkeletons;
-                _fused = null;
-                _backend?.Dispose();
-                _backend = null;
+                s.Backend?.Dispose();
                 enabled = false;
                 return;
             }
+
+            if (merger != null && !merger.useExternalBodies)
+            {
+                merger.useExternalBodies = true;
+                _mergerFlagOwned = true;
+            }
+
+            _session = s;
             SubscribeSources();
 
-            _stop = false;
-            _worker = new Thread(WorkerLoop) { IsBackground = true, Name = "LiveFusedBodySource" };
-            _worker.Start();
+            s.Worker = new Thread(() => WorkerLoop(s)) { IsBackground = true, Name = "LiveFusedBodySource" };
+            s.Worker.Start();
         }
 
         private void OnDisable()
         {
-            _stop = true;
-            _wake.Set();
-            bool workerExited = _worker == null || _worker.Join(5000);
-            _worker = null;
-
             foreach (var r in _subscribedRenderers)
                 if (r != null) r.OnRawFramesReady -= OnLiveFrame;
             _subscribedRenderers.Clear();
@@ -205,33 +214,37 @@ namespace BodyTracking.Eval.Rtmpose
                 _recorder = null;
             }
 
-            if (workerExited)
-            {
-                if (_fused != null) { _fused.OnSkeletons -= OnFusedSkeletons; _fused = null; }
-                _backend?.Dispose();
-                _backend = null;
-            }
-            else
-            {
-                // The worker may still be inside ORT inference — disposing the
-                // native sessions under it would crash the editor. Leak the
-                // backend deliberately (the thread is background; process
-                // teardown reclaims it) and make the failure loud.
-                Debug.LogError($"[{nameof(LiveFusedBodySource)}] worker did not stop within 5s — leaking the ORT backend instead of disposing it under a running inference", this);
-                _fused = null;
-                _backend = null;
-            }
-
             if (merger != null && _mergerFlagOwned) merger.useExternalBodies = false;
             _mergerFlagOwned = false;
 
-            lock (_slotLock) _slots.Clear();
-            lock (_resultLock) _results.Clear();
-            _xform.Clear();
+            var s = _session;
+            _session = null;
+            if (s == null) return;
+
+            s.Stop = true;
+            s.Wake.Set();
+            if (s.Worker == null || s.Worker.Join(5000))
+            {
+                // clean exit: the worker is gone, the session is ours to dispose
+                s.Backend?.Dispose();
+            }
+            else
+            {
+                // The worker is stuck inside a native inference call. Abandon the
+                // ENTIRE session — backend, adapter, slots, queues, scratch — as a
+                // unit: nothing of it is cleared or reused, so the stuck thread
+                // can only ever touch its own leaked state, never a fresh
+                // session created by a later OnEnable. Deliberate leak; process
+                // teardown reclaims it.
+                Debug.LogError($"[{nameof(LiveFusedBodySource)}] worker did not stop within 5s — abandoning the whole session (deliberate leak) instead of racing a running inference", this);
+            }
         }
 
         private void Update()
         {
+            var s = _session;
+            if (s == null) return;
+
             // late-joining renderers (live cameras open asynchronously)
             SubscribeSources();
 
@@ -240,16 +253,16 @@ namespace BodyTracking.Eval.Rtmpose
             while (true)
             {
                 FusedResult res;
-                lock (_resultLock)
+                lock (s.ResultLock)
                 {
-                    if (_results.Count == 0) break;
-                    res = _results.Dequeue();
+                    if (s.Results.Count == 0) break;
+                    res = s.Results.Dequeue();
                 }
                 if (merger == null) continue;
                 foreach (var kv in res.BytesBySerial)
                 {
                     Slot slot;
-                    lock (_slotLock) _slots.TryGetValue(kv.Key, out slot);
+                    lock (s.SlotLock) s.Slots.TryGetValue(kv.Key, out slot);
                     if (slot == null) continue;
                     merger.SubmitExternalBodies(kv.Key, res.TsNs, kv.Value, res.ByteCount,
                         slot.SourceTransform, slot.CamParam);
@@ -280,8 +293,10 @@ namespace BodyTracking.Eval.Rtmpose
 
         private void HandlePlaybackLooped()
         {
-            _resetPending = true;
-            _wake.Set();
+            var s = _session;
+            if (s == null) return;
+            s.ResetPending = true;
+            s.Wake.Set();
         }
 
         private void OnLiveFrame(PointCloudRenderer r, RawFrameData frame)
@@ -292,72 +307,74 @@ namespace BodyTracking.Eval.Rtmpose
 
         private void Ingest(string serial, ObCameraParam? camParam, Transform tr, in RawFrameData f)
         {
+            var s = _session;
+            if (s == null) return;
             if (string.IsNullOrEmpty(serial) || f.DepthBytes == null || f.ColorBytes == null) return;
-            lock (_slotLock)
+            lock (s.SlotLock)
             {
-                if (!_slots.TryGetValue(serial, out var s))
+                if (!s.Slots.TryGetValue(serial, out var slot))
                 {
-                    s = new Slot { Serial = serial };
-                    _slots[serial] = s;
+                    slot = new Slot { Serial = serial };
+                    s.Slots[serial] = slot;
                 }
-                s.CamParam = camParam ?? s.CamParam;
-                s.SourceTransform = tr != null ? tr : s.SourceTransform;
-                CopyInto(ref s.Depth, f.DepthBytes, f.DepthByteCount); s.DepthCount = f.DepthByteCount;
-                CopyInto(ref s.Color, f.ColorBytes, f.ColorByteCount); s.ColorCount = f.ColorByteCount;
-                CopyInto(ref s.IR, f.IRBytes, f.IRByteCount); s.IRCount = f.IRByteCount;
-                s.DW = f.DepthWidth; s.DH = f.DepthHeight;
-                s.CW = f.ColorWidth; s.CH = f.ColorHeight;
-                s.IW = f.IRWidth; s.IH = f.IRHeight;
-                s.TsNs = f.TimestampUs * 1000UL;
-                s.Fresh = true;
+                slot.CamParam = camParam ?? slot.CamParam;
+                slot.SourceTransform = tr != null ? tr : slot.SourceTransform;
+                CopyInto(ref slot.Depth, f.DepthBytes, f.DepthByteCount); slot.DepthCount = f.DepthByteCount;
+                CopyInto(ref slot.Color, f.ColorBytes, f.ColorByteCount); slot.ColorCount = f.ColorByteCount;
+                CopyInto(ref slot.IR, f.IRBytes, f.IRByteCount); slot.IRCount = f.IRByteCount;
+                slot.DW = f.DepthWidth; slot.DH = f.DepthHeight;
+                slot.CW = f.ColorWidth; slot.CH = f.ColorHeight;
+                slot.IW = f.IRWidth; slot.IH = f.IRHeight;
+                slot.TsNs = f.TimestampUs * 1000UL;
+                slot.Fresh = true;
             }
-            _wake.Set();
+            s.Wake.Set();
         }
 
         private static void CopyInto(ref byte[] dst, byte[] src, int count)
         {
-            if (src == null || count <= 0) { return; }
+            if (src == null || count <= 0) return;
             if (dst.Length < count) dst = new byte[count];
             Buffer.BlockCopy(src, 0, dst, 0, count);
         }
 
-        // ---------------- worker thread ----------------
+        // ---------------- worker thread (session-owned) ----------------
 
-        private void WorkerLoop()
+        private void WorkerLoop(Session s)
         {
             var burst = new List<Slot>(8);
             long lastFrameWallMs = Environment.TickCount;
             ulong lastTsNs = 0;
             long rateWindowStart = Environment.TickCount;
 
-            while (!_stop)
+            while (!s.Stop)
             {
-                _wake.WaitOne(10);
-                if (_stop) break;
+                s.Wake.WaitOne(10);
+                if (s.Stop) break;
 
-                if (_resetPending)
+                if (s.ResetPending)
                 {
-                    _resetPending = false;
-                    RebuildAdapter();
+                    s.ResetPending = false;
+                    RebuildAdapter(s);
                     lastTsNs = 0;
                 }
 
                 burst.Clear();
-                lock (_slotLock)
+                lock (s.SlotLock)
                 {
-                    foreach (var kv in _slots)
+                    foreach (var kv in s.Slots)
                     {
-                        var s = kv.Value;
-                        if (!s.Fresh) continue;
-                        s.Fresh = false;
+                        var slot = kv.Value;
+                        if (!slot.Fresh) continue;
+                        slot.Fresh = false;
                         // swap pending <-> processing so the worker owns the bytes
-                        (s.Depth, s.ProcDepth) = (s.ProcDepth, s.Depth);
-                        (s.Color, s.ProcColor) = (s.ProcColor, s.Color);
-                        (s.IR, s.ProcIR) = (s.ProcIR, s.IR);
-                        s.ProcDepthCount = s.DepthCount; s.ProcColorCount = s.ColorCount; s.ProcIRCount = s.IRCount;
-                        s.PDW = s.DW; s.PDH = s.DH; s.PCW = s.CW; s.PCH = s.CH; s.PIW = s.IW; s.PIH = s.IH;
-                        s.ProcTsNs = s.TsNs;
-                        burst.Add(s);
+                        (slot.Depth, slot.ProcDepth) = (slot.ProcDepth, slot.Depth);
+                        (slot.Color, slot.ProcColor) = (slot.ProcColor, slot.Color);
+                        (slot.IR, slot.ProcIR) = (slot.ProcIR, slot.IR);
+                        slot.ProcDepthCount = slot.DepthCount; slot.ProcColorCount = slot.ColorCount; slot.ProcIRCount = slot.IRCount;
+                        slot.PDW = slot.DW; slot.PDH = slot.DH; slot.PCW = slot.CW; slot.PCH = slot.CH; slot.PIW = slot.IW; slot.PIH = slot.IH;
+                        slot.ProcTsNs = slot.TsNs;
+                        burst.Add(slot);
                     }
                 }
 
@@ -368,25 +385,25 @@ namespace BodyTracking.Eval.Rtmpose
                     if (lastTsNs != 0 && idle > heartbeatMs)
                     {
                         lastFrameWallMs = Environment.TickCount;
-                        try { _fused.Heartbeat(lastTsNs + (ulong)idle * 1_000_000UL); }
+                        try { s.Fused.Heartbeat(lastTsNs + (ulong)idle * 1_000_000UL); }
                         catch (Exception e) { Debug.LogException(e, this); }
                     }
                     continue;
                 }
 
-                foreach (var s in burst)
+                foreach (var slot in burst)
                 {
-                    if (_stop) break;
+                    if (s.Stop) break;
                     try
                     {
-                        EnsureConfigured(s);
+                        EnsureConfigured(s, slot);
                         var raw = new RawFrameData(
-                            s.ProcDepth, s.ProcDepthCount, s.PDW, s.PDH,
-                            s.ProcColor, s.ProcColorCount, s.PCW, s.PCH,
-                            s.ProcIR, s.ProcIRCount, s.PIW, s.PIH,
-                            s.ProcTsNs / 1000UL);
-                        _fused.SubmitFrame(s.Serial, raw, s.ProcTsNs);
-                        lastTsNs = s.ProcTsNs > lastTsNs ? s.ProcTsNs : lastTsNs;
+                            slot.ProcDepth, slot.ProcDepthCount, slot.PDW, slot.PDH,
+                            slot.ProcColor, slot.ProcColorCount, slot.PCW, slot.PCH,
+                            slot.ProcIR, slot.ProcIRCount, slot.PIW, slot.PIH,
+                            slot.ProcTsNs / 1000UL);
+                        s.Fused.SubmitFrame(slot.Serial, raw, slot.ProcTsNs);
+                        lastTsNs = slot.ProcTsNs > lastTsNs ? slot.ProcTsNs : lastTsNs;
                         lastFrameWallMs = Environment.TickCount;
                     }
                     catch (Exception e) { Debug.LogException(e, this); }
@@ -396,75 +413,75 @@ namespace BodyTracking.Eval.Rtmpose
                 if (win >= 2000)
                 {
                     // actual fused OUTPUT rate (OnFusedSkeletons emissions)
-                    FusedHz = Interlocked.Exchange(ref _fusedEmitted, 0) * 1000f / win;
+                    s.FusedHz = Interlocked.Exchange(ref s.FusedEmitted, 0) * 1000f / win;
                     rateWindowStart = Environment.TickCount;
                 }
             }
-            try { _fused?.FlushLag(); } catch { }
+            try { s.Fused?.FlushLag(); } catch { }
         }
 
-        // Worker thread. Fresh adapter after a playback loop — the shared
-        // backend (ORT sessions) survives, only the fusion state is rebuilt.
-        private void RebuildAdapter()
+        // Worker thread. Fresh adapter after a playback loop — timestamps rewind
+        // and the adapter is strictly monotonic. The shared backend (ORT
+        // sessions) survives, only the fusion state is rebuilt.
+        private void RebuildAdapter(Session s)
         {
             try
             {
-                if (_fused != null) _fused.OnSkeletons -= OnFusedSkeletons;
-                var next = new FusedRtmposeAdapter(_backend) { ConfThreshold = confThreshold };
-                if (_fused != null) next.Profile = _fused.Profile;
+                var next = new FusedRtmposeAdapter(s.Backend) { ConfThreshold = confThreshold };
+                next.Profile = s.Fused?.Profile;
                 next.SetCaptureVolume(captureVolumeCenterMm, captureVolumeHalfMm);
-                foreach (var kv in _xform) next.SetWorldTransform(kv.Key, kv.Value.G);
-                next.OnSkeletons += OnFusedSkeletons;
-                _fused = next;
-                lock (_slotLock)
-                    foreach (var kv in _slots) { kv.Value.Configured = false; kv.Value.Fresh = false; }
+                foreach (var kv in s.Xform) next.SetWorldTransform(kv.Key, kv.Value.G);
+                next.OnSkeletons += f => OnFusedSkeletons(s, f);
+                s.Fused = next; // old adapter (and its subscription) drops with it
+                lock (s.SlotLock)
+                    foreach (var kv in s.Slots) { kv.Value.Configured = false; kv.Value.Fresh = false; }
             }
             catch (Exception e) { Debug.LogException(e, this); }
         }
 
         // adapter.Configure needs stream dims — known on first frame. Worker
         // thread only, before the serial's first SubmitFrame.
-        private void EnsureConfigured(Slot s)
+        private void EnsureConfigured(Session s, Slot slot)
         {
-            if (s.Configured) return;
-            if (!s.CamParam.HasValue)
+            if (slot.Configured) return;
+            if (!slot.CamParam.HasValue)
             {
                 // playback path always has calibration-built params; live fills in
                 // once the renderer publishes them — until then skip the frame.
-                throw new InvalidOperationException($"no CameraParam yet for {s.Serial}");
+                throw new InvalidOperationException($"no CameraParam yet for {slot.Serial}");
             }
-            var ctx = new EvalCameraContext(s.Serial, s.PDW, s.PDH, s.PCW, s.PCH, s.CamParam);
-            _fused.Configure(ctx);
-            if (_xform.TryGetValue(s.Serial, out var x))
-                _fused.SetWorldTransform(s.Serial, x.G);
-            s.Configured = true;
+            var ctx = new EvalCameraContext(slot.Serial, slot.PDW, slot.PDH, slot.PCW, slot.PCH, slot.CamParam);
+            s.Fused.Configure(ctx);
+            if (s.Xform.TryGetValue(slot.Serial, out var x))
+                s.Fused.SetWorldTransform(slot.Serial, x.G);
+            slot.Configured = true;
         }
 
-        // ---------------- fused output (worker thread) ----------------
+        // ---------------- fused output (worker thread, session-owned) ----------------
 
-        private void OnFusedSkeletons(EvalSkeletonFrame f)
+        private void OnFusedSkeletons(Session s, EvalSkeletonFrame f)
         {
-            Interlocked.Increment(ref _fusedEmitted);
+            Interlocked.Increment(ref s.FusedEmitted);
             var p = f.Primary();
             if (p == null) return;
 
             var res = new FusedResult { TsNs = f.TimestampNs };
-            foreach (var kv in _xform)
+            foreach (var kv in s.Xform)
             {
-                BuildSnapshot(p, kv.Value);
-                int bytes = RecordedBodySerializer.Encode(new[] { _snap }, 1, _encodeScratch);
+                BuildSnapshot(s, p, kv.Value);
+                int bytes = RecordedBodySerializer.Encode(new[] { s.Snap }, 1, s.EncodeScratch);
                 var copy = new byte[bytes];
-                Buffer.BlockCopy(_encodeScratch, 0, copy, 0, bytes);
+                Buffer.BlockCopy(s.EncodeScratch, 0, copy, 0, bytes);
                 res.BytesBySerial[kv.Key] = copy;
                 res.ByteCount = bytes;
             }
             if (res.BytesBySerial.Count == 0) return;
-            lock (_resultLock)
+            lock (s.ResultLock)
             {
-                _results.Enqueue(res);
+                s.Results.Enqueue(res);
                 // backpressure: never let the queue grow unbounded if the main
                 // thread stalls — drop the oldest
-                while (_results.Count > 8) _results.Dequeue();
+                while (s.Results.Count > 8) s.Results.Dequeue();
             }
         }
 
@@ -472,10 +489,10 @@ namespace BodyTracking.Eval.Rtmpose
         // the export lives in an Editor assembly this runtime component can't
         // reference): world -> camera color -> camera depth, EvalSkeleton joints
         // mapped to k4abt ids + derived spine/clavicle/nose fills.
-        private void BuildSnapshot(EvalSkeleton p, CamXform x)
+        private void BuildSnapshot(Session s, EvalSkeleton p, CamXform x)
         {
             for (int i = 0; i < K4ABTConsts.K4ABT_JOINT_COUNT; i++)
-                _snap.Joints[i] = new k4abt_joint_t
+                s.Snap.Joints[i] = new k4abt_joint_t
                 {
                     Position = new k4a_float3_t(),
                     Orientation = new k4a_quaternion_t { W = 1f },
@@ -486,7 +503,7 @@ namespace BodyTracking.Eval.Rtmpose
             {
                 if (!p.Joints[j].Valid) continue;
                 Vector3 d = ToDepth(p.Joints[j].PositionMm, x);
-                SetJoint(EvalSkeletonMap.K4abtSource[j], d, k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_MEDIUM);
+                SetJoint(s, EvalSkeletonMap.K4abtSource[j], d, k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_MEDIUM);
             }
 
             bool hasPelvis = p.Joints[(int)EvalJointId.Pelvis].Valid;
@@ -495,21 +512,21 @@ namespace BodyTracking.Eval.Rtmpose
             {
                 Vector3 pel = ToDepth(p.Joints[(int)EvalJointId.Pelvis].PositionMm, x);
                 Vector3 nk = ToDepth(p.Joints[(int)EvalJointId.Neck].PositionMm, x);
-                SetJoint(k4abt_joint_id_t.K4ABT_JOINT_SPINE_NAVEL, Vector3.Lerp(pel, nk, 1f / 3f), k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW);
-                SetJoint(k4abt_joint_id_t.K4ABT_JOINT_SPINE_CHEST, Vector3.Lerp(pel, nk, 2f / 3f), k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW);
-                SetJoint(k4abt_joint_id_t.K4ABT_JOINT_CLAVICLE_LEFT, nk, k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW);
-                SetJoint(k4abt_joint_id_t.K4ABT_JOINT_CLAVICLE_RIGHT, nk, k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW);
+                SetJoint(s, k4abt_joint_id_t.K4ABT_JOINT_SPINE_NAVEL, Vector3.Lerp(pel, nk, 1f / 3f), k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW);
+                SetJoint(s, k4abt_joint_id_t.K4ABT_JOINT_SPINE_CHEST, Vector3.Lerp(pel, nk, 2f / 3f), k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW);
+                SetJoint(s, k4abt_joint_id_t.K4ABT_JOINT_CLAVICLE_LEFT, nk, k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW);
+                SetJoint(s, k4abt_joint_id_t.K4ABT_JOINT_CLAVICLE_RIGHT, nk, k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW);
             }
             if (p.Joints[(int)EvalJointId.Head].Valid)
             {
                 Vector3 hd = ToDepth(p.Joints[(int)EvalJointId.Head].PositionMm, x);
-                SetJoint(k4abt_joint_id_t.K4ABT_JOINT_NOSE, hd, k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW);
+                SetJoint(s, k4abt_joint_id_t.K4ABT_JOINT_NOSE, hd, k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW);
             }
         }
 
-        private void SetJoint(k4abt_joint_id_t id, Vector3 posMm, k4abt_joint_confidence_level_t conf)
+        private static void SetJoint(Session s, k4abt_joint_id_t id, Vector3 posMm, k4abt_joint_confidence_level_t conf)
         {
-            _snap.Joints[(int)id] = new k4abt_joint_t
+            s.Snap.Joints[(int)id] = new k4abt_joint_t
             {
                 Position = new k4a_float3_t { X = posMm.x, Y = posMm.y, Z = posMm.z },
                 Orientation = new k4a_quaternion_t { W = 1f },
@@ -532,7 +549,7 @@ namespace BodyTracking.Eval.Rtmpose
 
         // ---------------- calibration ----------------
 
-        private bool LoadCalibration()
+        private bool LoadCalibration(Session s)
         {
             string root = ResolveCalibrationRoot();
             if (root == null)
@@ -545,8 +562,8 @@ namespace BodyTracking.Eval.Rtmpose
             foreach (var c in calib)
             {
                 if (!c.GlobalTrColorCamera.HasValue) continue;
-                _xform[c.Serial] = new CamXform { D2C = c.DepthToColor, G = c.GlobalTrColorCamera.Value };
-                _fused.SetWorldTransform(c.Serial, c.GlobalTrColorCamera.Value);
+                s.Xform[c.Serial] = new CamXform { D2C = c.DepthToColor, G = c.GlobalTrColorCamera.Value };
+                s.Fused.SetWorldTransform(c.Serial, c.GlobalTrColorCamera.Value);
                 rig.Add(new ProjectorMask.CameraPose
                 {
                     Serial = c.Serial,
@@ -554,14 +571,14 @@ namespace BodyTracking.Eval.Rtmpose
                     World = c.GlobalTrColorCamera.Value,
                 });
             }
-            if (_xform.Count == 0)
+            if (s.Xform.Count == 0)
             {
                 Debug.LogError($"[{nameof(LiveFusedBodySource)}] extrinsics.yaml at {root} has no camera with a world transform — disabling.", this);
                 return false;
             }
             // live projector-flare mask uses the same rig geometry
             ProjectorMask.Configure(rig);
-            Debug.Log($"[{nameof(LiveFusedBodySource)}] calibration loaded from {root}: {_xform.Count} camera(s)", this);
+            Debug.Log($"[{nameof(LiveFusedBodySource)}] calibration loaded from {root}: {s.Xform.Count} camera(s)", this);
             return true;
         }
 
