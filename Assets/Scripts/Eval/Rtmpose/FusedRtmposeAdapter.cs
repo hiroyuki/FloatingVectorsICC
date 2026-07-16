@@ -122,9 +122,11 @@ namespace BodyTracking.Eval.Rtmpose
         /// <summary>Cap (mm) on the total extrapolation displacement of a held joint.</summary>
         public float holdMaxStepMm = 200f;
         /// <summary>Two-strike jump gate (mm): a FRESH fused position this far from
-        /// the recent history is held back once; only a second consecutive frame
-        /// agreeing it moved gets accepted (kills single-frame out-and-back spikes).</summary>
-        public float jumpGateMm = 350f;
+        /// the recent history is held back once; the second consecutive frame is
+        /// accepted when it lands near the pending position OR continues in the
+        /// same direction (genuine fast motion keeps moving; an out-and-back
+        /// spike reverses). 220 mm/frame ≈ 6.6 m/s at 30 fps.</summary>
+        public float jumpGateMm = 220f;
 
         public BodyProfile Profile;
 
@@ -290,9 +292,27 @@ namespace BodyTracking.Eval.Rtmpose
                         if (age >= 0f && age <= holdMaxSeconds
                             && Vector3.Distance(pos, _histPos[j]) > jumpGateMm)
                         {
-                            if (_jumpHasPending[j] && Vector3.Distance(pos, _jumpPending[j]) <= jumpGateMm)
+                            // Second strike accepts on proximity to the pending
+                            // position OR on direction continuation — genuine fast
+                            // motion keeps moving the same way each frame (the
+                            // pending point itself has moved on), while an
+                            // out-and-back spike reverses direction (dot < 0).
+                            bool accept = false;
+                            if (_jumpHasPending[j])
                             {
-                                _jumpHasPending[j] = false; // second strike agrees → accept
+                                if (Vector3.Distance(pos, _jumpPending[j]) <= jumpGateMm) accept = true;
+                                else
+                                {
+                                    var stepA = _jumpPending[j] - _histPos[j];
+                                    var stepB = pos - _jumpPending[j];
+                                    if (stepA.sqrMagnitude > 1f && stepB.sqrMagnitude > 1f
+                                        && Vector3.Dot(stepA.normalized, stepB.normalized) > 0.3f)
+                                        accept = true;
+                                }
+                            }
+                            if (accept)
+                            {
+                                _jumpHasPending[j] = false;
                             }
                             else
                             {
