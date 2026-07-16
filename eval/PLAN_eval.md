@@ -61,6 +61,33 @@ harness-base を共通祖先にし、ハーネス修正は両トラックへ mer
 - **複数人**: 2 人以上での ID スワップ回数。※現データに 2 人シーン無し → 要長尺録画。
 
 ## Session refresh checkpoints
+### CP5 (2026-07-16 夕) — 融合品質の反復改善 v7 まで（目的: 本番採用判断 → main マージ → 印刷STL）
+- ユーザーの位置づけ: **トラッキング精度を本番レベルに上げるのが主目的**。合格なら main にマージし、
+  その後 curved line 付きモデルの STL を作成して 3D プリンタへ。
+- (a) v1→v7 の改善記録（全編スパイク>200mm / L トラック基準）:
+  v1=230(暴走直線) → v2=107(速度キャップ+ジャンプゲート) → v3=78(median-3)
+  → v4(ボーン長ハード拘束: 髪振り頭めり込み 13→0) → v5=80(オクルージョン z-テスト)
+  → v6=43(median-5, 遅延66ms) → **v7: Heartbeat で emission gap 15→0**(収録フレーム落ち対策)
+- (b) 主要な学び:
+  1. confidence は深度リフト Z 誤差を見ない(592mm誤差でconf0.64) → クロスカメラ偏差が判別信号
+  2. 深度マップ = オクルージョンの幾何学的判定器(z-テスト)。「隠れてる関節の捏造」をペア裁定で破棄
+     (ユーザー提案のロジック、v5 実装)
+  3. ボーン長キャリブは3役: 門前払い/レイ×長さの深度復元/出力ハード拘束
+  4. 残る~43スパイクは**モーションブラー帯(45s/54s)の3フレーム以上逸脱** = センサーレベルの情報消失。
+     フィルタでは回収不能 → **次回収録はシャッター速度を上げる**(+表現側でconf連動の曲線減衰も検討)
+  5. 収録はHW同期ゆえフレーム落ちも4台同時(66-299ms穴) → Heartbeat(保持ポーズの心拍emit)で充填。
+     ライブでもセンサーヒカップ対策としてそのまま有効
+- (c) 再生A/B: `FloatingVectors > Eval BT > Use RTMPose-fused bodies` → `D:/FVICC_eval/15-50-24-rtmfused`
+  (streams hardlink済み、bodies_main=v7)。書き出し: FusedBodiesExport.Start/Step(400)/Finish (~8分,
+  MCPタイムアウトしても処理継続、小Stepで進捗確認)
+- (d) 次セッション:
+  1. ユーザーの目視判定(特に 23s のカクつき解消 / 45s/54s ブラー帯の許容判断)
+  2. 合格なら: main マージ計画 — 残ギャップは**ライブ推論**(4cam RTMPose の GPU 予算、live capture 統合、
+     CUDA/TensorRT EP 導入=人手) と本番 SkeletonMerger との接続設計
+  3. STL: 再生 → Print Export パネル(Window > Print Export) → Pause → Fuse→Close→Export STL
+     (出力 ~/Documents/FloatingVectorsPrints/)。凍結レシピは CP4 参照
+  4. 表現側オプション: conf 連動の curved line 減衰(ブラー帯対策)
+
 ### CP4 (2026-07-16 午後) — 融合パイプライン初版まで完了
 - (a) 完了:
   - **本番修正済**: SkeletonMerger volume ゲート（main e8a0e6f → cherry-pick 4c2d498）
