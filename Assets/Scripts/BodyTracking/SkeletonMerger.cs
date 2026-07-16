@@ -211,6 +211,26 @@ namespace BodyTracking
         [Min(1)]
         public int requireMinWorkerCount = 1;
 
+        [Header("Tracking volume gate")]
+        [Tooltip("Discard whole bodies whose pelvis lies outside the tracking volume before " +
+                 "clustering. This installation is single-person and everything outside the " +
+                 "capture volume must be dropped — without this gate a bystander standing " +
+                 "meters outside the box is tracked, rendered, and counted (crowd alert / " +
+                 "presence). Per-worker debug skeletons (showPerWorkerSkeletons) stay ungated " +
+                 "so raw camera output remains inspectable.")]
+        public bool enableVolumeGate = true;
+
+        [Tooltip("OBB defining the tracking volume (same unit-cube convention as the point-" +
+                 "cloud filter). Auto-found at OnEnable when left null — the scene has one " +
+                 "shared sensing volume. Independent of the volume's filterMode: that switch " +
+                 "governs point culling, this gate has its own toggle above.")]
+        public BoundingVolume trackingVolume;
+
+        [Tooltip("Outward slack (meters) added to every box face for the gate test only. " +
+                 "Keeps a visitor straddling the boundary from flickering in and out; the " +
+                 "bystander this gate exists for stood ~3 m outside, far beyond any margin.")]
+        [Min(0f)] public float volumeGateMarginMeters = 0.25f;
+
         [Header("Debug")]
         [Tooltip("Also render each worker's raw skeleton (pre-merge) in a hue derived " +
                  "from the camera serial. Useful for comparing per-camera tracking quality " +
@@ -448,6 +468,7 @@ namespace BodyTracking
         // Diagnostic counters.
         private int _diagSnapshotsRecv;
         private int _diagDroppedStaleSnapshots;
+        private int _diagDroppedOutsideVolume;
         private int _diagFreshIterations; // CollectCandidates: slot non-empty AND not stale (= candidate built)
         private int _diagClustersFormed;
         private int _diagPersonsOutput;
@@ -469,6 +490,7 @@ namespace BodyTracking
             if (!ResolveDependencies()) { _disabledByGuard = true; enabled = false; return; }
 
             if (_pool == null) _pool = new BodyVisualPool(transform);
+            if (trackingVolume == null) trackingVolume = FindFirstObjectByType<BoundingVolume>();
             if (workerHost != null && !_hostSubscribed)
             {
                 workerHost.OnSkeletonsReady += OnWorkerSkeletons;
@@ -1053,6 +1075,7 @@ namespace BodyTracking
             Debug.Log(
                 $"[SkeletonMerger] workers={boundWorkers} " +
                 $"snapshots/s={_diagSnapshotsRecv} dropped_stale/s={_diagDroppedStaleSnapshots} " +
+                $"dropped_outside/s={_diagDroppedOutsideVolume} " +
                 $"fresh_iter/s={_diagFreshIterations} max_age_ms={_diagMaxObservedAgeMs:F0} " +
                 $"clusters/s={_diagClustersFormed} persons/s={_diagPersonsOutput} " +
                 $"continuity_carry_over/s={_diagContinuityCarryOver} " +
@@ -1060,6 +1083,7 @@ namespace BodyTracking
                 this);
             _diagSnapshotsRecv = 0;
             _diagDroppedStaleSnapshots = 0;
+            _diagDroppedOutsideVolume = 0;
             _diagFreshIterations = 0;
             _diagMaxObservedAgeMs = 0f;
             _diagClustersFormed = 0;
@@ -1110,6 +1134,16 @@ namespace BodyTracking
                         slot.DepthToColorMm,
                         slot.SourceTransform);
 
+                    // Volume gate: a body whose pelvis is outside the (margin-
+                    // expanded) tracking volume never becomes a candidate, so it
+                    // can't seed a cluster, be absorbed into one, spawn a
+                    // BodyVisual, or count toward Persons / the crowd alert.
+                    if (!PassesVolumeGate(pelvisWorld))
+                    {
+                        _diagDroppedOutsideVolume++;
+                        continue;
+                    }
+
                     var c = AcquireCandidate();
                     c.Slot = slot;
                     c.BodyIndex = i;
@@ -1119,6 +1153,36 @@ namespace BodyTracking
                 }
             }
         }
+
+        // True when the world position may enter the merge (gate off / no volume /
+        // inside the margin-expanded OBB). Same normalized-box math as
+        // PresenceDetector.IsInsideSensingVolume, minus the presence-specific XZ
+        // inset and world-Y band; the margin expands OUTWARD instead so a visitor
+        // straddling the boundary doesn't flicker in and out of tracking.
+        private bool PassesVolumeGate(Vector3 world)
+        {
+            if (!enableVolumeGate) return true;
+            if (trackingVolume == null)
+            {
+                if (!_volumeGateWarned)
+                {
+                    Debug.LogWarning(
+                        $"[{nameof(SkeletonMerger)}] enableVolumeGate is on but no " +
+                        "BoundingVolume was found in the scene; the gate is inert.", this);
+                    _volumeGateWarned = true;
+                }
+                return true;
+            }
+            var t = trackingVolume.transform;
+            Vector3 b = t.InverseTransformPoint(world);
+            Vector3 s = t.lossyScale;
+            float mx = 0.5f + (s.x != 0f ? volumeGateMarginMeters / Mathf.Abs(s.x) : 0f);
+            float my = 0.5f + (s.y != 0f ? volumeGateMarginMeters / Mathf.Abs(s.y) : 0f);
+            float mz = 0.5f + (s.z != 0f ? volumeGateMarginMeters / Mathf.Abs(s.z) : 0f);
+            return Mathf.Abs(b.x) <= mx && Mathf.Abs(b.y) <= my && Mathf.Abs(b.z) <= mz;
+        }
+
+        private bool _volumeGateWarned;
 
         private void BuildClusters()
         {
