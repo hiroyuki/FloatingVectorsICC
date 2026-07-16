@@ -67,17 +67,51 @@ k4abt latency is N/A here (replayed recorded output); live k4abt is typically
 - **Depth surface vs joint center**: RTMPose lifts to the body **surface** depth;
   k4abt estimates the joint **center** (slightly inside). A visible, systematic offset
   — evaluated raw (uncorrected) per the task.
-- **Production gap found via playback (2026-07-16)**: the k4abt→SkeletonMerger path has
+- **Production gap found via playback (2026-07-16)**: the k4abt→SkeletonMerger path had
   **no bounding-volume gate** — a bystander ~3.5 m OUTSIDE the capture volume was
-  tracked, merged and rendered (`Body_3786`) during production-scene playback. Per the
-  installation's rule ("outside the volume must be discarded — misfire + resource
-  risk") this is a defect to fix in production (separate task; production code was
-  off-limits for this eval). The RTMPose path already gates by the capture volume, so
-  its bodies contain the performer only.
-- **Per-frame/per-camera spot check (frame 788)**: cam L k4abt nearly lost the body
-  (5/26 joints) while RTMPose held 14/15; cam N k4abt produced a full-joint but
-  visibly distorted pose while RTMPose stayed compact; Z/EG comparable. Tool:
-  `FloatingVectors > Eval BT > Frame Inspector` (Grab & Freeze → per-camera view).
+  tracked, merged and rendered (`Body_3786`) during production-scene playback. **Fixed
+  2026-07-16**: `SkeletonMerger` now drops bodies whose pelvis is outside the scene
+  `BoundingVolume` (+0.25 m margin) before clustering — main `e8a0e6f`, cherry-picked
+  onto this branch as `4c2d498`. Verified on this session's playback (one full loop:
+  `alive_visuals=1`, up to 144 outside-drops/s; gate-off control brought the bystander
+  back). The RTMPose path already gated by the capture volume.
+
+## Visual A/B — frozen-frame deep-dive (2026-07-16, frame 788)
+
+Method: production playback frozen at reference frame 788 (30.81 s — dancer in a deep
+backbend, one arm whipped overhead, motion blur on the arm). Frame Inspector fused
+4-camera view + per-camera color-image overlays (`f788_overlay_{4L,4N,4Z,EG}.png`:
+green = YOLOX boxes, cyan = recorded k4abt, orange = RTMPose 3D joints reprojected).
+
+- **cam L**: k4abt near-total loss (**5/26** joints); RTMPose held 14/15. YOLOX fired
+  7 boxes on background clutter, but volume selection picked the dancer.
+- **cam N**: k4abt full-joint but **collapsed even in 2D** — an upright-ish skeleton
+  stuck inside the torso, ignoring the backbend. RTMPose's 2D pose tracked the spine
+  curve and the blurred arm well.
+- **cam Z**: both acceptable.
+- **cam EG** (rear view, head fully hidden; 2 bystanders + the installation's own
+  wall projection in frame): detector found 3 people, volume selection correctly took
+  the dancer; RTMPose arm/torso fine but **leg left/right assignment tangled**.
+- **Reprojection caveat → depth-lift diagnosis**: reprojecting into the *same* camera
+  cancels Z error. RTMPose's N/EG skeletons look clean in 2D yet were visibly wrong in
+  the 3D scene ⇒ the error concentrates in the **depth lift** (blurred limb edges /
+  self-occluded pixels sample wrong depth; the 5×5 median grid does not always save
+  it) and in **occlusion** (head-invisible viewpoints scramble limb assignment).
+
+**User verdict (visual A/B, 2026-07-16)**: *k4abt is struggling overall* — the cam-L
+loss and cam-N collapse mirror the original joint-accuracy complaint that motivated
+this eval. *RTMPose has not solved occlusion* — occluded-limb / head-hidden viewpoints
+(N, EG) still break its 3D output even where the 2D pose is right. Consequence for
+any RTMPose production path: **multi-camera confidence-weighted fusion with
+occlusion-aware per-joint down-weighting is mandatory**, not optional; single-camera
+RTMPose is not deployable for this choreography.
+
+Tools: `FloatingVectors > Eval BT > Frame Inspector` (Grab & Freeze / per-camera
+view; debug cloud now culled to the BoundingVolume, `0935fd3`). Frozen-frame recipe
+for camera-orbitable inspection: seek → `EditorApplication.Step()` a few frames (lets
+the merger consume the sought bodies) → `Time.timeScale=0` with the editor UNpaused
+(Game-view orbit keeps working) → TSDF `RequestFullClearNextBatch()` + re-emit to
+rebuild the surface at the frozen frame.
 
 ## Effort / gotchas / production work
 - **Effort**: harness + baseline reused directly; RTMPose backend ~1 day equivalent
