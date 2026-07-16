@@ -124,19 +124,28 @@ namespace PointCloud
         }
 
         // Scratch for the component sweep (grown on demand, box-local indices).
+        // _queue doubles as the component pixel list: indices [0, qt) after a
+        // traversal are exactly the pixels of that component.
         private static byte[] _visited = System.Array.Empty<byte>();
         private static int[] _queue = System.Array.Empty<int>();
-        private static int[] _component = System.Array.Empty<int>();
 
         /// <summary>Flood-fill every valid pixel inside the disc into its depth-linked
         /// component (4-connectivity, |Δdepth| ≤ DepthLinkMm per edge) within a working
-        /// box (disc + generous margin). A component is REAL — and kept — as soon as it
-        /// touches the box boundary (it connects to the world outside) or reaches
-        /// MinRealComponentPx; anything that exhausts while still small and enclosed is
-        /// the flare island and gets zeroed.</summary>
+        /// box (disc + margin). A component is REAL — and kept — as soon as it touches
+        /// the box boundary (it connects to the world outside), reaches
+        /// MinRealComponentPx, or touches a pixel already proven real; anything that
+        /// exhausts while still small and enclosed is the flare island and gets zeroed.
+        ///
+        /// Perf contract: this runs per camera per frame on the CPU (Mono in-editor),
+        /// so the big surface (body/wall) must never be walked exhaustively. The
+        /// early exits cap it at ~MinRealComponentPx dequeues once; every later seed
+        /// of the same surface resolves in O(1-ish) by touching a REAL-marked pixel —
+        /// the naive exhaustive version cost ~45 ms/frame across four cameras.
+        /// Visited states: 0 = unvisited, 1 = REAL (kept), 2 = consumed (invalid or
+        /// zeroed ghost).</summary>
         private static void FilterDisc(byte[] depth, int w, int h, float cu, float cv, float r)
         {
-            int margin = Mathf.CeilToInt(r) + 20;
+            int margin = 24; // ghost patch reaches ~40px from center; r+24 keeps it enclosed
             int bx0 = Mathf.Max(0, (int)(cu - r) - margin);
             int bx1 = Mathf.Min(w - 1, (int)(cu + r) + margin);
             int by0 = Mathf.Max(0, (int)(cv - r) - margin);
@@ -148,7 +157,6 @@ namespace PointCloud
             {
                 _visited = new byte[boxArea];
                 _queue = new int[boxArea];
-                _component = new int[boxArea];
             }
             System.Array.Clear(_visited, 0, boxArea);
 
@@ -170,41 +178,50 @@ namespace PointCloud
                     if (_visited[seedLocal] != 0) continue;
                     int seedIdx = (sv2 * w + su2) * 2;
                     int seedDepth = depth[seedIdx] | (depth[seedIdx + 1] << 8);
-                    _visited[seedLocal] = 1;
-                    if (seedDepth == 0) continue;
+                    if (seedDepth == 0) { _visited[seedLocal] = 2; continue; }
 
-                    // BFS the FULL component (no early exit: an abandoned traversal
-                    // would leave visited walls that cut a later seed's view of the
-                    // same surface into a small "fragment" and get it wrongly zeroed).
-                    // The box bounds the work to a few 10k pixels per disc.
-                    int qh = 0, qt = 0, size = 0;
+                    int qh = 0, qt = 0;
                     bool real = false;
+                    _visited[seedLocal] = 2;
                     _queue[qt++] = seedLocal;
                     while (qh < qt)
                     {
                         int cur = _queue[qh++];
-                        _component[size++] = cur;
                         int cy = cur / bw + by0, cx = cur % bw + bx0;
-                        if (cx == bx0 || cx == bx1 || cy == by0 || cy == by1) real = true;
+                        if (cx == bx0 || cx == bx1 || cy == by0 || cy == by1) { real = true; break; }
+                        if (qt >= minReal) { real = true; break; }
                         int curDepth = depth[(cy * w + cx) * 2] | (depth[(cy * w + cx) * 2 + 1] << 8);
-                        for (int n = 0; n < 4; n++)
+                        for (int n = 0; n < 4 && !real; n++)
                         {
                             int nx = cx + (n == 0 ? 1 : n == 1 ? -1 : 0);
                             int ny = cy + (n == 2 ? 1 : n == 3 ? -1 : 0);
                             if (nx < bx0 || nx > bx1 || ny < by0 || ny > by1) continue;
                             int nl = (ny - by0) * bw + (nx - bx0);
-                            if (_visited[nl] != 0) continue;
+                            byte vs = _visited[nl];
                             int nd = depth[(ny * w + nx) * 2] | (depth[(ny * w + nx) * 2 + 1] << 8);
-                            if (nd == 0) { _visited[nl] = 1; continue; }
+                            if (nd == 0) { if (vs == 0) _visited[nl] = 2; continue; }
+                            // same-surface link required for BOTH growth and the
+                            // touch-real shortcut (a 3 m flare pixel bordering a 6 m
+                            // wall pixel is NOT connected to it)
                             if (System.Math.Abs(nd - curDepth) > link) continue;
-                            _visited[nl] = 1;
+                            if (vs == 1) { real = true; break; }  // touches a proven-real surface
+                            if (vs != 0) continue;                 // already part of this traversal
+                            _visited[nl] = 2;
                             _queue[qt++] = nl;
                         }
+                        if (real) break;
                     }
-                    if (real || size >= minReal) continue; // keep
-                    for (int i = 0; i < size; i++)
+                    if (real)
                     {
-                        int l = _component[i];
+                        // promote everything this traversal touched to REAL so later
+                        // seeds of the same surface resolve on contact
+                        for (int i = 0; i < qt; i++) _visited[_queue[i]] = 1;
+                        continue;
+                    }
+                    // enclosed small island -> flare: zero it
+                    for (int i = 0; i < qt; i++)
+                    {
+                        int l = _queue[i];
                         int y = l / bw + by0, x = l % bw + bx0;
                         int idx = (y * w + x) * 2;
                         depth[idx] = 0; depth[idx + 1] = 0;
