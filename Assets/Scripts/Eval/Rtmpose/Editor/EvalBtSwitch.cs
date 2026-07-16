@@ -20,12 +20,16 @@ namespace BodyTracking.Eval.Rtmpose
     {
         const string RootK4abt = "D:/Dropbox/projects/ICC/Recordings/RecordingBase/2026-07-14_15-50-24";
         const string RootRtmpose = "D:/FVICC_eval/15-50-24-rtmpose";
+        const string RootRtmFused = "D:/FVICC_eval/15-50-24-rtmfused";
 
         [MenuItem("FloatingVectors/Eval BT/Use k4abt bodies", priority = 1)]
         public static void UseK4abt() => Switch(RootK4abt, "k4abt");
 
         [MenuItem("FloatingVectors/Eval BT/Use RTMPose bodies", priority = 2)]
         public static void UseRtmpose() => Switch(RootRtmpose, "RTMPose");
+
+        [MenuItem("FloatingVectors/Eval BT/Use RTMPose-fused bodies", priority = 3)]
+        public static void UseRtmFused() => Switch(RootRtmFused, "RTMPose-fused");
 
         [MenuItem("FloatingVectors/Eval BT/Status", priority = 20)]
         public static void Status()
