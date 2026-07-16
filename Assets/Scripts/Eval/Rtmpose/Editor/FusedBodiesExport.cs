@@ -40,6 +40,9 @@ namespace BodyTracking.Eval.Rtmpose
         static byte[] _scratch;
         static int _written;
 
+        /// <summary>The adapter of the current chunked run — for setting debug-probe fields between Start and Step.</summary>
+        public static FusedRtmposeAdapter ActiveAdapter => _fused;
+
         public static string Start(string sessionRoot, string outDir, int maxFramesPerDevice)
         {
             Abort();

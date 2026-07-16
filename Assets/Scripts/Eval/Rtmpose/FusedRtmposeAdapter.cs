@@ -213,6 +213,15 @@ namespace BodyTracking.Eval.Rtmpose
         // diagnostics (per session, read for reporting)
         public int StatConsensus, StatSingleAccepted, StatRelifted, StatHeld, StatDroppedLen, StatOutliers, StatJumpHeld, StatLenProjected, StatOccDropped;
 
+        // Debug probe: when dbgJoint >= 0, every fusion of that joint inside
+        // [dbgFromNs, dbgToNs] appends its per-camera candidates (with stage-1
+        // validity) and the decision (path, strong, jump-gate action) to DbgSb.
+        // Zero cost when disabled; read/clear DbgSb from an editor script.
+        public int dbgJoint = -1;
+        public ulong dbgFromNs, dbgToNs;
+        public readonly System.Text.StringBuilder DbgSb = new();
+        bool _dbgInFuse;
+
         public FusedRtmposeAdapter(OrtRtmposeBackend backend)
         {
             _inner = new RtmPoseAdapter(backend);
@@ -452,7 +461,23 @@ namespace BodyTracking.Eval.Rtmpose
                     pts.Add(_work[i].World[j]); wts.Add(Mathf.Max(0.05f, _work[i].Conf[j])); srcSample.Add(i);
                 }
 
+                bool dbg = dbgJoint == j && nowTs >= dbgFromNs && nowTs <= dbgToNs;
+                if (dbg)
+                {
+                    DbgSb.Append(nowTs).Append(' ');
+                    for (int i = 0; i < _work.Count; i++)
+                    {
+                        var w = _work[i].World[j];
+                        DbgSb.Append(_workSerial[i].Substring(_workSerial[i].Length - 2))
+                             .Append(_work[i].Valid[j] ? (_workValid[i][j] ? "" : "!len") : "!inv")
+                             .Append('(').Append(w.x.ToString("F0")).Append(',')
+                             .Append(w.y.ToString("F0")).Append(',').Append(w.z.ToString("F0"))
+                             .Append(")c").Append(_work[i].Conf[j].ToString("F2")).Append(' ');
+                    }
+                }
+
                 float conf; Vector3 pos; bool fresh, strong;
+                _dbgInFuse = dbg;
                 if (FuseJoint(j, pts, wts, srcSample, out pos, out conf, out fresh, out strong))
                 {
                     // Jump gate: a fresh position far from recent history is
@@ -509,10 +534,17 @@ namespace BodyTracking.Eval.Rtmpose
                     }
                     else { _jumpHasPending[j] = false; _jumpConfirms[j] = 0; }
 
+                    if (dbg)
+                        DbgSb.Append("=> (").Append(pos.x.ToString("F0")).Append(',')
+                             .Append(pos.y.ToString("F0")).Append(',').Append(pos.z.ToString("F0"))
+                             .Append(") fresh=").Append(fresh).Append(" strong=").Append(strong)
+                             .Append(" pend=").Append(_jumpHasPending[j]).Append('\n');
+
                     fusedPos[j] = pos; fusedOk[j] = true; fusedFresh[j] = fresh;
                     ref var oj = ref _fused.Joints[j];
                     oj.PositionMm = pos; oj.Confidence = conf; oj.Valid = true;
                 }
+                else if (dbg) DbgSb.Append("=> none\n");
             }
 
             // Final pass: calibrated bone lengths are HARD output constraints.
@@ -716,34 +748,16 @@ namespace BodyTracking.Eval.Rtmpose
         {
             pos = default; conf = 0f; fresh = false; strong = false;
 
-            // Occlusion arbitration between DISAGREEING samples: if camera C
-            // provably cannot see the place camera A puts the joint (A's position
-            // is behind C's measured surface, or outside C's view), while A CAN
-            // see C's claimed location and still disagrees, then C was guessing an
-            // occluded joint (e.g. a hand fully hidden behind the torso) — drop
-            // C's sample so the sighted camera wins.
-            if (pts.Count >= 2)
-            {
-                for (int i = pts.Count - 1; i >= 0 && pts.Count > 1; i--)
-                {
-                    bool dropI = false;
-                    for (int k = 0; k < pts.Count && !dropI; k++)
-                    {
-                        if (k == i) continue;
-                        if (Vector3.Distance(pts[i], pts[k]) <= gateMm[j]) continue;
-                        string si = _workSerial[srcSample[i]];
-                        string sk = _workSerial[srcSample[k]];
-                        if (VisibilityOf(si, pts[k]) == -1 && VisibilityOf(sk, pts[i]) == 1
-                            && wts[k] >= wts[i] * 0.7f)
-                            dropI = true;
-                    }
-                    if (dropI)
-                    {
-                        pts.RemoveAt(i); wts.RemoveAt(i); srcSample.RemoveAt(i);
-                        StatOccDropped++;
-                    }
-                }
-            }
+            // NOTE: the occlusion z-test used to run HERE, before clustering,
+            // and that dropped the CORRECT camera in the mirror-pair failure:
+            // when the person faces away, two cameras flip the right wrist onto
+            // the left hand — a real, visible surface — while a correct camera
+            // is genuinely blind to that spot (it is across the body), and
+            // silhouette-edge depth makes the flipped pair look "sighted" at
+            // the true position. Blindness to a rival's location is not
+            // evidence against one's own claim, so the z-test must never veto
+            // clustering; it now arbitrates only among isolated candidates in
+            // the weak path below (its original 1-vs-1 hidden-joint use).
 
             // Cluster consensus: the per-axis component median is not robust
             // when half the cameras are wrong — two bad samples drag the median
@@ -753,74 +767,160 @@ namespace BodyTracking.Eval.Rtmpose
             // the background wall, another was meters off, and the two correct
             // cameras got gated out). With <=4 cameras the exact answer is
             // cheap: enumerate subsets and take the largest mutually-consistent
-            // cluster (all pairwise distances within the joint gate), ties
-            // broken by total confidence weight. A cluster of >=2 is STRONG
-            // evidence; everything below is weak.
+            // cluster (all pairwise distances within the joint gate). A cluster
+            // of >=2 is STRONG evidence; everything below is weak.
             int n = pts.Count;
             if (n >= 2)
             {
-                int bestMask = 0, bestCount = 0; float bestWsum = 0f;
+                // Equal-count cluster ties break on TEMPORAL CONTINUITY, not
+                // confidence: when the person faces away, two cameras can
+                // mirror-flip the same limb the same way (both put the right
+                // wrist on the left hand) and form a perfectly valid-looking
+                // 2-camera cluster AGAINST the 2 correct cameras — and
+                // confidence is blind to that (it never sees 3D error). The
+                // joint history disambiguates decisively: the true cluster
+                // continues the track, the flipped one is a bone-length away.
+                bool hasPred = false; Vector3 pred = Vector3.zero;
+                {
+                    float pAge = AgeSec(_lastFusedTs, _histTs[j]);
+                    if (_histHas[j] && pAge <= holdMaxSeconds) { pred = HeldPrediction(j, pAge); hasPred = true; }
+                }
+                int bestMask = 0, bestCount = 0; float bestWsum = 0f, bestPredD = float.MaxValue;
                 for (int mask = 3; mask < (1 << n); mask++)
                 {
                     int cnt = 0; float msum = 0f; bool ok = true;
+                    Vector3 macc = Vector3.zero;
                     for (int a = 0; a < n && ok; a++)
                     {
                         if ((mask & (1 << a)) == 0) continue;
-                        cnt++; msum += wts[a];
+                        cnt++; msum += wts[a]; macc += pts[a] * wts[a];
                         for (int b = a + 1; b < n && ok; b++)
                             if ((mask & (1 << b)) != 0 && Vector3.Distance(pts[a], pts[b]) > gateMm[j])
                                 ok = false;
                     }
                     if (!ok || cnt < 2) continue;
-                    if (cnt > bestCount || (cnt == bestCount && msum > bestWsum))
-                    { bestMask = mask; bestCount = cnt; bestWsum = msum; }
+                    float predD = hasPred ? Vector3.Distance(macc / msum, pred) : 0f;
+                    bool better;
+                    if (cnt != bestCount) better = cnt > bestCount;
+                    else if (hasPred) better = predD < bestPredD;
+                    else better = msum > bestWsum;
+                    if (better)
+                    { bestMask = mask; bestCount = cnt; bestWsum = msum; bestPredD = predD; }
                 }
+                if (_dbgInFuse)
+                    DbgSb.Append("[cluster n=").Append(bestCount).Append(" mask=").Append(bestMask)
+                         .Append(" predD=").Append(hasPred ? bestPredD.ToString("F0") : "nopred").Append("] ");
                 if (bestCount >= 2)
                 {
-                    Vector3 acc = Vector3.zero; float wsum = 0f, cmax = 0f;
-                    for (int i = 0; i < n; i++)
+                    // Loyalty demotion: a PAIR that jumps a bone-length off the
+                    // predicted track while some other candidate stays on it is
+                    // the mirror-pair signature (two cameras flipping the same
+                    // limb the same way still out-count one correct camera when
+                    // its partner dropped out for a frame). Trust the track:
+                    // send the far pair down the weak path, whose prediction-
+                    // ordered vetting picks the loyal candidate instead. A
+                    // cluster of >=3 is never demoted — three cameras agreeing
+                    // on a jump is genuine fast motion.
+                    bool demoted = false;
+                    if (hasPred && bestCount <= 2 && bestPredD > jumpGateMm)
                     {
-                        if ((bestMask & (1 << i)) == 0) { StatOutliers++; continue; }
-                        acc += pts[i] * wts[i]; wsum += wts[i]; cmax = Mathf.Max(cmax, wts[i]);
+                        for (int i = 0; i < n && !demoted; i++)
+                        {
+                            if ((bestMask & (1 << i)) != 0) continue;
+                            if (Vector3.Distance(pts[i], pred) <= jumpGateMm && PassesParentLength(j, pts[i]))
+                                demoted = true;
+                        }
+                        if (_dbgInFuse && demoted) DbgSb.Append("[demote] ");
                     }
-                    pos = acc / wsum; conf = cmax; fresh = true; strong = true; StatConsensus++;
-                    return true;
+                    if (!demoted)
+                    {
+                        Vector3 acc = Vector3.zero; float wsum = 0f, cmax = 0f;
+                        for (int i = 0; i < n; i++)
+                        {
+                            if ((bestMask & (1 << i)) == 0) { StatOutliers++; continue; }
+                            acc += pts[i] * wts[i]; wsum += wts[i]; cmax = Mathf.Max(cmax, wts[i]);
+                        }
+                        pos = acc / wsum; conf = cmax; fresh = true; strong = true; StatConsensus++;
+                        return true;
+                    }
                 }
             }
 
-            // No agreeing pair — weak-evidence path. Order the candidates by
-            // trust (proximity to the temporal prediction when history is
-            // fresh, else confidence) so a grossly wrong camera can never win
-            // by iteration order, then vet each: direct accept on a sane bone
-            // length to the fused parent, else ray x bone-length re-lift.
-            if (n > 0)
+            // No trusted cluster — weak-evidence path.
             {
-                var order = new List<int>(n);
-                for (int i = 0; i < n; i++) order.Add(i);
                 float predAge = AgeSec(_lastFusedTs, _histTs[j]);
-                if (_histHas[j] && predAge <= holdMaxSeconds)
+                bool predFresh = _histHas[j] && predAge <= holdMaxSeconds;
+
+                // Occlusion arbitration between DISAGREEING isolated samples:
+                // if camera C provably cannot see the place camera A puts the
+                // joint (A's position is behind C's measured surface, or
+                // outside C's view), while A CAN see C's claimed location and
+                // still disagrees, then C was guessing an occluded joint
+                // (e.g. a hand fully hidden behind the torso) — drop C's
+                // sample so the sighted camera wins. Runs only WITHOUT fresh
+                // history, after clustering: silhouette-edge depth can fake
+                // the "sighted" verdict (and did — it vetoed the correct
+                // camera during a mirror-pair flip), so whenever the track can
+                // arbitrate, the track wins; the z-test only breaks cold-start
+                // disagreements.
+                if (!predFresh && pts.Count >= 2)
                 {
-                    var pred = HeldPrediction(j, predAge);
-                    order.Sort((a, b) => Vector3.Distance(pts[a], pred).CompareTo(Vector3.Distance(pts[b], pred)));
-                }
-                else
-                {
-                    order.Sort((a, b) => wts[b].CompareTo(wts[a]));
+                    for (int i = pts.Count - 1; i >= 0 && pts.Count > 1; i--)
+                    {
+                        bool dropI = false;
+                        for (int k = 0; k < pts.Count && !dropI; k++)
+                        {
+                            if (k == i) continue;
+                            if (Vector3.Distance(pts[i], pts[k]) <= gateMm[j]) continue;
+                            string si = _workSerial[srcSample[i]];
+                            string sk = _workSerial[srcSample[k]];
+                            if (VisibilityOf(si, pts[k]) == -1 && VisibilityOf(sk, pts[i]) == 1
+                                && wts[k] >= wts[i] * 0.7f)
+                                dropI = true;
+                        }
+                        if (dropI)
+                        {
+                            if (_dbgInFuse) DbgSb.Append("[occdrop ").Append(_workSerial[srcSample[i]].Substring(_workSerial[srcSample[i]].Length - 2)).Append("] ");
+                            pts.RemoveAt(i); wts.RemoveAt(i); srcSample.RemoveAt(i);
+                            StatOccDropped++;
+                        }
+                    }
                 }
 
-                foreach (int i in order)
+                // Order the candidates by trust (proximity to the temporal
+                // prediction when history is fresh, else confidence) so a
+                // grossly wrong camera can never win by iteration order, then
+                // vet each: direct accept on a sane bone length to the fused
+                // parent, else ray x bone-length re-lift.
+                n = pts.Count;
+                if (n > 0)
                 {
-                    if (!PassesParentLength(j, pts[i])) continue;
-                    pos = pts[i]; conf = wts[i] * 0.9f; fresh = true; StatSingleAccepted++;
-                    return true;
-                }
-                // Stage 3a: ray x bone-length re-lift (needs fused parent + profile)
-                foreach (int i in order)
-                {
-                    if (TryRayRelift(j, pts[i], srcSample[i], out var relift))
+                    var order = new List<int>(n);
+                    for (int i = 0; i < n; i++) order.Add(i);
+                    if (predFresh)
                     {
-                        pos = relift; conf = wts[i] * 0.7f; fresh = true; StatRelifted++;
+                        var pred = HeldPrediction(j, predAge);
+                        order.Sort((a, b) => Vector3.Distance(pts[a], pred).CompareTo(Vector3.Distance(pts[b], pred)));
+                    }
+                    else
+                    {
+                        order.Sort((a, b) => wts[b].CompareTo(wts[a]));
+                    }
+
+                    foreach (int i in order)
+                    {
+                        if (!PassesParentLength(j, pts[i])) continue;
+                        pos = pts[i]; conf = wts[i] * 0.9f; fresh = true; StatSingleAccepted++;
                         return true;
+                    }
+                    // Stage 3a: ray x bone-length re-lift (needs fused parent + profile)
+                    foreach (int i in order)
+                    {
+                        if (TryRayRelift(j, pts[i], srcSample[i], out var relift))
+                        {
+                            pos = relift; conf = wts[i] * 0.7f; fresh = true; StatRelifted++;
+                            return true;
+                        }
                     }
                 }
             }
