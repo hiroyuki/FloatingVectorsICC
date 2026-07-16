@@ -106,6 +106,36 @@ any RTMPose production path: **multi-camera confidence-weighted fusion with
 occlusion-aware per-joint down-weighting is mandatory**, not optional; single-camera
 RTMPose is not deployable for this choreography.
 
+### Per-joint confidence vs 3D error (frame 788, measured)
+
+Question: RTMPose has per-joint confidence (SimCC score, raw scale, threshold 0.3 —
+already applied) — can it catch the occlusion/depth-lift failures? **No.** Measured
+(conf, deviation in mm from the median of the *other* cameras, world space):
+
+| joint | 4L | 4N | 4Z | EG |
+|---|---|---|---|---|
+| Pelvis | 0.72, 103 | **0.64, 592** | 0.69, 149 | 0.65, 162 |
+| HipL | 0.72, 71 | **0.64, 652** | 0.72, 149 | 0.75, 73 |
+| KneeR | 0.83, 65 | 0.79, 77 | 0.75, 70 | **0.75, 550** |
+| ElbowR | 0.84, 149 | 0.86, 146 | 0.59, 489 | **0.41, 682** |
+| WristR | **0.84, 807** | **0.84, 796** | – | 0.34, 804 |
+
+- Confidence measures 2D heatmap certainty only; **depth-lift (Z) errors do not show
+  up in it** — N's pelvis is 592 mm off at conf 0.64, indistinguishable from the
+  healthy cameras (0.65–0.72). Thresholding/weighting on confidence alone cannot
+  separate these.
+- The **cross-camera deviation column itself is the discriminating signal**: for every
+  joint except WristR, the healthy majority sits within ~150 mm of consensus →
+  median fusion + outlier rejection (~200 mm gate) removes every N/EG failure at this
+  frame.
+- **WristR is the residual hard case**: all three observing cameras disagree by
+  ~800 mm (fast, motion-blurred wrist) — no consensus exists; only temporal
+  continuity / bone-length priors / per-frame invalidation can handle it.
+- Conclusion: **confidence alone ✗; confidence (as weight) × cross-camera consensus
+  (outlier rejection) × temporal continuity (last resort) — that 3-stage fusion is
+  the viable design**, and it is the RTMPose analogue of the production
+  SkeletonMerger's per-joint continuity gate.
+
 Tools: `FloatingVectors > Eval BT > Frame Inspector` (Grab & Freeze / per-camera
 view; debug cloud now culled to the BoundingVolume, `0935fd3`). Frozen-frame recipe
 for camera-orbitable inspection: seek → `EditorApplication.Step()` a few frames (lets
