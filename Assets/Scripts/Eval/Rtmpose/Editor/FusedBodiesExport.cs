@@ -32,6 +32,8 @@ namespace BodyTracking.Eval.Rtmpose
         static Dictionary<string, ObExtrinsic> _d2c;
         static Dictionary<string, ObExtrinsic> _gTr; // color->world per serial
         static List<(int dev, int idx)> _order;
+        static List<ulong> _orderTs;
+        static ulong _prevTs;
         static int _cursor;
         static string _outDir;
         static BodySnapshot _snap;
@@ -116,8 +118,10 @@ namespace BodyTracking.Eval.Rtmpose
             }
             withTs.Sort((a, b) => a.ts.CompareTo(b.ts));
             _order = new List<(int, int)>();
-            foreach (var w in withTs) _order.Add((w.dev, w.idx));
+            _orderTs = new List<ulong>();
+            foreach (var w in withTs) { _order.Add((w.dev, w.idx)); _orderTs.Add(w.ts); }
             _cursor = 0;
+            _prevTs = 0;
             return $"ready: {_order.Count} frames -> {_outDir} profile={(_fused.Profile != null ? "loaded" : "MISSING")}";
         }
 
@@ -197,7 +201,21 @@ namespace BodyTracking.Eval.Rtmpose
         {
             if (_driver == null || _order == null) return "not started";
             int end = Math.Min(_cursor + Math.Max(1, n), _order.Count);
-            for (; _cursor < end; _cursor++) { var o = _order[_cursor]; _driver.EmitAt(o.dev, o.idx); }
+            for (; _cursor < end; _cursor++)
+            {
+                var o = _order[_cursor];
+                ulong ts = _orderTs[_cursor];
+                // Recorded frame drops leave holes the fusion never gets called
+                // for (all cameras drop together on this HW-synced rig) — inject
+                // heartbeat beats so the output stream stays at cadence.
+                if (_prevTs != 0 && ts > _prevTs && ts - _prevTs > 40_000_000UL)
+                {
+                    for (ulong t = _prevTs + 33_000_000UL; t + 5_000_000UL < ts; t += 33_000_000UL)
+                        _fused.Heartbeat(t);
+                }
+                _driver.EmitAt(o.dev, o.idx);
+                _prevTs = ts;
+            }
             return $"{_cursor}/{_order.Count}{(_cursor >= _order.Count ? " DONE" : "")} fusedFrames={_written}";
         }
 

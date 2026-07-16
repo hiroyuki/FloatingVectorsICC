@@ -349,7 +349,14 @@ namespace BodyTracking.Eval.Rtmpose
                 if (d > skewNs) continue;
                 _work.Add(kv.Value); _workSerial.Add(kv.Key);
             }
-            if (_work.Count == 0) return;
+            if (_work.Count == 0)
+            {
+                // No fresh camera sample this beat (person selection momentarily
+                // failed on every camera) — emit the temporal hold instead of
+                // skipping a frame.
+                EmitHeldFrame(nowTs);
+                return;
+            }
             _lastFusedTs = nowTs;
 
             // Stage 1: per-camera bone-length sanity (blame the distal joint).
@@ -496,6 +503,47 @@ namespace BodyTracking.Eval.Rtmpose
                 _histPos[j] = fusedPos[j]; _histTs[j] = nowTs; _histHas[j] = true;
             }
 
+            PushLagAndEmit(nowTs);
+        }
+
+        /// <summary>Heartbeat: emit a temporal-hold frame when the cameras went
+        /// silent (recorded frame drop, live sensor hiccup). Keeps the output
+        /// cadence steady so downstream motion curves never bridge a hole with a
+        /// straight segment (visible kink). Safe to call any time — no-op inside
+        /// the normal fuse interval or when nothing recent enough to hold.</summary>
+        public void Heartbeat(ulong nowTs)
+        {
+            if (_lastFusedTs != 0 && nowTs > _lastFusedTs
+                && (nowTs - _lastFusedTs) < (ulong)(minFuseIntervalMs * 1e6f)) return;
+            EmitHeldFrame(nowTs);
+        }
+
+        // Emit the per-joint temporal-hold prediction as a full frame. Held
+        // joints do NOT update the history (no feedback into velocity).
+        void EmitHeldFrame(ulong nowTs)
+        {
+            _lastFusedTs = nowTs;
+            _fused.Reset(1, nowTs);
+            int heldJoints = 0;
+            for (int j = 0; j < (int)EvalJointId.Count; j++)
+            {
+                if (!_histHas[j]) continue;
+                float age = (nowTs - _histTs[j]) / 1e9f;
+                if (age < 0f || age > holdMaxSeconds) continue;
+                ref var oj = ref _fused.Joints[j];
+                oj.PositionMm = HeldPrediction(j, age);
+                oj.Confidence = 0.2f;
+                oj.Valid = true;
+                heldJoints++;
+            }
+            if (heldJoints == 0) return;
+            StatHeld += heldJoints;
+            ProjectBoneLengths(_fused);
+            PushLagAndEmit(nowTs);
+        }
+
+        void PushLagAndEmit(ulong nowTs)
+        {
             if (!medianLagFilter)
             {
                 _frame.Reset(Name, "fused", nowTs);
