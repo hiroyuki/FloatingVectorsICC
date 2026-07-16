@@ -343,8 +343,12 @@ void CSBuild(uint3 id : SV_DispatchThreadID)
 
 // Bounds-checked append into _SegsOut. _SegStats[0] counts every attempt, so the
 // host reads emitted = min(stats[0], cap) and dropped = stats[1].
-// tag rides in _pad (unused by BakeTrail): 0 = curve chain seg, 1 = body bridge —
-// the STL tube export reads the buffer back and needs to tell them apart.
+// tag rides in _pad (unused by BakeTrail): seed*2 + isBridge. The STL tube export
+// reads the buffer back and regroups the interleaved appends into per-seed chains
+// (+ their bridge), so tubes and bridges come from the SAME emit — reading the
+// drawn ribbon buffer instead would pair them with a DIFFERENT nondeterministic
+// seed subset (see the auto-hold comment in PointCloudMotionCurves.Update).
+// float holds integers exactly to 2^24, far above any real seed count.
 void AppendSegTag(float3 a, float3 b, float ra, float rb, float3 col, float tag)
 {
     uint idx;
@@ -352,11 +356,6 @@ void AppendSegTag(float3 a, float3 b, float ra, float rb, float3 col, float tag)
     if (idx >= _SegCap) { InterlockedAdd(_SegStats[1], 1u); return; }
     Seg s; s.a = a; s.b = b; s.ra = ra; s.rb = rb; s.color = col; s._pad = tag;
     _SegsOut[idx] = s;
-}
-
-void AppendSeg(float3 a, float3 b, float ra, float rb, float3 col)
-{
-    AppendSegTag(a, b, ra, rb, col, 0.0);
 }
 
 // Print export: one thread per PRINT seed (every _PrintSeedStride-th seed slot,
@@ -384,11 +383,12 @@ void CSEmitSegs(uint3 id : SV_DispatchThreadID)
     float3 col = sp.col;
 
     uint totalSegs = (m - 1u) * _Subdiv;
+    float chainTag = (float)(seedLocal * 2u);
     float3 prev = float3(0, 0, 0);
     for (uint si = 0; si <= totalSegs; si++)
     {
         float3 pt = StripPoint(pts, m, si, totalSegs);
-        if (si > 0u) AppendSeg(prev, pt, r, r, col);
+        if (si > 0u) AppendSegTag(prev, pt, r, r, col, chainTag);
         prev = pt;
     }
 
@@ -396,5 +396,5 @@ void CSEmitSegs(uint3 id : SV_DispatchThreadID)
     // side thicker). Guard against long struts from misclassified seeds.
     float3 tip = pts[m - 1u];
     if (length(anchor - tip) > _MaxBridgeLength) { InterlockedAdd(_SegStats[2], 1u); return; }
-    AppendSegTag(tip, anchor, r, r * _BridgeRadiusScale, col, 1.0);
+    AppendSegTag(tip, anchor, r, r * _BridgeRadiusScale, col, (float)(seedLocal * 2u + 1u));
 }

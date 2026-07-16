@@ -126,10 +126,11 @@ namespace TSDF.EditorTools
                     "MC の階段状ガタつきを除去する。表示中の TSDF mesh には影響しない。"),
                 pe.smoothIterations, 0, 30);
             bool stlTubes = EditorGUILayout.ToggleLeft(
-                new GUIContent("STL: Include Curve Tubes (表示解像度のチューブで同梱)",
-                    "カーブを描画バッファから読み戻し、閉じたチューブメッシュ＋体への接続ブリッジとして " +
-                    "STL に直接同梱する。voxel 化を通らないので解像度が落ちず、Fuse curves は不要" +
-                    "（すると二重になる）。重なったシェルはスライサーが union する。" +
+                new GUIContent("STL: Include Curve Tubes (フル解像度のチューブで同梱)",
+                    "カーブ＋体への接続ブリッジを 1 回の CSEmitSegs（Fuse curves と同一のシード集合）" +
+                    "から閉じたチューブメッシュとして再構成し、STL に直接同梱する。voxel 化を" +
+                    "通らないので解像度が落ちず、Fuse curves は不要（すると二重になる）。" +
+                    "重なったシェルはスライサーが union する。" +
                     "OFF = 旧方式（Fuse curves で voxel に焼いた分だけが STL に入る）。"),
                 pe.stlIncludeCurveTubes);
             int stlSides = EditorGUILayout.IntSlider(
