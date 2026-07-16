@@ -114,6 +114,13 @@ namespace BodyTracking.Eval.Rtmpose
         private BodySnapshot _snap;
         private byte[] _encodeScratch;
 
+        // Playback loop = timestamps jump BACKWARD, and the adapter is strictly
+        // monotonic (TryFuse rejects nowTs <= last) — without a reset, fusion is
+        // dead for good after the first loop. Live capture never loops; this is
+        // the dev live-sim plumbing. Rebuild happens on the worker thread.
+        private volatile bool _resetPending;
+        private int _fusedEmitted; // OnFusedSkeletons count (worker thread, Interlocked)
+
         private void OnEnable()
         {
             if (merger == null) merger = FindFirstObjectByType<SkeletonMerger>();
@@ -171,7 +178,12 @@ namespace BodyTracking.Eval.Rtmpose
             foreach (var r in _subscribedRenderers)
                 if (r != null) r.OnRawFramesReady -= OnLiveFrame;
             _subscribedRenderers.Clear();
-            if (_recorder != null) { _recorder.OnPlaybackRawFrame -= OnPlaybackFrame; _recorder = null; }
+            if (_recorder != null)
+            {
+                _recorder.OnPlaybackRawFrame -= OnPlaybackFrame;
+                _recorder.OnPlaybackLooped -= HandlePlaybackLooped;
+                _recorder = null;
+            }
 
             if (_fused != null) { _fused.OnSkeletons -= OnFusedSkeletons; _fused = null; }
             _backend?.Dispose();
@@ -225,8 +237,18 @@ namespace BodyTracking.Eval.Rtmpose
             if (usePlaybackFrames && _recorder == null)
             {
                 _recorder = FindFirstObjectByType<SensorRecorder>();
-                if (_recorder != null) _recorder.OnPlaybackRawFrame += OnPlaybackFrame;
+                if (_recorder != null)
+                {
+                    _recorder.OnPlaybackRawFrame += OnPlaybackFrame;
+                    _recorder.OnPlaybackLooped += HandlePlaybackLooped;
+                }
             }
+        }
+
+        private void HandlePlaybackLooped()
+        {
+            _resetPending = true;
+            _wake.Set();
         }
 
         private void OnLiveFrame(PointCloudRenderer r, RawFrameData frame)
@@ -273,13 +295,19 @@ namespace BodyTracking.Eval.Rtmpose
             var burst = new List<Slot>(8);
             long lastFrameWallMs = Environment.TickCount;
             ulong lastTsNs = 0;
-            int fusedCount = 0;
             long rateWindowStart = Environment.TickCount;
 
             while (!_stop)
             {
                 _wake.WaitOne(10);
                 if (_stop) break;
+
+                if (_resetPending)
+                {
+                    _resetPending = false;
+                    RebuildAdapter();
+                    lastTsNs = 0;
+                }
 
                 burst.Clear();
                 lock (_slotLock)
@@ -315,7 +343,6 @@ namespace BodyTracking.Eval.Rtmpose
                         _fused.SubmitFrame(s.Serial, raw, s.TsNs);
                         lastTsNs = s.TsNs > lastTsNs ? s.TsNs : lastTsNs;
                         lastFrameWallMs = Environment.TickCount;
-                        fusedCount++;
                     }
                     catch (Exception e) { Debug.LogException(e, this); }
                 }
@@ -323,12 +350,31 @@ namespace BodyTracking.Eval.Rtmpose
                 long win = Environment.TickCount - rateWindowStart;
                 if (win >= 2000)
                 {
-                    FusedHz = fusedCount * 1000f / win / Mathf.Max(1, burst.Count);
-                    fusedCount = 0;
+                    // actual fused OUTPUT rate (OnFusedSkeletons emissions)
+                    FusedHz = Interlocked.Exchange(ref _fusedEmitted, 0) * 1000f / win;
                     rateWindowStart = Environment.TickCount;
                 }
             }
             try { _fused?.FlushLag(); } catch { }
+        }
+
+        // Worker thread. Fresh adapter after a playback loop — the shared
+        // backend (ORT sessions) survives, only the fusion state is rebuilt.
+        private void RebuildAdapter()
+        {
+            try
+            {
+                if (_fused != null) _fused.OnSkeletons -= OnFusedSkeletons;
+                var next = new FusedRtmposeAdapter(_backend) { ConfThreshold = confThreshold };
+                if (_fused != null) next.Profile = _fused.Profile;
+                next.SetCaptureVolume(captureVolumeCenterMm, captureVolumeHalfMm);
+                foreach (var kv in _xform) next.SetWorldTransform(kv.Key, kv.Value.G);
+                next.OnSkeletons += OnFusedSkeletons;
+                _fused = next;
+                lock (_slotLock)
+                    foreach (var kv in _slots) { kv.Value.Configured = false; kv.Value.Fresh = false; }
+            }
+            catch (Exception e) { Debug.LogException(e, this); }
         }
 
         // adapter.Configure needs stream dims — known on first frame. Worker
@@ -353,6 +399,7 @@ namespace BodyTracking.Eval.Rtmpose
 
         private void OnFusedSkeletons(EvalSkeletonFrame f)
         {
+            Interlocked.Increment(ref _fusedEmitted);
             var p = f.Primary();
             if (p == null) return;
 
