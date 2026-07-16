@@ -114,6 +114,17 @@ namespace BodyTracking.Eval.Rtmpose
         public float maxPredictSeconds = 0.2f;
         /// <summary>Velocity EMA retention (0 = raw frame-to-frame velocity).</summary>
         public float velSmoothing = 0.5f;
+        /// <summary>Frame-to-frame velocities above this (m/s) never enter the
+        /// velocity history — a spike-derived velocity otherwise turns the
+        /// temporal hold into a runaway straight streak (seen as a ~1.2 m line
+        /// off the wrist in the motion curves).</summary>
+        public float velMaxMps = 5f;
+        /// <summary>Cap (mm) on the total extrapolation displacement of a held joint.</summary>
+        public float holdMaxStepMm = 200f;
+        /// <summary>Two-strike jump gate (mm): a FRESH fused position this far from
+        /// the recent history is held back once; only a second consecutive frame
+        /// agreeing it moved gets accepted (kills single-frame out-and-back spikes).</summary>
+        public float jumpGateMm = 350f;
 
         public BodyProfile Profile;
 
@@ -138,6 +149,9 @@ namespace BodyTracking.Eval.Rtmpose
         readonly Vector3[] _histVel = new Vector3[(int)EvalJointId.Count];
         readonly ulong[] _histTs = new ulong[(int)EvalJointId.Count];
         readonly bool[] _histHas = new bool[(int)EvalJointId.Count];
+        // two-strike jump gate: pending suspicious position per joint
+        readonly Vector3[] _jumpPending = new Vector3[(int)EvalJointId.Count];
+        readonly bool[] _jumpHasPending = new bool[(int)EvalJointId.Count];
 
         ulong _lastFusedTs;
         readonly EvalSkeletonFrame _frame = new();
@@ -146,7 +160,7 @@ namespace BodyTracking.Eval.Rtmpose
         public event Action<EvalSkeletonFrame> OnSkeletons;
 
         // diagnostics (per session, read for reporting)
-        public int StatConsensus, StatSingleAccepted, StatRelifted, StatHeld, StatDroppedLen, StatOutliers;
+        public int StatConsensus, StatSingleAccepted, StatRelifted, StatHeld, StatDroppedLen, StatOutliers, StatJumpHeld;
 
         public FusedRtmposeAdapter(OrtRtmposeBackend backend)
         {
@@ -266,6 +280,32 @@ namespace BodyTracking.Eval.Rtmpose
                 float conf; Vector3 pos; bool fresh;
                 if (FuseJoint(j, pts, wts, srcSample, out pos, out conf, out fresh))
                 {
+                    // Two-strike jump gate: a fresh position far from recent history
+                    // is suspicious (single-frame spike). Hold it back once; accept
+                    // only when a second consecutive frame lands near the pending
+                    // position (genuine fast motion keeps moving the same way).
+                    if (fresh && _histHas[j])
+                    {
+                        float age = (nowTs - _histTs[j]) / 1e9f;
+                        if (age >= 0f && age <= holdMaxSeconds
+                            && Vector3.Distance(pos, _histPos[j]) > jumpGateMm)
+                        {
+                            if (_jumpHasPending[j] && Vector3.Distance(pos, _jumpPending[j]) <= jumpGateMm)
+                            {
+                                _jumpHasPending[j] = false; // second strike agrees → accept
+                            }
+                            else
+                            {
+                                _jumpPending[j] = pos; _jumpHasPending[j] = true;
+                                pos = HeldPrediction(j, age);
+                                conf = 0.25f; fresh = false;
+                                StatJumpHeld++;
+                            }
+                        }
+                        else _jumpHasPending[j] = false;
+                    }
+                    else _jumpHasPending[j] = false;
+
                     fusedPos[j] = pos; fusedOk[j] = true; fusedFresh[j] = fresh;
                     ref var oj = ref _fused.Joints[j];
                     oj.PositionMm = pos; oj.Confidence = conf; oj.Valid = true;
@@ -283,7 +323,11 @@ namespace BodyTracking.Eval.Rtmpose
                     if (dt > 1e-4f)
                     {
                         var rawVel = (fusedPos[j] - _histPos[j]) / dt;
-                        _histVel[j] = _histHas[j] ? Vector3.Lerp(rawVel, _histVel[j], velSmoothing) : rawVel;
+                        // spike-derived velocities must never seed the hold
+                        // extrapolation (runaway streak); keep the previous
+                        // estimate when the implied speed is superhuman.
+                        if (rawVel.magnitude <= velMaxMps * 1000f)
+                            _histVel[j] = Vector3.Lerp(rawVel, _histVel[j], velSmoothing);
                     }
                 }
                 else _histVel[j] = Vector3.zero;
@@ -343,13 +387,23 @@ namespace BodyTracking.Eval.Rtmpose
                 float age = (_lastFusedTs - _histTs[j]) / 1e9f;
                 if (age >= 0f && age <= holdMaxSeconds)
                 {
-                    float dt = Mathf.Min(age, maxPredictSeconds);
-                    pos = _histPos[j] + _histVel[j] * dt;
+                    pos = HeldPrediction(j, age);
                     conf = 0.2f; fresh = false; StatHeld++;
                     return true;
                 }
             }
             return false;
+        }
+
+        // Clamped extrapolation from the joint history: velocity applies for at
+        // most maxPredictSeconds AND at most holdMaxStepMm of displacement, so a
+        // bad velocity can never draw a long straight streak.
+        Vector3 HeldPrediction(int j, float age)
+        {
+            float dt = Mathf.Clamp(age, 0f, maxPredictSeconds);
+            var disp = _histVel[j] * dt;
+            if (disp.magnitude > holdMaxStepMm) disp = disp.normalized * holdMaxStepMm;
+            return _histPos[j] + disp;
         }
 
         bool PassesParentLength(int j, Vector3 world)
