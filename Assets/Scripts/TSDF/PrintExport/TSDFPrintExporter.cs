@@ -19,11 +19,19 @@
 //                  AR Quick Look — Quick Look ignores vertex colours, so the
 //                  .usdz bakes them into a per-triangle texture atlas
 //                  (GlbWriter / UsdzWriter).
-//   [Export STL]   the MC mesh (full resolution, no curve tubes — fuse them
-//                  first) as binary STL scaled to targetHeightMm (mm units,
-//                  slicer convention) with a signed-volume winding check.
+//   [Export STL]   the MC mesh (full resolution) as binary STL scaled to
+//                  targetHeightMm (mm units, slicer convention), every shell
+//                  wound outward via its own signed volume. By default
+//                  (stlIncludeCurveTubes) the curved lines ride along as
+//                  full-resolution CLOSED tube meshes + tapered body bridges,
+//                  ALL rebuilt from ONE CSEmitSegs readback (the exact seed
+//                  set Fuse curves would bake, so tubes and bridges match) —
+//                  overlapping shells the slicer unions, no voxel fuse, so
+//                  Fuse curves is NOT needed (and would double them up).
 //                  Removed 2026-07-09, restored 2026-07-13 for the dancer-
-//                  session print run (the colour-PLY variant stayed in history).
+//                  session print run (the colour-PLY variant stayed in history);
+//                  curve tubes added 2026-07-16 (the voxel-fused curves came out
+//                  mushy: ~1-voxel tubes + closing + Taubin ate the detail).
 //   [Restore]      put the pre-print front buffer back (undo all of the above).
 //
 // All ops are one-shot and synchronous (GPU readbacks): export path, not per-frame.
@@ -97,6 +105,21 @@ namespace TSDF
         [Min(100_000)]
         [Tooltip("Triangle capacity of the per-slab MC readback buffer (72 B each).")]
         public int triangleBudgetPerSlab = 2_000_000;
+
+        [Header("STL curve tubes")]
+        [Tooltip("Append the curved lines to the STL as closed tube meshes plus their " +
+                 "body bridges as tapered tubes, all rebuilt from one CSEmitSegs pass " +
+                 "(the exact chains + anchors Fuse curves would bake — full curve " +
+                 "resolution, no voxel fuse). The slicer unions the overlapping shells. " +
+                 "Fuse curves is then NOT needed for print (and would double the curves " +
+                 "up), and Close holes only ever sees the body. Off = legacy: curves " +
+                 "reach the STL only via Fuse curves.")]
+        public bool stlIncludeCurveTubes = true;
+
+        [Range(3, 12)]
+        [Tooltip("Tube cross-section sides for the STL tubes. The print is physical — " +
+                 "6 reads round at a 2 mm printed wire.")]
+        public int stlCurveSides = 6;
 
         [Header("Web export (GLB + USDZ)")]
         [Tooltip("Include the curved lines in the web files as real tube meshes tessellated " +
@@ -493,43 +516,80 @@ namespace TSDF
         // ---------------- 3: exports ----------------
 
         /// <summary>Print export: binary STL scaled to targetHeightMm (mm units,
-        /// slicer convention) with a signed-volume winding check. Uses the same
-        /// MC + weld + Taubin pipeline as the web export (TSDFSnapshotBuilder) but
-        /// at full resolution (no decimation) and without curve tubes — for print
-        /// the curves go through [Fuse curves] into the volume so they're solid.
-        /// (Removed 2026-07-09, restored 2026-07-13 for the dancer-session print
-        /// run — the colour-PLY variant stayed in git history.)</summary>
+        /// slicer convention). The body is the same MC + weld + Taubin pipeline
+        /// as the web export (TSDFSnapshotBuilder) at full resolution (no
+        /// decimation). With stlIncludeCurveTubes the curved lines are appended
+        /// as closed tube meshes + tapered body bridges, all rebuilt from one
+        /// CSEmitSegs readback (no voxel fuse, no resolution loss — see
+        /// BuildCurveAndBridgeTubes); the slicer unions the overlapping shells.
+        /// Every shell is wound outward via its own signed volume.</summary>
         public void ExportStl()
         {
             if (!Guard(needCurves: false)) return;
             var sw = System.Diagnostics.Stopwatch.StartNew();
             var opt = WebCaptureOptions();
-            opt.meshTargetTris = 0;    // print wants full resolution
-            opt.includeCurves = false; // tubes are display-only; print fuses them
+            opt.meshTargetTris = 0;     // print wants full resolution
+            opt.includeCurves = false;  // STL curves come from the CSEmitSegs readback below,
+                                        // NOT the drawn ribbon buffer — see BuildCurveAndBridgeTubes
             var snap = TSDFSnapshotBuilder.Capture(volume, null, opt, out string err);
             if (snap == null) { Fail(err); return; }
 
+            // Body shell: drop weld-collapsed slivers, then wind outward (MC
+            // emits inside = sdf < iso, so a negative volume means inward).
+            var pos = new List<Vector3>(snap.pos);
+            var tri = new List<int>(snap.tri.Length);
+            for (int t = 0; t + 2 < snap.tri.Length; t += 3)
+            {
+                int i0 = snap.tri[t], i1 = snap.tri[t + 1], i2 = snap.tri[t + 2];
+                if (i0 == i1 || i1 == i2 || i0 == i2) continue;
+                tri.Add(i0); tri.Add(i1); tri.Add(i2);
+            }
+            if (tri.Count == 0) { Fail("no non-degenerate triangles after weld"); return; }
+            double bodyVol = OrientOutward(pos, tri, 0, tri.Count);
+            int bodyTris = tri.Count / 3;
+
+            // Curve tubes + body bridges as their own outward-wound shells. Both
+            // come from ONE CSEmitSegs readback (the exact seed set Fuse curves
+            // would bake), so every tube has its matching bridge — the drawn
+            // ribbon buffer is a DIFFERENT nondeterministic seed subset and is
+            // deliberately not used here.
+            int tubeCount = 0, bridgeCount = 0;
+            if (stlIncludeCurveTubes)
+            {
+                var tp = new List<Vector3>(); var tn = new List<Vector3>();
+                var tc = new List<Vector3>(); var ti = new List<int>();
+                BuildCurveAndBridgeTubes(tp, tn, tc, ti, out tubeCount, out bridgeCount);
+                if (ti.Count > 0)
+                {
+                    int vOff = pos.Count, iBase = tri.Count;
+                    pos.AddRange(tp);
+                    for (int i = 0; i < ti.Count; i++) tri.Add(ti[i] + vOff);
+                    OrientOutward(pos, tri, iBase, tri.Count - iBase);
+                }
+                else
+                    Debug.LogWarning("[TSDFPrintExporter] STL: no curve tubes emitted " +
+                                     "(no curves component / seeds all culled?) — exporting " +
+                                     "the body only.", this);
+            }
+
+            // Bounds over EVERYTHING: tubes can reach past the body bbox and
+            // they must land inside the printed height too.
             Vector3 min = Vector3.positiveInfinity, max = Vector3.negativeInfinity;
-            foreach (var p in snap.pos) { min = Vector3.Min(min, p); max = Vector3.Max(max, p); }
+            foreach (var p in pos) { min = Vector3.Min(min, p); max = Vector3.Max(max, p); }
             Vector3 center = (min + max) * 0.5f;
             Vector3 size = max - min;
             if (size.y < 1e-4f) { Fail("degenerate mesh bounds"); return; }
 
-            // Count non-degenerate triangles (the 0.1 mm weld can collapse slivers)
-            // and measure the signed volume: MC emits inside = sdf < iso, so a
-            // negative volume means the winding faces inward — flip on write.
-            int triCount = snap.tri.Length / 3;
-            int written = 0;
-            double signedVol = 0;
-            for (int t = 0; t < triCount; t++)
+            // Preflight: StlWriter builds the whole file in one MemoryStream, so
+            // its hard ceiling is int.MaxValue bytes (~42M triangles at 50 B each).
+            long stlBytes = 84L + 50L * (tri.Count / 3);
+            if (stlBytes > int.MaxValue)
             {
-                int i0 = snap.tri[t * 3], i1 = snap.tri[t * 3 + 1], i2 = snap.tri[t * 3 + 2];
-                if (i0 == i1 || i1 == i2 || i0 == i2) continue;
-                written++;
-                Vector3 a = snap.pos[i0] - center, b = snap.pos[i1] - center, c = snap.pos[i2] - center;
-                signedVol += Vector3.Dot(a, Vector3.Cross(b, c)) / 6.0;
+                Fail($"STL would be {stlBytes / (1024 * 1024)} MB ({tri.Count / 3} tris) — over the " +
+                     "2 GB writer limit. Raise Print Seed Stride / Web Curve Tolerance or lower " +
+                     "STL Curve Sides.");
+                return;
             }
-            bool flip = signedVol < 0;
 
             float scale = targetHeightMm / size.y; // metres -> printed mm
             string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
@@ -539,13 +599,14 @@ namespace TSDF
             try
             {
                 Directory.CreateDirectory(dir);
-                StlWriter.Write(stlPath, snap.pos, snap.tri, written, center, scale, flip);
+                StlWriter.Write(stlPath, pos.ToArray(), tri.ToArray(), tri.Count / 3,
+                                center, scale, flip: false);
                 long bytes = new FileInfo(stlPath).Length;
-                _status = $"STL: {written} tris / {snap.pos.Length} welded verts, " +
+                _status = $"STL: {tri.Count / 3} tris ({bodyTris} body + {tubeCount} tubes / " +
+                          $"{bridgeCount} bridges), {pos.Count} verts, " +
                           $"{bytes / (1024 * 1024)} MB -> {stlPath} " +
                           $"(height {targetHeightMm:0} mm, smooth x{smoothIterations}, " +
-                          $"winding {(flip ? "flipped" : "ok")}, " +
-                          $"signedVol {(signedVol >= 0 ? "+" : "")}{signedVol:0.0000} m^3, " +
+                          $"bodyVol {bodyVol:0.0000} m^3, " +
                           $"total {sw.ElapsedMilliseconds / 1000.0:0.0}s)";
                 Debug.Log("[TSDFPrintExporter] " + _status, this);
             }
@@ -553,6 +614,120 @@ namespace TSDF
             {
                 Fail($"write failed: {e.Message}");
             }
+        }
+
+        /// <summary>Signed volume of tri[start..start+count) about the submesh
+        /// bbox centre; flips the range in place when negative so it winds
+        /// outward. Returns the absolute volume (m^3). The reference point only
+        /// matters for open shells (an un-closed body), where it keeps the
+        /// estimate stable — closed tube shells are translation-invariant.</summary>
+        private static double OrientOutward(List<Vector3> pos, List<int> tri, int start, int count)
+        {
+            Vector3 min = Vector3.positiveInfinity, max = Vector3.negativeInfinity;
+            for (int i = start; i < start + count; i++)
+            {
+                var p = pos[tri[i]];
+                min = Vector3.Min(min, p); max = Vector3.Max(max, p);
+            }
+            Vector3 c = (min + max) * 0.5f;
+            double vol = 0;
+            for (int t = start; t + 2 < start + count; t += 3)
+            {
+                Vector3 a = pos[tri[t]] - c, b = pos[tri[t + 1]] - c, d = pos[tri[t + 2]] - c;
+                vol += Vector3.Dot(a, Vector3.Cross(b, d)) / 6.0;
+            }
+            if (vol < 0)
+            {
+                for (int t = start; t + 2 < start + count; t += 3)
+                    (tri[t + 1], tri[t + 2]) = (tri[t + 2], tri[t + 1]);
+                vol = -vol;
+            }
+            return vol;
+        }
+
+        /// <summary>Curve + bridge tubes for the STL, ALL from one CSEmitSegs
+        /// readback — the exact seed set (and bridge anchors) Fuse curves would
+        /// bake, so every tube has its matching bridge. Reading the drawn ribbon
+        /// buffer instead would pair tubes with a different nondeterministic seed
+        /// subset (GPU append order — see PointCloudMotionCurves.Update), leaving
+        /// bridges to curves that aren't in the STL and tubes with no attachment.
+        /// Segments carry tag = seed*2 + isBridge in their pad; a single thread's
+        /// appends get monotonically increasing buffer indices, so per-seed chain
+        /// order is just buffer order. Chains become closed constant-radius tubes
+        /// (polyline [a0, b0, b1, ...]); each bridge becomes a 2-point tapered
+        /// tube — printRadius at the curve tip, ×bridgeRadiusScale at the body
+        /// side (fillet root, like the voxel-fuse path had).</summary>
+        private void BuildCurveAndBridgeTubes(List<Vector3> tp, List<Vector3> tn,
+                                              List<Vector3> tc, List<int> ti,
+                                              out int tubeCount, out int bridgeCount)
+        {
+            tubeCount = 0; bridgeCount = 0;
+            if (curves == null) return;
+            int segCap = curves.MaxPrintSegs(printSeedStride);
+            var segBuf = new ComputeBuffer(segCap, TrailBakeOps.SegStride);
+            try
+            {
+                if (!curves.EmitPrintSegs(segBuf, printSeedStride, printRadius,
+                                          bridgeRadiusScale, maxBridgeLength, out var st))
+                    return;
+                int n = Mathf.Min(st.emitted, segCap);
+                if (n <= 0) return;
+                if (st.dropped > 0)
+                    Debug.LogWarning($"[TSDFPrintExporter] STL curves: {st.dropped} segments dropped " +
+                                     $"(cap {segCap}) — some tubes will be truncated or jump; raise " +
+                                     "printSeedStride.", this);
+                if (st.bridgesSkipped > 0)
+                    Debug.LogWarning($"[TSDFPrintExporter] STL bridges: {st.bridgesSkipped} skipped " +
+                                     $"(over maxBridgeLength {maxBridgeLength} m) — those curves " +
+                                     "hang on their tip contact only.", this);
+                var segs = new TrailBakeOps.TrailSeg[n];
+                segBuf.GetData(segs, 0, 0, n);
+
+                // Regroup the interleaved appends: chains keyed by seed (buffer
+                // order within a seed = emission order), bridges as-is.
+                var chains = new Dictionary<uint, List<int>>();
+                var bridges = new List<int>();
+                for (int i = 0; i < n; i++)
+                {
+                    uint code = (uint)segs[i].pad; // seed*2 + isBridge
+                    if ((code & 1u) != 0u) { bridges.Add(i); continue; }
+                    uint seed = code >> 1;
+                    if (!chains.TryGetValue(seed, out var list))
+                        chains[seed] = list = new List<int>(64);
+                    list.Add(i);
+                }
+
+                var line = new List<Vector3[]> { null };
+                var col = new List<Vector3> { Vector3.one };
+                var pts = new List<Vector3>(64);
+                foreach (var kv in chains)
+                {
+                    var idxs = kv.Value;
+                    pts.Clear();
+                    pts.Add(segs[idxs[0]].a);
+                    foreach (int i in idxs) pts.Add(segs[i].b);
+                    if (pts.Count < 2) continue;
+                    line[0] = pts.ToArray();
+                    col[0] = segs[idxs[0]].color;
+                    // Constant radius: a tapered tail would print below the wire floor.
+                    tubeCount += CurveTubeBuilder.AppendCurveTubes(line, col, 1f, printRadius,
+                        stlCurveSides, webCurveTolerance, Vector3.zero, 0f, tp, tn, tc, ti,
+                        tipTaper: 1f, exportSpace: false);
+                }
+
+                foreach (int i in bridges)
+                {
+                    if ((segs[i].b - segs[i].a).sqrMagnitude < 1e-10f) continue;
+                    line[0] = new[] { segs[i].a, segs[i].b };
+                    col[0] = segs[i].color;
+                    float rb = Mathf.Max(segs[i].rb, 1e-4f);
+                    CurveTubeBuilder.AppendCurveTubes(line, col, 1f, rb, stlCurveSides,
+                        0f, Vector3.zero, 0f, tp, tn, tc, ti,
+                        tipTaper: Mathf.Clamp01(segs[i].ra / rb), exportSpace: false);
+                    bridgeCount++;
+                }
+            }
+            finally { segBuf.Release(); }
         }
 
         /// <summary>The web/AR capture options from the panel-tuned fields —

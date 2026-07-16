@@ -19,9 +19,17 @@
 
 ## 3D プリント書き出し
 
-`Window > Print Export` → **[Fuse → Close → Export STL (ワンクリック)]**。
-- 出力: `~/Documents/FloatingVectorsPrints/print_<stamp>.stl`（`targetHeightMm`、既定 300mm、winding 自動補正）
-- やり直し: **Restore** で融合前に戻る（表示 volume も戻る）
+`Window > Print Export` → **[Close → Export STL (ワンクリック)]**
+（`STL: Include Curve Tubes` ON が既定。OFF にすると旧 **[Fuse → Close → Export STL]** に戻る）。
+- カーブは voxel 融合を通さず、**フル解像度の閉じたチューブ＋接続ブリッジとして STL に直接同梱**される
+  （2026-07-16 変更: voxel 融合だと ~1voxel チューブ + 穴塞ぎ + 平滑化で潰れ、未接続分は島カリングで消えていた）。
+  チューブとブリッジは 1 回の CSEmitSegs（Fuse curves と同一のシード集合・アンカー）から再構成されるので
+  必ず対で揃う。重なったシェルはスライサーが union する。Fuse curves を押す必要はない（押すと二重になる）
+- カーブの表示状態（F12 プレビュー等）に依存せず、frozen した pose+cloud からその場で生成される。
+  ただし GPU シード抽選の関係で**画面のカーブとは別の間引きサブセットになり得る**（旧 Fuse 経由と同じ性質）
+- `Close Radius Voxels` はカーブを巻き込まなくなったので小さめ（2 前後）を推奨 — 大きいと体の凹みが丸まって団子になる
+- 出力: `~/Documents/FloatingVectorsPrints/print_<stamp>.stl`（`targetHeightMm`、既定 300mm、winding はシェル毎に自動補正）
+- やり直し: **Restore** で穴塞ぎ前に戻る（表示 volume も戻る）
 - パネル右下 **[出力フォルダを開く]** で確認
 
 ## 設定・前提
