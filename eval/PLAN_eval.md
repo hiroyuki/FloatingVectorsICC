@@ -279,3 +279,22 @@ harness-base を共通祖先にし、ハーネス修正は両トラックへ mer
 - bodies_main codec: `RecordedBodySerializer.Decode(bytes,count,BodySnapshot[])`。
 - オーバーレイ数学: `MultiCam/SkeletonWorldTransform.ToWorld(jointMm, depthToColorMm, rendererTransform)`。
 - 外部キャリブ: `PointCloudRecording.ReadExtrinsicsYaml(root)` → `DeviceCalibration`（intrinsics/D2C/GlobalTrColorCamera）。
+
+### CP9 (2026-07-17 未明) — 全テイク v11s 一括変換 + ライブ統合 main 投入（夜間自動作業）
+- **v11s 一括変換: 29/29 成功・失敗 0** → `F:\RecordingBaseV11s\<テイク名>\`（計 30 再生可能ルート）
+  - bodies_main は実体（~350MB 総量）、depth/color/ir は **D: 原本へのシンボリックリンク 372 本**
+    （容量ゼロ・Dropbox 同期なし）。`v11s.done` マーカーで再実行時スキップ（レジューム可）
+  - スキップ 8 テイク: depth 空 7 + 15-44-22（color なし = RTMPose 不可）
+  - `FusedBatchConvert`（Editor 自走ツール、Assets/Scripts/Eval/Rtmpose/Editor/）
+  - シンボリックリンク越しの再生検証済み（14-58-58: ストリーム読込 + v11s 骨格 person=1）
+- **ライブ統合 main マージ + codex 3 ラウンド APPROVED**（12c83d3 → 6de9a46 → 5e486f6 → 6461064 → a66289e）
+  - `LiveFusedBodySource`: Session 所有のワーカースレッドで推論+融合（メインスレッドはフレームコピーと
+    注入のみ）。ダブルバッファでフレーム競合なし、再生ループでアダプタ再構築、Join タイムアウト時は
+    セッションごと放棄（ORT を推論中に破棄しない）。ライブ/再生フレーム両対応（後者 = live-sim）
+  - `SkeletonMerger.useExternalBodies` + `SubmitExternalBodies`（OnWorkerSkeletons もゲート）
+  - `PointCloudRenderer.maskRivalProjectors`（ライブ経路のフレアマスク配線）
+  - **live-sim 検証**: PersonCount=1 安定（有効化直後数フレームは 0 = ウォームアップ）、ループ跨ぎ生存、
+    融合 4〜23Hz（エディタのフォーカス/GPU 競合で変動。実測はカメラ実機 + フォーカス環境で要再測）
+- **実機日の TODO**: LiveFusedBodySource の実カメラ試験 / trigger2ImageDelayUs スタガ + GetSyncConfig /
+  カラー露光アップ / 三脚をボリューム外へ / CUDA・TensorRT EP 導入（人手、30Hz 化）
+- 次のユーザー作業: **STL 作成**（Window > Print Export）
