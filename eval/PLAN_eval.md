@@ -61,6 +61,29 @@ harness-base を共通祖先にし、ハーネス修正は両トラックへ mer
 - **複数人**: 2 人以上での ID スワップ回数。※現データに 2 人シーン無し → 要長尺録画。
 
 ## Session refresh checkpoints
+### CP4 (2026-07-16 午後) — 融合パイプライン初版まで完了
+- (a) 完了:
+  - **本番修正済**: SkeletonMerger volume ゲート（main e8a0e6f → cherry-pick 4c2d498）
+  - **frame 788 デバッグ環境**: シーク→凍結レシピ（seek → EditorApplication.Step ×N →
+    timeScale=0 + editor unpause で Game view オービット可 → TSDF RequestFullClearNextBatch+再emit）
+  - **オクルージョン分析**: confidence では深度リフト Z 誤差を検出不能（実測: 592mm誤差で conf 0.64）。
+    クロスカメラ偏差が判別信号。表面視差フロア（胴体 ~150-250mm）あり → 関節別ゲート必須
+  - **身体キャリブ**: GoodFrameScan（全セッション走査）→ ユーザー目視承認（45/84/369/993/1056）→
+    BodyProfileBuilder → `eval/body_profile.json`（左右対称性で検証済: 前腕 223/223mm）
+  - **FusedRtmposeAdapter**（3段融合: ボーン長サニティ→median コンセンサス→レイ×ボーン長 relift
+    +時間保持）+ FusedCompareChunked。初回 900f/cam: fused は 15.0/15 関節、whole-range
+    jitter 305mm（per-cam RTMPose 318-414 / k4abt 297-336）。f788 で完全骨格・ボーン長整合
+  - **クラッシュ罠**: RtmPoseAdapter.Dispose は渡された backend を破棄する —
+    BtFrameInspectorWindow.SharedBackend() 利用時は adapter を Dispose しないこと（Editor 2回クラッシュ済み。
+    OrtRtmposeBackend に破棄後ガード追加済み）
+- (b) 既知の課題（次セッション）:
+  1. fused の spikeRate 17.7% — カメラ集合の入れ替わりで視差オフセット分の跳び。
+     候補: 全カメラ揃いでのみ融合 / カメラ×関節の系統バイアス学習 / 出力 One-Euro
+  2. fused continuity 29% 表示は分母バグ（camera-frame 毎に AddSubmitted。実カバレッジは ~1.16 emissions/frame-set）
+  3. 静止区間つき録画での純ジッター測定は未
+- (c) 判断材料: 融合でオクルージョン破綻は修復可能と実証。残るは spike 源の除去と
+  ライブ性能（4カメラ×RTMPose の GPU 予算）確認 → k4abt 置き換え判断
+
 ### CP3 (2026-07-16, セッション終了時点) — Track B 完了・ビジュアル A/B 稼働・本番修正 1 件持ち越し
 - (a) 完了（このセッション）:
   - **Track B (RTMPose) 一式**: ORT DirectML バックエンド、捕捉ボリューム人物選別
