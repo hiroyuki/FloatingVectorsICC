@@ -105,7 +105,10 @@ namespace PointCloud
         /// (&lt; ~200 px, enclosed by saturated/invalid pixels), while real geometry —
         /// a body crossing the disc, the wall behind the rival camera — always connects
         /// outward into a large surface. Blanket-zeroing the disc is NOT safe: the body
-        /// regularly overlaps the disc while the projector still peeks past its edge.</summary>
+        /// regularly overlaps the disc while the projector still peeks past its edge.
+        /// A missing/undersized IR buffer SKIPS masking entirely — without the gate
+        /// there is no evidence the projector is visible this frame, and the component
+        /// filter alone must never zero enclosed real geometry on an IR-less recording.</summary>
         public static void Apply(string serial, byte[] depth, int depthByteCount, int w, int h,
                                  byte[] ir, int irByteCount, int irW, int irH)
         {
@@ -232,7 +235,8 @@ namespace PointCloud
 
         private static bool ProjectorVisible(byte[] ir, int irByteCount, int irW, int irH, float cu, float cv)
         {
-            if (ir == null || irW <= 0 || irH <= 0 || irByteCount < irW * irH * 2) return true;
+            // No usable IR -> no gate evidence -> do NOT mask (fail-closed).
+            if (ir == null || irW <= 0 || irH <= 0 || irByteCount < irW * irH * 2) return false;
             int uc = Mathf.Clamp((int)cu, 2, irW - 3), vc = Mathf.Clamp((int)cv, 2, irH - 3);
             long sum = 0;
             for (int dv = -2; dv <= 2; dv++)
