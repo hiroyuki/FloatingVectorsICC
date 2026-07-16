@@ -116,6 +116,13 @@ namespace BodyTracking.Eval.Rtmpose
 
         public void Dispose()
         {
+            // Ready gates Detect/Pose, so flipping it first turns any call on a
+            // disposed backend into a no-op instead of a native crash inside ORT.
+            // This matters because RtmPoseAdapter.Dispose() disposes the backend
+            // it was HANDED — callers sharing one backend across adapters (Frame
+            // Inspector's s_backend cache, ad-hoc eval scripts) hard-crashed the
+            // editor when a later adapter used the already-disposed session.
+            Ready = false;
             _yolox?.Dispose();
             _rtmpose?.Dispose();
             _runOpt?.Dispose();

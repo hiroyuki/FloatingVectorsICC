@@ -327,14 +327,29 @@ namespace BodyTracking.Eval.Rtmpose
             return 0;
         }
 
-        void EnsureBackend()
+        void EnsureBackend() => SharedBackend();
+
+        /// <summary>Process-wide cached ONNX backend for eval tooling (loads on
+        /// first use; reloads if a caller disposed the cached one — Ready goes
+        /// false on Dispose). Callers must NOT dispose the returned instance.</summary>
+        internal static OrtRtmposeBackend SharedBackend()
         {
-            if (s_backend != null) return;
-            string modelsDir = Path.GetFullPath(Path.Combine(Application.dataPath, "..", "eval", "models"));
-            string yolox = FirstOnnx(Path.Combine(modelsDir, "yolox-m"));
-            string rtm = FirstOnnx(Path.Combine(modelsDir, "rtmpose-m"));
-            if (yolox == null || rtm == null) throw new Exception("ONNX models not found under eval/models");
-            s_backend = new OrtRtmposeBackend(yolox, rtm);
+            if (s_backend == null || !s_backend.Ready)
+            {
+                string modelsDir = Path.GetFullPath(Path.Combine(Application.dataPath, "..", "eval", "models"));
+                string yolox = FirstOnnxStatic(Path.Combine(modelsDir, "yolox-m"));
+                string rtm = FirstOnnxStatic(Path.Combine(modelsDir, "rtmpose-m"));
+                if (yolox == null || rtm == null) throw new Exception("ONNX models not found under eval/models");
+                s_backend = new OrtRtmposeBackend(yolox, rtm);
+            }
+            return s_backend;
+        }
+
+        static string FirstOnnxStatic(string dir)
+        {
+            if (!Directory.Exists(dir)) return null;
+            var files = Directory.GetFiles(dir, "*.onnx", SearchOption.AllDirectories);
+            return files.Length > 0 ? files[0] : null;
         }
 
         int SpawnK4abt(Transform parent, string bodiesPath, ulong ts, ObCameraParam cam)
