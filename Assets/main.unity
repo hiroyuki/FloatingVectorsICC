@@ -267,7 +267,7 @@ MonoBehaviour:
   cumulative: {fileID: 18533122}
   folderPath: D:\FloatingVectorsICC\RecordingBase
   folderPathMacOverride: /Volumes/horristicSSD2T/Dropbox/projects/ICC/Recordings/Rec2_jump
-  playbackFolderPath: D:\FloatingVectorsICC\RecordingBase\2026-07-08_12-50-09
+  playbackFolderPath: D:/Dropbox/projects/ICC/Recordings/RecordingBase/2026-07-14_15-50-24
   playbackFolderPathMacOverride: /Volumes/horristicSSD2T/Dropbox/projects/ICC/Recordings/rec2_turn
   applyWorldRebase: 1
   rigSerialOrder:
@@ -548,6 +548,7 @@ MonoBehaviour:
   trailSamples: 15
   publishKey: 291
   hideQrKey: 292
+  previewToggleKey: 293
 --- !u!4 &353236999
 Transform:
   m_ObjectHideFlags: 0
@@ -1142,7 +1143,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 96892899ec43f7246a88f0b3f63d9e67, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::PointCloud.PointCloudCameraManager
-  playbackOnly: 0
+  playbackOnly: 1
   defaultPointMaterial: {fileID: 0}
   depthWidth: 320
   depthHeight: 288
@@ -2020,7 +2021,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::BodyTracking.BodyTrackingMultiLive
   cameraManager: {fileID: 925702423}
   workerHost: {fileID: 100997492}
-  ignoreRecordedBodies: 1
+  ignoreRecordedBodies: 0
   btInferenceFps: 30
   loopSeamBlackoutSeconds: 0.4
   showBones: 0
