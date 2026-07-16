@@ -163,6 +163,7 @@ namespace BodyTracking.Eval.Rtmpose
                 if (yolox == null || rtm == null)
                 {
                     Debug.LogError($"[{nameof(LiveFusedBodySource)}] ONNX models not found under {models} — disabling.", this);
+                    s.Wake.Dispose();
                     enabled = false;
                     return;
                 }
@@ -178,6 +179,7 @@ namespace BodyTracking.Eval.Rtmpose
             {
                 Debug.LogException(e, this);
                 s.Backend?.Dispose();
+                s.Wake.Dispose();
                 enabled = false;
                 return;
             }
@@ -185,6 +187,7 @@ namespace BodyTracking.Eval.Rtmpose
             if (!LoadCalibration(s))
             {
                 s.Backend?.Dispose();
+                s.Wake.Dispose();
                 enabled = false;
                 return;
             }
@@ -227,6 +230,7 @@ namespace BodyTracking.Eval.Rtmpose
             {
                 // clean exit: the worker is gone, the session is ours to dispose
                 s.Backend?.Dispose();
+                s.Wake.Dispose();
             }
             else
             {
