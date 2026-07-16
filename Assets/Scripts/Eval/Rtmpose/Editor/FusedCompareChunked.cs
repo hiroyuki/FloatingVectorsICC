@@ -116,6 +116,7 @@ namespace BodyTracking.Eval.Rtmpose
         public static string Finish(string resultsDir)
         {
             if (_metrics == null) return "not started";
+            _fused?.FlushLag(); // final lag-ring frames must reach the metrics too
             if (string.IsNullOrEmpty(resultsDir))
                 resultsDir = Path.GetFullPath(Path.Combine(Application.dataPath, "..", "eval", "results", "fused"));
             Directory.CreateDirectory(resultsDir);

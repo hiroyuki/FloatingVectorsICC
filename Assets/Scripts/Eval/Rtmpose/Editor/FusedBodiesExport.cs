@@ -222,6 +222,7 @@ namespace BodyTracking.Eval.Rtmpose
         public static string Finish()
         {
             if (_writers == null) return "not started";
+            _fused?.FlushLag(); // emit the last two lag-ring frames before closing
             var sb = new System.Text.StringBuilder();
             foreach (var kv in _writers) { sb.AppendLine($"{kv.Key}: {kv.Value.FrameCount} body frames -> {kv.Value.FilePath}"); kv.Value.Dispose(); }
             _writers = null;

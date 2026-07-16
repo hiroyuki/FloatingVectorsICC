@@ -147,7 +147,10 @@ namespace BodyTracking.Eval.Rtmpose
         sealed class DepthRef
         {
             public ushort[] D; public int W, H;      // stride-2 downsample
-            public float Fx, Fy, Cx, Cy;             // depth intrinsics (halved)
+            public float CalFx, CalFy, CalCx, CalCy; // as calibrated
+            public int CalW, CalH;                   // calibration resolution
+            public float Fx, Fy, Cx, Cy;             // effective for the buffer
+                                                     // (scaled to frame res / 2)
             public float[] Rd2c, Td2c;               // depth -> color extrinsic
             public bool HasCal;
         }
@@ -225,8 +228,9 @@ namespace BodyTracking.Eval.Rtmpose
                 var cp = ctx.CameraParam.Value;
                 var dr = new DepthRef
                 {
-                    Fx = cp.DepthIntrinsic.Fx * 0.5f, Fy = cp.DepthIntrinsic.Fy * 0.5f,
-                    Cx = cp.DepthIntrinsic.Cx * 0.5f, Cy = cp.DepthIntrinsic.Cy * 0.5f,
+                    CalFx = cp.DepthIntrinsic.Fx, CalFy = cp.DepthIntrinsic.Fy,
+                    CalCx = cp.DepthIntrinsic.Cx, CalCy = cp.DepthIntrinsic.Cy,
+                    CalW = cp.DepthIntrinsic.Width, CalH = cp.DepthIntrinsic.Height,
                     HasCal = cp.Transform.Rot != null && cp.Transform.Rot.Length >= 9
                              && cp.Transform.Trans != null && cp.Transform.Trans.Length >= 3,
                 };
@@ -239,11 +243,36 @@ namespace BodyTracking.Eval.Rtmpose
             }
         }
 
+        // Burst-close fusion: the HW-synced rig delivers all four cameras within
+        // ~1 ms of each other (a "burst"). Fusing on the burst's FIRST frame
+        // would combine one fresh sample with three previous-burst samples, so
+        // fusion is deferred until the burst is complete — detected when a frame
+        // arrives more than BurstGapNs later. Costs one burst (~33 ms) of
+        // latency, consistent with the fixed-lag output filter.
+        const ulong BurstGapNs = 5_000_000UL;
+        ulong _pendingBurstTs;
+
         public void SubmitFrame(string serial, in RawFrameData frame, ulong tsNs)
         {
+            // Close the previous burst BEFORE ingesting a frame that starts a new
+            // one — otherwise this first next-burst sample (and its depth buffer)
+            // would sit inside the skew window and contaminate the previous
+            // burst's fusion/occlusion tests with future data.
+            if (_pendingBurstTs != 0 && tsNs > _pendingBurstTs + BurstGapNs)
+                FusePendingBurst();
+
             StashDepth(serial, frame);
             _inner.SubmitFrame(serial, frame, tsNs); // synchronous → OnInnerSkeletons fires inside
-            TryFuse(tsNs);
+
+            if (_pendingBurstTs == 0) _pendingBurstTs = tsNs;
+            else if (tsNs > _pendingBurstTs) _pendingBurstTs = tsNs; // same burst, later stamp
+        }
+
+        void FusePendingBurst()
+        {
+            if (_pendingBurstTs == 0) return;
+            TryFuse(_pendingBurstTs);
+            _pendingBurstTs = 0;
         }
 
         // Keep a stride-2 copy of this camera's latest depth map for visibility tests.
@@ -253,7 +282,17 @@ namespace BodyTracking.Eval.Rtmpose
             int dw = frame.DepthWidth, dh = frame.DepthHeight;
             if (dw <= 0 || dh <= 0 || frame.DepthBytes == null || frame.DepthByteCount < dw * dh * 2) return;
             int w = dw / 2, h = dh / 2;
-            if (dr.D == null || dr.W != w || dr.H != h) { dr.D = new ushort[w * h]; dr.W = w; dr.H = h; }
+            if (dr.D == null || dr.W != w || dr.H != h)
+            {
+                dr.D = new ushort[w * h]; dr.W = w; dr.H = h;
+                // calibration intrinsics are for CalW x CalH; scale to the actual
+                // frame resolution, then halve for the stride-2 buffer (same
+                // scaling DepthLift applies for the lift itself)
+                float sx = dr.CalW > 0 ? dw / (float)dr.CalW : 1f;
+                float sy = dr.CalH > 0 ? dh / (float)dr.CalH : 1f;
+                dr.Fx = dr.CalFx * sx * 0.5f; dr.Cx = dr.CalCx * sx * 0.5f;
+                dr.Fy = dr.CalFy * sy * 0.5f; dr.Cy = dr.CalCy * sy * 0.5f;
+            }
             var src = frame.DepthBytes;
             for (int y = 0; y < h; y++)
             {
@@ -338,8 +377,13 @@ namespace BodyTracking.Eval.Rtmpose
 
         void TryFuse(ulong nowTs)
         {
-            if (_lastFusedTs != 0 && nowTs > _lastFusedTs
-                && (nowTs - _lastFusedTs) < (ulong)(minFuseIntervalMs * 1e6f)) return;
+            if (_lastFusedTs != 0)
+            {
+                // drop out-of-order/duplicate triggers so _lastFusedTs (and the
+                // emitted stream) is strictly monotonic
+                if (nowTs <= _lastFusedTs) return;
+                if (nowTs - _lastFusedTs < (ulong)(minFuseIntervalMs * 1e6f)) return;
+            }
 
             _work.Clear(); _workSerial.Clear(); _workValid.Clear();
             ulong skewNs = (ulong)(skewMs * 1e6f);
@@ -408,8 +452,8 @@ namespace BodyTracking.Eval.Rtmpose
                     // position (genuine fast motion keeps moving the same way).
                     if (fresh && _histHas[j])
                     {
-                        float age = (nowTs - _histTs[j]) / 1e9f;
-                        if (age >= 0f && age <= holdMaxSeconds
+                        float age = AgeSec(nowTs, _histTs[j]);
+                        if (age <= holdMaxSeconds
                             && Vector3.Distance(pos, _histPos[j]) > jumpGateMm)
                         {
                             // Second strike accepts on proximity to the pending
@@ -513,8 +557,14 @@ namespace BodyTracking.Eval.Rtmpose
         /// the normal fuse interval or when nothing recent enough to hold.</summary>
         public void Heartbeat(ulong nowTs)
         {
-            if (_lastFusedTs != 0 && nowTs > _lastFusedTs
-                && (nowTs - _lastFusedTs) < (ulong)(minFuseIntervalMs * 1e6f)) return;
+            // close a burst the heartbeat is jumping past, so its samples fuse
+            // before the held frame lands after them
+            if (_pendingBurstTs != 0 && nowTs > _pendingBurstTs + BurstGapNs) FusePendingBurst();
+            if (_lastFusedTs != 0)
+            {
+                if (nowTs <= _lastFusedTs) return; // keep the stream monotonic
+                if (nowTs - _lastFusedTs < (ulong)(minFuseIntervalMs * 1e6f)) return;
+            }
             EmitHeldFrame(nowTs);
         }
 
@@ -528,8 +578,8 @@ namespace BodyTracking.Eval.Rtmpose
             for (int j = 0; j < (int)EvalJointId.Count; j++)
             {
                 if (!_histHas[j]) continue;
-                float age = (nowTs - _histTs[j]) / 1e9f;
-                if (age < 0f || age > holdMaxSeconds) continue;
+                float age = AgeSec(nowTs, _histTs[j]);
+                if (age > holdMaxSeconds) continue;
                 ref var oj = ref _fused.Joints[j];
                 oj.PositionMm = HeldPrediction(j, age);
                 oj.Confidence = 0.2f;
@@ -594,6 +644,18 @@ namespace BodyTracking.Eval.Rtmpose
             int n = _medScratch.Count;
             return (n & 1) == 1 ? _medScratch[n / 2]
                                 : 0.5f * (_medScratch[n / 2 - 1] + _medScratch[n / 2]);
+        }
+
+        /// <summary>Emit the frames still waiting in the fixed-lag ring (raw — the
+        /// median window is incomplete for them). For offline export end-of-stream;
+        /// a live session never ends so it never calls this.</summary>
+        public void FlushLag()
+        {
+            FusePendingBurst(); // the final burst never sees a successor
+            if (!medianLagFilter) return;
+            for (int i = Mathf.Max(0, _lagCount - 2); i < _lagCount; i++)
+                EmitSkeleton(_lag[i], _lagTs[i]);
+            _lagCount = 0;
         }
 
         void EmitSkeleton(EvalSkeleton s, ulong ts)
@@ -664,6 +726,27 @@ namespace BodyTracking.Eval.Rtmpose
                 }
             }
 
+            // Two-sample special case: a DISAGREEING pair must not fake a
+            // consensus (the component median of two points is their per-axis
+            // upper envelope, and one arbitrary survivor would bypass the
+            // single-camera sanity path). Reduce to the better candidate —
+            // closest to a fresh prediction when one exists, else higher
+            // confidence — and let the single-camera path vet it below.
+            if (pts.Count == 2 && Vector3.Distance(pts[0], pts[1]) > gateMm[j])
+            {
+                int keep;
+                float predAge = AgeSec(_lastFusedTs, _histTs[j]);
+                if (_histHas[j] && predAge <= holdMaxSeconds)
+                {
+                    var pred = HeldPrediction(j, predAge);
+                    keep = Vector3.Distance(pts[0], pred) <= Vector3.Distance(pts[1], pred) ? 0 : 1;
+                }
+                else keep = wts[0] >= wts[1] ? 0 : 1;
+                int drop = 1 - keep;
+                pts.RemoveAt(drop); wts.RemoveAt(drop); srcSample.RemoveAt(drop);
+                StatOutliers++;
+            }
+
             if (pts.Count >= 2)
             {
                 var med = ComponentMedian(pts);
@@ -674,7 +757,7 @@ namespace BodyTracking.Eval.Rtmpose
                     if (Vector3.Distance(pts[i], med) > gateMm[j]) { StatOutliers++; continue; }
                     acc += pts[i] * wts[i]; wsum += wts[i]; cmax = Mathf.Max(cmax, wts[i]); nOk++;
                 }
-                if (nOk >= 2 || (nOk == 1 && pts.Count == 2))
+                if (nOk >= 2)
                 {
                     pos = acc / wsum; conf = cmax; fresh = true; StatConsensus++;
                     return true;
@@ -704,8 +787,8 @@ namespace BodyTracking.Eval.Rtmpose
             // Stage 3b: temporal hold
             if (_histHas[j])
             {
-                float age = (_lastFusedTs - _histTs[j]) / 1e9f;
-                if (age >= 0f && age <= holdMaxSeconds)
+                float age = AgeSec(_lastFusedTs, _histTs[j]);
+                if (age <= holdMaxSeconds)
                 {
                     pos = HeldPrediction(j, age);
                     conf = 0.2f; fresh = false; StatHeld++;
@@ -714,6 +797,11 @@ namespace BodyTracking.Eval.Rtmpose
             }
             return false;
         }
+
+        // Age in seconds with ulong-underflow safety: an out-of-order pair (then
+        // in the future) reads as "expired" (MaxValue), never as a huge valid age.
+        static float AgeSec(ulong now, ulong then) =>
+            now >= then ? (now - then) / 1e9f : float.MaxValue;
 
         // Clamped extrapolation from the joint history: velocity applies for at
         // most maxPredictSeconds AND at most holdMaxStepMm of displacement, so a
@@ -788,8 +876,8 @@ namespace BodyTracking.Eval.Rtmpose
             // sanity: don't teleport across the scene relative to prediction
             if (_histHas[j])
             {
-                float age = (_lastFusedTs - _histTs[j]) / 1e9f;
-                if (age >= 0f && age <= holdMaxSeconds)
+                float age = AgeSec(_lastFusedTs, _histTs[j]);
+                if (age <= holdMaxSeconds)
                 {
                     var pred = _histPos[j] + _histVel[j] * Mathf.Min(age, maxPredictSeconds);
                     if (Vector3.Distance(candidate, pred) > 2f * gateMm[j]) return false;
