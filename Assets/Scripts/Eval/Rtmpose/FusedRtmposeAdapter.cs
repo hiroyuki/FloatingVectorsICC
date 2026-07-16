@@ -160,7 +160,7 @@ namespace BodyTracking.Eval.Rtmpose
         public event Action<EvalSkeletonFrame> OnSkeletons;
 
         // diagnostics (per session, read for reporting)
-        public int StatConsensus, StatSingleAccepted, StatRelifted, StatHeld, StatDroppedLen, StatOutliers, StatJumpHeld;
+        public int StatConsensus, StatSingleAccepted, StatRelifted, StatHeld, StatDroppedLen, StatOutliers, StatJumpHeld, StatLenProjected;
 
         public FusedRtmposeAdapter(OrtRtmposeBackend backend)
         {
@@ -309,6 +309,35 @@ namespace BodyTracking.Eval.Rtmpose
                     fusedPos[j] = pos; fusedOk[j] = true; fusedFresh[j] = fresh;
                     ref var oj = ref _fused.Joints[j];
                     oj.PositionMm = pos; oj.Confidence = conf; oj.Valid = true;
+                }
+            }
+
+            // Final pass: calibrated bone lengths are HARD output constraints.
+            // A violation beyond tolerance projects the CHILD onto the sphere of
+            // the calibrated length around its (already corrected) parent —
+            // direction is kept, length is enforced. This is the only guard that
+            // catches an ALL-cameras-agree-but-wrong systematic bias: e.g. the
+            // hair-flip pose (face invisible from every camera) collapses the
+            // head into the neck on every view, so consensus happily passes it,
+            // and the collapse onsets gradually enough to ride inside the
+            // per-frame gates. Bones is parent-first, so corrections chain.
+            if (Profile != null)
+            {
+                for (int b = 0; b < Bones.Length; b++)
+                {
+                    float L = Profile.LengthMm[b];
+                    if (L <= 0f) continue;
+                    int ia = (int)Bones[b].a, ib = (int)Bones[b].b;
+                    if (!fusedOk[ia] || !fusedOk[ib]) continue;
+                    var dir = fusedPos[ib] - fusedPos[ia];
+                    float len = dir.magnitude;
+                    if (Mathf.Abs(len - L) <= Mathf.Max(lenRelTol * L, lenAbsTolMm)) continue;
+                    if (len < 1f) { _fused.Joints[ib].Valid = false; fusedOk[ib] = false; continue; }
+                    var np = fusedPos[ia] + dir * (L / len);
+                    fusedPos[ib] = np;
+                    _fused.Joints[ib].PositionMm = np;
+                    _fused.Joints[ib].Confidence *= 0.8f;
+                    StatLenProjected++;
                 }
             }
 

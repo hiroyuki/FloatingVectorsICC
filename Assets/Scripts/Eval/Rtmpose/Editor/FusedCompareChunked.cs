@@ -124,6 +124,7 @@ namespace BodyTracking.Eval.Rtmpose
             sb.AppendLine(_metrics.BuildSummary());
             sb.AppendLine($"fusion stats: consensus={_fused.StatConsensus} single={_fused.StatSingleAccepted} " +
                           $"relift={_fused.StatRelifted} held={_fused.StatHeld} jumpHeld={_fused.StatJumpHeld} " +
+                          $"lenProjected={_fused.StatLenProjected} " +
                           $"droppedLen={_fused.StatDroppedLen} outliers={_fused.StatOutliers}");
             sb.AppendLine("csv dir: " + resultsDir);
             // NOTE: no Abort here — _fusedLog stays available for SpotCheck().
