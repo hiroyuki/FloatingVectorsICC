@@ -61,6 +61,44 @@ harness-base を共通祖先にし、ハーネス修正は両トラックへ mer
 - **複数人**: 2 人以上での ID スワップ回数。※現データに 2 人シーン無し → 要長尺録画。
 
 ## Session refresh checkpoints
+### CP3 (2026-07-16, セッション終了時点) — Track B 完了・ビジュアル A/B 稼働・本番修正 1 件持ち越し
+- (a) 完了（このセッション）:
+  - **Track B (RTMPose) 一式**: ORT DirectML バックエンド、捕捉ボリューム人物選別
+    （box中心1点→**5x5グリッド中央値深度**修正済）、detect-once-then-track（**~44ms/frame**）、
+    メトリクス比較（`eval/results/compare/`）、`eval/COMPARISON_REPORT.md`。
+    codex-review 承認済（`codex review --base eval/harness-base` を worktree で直接実行）。
+  - **本番ビジュアル A/B**（本番コード無変更）: メニュー `FloatingVectors > Eval BT >
+    Use k4abt|RTMPose bodies`。k4abt=元セッション、RTMPose=`D:\FVICC_eval\15-50-24-rtmpose`
+    （depth/color/ir はハードリンク、bodies_main は RtmposeBodiesExport 生成・全編 ~1540f/cam）。
+    再生は SkeletonMerger.ignoreRecordedBodies=false 経由。開発ルック（TSDF+curves）も再生で動作
+    （Views: Point cloud OFF / TSDF mesh ON / Motion lines ON — Window > Control Panel）。
+  - **BT Frame Inspector**（`FloatingVectors > Eval BT > Frame Inspector`）:
+    再生を観て → **Grab & Freeze**（Editor ごと凍結＋フレーム取得）→ カメラボタンで
+    1台ずつ点群+k4abt(シアン)+RTMPose(オレンジ)+ボーンを Scene に表示。
+    フレームは**タイムスタンプ照合**（カメラ毎に index が最大56f ずれる問題を修正）。
+    配置は常に本番同一（extrinsics+world rebase）。viz は Play 遷移で自動削除。
+  - **frame 788 の個別検証**: cam L で k4abt がほぼロスト(5関節) vs RTMPose 14関節、
+    cam N で k4abt が歪んだポーズ。→ ユーザーの「k4abt 関節精度への不満」を具体化。
+- (b) 次セッションで最初に読む: この CP3、`eval/COMPARISON_REPORT.md`、
+  memory の `eval-bodytracking-task.md` / `codex-review-setup.md`。
+  Editor は worktree `F:\FloatingVectorsICC-eval-rtmpose` を開く（main とは別インスタンス）。
+- (c) 残タスク:
+  1. **【持ち越し・別タスク】本番修正: SkeletonMerger に bounding volume ゲート追加**
+     — 再生で box 外の見学者 (Body_3786, x≈-3.5m) を追跡・描画していた。
+     「volume 外は捨てる」仕様に反する（誤作動・リソース圧迫）。本番コードなので要承認+計画。
+  2. ユーザーのビジュアル A/B 継続（k4abt vs RTMPose の絵の所感 → レポートに追記）
+  3. RTMPose さらなる高速化: CUDA/TensorRT EP（要 CUDA12.x+cuDNN9 導入=人手、現状 11.6/cuDNN8）
+  4. Nuitrack ライブ試用（デバイス接続時、A-1: ライブ+同時録画）
+  5. 静止保持区間つき録画で純ジッター測定（任意）
+- 注意事項:
+  - Frame Inspector の自動掃除ガードは**次回コンパイルから有効**（コミット済 6c4b619）
+  - worktree には OpenCV junction (`Assets/OpenCVForUnity` → main) と
+    Workers/K4abtWorker の publish 済 exe がある（このマシンに BT SDK 無し→ライブ k4abt 不可）
+  - MCP: `set_active_instance` で worktree インスタンスを選ぶ。GPU 系（RTMPose/DirectML）は
+    batchmode -nographics では動かない → 対話 Editor + execute_code（>60s は MCP タイムアウト
+    するが処理は継続、chunked Start/Step/Finish パターンを使う）
+
+
 ### CP2 (現在) — harness-base 実装＋検証 完了、コミット待ち
 - (a) 完了:
   - 共有ハーネス全ファイル実装（`Assets/Scripts/Eval/*.cs` + Editor）。

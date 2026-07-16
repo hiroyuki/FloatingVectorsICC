@@ -67,6 +67,17 @@ k4abt latency is N/A here (replayed recorded output); live k4abt is typically
 - **Depth surface vs joint center**: RTMPose lifts to the body **surface** depth;
   k4abt estimates the joint **center** (slightly inside). A visible, systematic offset
   — evaluated raw (uncorrected) per the task.
+- **Production gap found via playback (2026-07-16)**: the k4abt→SkeletonMerger path has
+  **no bounding-volume gate** — a bystander ~3.5 m OUTSIDE the capture volume was
+  tracked, merged and rendered (`Body_3786`) during production-scene playback. Per the
+  installation's rule ("outside the volume must be discarded — misfire + resource
+  risk") this is a defect to fix in production (separate task; production code was
+  off-limits for this eval). The RTMPose path already gates by the capture volume, so
+  its bodies contain the performer only.
+- **Per-frame/per-camera spot check (frame 788)**: cam L k4abt nearly lost the body
+  (5/26 joints) while RTMPose held 14/15; cam N k4abt produced a full-joint but
+  visibly distorted pose while RTMPose stayed compact; Z/EG comparable. Tool:
+  `FloatingVectors > Eval BT > Frame Inspector` (Grab & Freeze → per-camera view).
 
 ## Effort / gotchas / production work
 - **Effort**: harness + baseline reused directly; RTMPose backend ~1 day equivalent
