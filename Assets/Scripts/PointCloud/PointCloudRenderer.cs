@@ -67,6 +67,12 @@ namespace PointCloud
         [Tooltip("Serial number of the Femto Bolt to open. Set by SensorManager.")]
         public string deviceSerial = string.Empty;
 
+        [Tooltip("Mask the depth pixels where a rival camera's IR projector appears " +
+                 "(facing ToF pairs return false mid-air depth there) before raw frames " +
+                 "reach consumers. Needs ProjectorMask.Configure with the rig calibration " +
+                 "(LiveFusedBodySource does this) — a no-op until then.")]
+        public bool maskRivalProjectors = true;
+
         [Tooltip("Exclude this live renderer from the SCULPTURE sources (TSDF " +
                  "integration + motion-curve seeding) — attract playback owns the " +
                  "sculpture while the ghost plays. Frame capture, BT worker feed, " +
@@ -400,6 +406,16 @@ namespace PointCloud
 
                     if (OnRawFramesReady != null && slot.DepthByteCount > 0 && slot.ColorByteCount > 0)
                     {
+                        // Rival-projector flare mask (live path). Effective once
+                        // ProjectorMask.Configure ran with the rig calibration (e.g.
+                        // LiveFusedBodySource does); a no-op otherwise. Note: this
+                        // cleans the raw-frame CONSUMERS (TSDF, BT, curves) — the
+                        // displayed live point cloud is converted SDK-side from the
+                        // original frame and keeps its flare until masked natively.
+                        if (maskRivalProjectors)
+                            ProjectorMask.Apply(deviceSerial, slot.DepthBytes, slot.DepthByteCount,
+                                slot.DepthWidth, slot.DepthHeight,
+                                slot.IRBytes, slot.IRByteCount, slot.IRWidth, slot.IRHeight);
                         OnRawFramesReady.Invoke(this, new RawFrameData(
                             depthBytes: slot.DepthBytes,
                             depthByteCount: slot.DepthByteCount,
