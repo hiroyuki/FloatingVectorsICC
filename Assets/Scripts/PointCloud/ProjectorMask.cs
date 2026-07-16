@@ -52,6 +52,15 @@ namespace PointCloud
         /// is insensitive to the exact value.</summary>
         public static int IrGateThreshold = 2000;
 
+        /// <summary>Two depth pixels belong to the same surface when they differ by at
+        /// most this (mm) — the component-growing link tolerance.</summary>
+        public static int DepthLinkMm = 300;
+
+        /// <summary>A connected component inside the disc counts as REAL geometry when it
+        /// reaches this many pixels (at 320-wide; scales quadratically) — the measured
+        /// flare patch is &lt; ~200 px, a body or wall region is thousands.</summary>
+        public static int MinRealComponentPx320 = 500;
+
         public static void Clear() => _discs.Clear();
 
         public static int DiscCount(string serial)
@@ -89,10 +98,14 @@ namespace PointCloud
             }
         }
 
-        /// <summary>Zero the depth inside each registered disc of <paramref name="serial"/>,
-        /// gated per frame on the IR brightness at the disc center. A missing IR buffer
-        /// masks unconditionally — the disc only ever contains the rival camera and the
-        /// wall behind it, both outside the capture volume.</summary>
+        /// <summary>Clean the flare artifacts inside each registered disc of
+        /// <paramref name="serial"/>, gated per frame on the IR brightness at the disc
+        /// center. Inside the disc, only ISOLATED small depth components are zeroed:
+        /// the flare patch is a free-floating island of self-consistent false depth
+        /// (&lt; ~200 px, enclosed by saturated/invalid pixels), while real geometry —
+        /// a body crossing the disc, the wall behind the rival camera — always connects
+        /// outward into a large surface. Blanket-zeroing the disc is NOT safe: the body
+        /// regularly overlaps the disc while the projector still peeks past its edge.</summary>
         public static void Apply(string serial, byte[] depth, int depthByteCount, int w, int h,
                                  byte[] ir, int irByteCount, int irW, int irH)
         {
@@ -106,19 +119,95 @@ namespace PointCloud
                 if (!ProjectorVisible(ir, irByteCount, irW, irH,
                         cu * (irW > 0 ? (float)irW / w : 1f), cv * (irH > 0 ? (float)irH / h : 1f)))
                     continue;
-                float r = MaskRadius320 * (w / 320f);
-                int u0 = Mathf.Max(0, (int)(cu - r)), u1 = Mathf.Min(w - 1, (int)(cu + r));
-                int v0 = Mathf.Max(0, (int)(cv - r)), v1 = Mathf.Min(h - 1, (int)(cv + r));
-                float r2 = r * r;
-                for (int v = v0; v <= v1; v++)
+                FilterDisc(depth, w, h, cu, cv, MaskRadius320 * (w / 320f));
+            }
+        }
+
+        // Scratch for the component sweep (grown on demand, box-local indices).
+        private static byte[] _visited = System.Array.Empty<byte>();
+        private static int[] _queue = System.Array.Empty<int>();
+        private static int[] _component = System.Array.Empty<int>();
+
+        /// <summary>Flood-fill every valid pixel inside the disc into its depth-linked
+        /// component (4-connectivity, |Δdepth| ≤ DepthLinkMm per edge) within a working
+        /// box (disc + generous margin). A component is REAL — and kept — as soon as it
+        /// touches the box boundary (it connects to the world outside) or reaches
+        /// MinRealComponentPx; anything that exhausts while still small and enclosed is
+        /// the flare island and gets zeroed.</summary>
+        private static void FilterDisc(byte[] depth, int w, int h, float cu, float cv, float r)
+        {
+            int margin = Mathf.CeilToInt(r) + 20;
+            int bx0 = Mathf.Max(0, (int)(cu - r) - margin);
+            int bx1 = Mathf.Min(w - 1, (int)(cu + r) + margin);
+            int by0 = Mathf.Max(0, (int)(cv - r) - margin);
+            int by1 = Mathf.Min(h - 1, (int)(cv + r) + margin);
+            int bw = bx1 - bx0 + 1, bh = by1 - by0 + 1;
+            int boxArea = bw * bh;
+            if (boxArea <= 0) return;
+            if (_visited.Length < boxArea)
+            {
+                _visited = new byte[boxArea];
+                _queue = new int[boxArea];
+                _component = new int[boxArea];
+            }
+            System.Array.Clear(_visited, 0, boxArea);
+
+            float r2 = r * r;
+            float scale = w / 320f;
+            int minReal = Mathf.Max(1, (int)(MinRealComponentPx320 * scale * scale));
+            int link = DepthLinkMm;
+
+            int u0 = Mathf.Max(bx0, (int)(cu - r)), u1 = Mathf.Min(bx1, (int)(cu + r));
+            int v0 = Mathf.Max(by0, (int)(cv - r)), v1 = Mathf.Min(by1, (int)(cv + r));
+            for (int sv2 = v0; sv2 <= v1; sv2++)
+            {
+                float dvv = sv2 - cv;
+                for (int su2 = u0; su2 <= u1; su2++)
                 {
-                    float dv = v - cv;
-                    for (int u = u0; u <= u1; u++)
+                    float duu = su2 - cu;
+                    if (duu * duu + dvv * dvv > r2) continue;
+                    int seedLocal = (sv2 - by0) * bw + (su2 - bx0);
+                    if (_visited[seedLocal] != 0) continue;
+                    int seedIdx = (sv2 * w + su2) * 2;
+                    int seedDepth = depth[seedIdx] | (depth[seedIdx + 1] << 8);
+                    _visited[seedLocal] = 1;
+                    if (seedDepth == 0) continue;
+
+                    // BFS the FULL component (no early exit: an abandoned traversal
+                    // would leave visited walls that cut a later seed's view of the
+                    // same surface into a small "fragment" and get it wrongly zeroed).
+                    // The box bounds the work to a few 10k pixels per disc.
+                    int qh = 0, qt = 0, size = 0;
+                    bool real = false;
+                    _queue[qt++] = seedLocal;
+                    while (qh < qt)
                     {
-                        float du = u - cu;
-                        if (du * du + dv * dv > r2) continue;
-                        int i = (v * w + u) * 2;
-                        depth[i] = 0; depth[i + 1] = 0;
+                        int cur = _queue[qh++];
+                        _component[size++] = cur;
+                        int cy = cur / bw + by0, cx = cur % bw + bx0;
+                        if (cx == bx0 || cx == bx1 || cy == by0 || cy == by1) real = true;
+                        int curDepth = depth[(cy * w + cx) * 2] | (depth[(cy * w + cx) * 2 + 1] << 8);
+                        for (int n = 0; n < 4; n++)
+                        {
+                            int nx = cx + (n == 0 ? 1 : n == 1 ? -1 : 0);
+                            int ny = cy + (n == 2 ? 1 : n == 3 ? -1 : 0);
+                            if (nx < bx0 || nx > bx1 || ny < by0 || ny > by1) continue;
+                            int nl = (ny - by0) * bw + (nx - bx0);
+                            if (_visited[nl] != 0) continue;
+                            int nd = depth[(ny * w + nx) * 2] | (depth[(ny * w + nx) * 2 + 1] << 8);
+                            if (nd == 0) { _visited[nl] = 1; continue; }
+                            if (System.Math.Abs(nd - curDepth) > link) continue;
+                            _visited[nl] = 1;
+                            _queue[qt++] = nl;
+                        }
+                    }
+                    if (real || size >= minReal) continue; // keep
+                    for (int i = 0; i < size; i++)
+                    {
+                        int l = _component[i];
+                        int y = l / bw + by0, x = l % bw + bx0;
+                        int idx = (y * w + x) * 2;
+                        depth[idx] = 0; depth[idx + 1] = 0;
                     }
                 }
             }
