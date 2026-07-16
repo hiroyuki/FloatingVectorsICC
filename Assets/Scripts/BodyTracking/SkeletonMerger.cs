@@ -1037,6 +1037,12 @@ namespace BodyTracking
             // Data ingestion is independent of showBones now — that toggle only controls whether the
             // skeleton is DRAWN (bones + joints), so consumers like BonePoseHistory keep getting poses
             // while the skeleton is hidden.
+
+            // External-source mode: workers spawned BEFORE the mode flipped may still
+            // deliver — their k4abt output must not fight the external fused bodies
+            // in the same slots (DispatchRawFrame already stops feeding them).
+            if (useExternalBodies) return;
+
             if (!_latestBySerial.TryGetValue(serial, out var slot)) return;
 
             // Loop-seam / backward-seek guard (live-k4abt-on-playback): BT inference lags
