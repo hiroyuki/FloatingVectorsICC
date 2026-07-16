@@ -1,0 +1,23 @@
+{
+    "name": "BodyTracking.Eval.Rtmpose.Editor",
+    "rootNamespace": "BodyTracking.Eval.Rtmpose",
+    "references": [
+        "BodyTracking.Eval.Rtmpose",
+        "BodyTracking.Eval",
+        "BodyTracking",
+        "PointCloud",
+        "Orbbec",
+        "Calibration"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": true,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

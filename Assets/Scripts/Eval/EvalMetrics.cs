@@ -1,0 +1,269 @@
+// Metric collection for the evaluation harness. Accumulates per-STREAM skeleton
+// data (a stream = one tracker on one camera serial) and latency samples, then
+// computes the comparison metrics (jitter, temporal spikes, continuity, latency,
+// ID swaps) and writes CSV.
+//
+// Keying by (tracker, serial) is essential: each camera produces skeletons in
+// its OWN camera space, so pooling cameras into one time series would fabricate
+// huge frame-to-frame jumps and ID swaps. World-space multi-camera fusion is a
+// separate metric handled elsewhere.
+//
+// All positions are the common EvalSkeleton camera-space millimeters, so jitter
+// numbers are directly comparable across trackers. Metrics are computed on the
+// RAW tracker output — the harness never applies One-Euro / smoothing.
+
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Text;
+using UnityEngine;
+
+namespace BodyTracking.Eval
+{
+    public sealed class EvalMetrics
+    {
+        public struct Config
+        {
+            public float StaticStartSec;   // jitter window, relative to first frame
+            public float StaticEndSec;     // <=Start means "use full range"
+            public float SpikeThresholdMm; // frame-to-frame displacement spike gate
+
+            public static Config Default => new Config { StaticStartSec = 0f, StaticEndSec = 0f, SpikeThresholdMm = 50f };
+        }
+
+        private struct Sample
+        {
+            public ulong Ts;
+            public int BodyCount;
+            public int PrimaryId;
+            public Vector3[] Pos;   // [EvalSkeleton.JointCount]
+            public bool[] Valid;
+            public float[] Conf;
+        }
+
+        private sealed class Series
+        {
+            public string Tracker;
+            public string Serial;
+            public readonly List<Sample> Samples = new List<Sample>();
+            public readonly List<double> LatencyMs = new List<double>();
+            public int Submitted;
+        }
+
+        private readonly Dictionary<string, Series> _series = new Dictionary<string, Series>();
+        private Config _cfg = Config.Default;
+
+        public void Configure(Config cfg) => _cfg = cfg;
+
+        private static string Key(string tracker, string serial) => tracker + "|" + (serial ?? "");
+
+        private Series Get(string tracker, string serial)
+        {
+            string k = Key(tracker, serial);
+            if (!_series.TryGetValue(k, out var s)) { s = new Series { Tracker = tracker, Serial = serial }; _series[k] = s; }
+            return s;
+        }
+
+        public void AddSubmitted(string tracker, string serial) => Get(tracker, serial).Submitted++;
+
+        public void AddLatency(string tracker, string serial, double ms) => Get(tracker, serial).LatencyMs.Add(ms);
+
+        public void AddFrame(string tracker, EvalSkeletonFrame frame)
+        {
+            var primary = frame.Primary();
+            if (primary == null) return;
+            int n = EvalSkeleton.JointCount;
+            var s = new Sample
+            {
+                Ts = frame.TimestampNs,
+                BodyCount = frame.Bodies.Count,
+                PrimaryId = primary.PersonId,
+                Pos = new Vector3[n],
+                Valid = new bool[n],
+                Conf = new float[n],
+            };
+            for (int i = 0; i < n; i++)
+            {
+                s.Pos[i] = primary.Joints[i].PositionMm;
+                s.Valid[i] = primary.Joints[i].Valid;
+                s.Conf[i] = primary.Joints[i].Confidence;
+            }
+            Get(tracker, frame.Serial).Samples.Add(s);
+        }
+
+        // ------------------------------------------------------------------
+
+        public sealed class JointStat
+        {
+            public EvalJointId Joint;
+            public int Samples;
+            public float JitterMm;   // 3D RMS stddev over the static window
+            public float MeanConf;
+        }
+
+        public sealed class Report
+        {
+            public string Tracker;
+            public string Serial;
+            public int OutputFrames;
+            public int Submitted;
+            public float Continuity;      // OutputFrames / Submitted
+            public float MeanValidJoints; // avg valid joints on primary body
+            public float SpikeRatePct;    // % of consecutive valid pairs exceeding threshold
+            public int IdSwaps;
+            public double LatMeanMs, LatP50Ms, LatP95Ms, LatMaxMs;
+            public JointStat[] Joints;
+        }
+
+        public IEnumerable<Report> AllReports()
+        {
+            foreach (var s in _series.Values) yield return Compute(s);
+        }
+
+        private Report Compute(Series s)
+        {
+            var r = new Report { Tracker = s.Tracker, Serial = s.Serial, Submitted = s.Submitted, OutputFrames = s.Samples.Count };
+            r.Continuity = s.Submitted > 0 ? (float)s.Samples.Count / s.Submitted : 0f;
+
+            ulong t0 = ulong.MaxValue;
+            foreach (var smp in s.Samples) if (smp.Ts < t0) t0 = smp.Ts;
+            bool useFull = _cfg.StaticEndSec <= _cfg.StaticStartSec;
+            ulong winStart = t0 + (ulong)(_cfg.StaticStartSec * 1e9);
+            ulong winEnd = t0 + (ulong)(_cfg.StaticEndSec * 1e9);
+
+            int n = EvalSkeleton.JointCount;
+            r.Joints = new JointStat[n];
+            var accum = new List<Vector3>[n];
+            var conf = new List<float>[n];
+            for (int j = 0; j < n; j++) { accum[j] = new List<Vector3>(); conf[j] = new List<float>(); }
+
+            double validJointSum = 0;
+            foreach (var smp in s.Samples)
+            {
+                int vc = 0;
+                bool inWin = useFull || (smp.Ts >= winStart && smp.Ts <= winEnd);
+                for (int j = 0; j < n; j++)
+                {
+                    if (!smp.Valid[j]) continue;
+                    vc++;
+                    if (inWin) { accum[j].Add(smp.Pos[j]); conf[j].Add(smp.Conf[j]); }
+                }
+                validJointSum += vc;
+            }
+            r.MeanValidJoints = s.Samples.Count > 0 ? (float)(validJointSum / s.Samples.Count) : 0f;
+
+            for (int j = 0; j < n; j++)
+            {
+                r.Joints[j] = new JointStat
+                {
+                    Joint = (EvalJointId)j,
+                    Samples = accum[j].Count,
+                    JitterMm = Rms3D(accum[j]),
+                    MeanConf = Mean(conf[j]),
+                };
+            }
+
+            int spikes = 0, pairs = 0, swaps = 0;
+            for (int i = 1; i < s.Samples.Count; i++)
+            {
+                var a = s.Samples[i - 1];
+                var b = s.Samples[i];
+                if (a.PrimaryId != b.PrimaryId) swaps++;
+                for (int j = 0; j < n; j++)
+                {
+                    if (!a.Valid[j] || !b.Valid[j]) continue;
+                    pairs++;
+                    if (Vector3.Distance(a.Pos[j], b.Pos[j]) > _cfg.SpikeThresholdMm) spikes++;
+                }
+            }
+            r.SpikeRatePct = pairs > 0 ? 100f * spikes / pairs : 0f;
+            r.IdSwaps = swaps;
+
+            var lat = new List<double>(s.LatencyMs);
+            lat.Sort();
+            if (lat.Count > 0)
+            {
+                double sum = 0; foreach (var v in lat) sum += v;
+                r.LatMeanMs = sum / lat.Count;
+                r.LatP50Ms = Percentile(lat, 0.50);
+                r.LatP95Ms = Percentile(lat, 0.95);
+                r.LatMaxMs = lat[lat.Count - 1];
+            }
+            return r;
+        }
+
+        // ------------------------------------------------------------------
+
+        public string BuildSummary()
+        {
+            var sb = new StringBuilder();
+            foreach (var r in AllReports())
+            {
+                sb.AppendLine($"[{r.Tracker}@{r.Serial}] frames={r.OutputFrames}/{r.Submitted} " +
+                              $"continuity={r.Continuity:P0} validJoints={r.MeanValidJoints:F1}/15 " +
+                              $"spikeRate={r.SpikeRatePct:F1}% idSwaps={r.IdSwaps} " +
+                              $"lat(ms) mean={r.LatMeanMs:F1} p95={r.LatP95Ms:F1}");
+                float sumJit = 0; int nj = 0;
+                foreach (var js in r.Joints) if (js.Samples > 1) { sumJit += js.JitterMm; nj++; }
+                sb.AppendLine($"    mean jitter over {nj} joints = {(nj > 0 ? sumJit / nj : 0f):F1} mm");
+            }
+            return sb.ToString();
+        }
+
+        public void WriteCsv(string dir)
+        {
+            Directory.CreateDirectory(dir);
+            var sum = new StringBuilder();
+            sum.AppendLine("tracker,serial,output_frames,submitted,continuity_pct,mean_valid_joints,spike_rate_pct,id_swaps,lat_mean_ms,lat_p50_ms,lat_p95_ms,lat_max_ms");
+            foreach (var r in AllReports())
+            {
+                sum.AppendLine(string.Join(",",
+                    Csv(r.Tracker), Csv(r.Serial), r.OutputFrames, r.Submitted,
+                    F(r.Continuity * 100f), F(r.MeanValidJoints), F(r.SpikeRatePct), r.IdSwaps,
+                    F(r.LatMeanMs), F(r.LatP50Ms), F(r.LatP95Ms), F(r.LatMaxMs)));
+
+                var jit = new StringBuilder();
+                jit.AppendLine("joint,samples,jitter_mm,mean_conf");
+                foreach (var js in r.Joints)
+                    jit.AppendLine(string.Join(",", js.Joint, js.Samples, F(js.JitterMm), F(js.MeanConf)));
+                File.WriteAllText(Path.Combine(dir, $"jitter_{Safe(r.Tracker)}_{Safe(r.Serial)}.csv"), jit.ToString());
+            }
+            File.WriteAllText(Path.Combine(dir, "summary.csv"), sum.ToString());
+        }
+
+        // ------------------------------------------------------------------
+
+        private static float Rms3D(List<Vector3> pts)
+        {
+            if (pts.Count < 2) return 0f;
+            Vector3 mean = Vector3.zero;
+            foreach (var p in pts) mean += p;
+            mean /= pts.Count;
+            double vx = 0, vy = 0, vz = 0;
+            foreach (var p in pts) { vx += (p.x - mean.x) * (p.x - mean.x); vy += (p.y - mean.y) * (p.y - mean.y); vz += (p.z - mean.z) * (p.z - mean.z); }
+            int n = pts.Count;
+            return (float)Math.Sqrt((vx + vy + vz) / n);
+        }
+
+        private static float Mean(List<float> v)
+        {
+            if (v.Count == 0) return 0f;
+            float s = 0; foreach (var x in v) s += x; return s / v.Count;
+        }
+
+        private static double Percentile(List<double> sorted, double p)
+        {
+            if (sorted.Count == 0) return 0;
+            double idx = p * (sorted.Count - 1);
+            int lo = (int)Math.Floor(idx), hi = (int)Math.Ceiling(idx);
+            if (lo == hi) return sorted[lo];
+            double frac = idx - lo;
+            return sorted[lo] * (1 - frac) + sorted[hi] * frac;
+        }
+
+        private static string F(double v) => v.ToString("F3", CultureInfo.InvariantCulture);
+        private static string Csv(string s) => s?.Replace(",", "_") ?? "";
+        private static string Safe(string s) => s?.Replace(" ", "_").Replace(",", "_") ?? "x";
+    }
+}

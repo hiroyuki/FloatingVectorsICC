@@ -1,0 +1,20 @@
+{
+  "session": "D:/Dropbox/projects/ICC/Recordings/RecordingBase/2026-07-14_15-50-24",
+  "frames": [45,84,369,993,1056],
+  "lengthsMm": {
+    "Pelvis-Neck": { "medianMm": 455.3, "samples": 19, "iqrMm": 57.7 },
+    "Neck-Head": { "medianMm": 207.1, "samples": 17, "iqrMm": 53.6 },
+    "Neck-ShoulderL": { "medianMm": 128.1, "samples": 19, "iqrMm": 32.1 },
+    "ShoulderL-ElbowL": { "medianMm": 243.9, "samples": 19, "iqrMm": 32.6 },
+    "ElbowL-WristL": { "medianMm": 223.3, "samples": 19, "iqrMm": 105.9 },
+    "Neck-ShoulderR": { "medianMm": 149.3, "samples": 19, "iqrMm": 55.6 },
+    "ShoulderR-ElbowR": { "medianMm": 241.5, "samples": 18, "iqrMm": 23.4 },
+    "ElbowR-WristR": { "medianMm": 223.5, "samples": 16, "iqrMm": 20.7 },
+    "Pelvis-HipL": { "medianMm": 75.3, "samples": 19, "iqrMm": 28.5 },
+    "HipL-KneeL": { "medianMm": 383.2, "samples": 19, "iqrMm": 22.2 },
+    "KneeL-AnkleL": { "medianMm": 380.5, "samples": 19, "iqrMm": 23.4 },
+    "Pelvis-HipR": { "medianMm": 78.6, "samples": 19, "iqrMm": 33.3 },
+    "HipR-KneeR": { "medianMm": 379.5, "samples": 19, "iqrMm": 42.3 },
+    "KneeR-AnkleR": { "medianMm": 369.2, "samples": 19, "iqrMm": 41.5 }
+  }
+}
