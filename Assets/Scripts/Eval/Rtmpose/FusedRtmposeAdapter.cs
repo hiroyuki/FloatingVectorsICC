@@ -180,19 +180,21 @@ namespace BodyTracking.Eval.Rtmpose
         readonly EvalSkeletonFrame _frame = new();
         readonly EvalSkeleton _fused = new();
 
-        /// <summary>Fixed-lag median-of-3 output filter: emission is delayed by ONE
-        /// fused frame (~33 ms) so each emitted joint is the component-wise median
-        /// of (t-1, t, t+1). A single-frame out-and-back spike is structurally
-        /// removed (the middle value never wins), while sustained motion passes
-        /// undistorted (median of a monotone triple is its middle sample). This is
-        /// live-viable — the only cost is the one-frame latency.</summary>
+        /// <summary>Fixed-lag median output filter: emission is delayed by TWO
+        /// fused frames (~66 ms) so each emitted joint is the component-wise
+        /// median of a 5-frame window centered on the emitted frame. Excursions
+        /// lasting up to TWO frames are structurally removed (they can never be
+        /// the median of 5), while sustained motion passes undistorted (median of
+        /// a monotone run is its middle sample). Live-viable — the only cost is
+        /// the two-frame latency, negligible for trail-style visuals.</summary>
         public bool medianLagFilter = true;
 
-        // lag ring: 3 most recent fused skeletons (post length-projection)
-        readonly EvalSkeleton[] _lag = { new EvalSkeleton(), new EvalSkeleton(), new EvalSkeleton() };
-        readonly ulong[] _lagTs = new ulong[3];
+        // lag ring, oldest.._lag[4]=newest (post length-projection)
+        readonly EvalSkeleton[] _lag = { new EvalSkeleton(), new EvalSkeleton(), new EvalSkeleton(), new EvalSkeleton(), new EvalSkeleton() };
+        readonly ulong[] _lagTs = new ulong[5];
         int _lagCount;
         readonly EvalSkeleton _emit = new();
+        readonly List<float> _medScratch = new(5);
 
         public event Action<EvalSkeletonFrame> OnSkeletons;
 
@@ -502,37 +504,48 @@ namespace BodyTracking.Eval.Rtmpose
                 return;
             }
 
-            // push into the lag ring (oldest.._lag[2]=newest)
-            if (_lagCount >= 3)
+            // push into the lag ring (oldest.._lag[4]=newest)
+            if (_lagCount >= 5)
             {
-                var tmp = _lag[0]; _lag[0] = _lag[1]; _lag[1] = _lag[2]; _lag[2] = tmp;
-                _lagTs[0] = _lagTs[1]; _lagTs[1] = _lagTs[2];
+                var tmp = _lag[0];
+                for (int i = 0; i < 4; i++) { _lag[i] = _lag[i + 1]; _lagTs[i] = _lagTs[i + 1]; }
+                _lag[4] = tmp;
             }
-            int newest = Mathf.Min(_lagCount, 2);
+            int newest = Mathf.Min(_lagCount, 4);
             CopySkeleton(_fused, _lag[newest]);
             _lagTs[newest] = nowTs;
-            if (_lagCount < 3) _lagCount++;
+            if (_lagCount < 5) _lagCount++;
 
-            if (_lagCount == 2)
+            // emit index len-3 (fixed lag of two frames once warm); window = the
+            // whole current ring (3..5 samples)
+            if (_lagCount < 3) return;
+            int emitIdx = _lagCount - 3;
+            CopySkeleton(_lag[emitIdx], _emit);
+            for (int j = 0; j < (int)EvalJointId.Count; j++)
             {
-                // warmup: emit the very first frame raw (lag settles at one frame)
-                EmitSkeleton(_lag[0], _lagTs[0]);
+                bool all = true;
+                for (int i = 0; i < _lagCount && all; i++) all = _lag[i].Joints[j].Valid;
+                if (!all) continue;
+                _emit.Joints[j].PositionMm = new Vector3(
+                    MedN(j, 0), MedN(j, 1), MedN(j, 2));
             }
-            else if (_lagCount >= 3)
+            ProjectBoneLengths(_emit); // median mixing can bend a length back out of tolerance
+            EmitSkeleton(_emit, _lagTs[emitIdx]);
+        }
+
+        // component-wise median over the current lag window (axis: 0=x 1=y 2=z)
+        float MedN(int j, int axis)
+        {
+            _medScratch.Clear();
+            for (int i = 0; i < _lagCount; i++)
             {
-                // median-of-3 centered on the middle frame
-                CopySkeleton(_lag[1], _emit);
-                for (int j = 0; j < (int)EvalJointId.Count; j++)
-                {
-                    if (!_lag[0].Joints[j].Valid || !_lag[1].Joints[j].Valid || !_lag[2].Joints[j].Valid) continue;
-                    var a = _lag[0].Joints[j].PositionMm;
-                    var b = _lag[1].Joints[j].PositionMm;
-                    var c = _lag[2].Joints[j].PositionMm;
-                    _emit.Joints[j].PositionMm = new Vector3(Med3(a.x, b.x, c.x), Med3(a.y, b.y, c.y), Med3(a.z, b.z, c.z));
-                }
-                ProjectBoneLengths(_emit); // median mixing can bend a length back out of tolerance
-                EmitSkeleton(_emit, _lagTs[1]);
+                var p = _lag[i].Joints[j].PositionMm;
+                _medScratch.Add(axis == 0 ? p.x : axis == 1 ? p.y : p.z);
             }
+            _medScratch.Sort();
+            int n = _medScratch.Count;
+            return (n & 1) == 1 ? _medScratch[n / 2]
+                                : 0.5f * (_medScratch[n / 2 - 1] + _medScratch[n / 2]);
         }
 
         void EmitSkeleton(EvalSkeleton s, ulong ts)
