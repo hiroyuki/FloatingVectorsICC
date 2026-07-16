@@ -60,6 +60,10 @@ namespace BodyTracking.Eval.Rtmpose
         // same as the playback clouds. Not an option: anything else just looks like
         // a misaligned duplicate next to the real scene.
         bool _showCloud = true, _showK4abt = true, _showRtmpose = true;
+        // Cull the spawned cloud with the scene BoundingVolume like the production
+        // renderers do (shader OBB filter). OFF shows the full room — occasionally
+        // useful, but the default must match what the installation actually renders.
+        bool _cullCloud = true;
         Vector2 _scroll;
         string _log = "";
 
@@ -108,6 +112,9 @@ namespace BodyTracking.Eval.Rtmpose
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("Show", EditorStyles.boldLabel);
             _showCloud = EditorGUILayout.Toggle("Point cloud", _showCloud);
+            using (new EditorGUI.IndentLevelScope())
+            using (new EditorGUI.DisabledScope(!_showCloud))
+                _cullCloud = EditorGUILayout.Toggle("Cull to volume", _cullCloud);
             _showK4abt = EditorGUILayout.Toggle("k4abt (cyan)", _showK4abt);
             _showRtmpose = EditorGUILayout.Toggle("RTMPose (orange)", _showRtmpose);
 
@@ -264,6 +271,21 @@ namespace BodyTracking.Eval.Rtmpose
                             var mr = cg.AddComponent<MeshRenderer>();
                             var sh = Shader.Find("Orbbec/PointCloudUnlit");
                             if (sh != null) mr.sharedMaterial = new Material(sh);
+                            // Same OBB cull the production renderers push via
+                            // PointCloudShaderFilters (internal to the PointCloud
+                            // asmdef, so the two relevant uniforms are set here
+                            // directly). Without this the debug cloud shows the
+                            // whole room — everything outside the volume.
+                            var cullBox = _cullCloud ? FindFirstObjectByType<BoundingVolume>() : null;
+                            if (cullBox != null && cullBox.Mode != BoundingVolume.FilterMode.Disabled)
+                            {
+                                var mpb = new MaterialPropertyBlock();
+                                mpb.SetMatrix("_ObbObjToBox",
+                                    cullBox.transform.worldToLocalMatrix * cg.transform.localToWorldMatrix);
+                                mpb.SetFloat("_ObbMode",
+                                    cullBox.Mode == BoundingVolume.FilterMode.KeepInside ? 1f : 2f);
+                                mr.SetPropertyBlock(mpb);
+                            }
                         }
                         else recon.Dispose();
                     }
