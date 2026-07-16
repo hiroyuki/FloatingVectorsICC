@@ -267,7 +267,7 @@ MonoBehaviour:
   cumulative: {fileID: 18533122}
   folderPath: D:\FloatingVectorsICC\RecordingBase
   folderPathMacOverride: /Volumes/horristicSSD2T/Dropbox/projects/ICC/Recordings/Rec2_jump
-  playbackFolderPath: D:/Dropbox/projects/ICC/Recordings/RecordingBase/2026-07-14_15-50-24
+  playbackFolderPath: D:/FVICC_eval/15-50-24-rtmfused
   playbackFolderPathMacOverride: /Volumes/horristicSSD2T/Dropbox/projects/ICC/Recordings/rec2_turn
   applyWorldRebase: 1
   rigSerialOrder:
@@ -282,6 +282,7 @@ MonoBehaviour:
   recordKey: 290
   liveFreezeCountdownSeconds: 5
   loop: 1
+  maskRivalProjectors: 1
   view: {fileID: 1168113566}
   playbackRate: 1
   bodyLeadFrames: 0
@@ -492,8 +493,8 @@ MonoBehaviour:
   ribbonWidth: 0.006
   round: 1
   rimBoost: 0.5
-  tailAlpha: 0
-  tailFadePow: 2.5
+  tailAlpha: 1
+  tailFadePow: 0.5
   freeze: 0
   sanityRange: 100
 --- !u!4 &333033384
@@ -2047,6 +2048,9 @@ MonoBehaviour:
   continuityRadiusMeters: 0.5
   maxSkewMs: 500
   requireMinWorkerCount: 2
+  enableVolumeGate: 1
+  trackingVolume: {fileID: 0}
+  volumeGateMarginMeters: 0.25
   showPerWorkerSkeletons: 0
   perWorkerVisualScale: 0.5
   showDebugHud: 1
