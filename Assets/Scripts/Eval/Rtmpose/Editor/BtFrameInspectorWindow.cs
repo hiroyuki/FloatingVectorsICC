@@ -27,6 +27,27 @@ namespace BodyTracking.Eval.Rtmpose
         [MenuItem("FloatingVectors/Eval BT/Frame Inspector", priority = 10)]
         public static void Open() => GetWindow<BtFrameInspectorWindow>("BT Frame Inspector");
 
+        // Inspection viz created in Edit mode is part of the scene and would be
+        // CARRIED INTO Play mode (it then renders in the Game view as a misaligned
+        // extra body/walls). Auto-clear it on every play-mode transition.
+        [InitializeOnLoadMethod]
+        static void RegisterAutoClear()
+        {
+            EditorApplication.playModeStateChanged += s =>
+            {
+                if (s == PlayModeStateChange.ExitingEditMode || s == PlayModeStateChange.ExitingPlayMode)
+                    ClearVizStatic();
+            };
+        }
+
+        static void ClearVizStatic()
+        {
+            foreach (var g in FindObjectsByType<GameObject>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+                if (g != null && g.transform.parent == null && g.name == "BTInspect") DestroyImmediate(g);
+            foreach (var d in s_keep) { try { d.Dispose(); } catch { } }
+            s_keep.Clear();
+        }
+
         string _root = "D:/Dropbox/projects/ICC/Recordings/RecordingBase/2026-07-14_15-50-24";
         string _host = "PAN-SHI";
         int _frame = 800;
@@ -366,13 +387,7 @@ namespace BodyTracking.Eval.Rtmpose
             lr.startColor = lr.endColor = col;
         }
 
-        void ClearViz()
-        {
-            var old = GameObject.Find("BTInspect");
-            if (old != null) DestroyImmediate(old);
-            foreach (var d in s_keep) { try { d.Dispose(); } catch { } }
-            s_keep.Clear();
-        }
+        void ClearViz() => ClearVizStatic(); // robust scan (GameObject.Find misses some states)
 
         void FrameSceneView(GameObject parent)
         {
