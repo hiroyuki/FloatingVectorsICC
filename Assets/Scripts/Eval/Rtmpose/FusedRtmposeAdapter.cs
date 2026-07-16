@@ -127,6 +127,14 @@ namespace BodyTracking.Eval.Rtmpose
         /// same direction (genuine fast motion keeps moving; an out-and-back
         /// spike reverses). 220 mm/frame ≈ 6.6 m/s at 30 fps.</summary>
         public float jumpGateMm = 220f;
+        /// <summary>Confirmations a WEAK-evidence jump (no cross-camera cluster
+        /// behind it — single camera or ray re-lift) needs before acceptance. A
+        /// grossly wrong camera repeats the same wrong position for several
+        /// frames, so proximity-to-pending alone is not proof for it; strong
+        /// (clustered) jumps still accept on the first confirmation. Late
+        /// acceptance leaves at most a 1-frame excursion, which the median-5
+        /// lag filter then removes structurally.</summary>
+        public int weakJumpConfirms = 3;
 
         public BodyProfile Profile;
 
@@ -178,6 +186,7 @@ namespace BodyTracking.Eval.Rtmpose
         // two-strike jump gate: pending suspicious position per joint
         readonly Vector3[] _jumpPending = new Vector3[(int)EvalJointId.Count];
         readonly bool[] _jumpHasPending = new bool[(int)EvalJointId.Count];
+        readonly int[] _jumpConfirms = new int[(int)EvalJointId.Count];
 
         ulong _lastFusedTs;
         readonly EvalSkeletonFrame _frame = new();
@@ -443,40 +452,50 @@ namespace BodyTracking.Eval.Rtmpose
                     pts.Add(_work[i].World[j]); wts.Add(Mathf.Max(0.05f, _work[i].Conf[j])); srcSample.Add(i);
                 }
 
-                float conf; Vector3 pos; bool fresh;
-                if (FuseJoint(j, pts, wts, srcSample, out pos, out conf, out fresh))
+                float conf; Vector3 pos; bool fresh, strong;
+                if (FuseJoint(j, pts, wts, srcSample, out pos, out conf, out fresh, out strong))
                 {
-                    // Two-strike jump gate: a fresh position far from recent history
-                    // is suspicious (single-frame spike). Hold it back once; accept
-                    // only when a second consecutive frame lands near the pending
-                    // position (genuine fast motion keeps moving the same way).
+                    // Jump gate: a fresh position far from recent history is
+                    // suspicious (spike). Hold it back; acceptance depends on the
+                    // evidence tier — a cross-camera cluster (strong) accepts on
+                    // the second consecutive frame near the pending position or
+                    // on direction continuation, while weak evidence (single
+                    // camera / re-lift) needs weakJumpConfirms agreeing frames,
+                    // because one wrong camera repeats the same wrong position
+                    // frame after frame and would otherwise self-confirm.
                     if (fresh && _histHas[j])
                     {
                         float age = AgeSec(nowTs, _histTs[j]);
                         if (age <= holdMaxSeconds
                             && Vector3.Distance(pos, _histPos[j]) > jumpGateMm)
                         {
-                            // Second strike accepts on proximity to the pending
-                            // position OR on direction continuation — genuine fast
-                            // motion keeps moving the same way each frame (the
-                            // pending point itself has moved on), while an
-                            // out-and-back spike reverses direction (dot < 0).
                             bool accept = false;
                             if (_jumpHasPending[j])
                             {
-                                if (Vector3.Distance(pos, _jumpPending[j]) <= jumpGateMm) accept = true;
-                                else
+                                if (Vector3.Distance(pos, _jumpPending[j]) <= jumpGateMm)
                                 {
+                                    _jumpConfirms[j]++;
+                                    accept = _jumpConfirms[j] >= (strong ? 1 : weakJumpConfirms);
+                                }
+                                else if (strong)
+                                {
+                                    // Direction continuation — genuine fast motion
+                                    // keeps moving the same way each frame (the
+                                    // pending point itself has moved on), while an
+                                    // out-and-back spike reverses direction (dot < 0).
+                                    // Trusted only with cross-camera agreement.
                                     var stepA = _jumpPending[j] - _histPos[j];
                                     var stepB = pos - _jumpPending[j];
                                     if (stepA.sqrMagnitude > 1f && stepB.sqrMagnitude > 1f
                                         && Vector3.Dot(stepA.normalized, stepB.normalized) > 0.3f)
                                         accept = true;
+                                    if (!accept) _jumpConfirms[j] = 0;
                                 }
+                                else _jumpConfirms[j] = 0;
                             }
                             if (accept)
                             {
-                                _jumpHasPending[j] = false;
+                                _jumpHasPending[j] = false; _jumpConfirms[j] = 0;
                             }
                             else
                             {
@@ -486,9 +505,9 @@ namespace BodyTracking.Eval.Rtmpose
                                 StatJumpHeld++;
                             }
                         }
-                        else _jumpHasPending[j] = false;
+                        else { _jumpHasPending[j] = false; _jumpConfirms[j] = 0; }
                     }
-                    else _jumpHasPending[j] = false;
+                    else { _jumpHasPending[j] = false; _jumpConfirms[j] = 0; }
 
                     fusedPos[j] = pos; fusedOk[j] = true; fusedFresh[j] = fresh;
                     ref var oj = ref _fused.Joints[j];
@@ -693,9 +712,9 @@ namespace BodyTracking.Eval.Rtmpose
         }
 
         bool FuseJoint(int j, List<Vector3> pts, List<float> wts, List<int> srcSample,
-                       out Vector3 pos, out float conf, out bool fresh)
+                       out Vector3 pos, out float conf, out bool fresh, out bool strong)
         {
-            pos = default; conf = 0f; fresh = false;
+            pos = default; conf = 0f; fresh = false; strong = false;
 
             // Occlusion arbitration between DISAGREEING samples: if camera C
             // provably cannot see the place camera A puts the joint (A's position
@@ -726,61 +745,83 @@ namespace BodyTracking.Eval.Rtmpose
                 }
             }
 
-            // Two-sample special case: a DISAGREEING pair must not fake a
-            // consensus (the component median of two points is their per-axis
-            // upper envelope, and one arbitrary survivor would bypass the
-            // single-camera sanity path). Reduce to the better candidate —
-            // closest to a fresh prediction when one exists, else higher
-            // confidence — and let the single-camera path vet it below.
-            if (pts.Count == 2 && Vector3.Distance(pts[0], pts[1]) > gateMm[j])
+            // Cluster consensus: the per-axis component median is not robust
+            // when half the cameras are wrong — two bad samples drag the median
+            // between the clusters, so the cameras that actually AGREE get
+            // rejected as outliers of the poisoned median (seen live as a head
+            // side-flip while standing still: one camera lifted the head onto
+            // the background wall, another was meters off, and the two correct
+            // cameras got gated out). With <=4 cameras the exact answer is
+            // cheap: enumerate subsets and take the largest mutually-consistent
+            // cluster (all pairwise distances within the joint gate), ties
+            // broken by total confidence weight. A cluster of >=2 is STRONG
+            // evidence; everything below is weak.
+            int n = pts.Count;
+            if (n >= 2)
             {
-                int keep;
+                int bestMask = 0, bestCount = 0; float bestWsum = 0f;
+                for (int mask = 3; mask < (1 << n); mask++)
+                {
+                    int cnt = 0; float msum = 0f; bool ok = true;
+                    for (int a = 0; a < n && ok; a++)
+                    {
+                        if ((mask & (1 << a)) == 0) continue;
+                        cnt++; msum += wts[a];
+                        for (int b = a + 1; b < n && ok; b++)
+                            if ((mask & (1 << b)) != 0 && Vector3.Distance(pts[a], pts[b]) > gateMm[j])
+                                ok = false;
+                    }
+                    if (!ok || cnt < 2) continue;
+                    if (cnt > bestCount || (cnt == bestCount && msum > bestWsum))
+                    { bestMask = mask; bestCount = cnt; bestWsum = msum; }
+                }
+                if (bestCount >= 2)
+                {
+                    Vector3 acc = Vector3.zero; float wsum = 0f, cmax = 0f;
+                    for (int i = 0; i < n; i++)
+                    {
+                        if ((bestMask & (1 << i)) == 0) { StatOutliers++; continue; }
+                        acc += pts[i] * wts[i]; wsum += wts[i]; cmax = Mathf.Max(cmax, wts[i]);
+                    }
+                    pos = acc / wsum; conf = cmax; fresh = true; strong = true; StatConsensus++;
+                    return true;
+                }
+            }
+
+            // No agreeing pair — weak-evidence path. Order the candidates by
+            // trust (proximity to the temporal prediction when history is
+            // fresh, else confidence) so a grossly wrong camera can never win
+            // by iteration order, then vet each: direct accept on a sane bone
+            // length to the fused parent, else ray x bone-length re-lift.
+            if (n > 0)
+            {
+                var order = new List<int>(n);
+                for (int i = 0; i < n; i++) order.Add(i);
                 float predAge = AgeSec(_lastFusedTs, _histTs[j]);
                 if (_histHas[j] && predAge <= holdMaxSeconds)
                 {
                     var pred = HeldPrediction(j, predAge);
-                    keep = Vector3.Distance(pts[0], pred) <= Vector3.Distance(pts[1], pred) ? 0 : 1;
+                    order.Sort((a, b) => Vector3.Distance(pts[a], pred).CompareTo(Vector3.Distance(pts[b], pred)));
                 }
-                else keep = wts[0] >= wts[1] ? 0 : 1;
-                int drop = 1 - keep;
-                pts.RemoveAt(drop); wts.RemoveAt(drop); srcSample.RemoveAt(drop);
-                StatOutliers++;
-            }
+                else
+                {
+                    order.Sort((a, b) => wts[b].CompareTo(wts[a]));
+                }
 
-            if (pts.Count >= 2)
-            {
-                var med = ComponentMedian(pts);
-                // survivors within the per-joint gate of the median
-                Vector3 acc = Vector3.zero; float wsum = 0f, cmax = 0f; int nOk = 0;
-                for (int i = 0; i < pts.Count; i++)
+                foreach (int i in order)
                 {
-                    if (Vector3.Distance(pts[i], med) > gateMm[j]) { StatOutliers++; continue; }
-                    acc += pts[i] * wts[i]; wsum += wts[i]; cmax = Mathf.Max(cmax, wts[i]); nOk++;
-                }
-                if (nOk >= 2)
-                {
-                    pos = acc / wsum; conf = cmax; fresh = true; StatConsensus++;
+                    if (!PassesParentLength(j, pts[i])) continue;
+                    pos = pts[i]; conf = wts[i] * 0.9f; fresh = true; StatSingleAccepted++;
                     return true;
                 }
-                // fall through: candidates exist but no consensus
-            }
-            else if (pts.Count == 1)
-            {
-                // single camera: accept when the bone length to the fused parent is sane
-                if (PassesParentLength(j, pts[0]))
+                // Stage 3a: ray x bone-length re-lift (needs fused parent + profile)
+                foreach (int i in order)
                 {
-                    pos = pts[0]; conf = wts[0] * 0.9f; fresh = true; StatSingleAccepted++;
-                    return true;
-                }
-            }
-
-            // Stage 3a: ray x bone-length re-lift (needs fused parent + profile)
-            for (int i = 0; i < pts.Count; i++)
-            {
-                if (TryRayRelift(j, pts[i], srcSample[i], out var relift))
-                {
-                    pos = relift; conf = wts[i] * 0.7f; fresh = true; StatRelifted++;
-                    return true;
+                    if (TryRayRelift(j, pts[i], srcSample[i], out var relift))
+                    {
+                        pos = relift; conf = wts[i] * 0.7f; fresh = true; StatRelifted++;
+                        return true;
+                    }
                 }
             }
 
@@ -887,13 +928,5 @@ namespace BodyTracking.Eval.Rtmpose
             return true;
         }
 
-        static Vector3 ComponentMedian(List<Vector3> pts)
-        {
-            var xs = new List<float>(pts.Count); var ys = new List<float>(pts.Count); var zs = new List<float>(pts.Count);
-            foreach (var p in pts) { xs.Add(p.x); ys.Add(p.y); zs.Add(p.z); }
-            xs.Sort(); ys.Sort(); zs.Sort();
-            int m = pts.Count / 2;
-            return new Vector3(xs[m], ys[m], zs[m]);
-        }
     }
 }
