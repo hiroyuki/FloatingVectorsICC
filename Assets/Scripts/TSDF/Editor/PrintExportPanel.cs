@@ -84,10 +84,13 @@ namespace TSDF.EditorTools
                 new GUIContent("Print Seed Stride", "間引き：何本置きに1本エクスポートするか。40 → 20000本中約500本。"),
                 pe.printSeedStride, 1, 400);
             float radius = EditorGUILayout.Slider(
-                new GUIContent("Print Radius (m)", "カーブチューブの半径。直径 3 voxel 以上でないと MC がガタガタになる。"),
+                new GUIContent("Print Radius (m)", "カーブチューブの半径。STL チューブ直接同梱なら解像度制約なし。" +
+                    "Fuse curves（voxel 融合）を使う場合のみ直径 3 voxel 以上必要。"),
                 pe.printRadius, 0.002f, 0.05f);
-            if (voxel > 1e-6f)
+            if (voxel > 1e-6f && !pe.stlIncludeCurveTubes)
             {
+                // The 3-voxel MC floor only applies to the voxel-fuse path — the
+                // direct STL tubes never touch the volume.
                 float diaVox = radius * 2f / voxel;
                 EditorGUILayout.HelpBox(
                     $"直径 {radius * 2000f:0.0} mm ≈ {diaVox:0.0} voxel (voxelSize {voxel * 1000f:0.0} mm)" +
@@ -122,6 +125,16 @@ namespace TSDF.EditorTools
                 new GUIContent("Smooth Iterations", "書き出し時の Taubin 平滑化（縮まない）。0=OFF。" +
                     "MC の階段状ガタつきを除去する。表示中の TSDF mesh には影響しない。"),
                 pe.smoothIterations, 0, 30);
+            bool stlTubes = EditorGUILayout.ToggleLeft(
+                new GUIContent("STL: Include Curve Tubes (表示解像度のチューブで同梱)",
+                    "カーブを描画バッファから読み戻し、閉じたチューブメッシュ＋体への接続ブリッジとして " +
+                    "STL に直接同梱する。voxel 化を通らないので解像度が落ちず、Fuse curves は不要" +
+                    "（すると二重になる）。重なったシェルはスライサーが union する。" +
+                    "OFF = 旧方式（Fuse curves で voxel に焼いた分だけが STL に入る）。"),
+                pe.stlIncludeCurveTubes);
+            int stlSides = EditorGUILayout.IntSlider(
+                new GUIContent("STL Curve Sides", "STL チューブ断面の角数。2mm ワイヤ相当なら 6 で丸く見える。"),
+                pe.stlCurveSides, 3, 12);
 
             EditorGUILayout.Space(4);
             EditorGUILayout.LabelField("Web export (GLB + USDZ)", EditorStyles.miniBoldLabel);
@@ -163,6 +176,8 @@ namespace TSDF.EditorTools
                 pe.keepLargestOnly = keepLargest;
                 pe.targetHeightMm = heightMm;
                 pe.smoothIterations = smooth;
+                pe.stlIncludeCurveTubes = stlTubes;
+                pe.stlCurveSides = stlSides;
                 pe.webIncludeCurves = webCurves;
                 pe.webCurveStride = webStride;
                 pe.webCurveSides = webSides;
@@ -184,7 +199,8 @@ namespace TSDF.EditorTools
                 using (new EditorGUI.DisabledScope(!ready || pe.curves == null))
                 {
                     if (GUILayout.Button(new GUIContent("Fuse curves",
-                            "カーブをチューブ化して表示中の TSDF に融合（何度押しても累積しない）"),
+                            "カーブをチューブ化して表示中の TSDF に融合（何度押しても累積しない）。" +
+                            "STL: Include Curve Tubes が ON のときは表示確認用 — STL には不要（二重になる）"),
                             GUILayout.Height(26)))
                         pe.FuseCurves();
                 }
@@ -194,7 +210,9 @@ namespace TSDF.EditorTools
                             "穴塞ぎ＋未接続チェック"), GUILayout.Height(26)))
                         pe.CloseHoles();
                     if (GUILayout.Button(new GUIContent("Export STL",
-                            "~/Documents/FloatingVectorsPrints/ に書き出し"), GUILayout.Height(26)))
+                            "~/Documents/FloatingVectorsPrints/ に書き出し。" +
+                            "カーブは表示解像度のチューブ＋ブリッジとして自動同梱（Fuse 不要）"),
+                            GUILayout.Height(26)))
                         pe.ExportStl();
                 }
                 using (new EditorGUI.DisabledScope(!ready || !pe.HasSnapshot))
@@ -207,11 +225,18 @@ namespace TSDF.EditorTools
 
             using (new EditorGUI.DisabledScope(!ready))
             {
-                if (GUILayout.Button(new GUIContent("Fuse → Close → Export STL (ワンクリック)",
-                        "3Dプリント一連: カーブ融合 → 穴塞ぎ → STL 書き出しを連続実行。" +
-                        "やり直しは Restore で融合前に戻せる。"), GUILayout.Height(30)))
+                // With direct STL tubes the voxel fuse must be skipped (the tubes
+                // would land twice: once meshed, once voxelised).
+                bool direct = pe.stlIncludeCurveTubes;
+                if (GUILayout.Button(new GUIContent(
+                        direct ? "Close → Export STL (ワンクリック)"
+                               : "Fuse → Close → Export STL (ワンクリック)",
+                        direct ? "3Dプリント一連: 穴塞ぎ → STL 書き出し（カーブはチューブとして自動同梱）。" +
+                                 "やり直しは Restore で穴塞ぎ前に戻せる。"
+                               : "3Dプリント一連: カーブ融合 → 穴塞ぎ → STL 書き出しを連続実行。" +
+                                 "やり直しは Restore で融合前に戻せる。"), GUILayout.Height(30)))
                 {
-                    if (pe.curves != null) pe.FuseCurves();
+                    if (!direct && pe.curves != null) pe.FuseCurves();
                     pe.CloseHoles();
                     pe.ExportStl();
                 }

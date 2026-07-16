@@ -19,9 +19,15 @@
 
 ## 3D プリント書き出し
 
-`Window > Print Export` → **[Fuse → Close → Export STL (ワンクリック)]**。
-- 出力: `~/Documents/FloatingVectorsPrints/print_<stamp>.stl`（`targetHeightMm`、既定 300mm、winding 自動補正）
-- やり直し: **Restore** で融合前に戻る（表示 volume も戻る）
+`Window > Print Export` → **[Close → Export STL (ワンクリック)]**
+（`STL: Include Curve Tubes` ON が既定。OFF にすると旧 **[Fuse → Close → Export STL]** に戻る）。
+- カーブは voxel 融合を通さず、**表示解像度の閉じたチューブ＋接続ブリッジとして STL に直接同梱**される
+  （2026-07-16 変更: voxel 融合だと ~1voxel チューブ + 穴塞ぎ + 平滑化で潰れ、未接続分は島カリングで消えていた）。
+  重なったシェルはスライサーが union する。Fuse curves を押す必要はない（押すと二重になる）
+- F12 プレビュー中は curves 非表示 = チューブが読めない → **STL 前に F12 で live 表示に戻す**（body のみ出力になり警告ログ）
+- `Close Radius Voxels` はカーブを巻き込まなくなったので小さめ（2 前後）を推奨 — 大きいと体の凹みが丸まって団子になる
+- 出力: `~/Documents/FloatingVectorsPrints/print_<stamp>.stl`（`targetHeightMm`、既定 300mm、winding はシェル毎に自動補正）
+- やり直し: **Restore** で穴塞ぎ前に戻る（表示 volume も戻る）
 - パネル右下 **[出力フォルダを開く]** で確認
 
 ## 設定・前提

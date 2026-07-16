@@ -343,13 +343,20 @@ void CSBuild(uint3 id : SV_DispatchThreadID)
 
 // Bounds-checked append into _SegsOut. _SegStats[0] counts every attempt, so the
 // host reads emitted = min(stats[0], cap) and dropped = stats[1].
-void AppendSeg(float3 a, float3 b, float ra, float rb, float3 col)
+// tag rides in _pad (unused by BakeTrail): 0 = curve chain seg, 1 = body bridge —
+// the STL tube export reads the buffer back and needs to tell them apart.
+void AppendSegTag(float3 a, float3 b, float ra, float rb, float3 col, float tag)
 {
     uint idx;
     InterlockedAdd(_SegStats[0], 1u, idx);
     if (idx >= _SegCap) { InterlockedAdd(_SegStats[1], 1u); return; }
-    Seg s; s.a = a; s.b = b; s.ra = ra; s.rb = rb; s.color = col; s._pad = 0.0;
+    Seg s; s.a = a; s.b = b; s.ra = ra; s.rb = rb; s.color = col; s._pad = tag;
     _SegsOut[idx] = s;
+}
+
+void AppendSeg(float3 a, float3 b, float ra, float rb, float3 col)
+{
+    AppendSegTag(a, b, ra, rb, col, 0.0);
 }
 
 // Print export: one thread per PRINT seed (every _PrintSeedStride-th seed slot,
@@ -389,5 +396,5 @@ void CSEmitSegs(uint3 id : SV_DispatchThreadID)
     // side thicker). Guard against long struts from misclassified seeds.
     float3 tip = pts[m - 1u];
     if (length(anchor - tip) > _MaxBridgeLength) { InterlockedAdd(_SegStats[2], 1u); return; }
-    AppendSeg(tip, anchor, r, r * _BridgeRadiusScale, col);
+    AppendSegTag(tip, anchor, r, r * _BridgeRadiusScale, col, 1.0);
 }
