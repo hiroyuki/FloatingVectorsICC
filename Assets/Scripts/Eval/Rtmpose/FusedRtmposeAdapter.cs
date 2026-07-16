@@ -137,6 +137,27 @@ namespace BodyTracking.Eval.Rtmpose
         sealed class WorldTr { public float[] R; public float[] T; }
         readonly Dictionary<string, WorldTr> _world = new();
 
+        // ---- per-camera depth reference for the visibility (z-buffer) test ----
+        // A camera's joint estimate is only trustworthy if the camera can SEE the
+        // joint. The depth map answers that geometrically: project a competing
+        // hypothesis into this camera — if the camera's surface at that pixel is
+        // clearly CLOSER than the hypothesis, the hypothesis is occluded from
+        // this camera, i.e. this camera was guessing (e.g. a hand fully hidden
+        // behind the torso: the model hallucinates it at the body silhouette).
+        sealed class DepthRef
+        {
+            public ushort[] D; public int W, H;      // stride-2 downsample
+            public float Fx, Fy, Cx, Cy;             // depth intrinsics (halved)
+            public float[] Rd2c, Td2c;               // depth -> color extrinsic
+            public bool HasCal;
+        }
+        readonly Dictionary<string, DepthRef> _depth = new();
+
+        /// <summary>A competing joint hypothesis must be at least this much (mm)
+        /// BEHIND a camera's measured surface before that camera counts as
+        /// occluded (body thickness scale; keeps normal surface noise out).</summary>
+        public float occlusionMarginMm = 200f;
+
         sealed class CamSample
         {
             public ulong Ts;
@@ -176,7 +197,7 @@ namespace BodyTracking.Eval.Rtmpose
         public event Action<EvalSkeletonFrame> OnSkeletons;
 
         // diagnostics (per session, read for reporting)
-        public int StatConsensus, StatSingleAccepted, StatRelifted, StatHeld, StatDroppedLen, StatOutliers, StatJumpHeld, StatLenProjected;
+        public int StatConsensus, StatSingleAccepted, StatRelifted, StatHeld, StatDroppedLen, StatOutliers, StatJumpHeld, StatLenProjected, StatOccDropped;
 
         public FusedRtmposeAdapter(OrtRtmposeBackend backend)
         {
@@ -194,12 +215,88 @@ namespace BodyTracking.Eval.Rtmpose
 
         public void SetCaptureVolume(Vector3 centerMm, Vector3 halfMm) => _inner.SetCaptureVolume(centerMm, halfMm);
 
-        public void Configure(in EvalCameraContext ctx) => _inner.Configure(ctx);
+        public void Configure(in EvalCameraContext ctx)
+        {
+            _inner.Configure(ctx);
+            if (ctx.CameraParam.HasValue)
+            {
+                var cp = ctx.CameraParam.Value;
+                var dr = new DepthRef
+                {
+                    Fx = cp.DepthIntrinsic.Fx * 0.5f, Fy = cp.DepthIntrinsic.Fy * 0.5f,
+                    Cx = cp.DepthIntrinsic.Cx * 0.5f, Cy = cp.DepthIntrinsic.Cy * 0.5f,
+                    HasCal = cp.Transform.Rot != null && cp.Transform.Rot.Length >= 9
+                             && cp.Transform.Trans != null && cp.Transform.Trans.Length >= 3,
+                };
+                if (dr.HasCal)
+                {
+                    dr.Rd2c = (float[])cp.Transform.Rot.Clone();
+                    dr.Td2c = (float[])cp.Transform.Trans.Clone();
+                }
+                _depth[ctx.Serial] = dr;
+            }
+        }
 
         public void SubmitFrame(string serial, in RawFrameData frame, ulong tsNs)
         {
+            StashDepth(serial, frame);
             _inner.SubmitFrame(serial, frame, tsNs); // synchronous → OnInnerSkeletons fires inside
             TryFuse(tsNs);
+        }
+
+        // Keep a stride-2 copy of this camera's latest depth map for visibility tests.
+        void StashDepth(string serial, in RawFrameData frame)
+        {
+            if (!_depth.TryGetValue(serial, out var dr) || !dr.HasCal) return;
+            int dw = frame.DepthWidth, dh = frame.DepthHeight;
+            if (dw <= 0 || dh <= 0 || frame.DepthBytes == null || frame.DepthByteCount < dw * dh * 2) return;
+            int w = dw / 2, h = dh / 2;
+            if (dr.D == null || dr.W != w || dr.H != h) { dr.D = new ushort[w * h]; dr.W = w; dr.H = h; }
+            var src = frame.DepthBytes;
+            for (int y = 0; y < h; y++)
+            {
+                int srcRow = (y * 2) * dw;
+                int dstRow = y * w;
+                for (int x = 0; x < w; x++)
+                {
+                    int si = (srcRow + x * 2) * 2;
+                    dr.D[dstRow + x] = (ushort)(src[si] | (src[si + 1] << 8));
+                }
+            }
+        }
+
+        /// <summary>Can this camera see the world-space point?
+        /// 1 = visible, -1 = provably occluded / out of view, 0 = unknown.</summary>
+        int VisibilityOf(string serial, Vector3 world)
+        {
+            if (!_depth.TryGetValue(serial, out var dr) || !dr.HasCal || dr.D == null) return 0;
+            if (!_world.TryGetValue(serial, out var tr)) return 0;
+            // world -> color frame (inverse of color->world), then color -> depth
+            var pc = InverseTransform(world, tr.R, tr.T);
+            var pd = InverseTransform(pc, dr.Rd2c, dr.Td2c);
+            if (pd.z <= 100f) return 0;
+            int u = (int)(dr.Fx * pd.x / pd.z + dr.Cx);
+            int v = (int)(dr.Fy * pd.y / pd.z + dr.Cy);
+            if (u < 1 || v < 1 || u >= dr.W - 1 || v >= dr.H - 1) return -1; // out of view = cannot see
+            // closest valid surface in a 3x3 neighborhood
+            float minD = float.MaxValue;
+            for (int dy = -1; dy <= 1; dy++)
+                for (int dx = -1; dx <= 1; dx++)
+                {
+                    ushort d = dr.D[(v + dy) * dr.W + (u + dx)];
+                    if (d > 0 && d < minD) minD = d;
+                }
+            if (minD == float.MaxValue) return 0; // no valid depth here
+            return minD < pd.z - occlusionMarginMm ? -1 : 1;
+        }
+
+        static Vector3 InverseTransform(Vector3 p, float[] R, float[] T)
+        {
+            float x = p.x - T[0], y = p.y - T[1], z = p.z - T[2];
+            return new Vector3(
+                R[0] * x + R[3] * y + R[6] * z,
+                R[1] * x + R[4] * y + R[7] * z,
+                R[2] * x + R[5] * y + R[8] * z);
         }
 
         public void SubmitRecordedBodies(string serial, byte[] payload, int byteCount, ulong tsNs) { }
@@ -476,6 +573,35 @@ namespace BodyTracking.Eval.Rtmpose
                        out Vector3 pos, out float conf, out bool fresh)
         {
             pos = default; conf = 0f; fresh = false;
+
+            // Occlusion arbitration between DISAGREEING samples: if camera C
+            // provably cannot see the place camera A puts the joint (A's position
+            // is behind C's measured surface, or outside C's view), while A CAN
+            // see C's claimed location and still disagrees, then C was guessing an
+            // occluded joint (e.g. a hand fully hidden behind the torso) — drop
+            // C's sample so the sighted camera wins.
+            if (pts.Count >= 2)
+            {
+                for (int i = pts.Count - 1; i >= 0 && pts.Count > 1; i--)
+                {
+                    bool dropI = false;
+                    for (int k = 0; k < pts.Count && !dropI; k++)
+                    {
+                        if (k == i) continue;
+                        if (Vector3.Distance(pts[i], pts[k]) <= gateMm[j]) continue;
+                        string si = _workSerial[srcSample[i]];
+                        string sk = _workSerial[srcSample[k]];
+                        if (VisibilityOf(si, pts[k]) == -1 && VisibilityOf(sk, pts[i]) == 1
+                            && wts[k] >= wts[i] * 0.7f)
+                            dropI = true;
+                    }
+                    if (dropI)
+                    {
+                        pts.RemoveAt(i); wts.RemoveAt(i); srcSample.RemoveAt(i);
+                        StatOccDropped++;
+                    }
+                }
+            }
 
             if (pts.Count >= 2)
             {
