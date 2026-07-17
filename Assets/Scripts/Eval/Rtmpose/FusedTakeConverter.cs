@@ -319,6 +319,22 @@ namespace BodyTracking.Eval.Rtmpose
                 renamed = true;
                 _progress = 0.96f;
 
+                // FusedCatchupSmooth reads from bodies_main.prekink when one
+                // exists (it backs up only once). A rerun on a previously
+                // converted take would therefore smooth the PREVIOUS run's
+                // skeletons over the fresh promote — drop stale backups so the
+                // smoother snapshots the bodies_main we just wrote.
+                foreach (var t in tracks)
+                {
+                    try
+                    {
+                        string prekink = Path.Combine(t.DeviceDir,
+                            PointCloudRecording.BodiesSensorName) + ".prekink";
+                        if (File.Exists(prekink)) File.Delete(prekink);
+                    }
+                    catch { /* smoother failure is non-fatal below anyway */ }
+                }
+
                 // ---- catch-up smoothing (non-fatal: the fused output already stands) ----
                 string smoothReport = "";
                 if (options.RunCatchupSmooth && !_stop)
