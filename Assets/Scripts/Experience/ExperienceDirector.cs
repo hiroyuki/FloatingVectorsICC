@@ -799,10 +799,12 @@ namespace Experience
                 }
                 // Abort() is cooperative — a worker stuck inside a native ORT call
                 // can't observe it. Don't hold the visitor hostage: abandon the
-                // thread after the grace window. The converter re-checks its stop
-                // flag before ever touching bodies_main, so the abandoned thread
-                // can only end Aborted, never promote under the k4abt playback.
-                if (now > abandonAt)
+                // thread after the grace window. Abort() atomically locked the
+                // converter's finalize gate, so an abandoned thread can never
+                // rename/smooth bodies_main under the k4abt playback we start
+                // next. The one exception: the worker already ENTERED finalize
+                // (bounded file I/O) — wait that out instead of racing it.
+                if (now > abandonAt && !_converter.IsFinalizing)
                 {
                     Debug.LogWarning($"[{nameof(ExperienceDirector)}] converter did not stop within " +
                                      "the grace window — abandoning it and continuing with k4abt bodies.", this);

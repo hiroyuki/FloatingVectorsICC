@@ -69,6 +69,12 @@ namespace BodyTracking.Eval.Rtmpose
         volatile string _error = "";
         volatile string _report = "";
         Thread _worker;
+        // Finalize gate: 0 = open, 1 = worker is finalizing (rename + smooth),
+        // 2 = abort locked finalize out. Whoever wins the CompareExchange
+        // decides — an aborted run can NEVER touch bodies_main afterwards, and
+        // a run that already entered finalize completes it (bounded file I/O),
+        // which callers can await via IsFinalizing.
+        int _finalizeGate;
 
         public ConvertStatus Status => _status;
         /// <summary>0..1. Frame processing spans 0.02..0.95; smooth+rename fills the rest.</summary>
@@ -114,8 +120,21 @@ namespace BodyTracking.Eval.Rtmpose
         }
 
         /// <summary>Request cancellation. The worker deletes its temps and flips
-        /// Status to Aborted; the original bodies_main is never touched.</summary>
-        public void Abort() => _stop = true;
+        /// Status to Aborted; the original bodies_main is never touched. If the
+        /// worker has NOT yet entered its finalize section this atomically locks
+        /// it out of ever renaming/smoothing; if it already has, the finalize
+        /// completes — poll <see cref="IsFinalizing"/> before reading the take.</summary>
+        public void Abort()
+        {
+            _stop = true;
+            Interlocked.CompareExchange(ref _finalizeGate, 2, 0);
+        }
+
+        /// <summary>True while the worker is inside the finalize section (rename
+        /// dance + catch-up smoothing) — bounded file I/O; callers that abandoned
+        /// a stuck conversion must wait this out before touching the take.</summary>
+        public bool IsFinalizing =>
+            _status == ConvertStatus.Running && Volatile.Read(ref _finalizeGate) == 1;
 
         // ---------------- worker thread ----------------
 
@@ -272,16 +291,21 @@ namespace BodyTracking.Eval.Rtmpose
 
                 foreach (var t in tracks) { t.Writer.Dispose(); t.Writer = null; }
 
-                // A stop requested while we were stuck inside the last native
-                // inference call (the director may have abandoned this thread and
-                // already started k4abt playback) must NEVER promote — check one
-                // last time before touching bodies_main.
-                if (_stop) { CleanupTemps(tracks); _status = ConvertStatus.Aborted; return; }
-
                 if (written == 0)
                 {
                     CleanupTemps(tracks);
                     Fail("fusion produced no skeleton frames (nobody in the capture volume?)");
+                    return;
+                }
+
+                // Claim the finalize gate. Losing means Abort() got there first —
+                // possibly while we were stuck inside the last native inference
+                // call and the director already fell back to k4abt playback of
+                // this very take. bodies_main must not be touched then.
+                if (Interlocked.CompareExchange(ref _finalizeGate, 1, 0) != 0)
+                {
+                    CleanupTemps(tracks);
+                    _status = ConvertStatus.Aborted;
                     return;
                 }
 
