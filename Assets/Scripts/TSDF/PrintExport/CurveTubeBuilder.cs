@@ -20,13 +20,33 @@ namespace TSDF
         // exportSpace false = keep the polylines' world space (no mirror, no
         // recentre; center/minY unused) for in-scene display meshes. Winding is
         // then mirrored relative to Unity's front faces — render with Cull Off.
+        // teardrop: droplet cross-section instead of a circle — lower 3/4 arc of
+        // the circle plus a 90-degree apex (height sqrt(2)*r, tangent to the
+        // circle at +-45 degrees) pointing WORLD UP on every ring, so overhangs
+        // self-support in FDM and the tubes read as falling drops. Needs
+        // sides >= 4; the ring frame comes from projecting world up into the
+        // ring plane (near-vertical segments reuse the previous ring's frame).
         public static int AppendCurveTubes(List<Vector3[]> lines, List<Vector3> lineCols, float brightness,
                                            float radius, int sides, float tolerance, Vector3 center, float minY,
                                            List<Vector3> pos, List<Vector3> nrm, List<Vector3> col,
-                                           List<int> idx, float tipTaper = 1f, bool exportSpace = true)
+                                           List<int> idx, float tipTaper = 1f, bool exportSpace = true,
+                                           bool teardrop = false)
         {
             int tubes = 0;
             var p = new List<Vector3>(256);
+            Vector2[] prof = null;
+            if (teardrop && sides >= 4)
+            {
+                prof = new Vector2[sides];
+                prof[0] = new Vector2(0f, 1.41421356f); // apex
+                for (int k = 1; k < sides; k++)
+                {
+                    // CCW in the (u,v) ring plane: apex -> left tangent point
+                    // (135 deg) -> bottom -> right tangent point (45 deg)
+                    float phi = Mathf.Deg2Rad * (45f + 270f * (k - 1) / (sides - 2));
+                    prof[k] = new Vector2(-Mathf.Sin(phi), Mathf.Cos(phi));
+                }
+            }
             for (int li = 0; li < lines.Count; li++)
             {
                 // To export space; drop near-duplicate points (a paused pose makes
@@ -49,21 +69,39 @@ namespace TSDF
                 Vector3 startT = (p[1] - p[0]).normalized;
                 Vector3 u = Vector3.Cross(startT, Mathf.Abs(startT.y) < 0.9f ? Vector3.up : Vector3.right).normalized;
                 Vector3 prevT = startT;
+                Vector3 dPrev = u; // droplet-up fallback for near-vertical segments
                 for (int i = 0; i < n; i++)
                 {
                     Vector3 t = p[Mathf.Min(i + 1, n - 1)] - p[Mathf.Max(i - 1, 0)];
                     t = t.sqrMagnitude > 1e-12f ? t.normalized : prevT;
                     u = (Quaternion.FromToRotation(prevT, t) * u).normalized;
                     prevT = t;
-                    Vector3 v = Vector3.Cross(t, u);
                     float r = radius * Mathf.Lerp(Mathf.Clamp01(tipTaper), 1f, n > 1 ? (float)i / (n - 1) : 1f);
-                    for (int k = 0; k < sides; k++)
+                    if (prof != null)
                     {
-                        float ang = 2f * Mathf.PI * k / sides;
-                        Vector3 rd = Mathf.Cos(ang) * u + Mathf.Sin(ang) * v;
-                        pos.Add(p[i] + rd * r);
-                        nrm.Add(rd);
-                        col.Add(c);
+                        Vector3 d = Vector3.up - t * t.y; // world up in the ring plane
+                        d = d.sqrMagnitude > 1e-6f ? d.normalized : dPrev;
+                        dPrev = d;
+                        Vector3 uA = Vector3.Cross(d, t); // so that d == cross(t, uA)
+                        for (int k = 0; k < sides; k++)
+                        {
+                            Vector3 rd = prof[k].x * uA + prof[k].y * d;
+                            pos.Add(p[i] + rd * r);
+                            nrm.Add(rd.normalized);
+                            col.Add(c);
+                        }
+                    }
+                    else
+                    {
+                        Vector3 v = Vector3.Cross(t, u);
+                        for (int k = 0; k < sides; k++)
+                        {
+                            float ang = 2f * Mathf.PI * k / sides;
+                            Vector3 rd = Mathf.Cos(ang) * u + Mathf.Sin(ang) * v;
+                            pos.Add(p[i] + rd * r);
+                            nrm.Add(rd);
+                            col.Add(c);
+                        }
                     }
                 }
                 Vector3 endT = prevT;
