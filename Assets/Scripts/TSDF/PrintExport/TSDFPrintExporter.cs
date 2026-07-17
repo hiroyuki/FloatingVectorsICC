@@ -28,6 +28,8 @@
 //                  set Fuse curves would bake, so tubes and bridges match) —
 //                  overlapping shells the slicer unions, no voxel fuse, so
 //                  Fuse curves is NOT needed (and would double them up).
+//                  (stlIncludeFloorPlane) adds a square floor plate as one more
+//                  closed shell, centred on the dancer's floor contact.
 //                  Removed 2026-07-09, restored 2026-07-13 for the dancer-
 //                  session print run (the colour-PLY variant stayed in history);
 //                  curve tubes added 2026-07-16 (the voxel-fused curves came out
@@ -123,6 +125,25 @@ namespace TSDF
         [Tooltip("Tube cross-section sides for the STL tubes. The print is physical — " +
                  "6 reads round at a 2 mm printed wire.")]
         public int stlCurveSides = 6;
+
+        [Header("STL floor plane")]
+        [Tooltip("Append a square floor plate under the sculpture as its own closed shell " +
+                 "(the slicer unions whatever overlaps it). Centred on the dancer — the " +
+                 "centroid of the body shell's floor-contact band, NOT the mesh bbox " +
+                 "centre, which trails and outstretched arms would drag off the body. " +
+                 "Lies in the volume grid frame, so it stays parallel to the sculpture's " +
+                 "floor-crop plane even with the bbox tilted to the real floor.")]
+        public bool stlIncludeFloorPlane = true;
+
+        [Range(0.5f, 3f)]
+        [Tooltip("Floor plate side length (m, square, real-world scale — printed size " +
+                 "follows targetHeightMm like everything else).")]
+        public float stlFloorSize = 1.5f;
+
+        [Range(0.005f, 0.1f)]
+        [Tooltip("Floor plate thickness (m, real-world scale). 0.02 m at a 1/8 print " +
+                 "scale ≈ 2.5 mm plate.")]
+        public float stlFloorThickness = 0.02f;
 
         [Header("Web export (GLB + USDZ)")]
         [Tooltip("Include the curved lines in the web files as real tube meshes tessellated " +
@@ -575,6 +596,14 @@ namespace TSDF
                                      "the body only.", this);
             }
 
+            // Floor plate: after the tubes so its top can sink into the lowest
+            // geometry of EVERYTHING (a tube dipping below the feet would
+            // otherwise poke through the plate).
+            int floorTris = 0;
+            Vector2 floorAt = Vector2.zero;
+            if (stlIncludeFloorPlane)
+                floorTris = AppendFloorPlane(pos, tri, snap.pos.Length, out floorAt);
+
             // Bounds over EVERYTHING: tubes can reach past the body bbox and
             // they must land inside the printed height too.
             Vector3 min = Vector3.positiveInfinity, max = Vector3.negativeInfinity;
@@ -605,8 +634,11 @@ namespace TSDF
                 StlWriter.Write(stlPath, pos.ToArray(), tri.ToArray(), tri.Count / 3,
                                 center, scale, flip: false);
                 long bytes = new FileInfo(stlPath).Length;
+                string floorNote = floorTris > 0
+                    ? $" + {stlFloorSize:0.0#} m floor @ ({floorAt.x:0.00}, {floorAt.y:0.00})"
+                    : "";
                 _status = $"STL: {tri.Count / 3} tris ({bodyTris} body + {tubeCount} tubes / " +
-                          $"{bridgeCount} bridges), {pos.Count} verts, " +
+                          $"{bridgeCount} bridges{floorNote}), {pos.Count} verts, " +
                           $"{bytes / (1024 * 1024)} MB -> {stlPath} " +
                           $"(height {targetHeightMm:0} mm, smooth x{smoothIterations}, " +
                           $"bodyVol {bodyVol:0.0000} m^3, " +
@@ -731,6 +763,76 @@ namespace TSDF
                 }
             }
             finally { segBuf.Release(); }
+        }
+
+        // Floor plate: how deep the plate top sinks into the lowest geometry
+        // (guarantees shell overlap for the slicer union) and how far above the
+        // body's lowest point vertices still count as "standing on the floor".
+        private const float kFloorEmbed = 0.005f;
+        private const float kFloorContactBand = 0.15f;
+
+        /// <summary>Append the floor plate: a stlFloorSize² × stlFloorThickness
+        /// box built in the volume grid frame (the BoundingVolume rotation —
+        /// TSDFVolume anchors its voxels to it, so the plate lies parallel to
+        /// the sculpture's floor-crop plane even with the bbox tilted to the
+        /// real floor). XZ-centred on the dancer: the centroid of body-shell
+        /// vertices within kFloorContactBand of the body's lowest point — the
+        /// mesh bbox centre would drift with trails or an outstretched arm, the
+        /// feet don't. Top sits kFloorEmbed above the lowest geometry so the
+        /// shells overlap; wound outward like every other shell. Returns the
+        /// triangle count added; <paramref name="floorAt"/> gets the plate
+        /// centre (grid-frame XZ, for the status line).</summary>
+        private int AppendFloorPlane(List<Vector3> pos, List<int> tri, int bodyVerts,
+                                     out Vector2 floorAt)
+        {
+            Quaternion rot = volume != null && volume.boundingBox != null
+                ? volume.boundingBox.transform.rotation
+                : Quaternion.identity;
+            Quaternion inv = Quaternion.Inverse(rot);
+
+            float bodyMinY = float.PositiveInfinity, allMinY = float.PositiveInfinity;
+            for (int i = 0; i < pos.Count; i++)
+            {
+                float y = (inv * pos[i]).y;
+                if (y < allMinY) allMinY = y;
+                if (i < bodyVerts && y < bodyMinY) bodyMinY = y;
+            }
+
+            double sx = 0, sz = 0; long n = 0;
+            for (int i = 0; i < bodyVerts; i++)
+            {
+                var l = inv * pos[i];
+                if (l.y > bodyMinY + kFloorContactBand) continue;
+                sx += l.x; sz += l.z; n++;
+            }
+            float cx = (float)(sx / n), cz = (float)(sz / n); // n >= 1: the min vertex is in band
+            floorAt = new Vector2(cx, cz);
+
+            float half = stlFloorSize * 0.5f;
+            float topY = allMinY + kFloorEmbed;
+            int iBase = tri.Count;
+            // u × v = outward normal (component algebra) — all six faces
+            // consistent, OrientOutward then only confirms the sign.
+            void Face(Vector3 o, Vector3 u, Vector3 v)
+            {
+                int b = pos.Count;
+                pos.Add(rot * o); pos.Add(rot * (o + u));
+                pos.Add(rot * (o + u + v)); pos.Add(rot * (o + v));
+                tri.Add(b); tri.Add(b + 1); tri.Add(b + 2);
+                tri.Add(b); tri.Add(b + 2); tri.Add(b + 3);
+            }
+            var ux = new Vector3(stlFloorSize, 0f, 0f);
+            var uz = new Vector3(0f, 0f, stlFloorSize);
+            var ut = new Vector3(0f, stlFloorThickness, 0f);
+            var c00 = new Vector3(cx - half, topY - stlFloorThickness, cz - half);
+            Face(c00, ux, uz);                                            // bottom (-Y)
+            Face(new Vector3(cx - half, topY, cz - half), uz, ux);        // top (+Y)
+            Face(c00, uz, ut);                                            // -X
+            Face(new Vector3(cx + half, c00.y, cz - half), ut, uz);       // +X
+            Face(c00, ut, ux);                                            // -Z
+            Face(new Vector3(cx - half, c00.y, cz + half), ux, ut);       // +Z
+            OrientOutward(pos, tri, iBase, tri.Count - iBase);
+            return (tri.Count - iBase) / 3;
         }
 
         /// <summary>The web/AR capture options from the panel-tuned fields —

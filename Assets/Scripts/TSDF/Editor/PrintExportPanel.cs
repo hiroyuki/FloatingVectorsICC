@@ -136,6 +136,20 @@ namespace TSDF.EditorTools
             int stlSides = EditorGUILayout.IntSlider(
                 new GUIContent("STL Curve Sides", "STL チューブ断面の角数。2mm ワイヤ相当なら 6 で丸く見える。"),
                 pe.stlCurveSides, 3, 12);
+            bool stlFloor = EditorGUILayout.ToggleLeft(
+                new GUIContent("STL: Include Floor Plane (床プレートを同梱)",
+                    "彫刻の下に正方形の床プレートを敷く。中心はダンサー（body シェル接地帯の重心 — " +
+                    "軌跡や伸ばした腕で bbox 中心がずれても足元に追従）。上面は最下点に 5mm 食い込み、" +
+                    "足やチューブとはスライサーが union する。床合わせ済み bbox の傾きにも平行に追従。"),
+                pe.stlIncludeFloorPlane);
+            float stlFloorSz = EditorGUILayout.Slider(
+                new GUIContent("STL Floor Size (m)", "床プレートの一辺（実寸 m の正方形）。" +
+                    "プリント寸法は他と同じく Target Height Mm のスケールに従う。"),
+                pe.stlFloorSize, 0.5f, 3f);
+            float stlFloorTh = EditorGUILayout.Slider(
+                new GUIContent("STL Floor Thickness (m)", "床プレートの厚み（実寸 m）。" +
+                    "0.02m は 1/8 スケール出力でおよそ 2.5mm。"),
+                pe.stlFloorThickness, 0.005f, 0.1f);
 
             EditorGUILayout.Space(4);
             EditorGUILayout.LabelField("Web export (GLB + USDZ)", EditorStyles.miniBoldLabel);
@@ -179,6 +193,9 @@ namespace TSDF.EditorTools
                 pe.smoothIterations = smooth;
                 pe.stlIncludeCurveTubes = stlTubes;
                 pe.stlCurveSides = stlSides;
+                pe.stlIncludeFloorPlane = stlFloor;
+                pe.stlFloorSize = stlFloorSz;
+                pe.stlFloorThickness = stlFloorTh;
                 pe.webIncludeCurves = webCurves;
                 pe.webCurveStride = webStride;
                 pe.webCurveSides = webSides;
