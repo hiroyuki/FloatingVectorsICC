@@ -754,6 +754,18 @@ namespace Experience
                 yield break;
             }
 
+            // Canned-take protection: the conversion rewrites bodies_main IN PLACE.
+            // A dev E2E run must never mutate the canonical recording unless the
+            // operator explicitly opted in with a disposable copy.
+            if (config.timings.skipExplore && !config.allowCannedTakeConversion)
+            {
+                Debug.Log($"[{nameof(ExperienceDirector)}] canned take — skipping v11s conversion " +
+                          "(allowCannedTakeConversion is off); playing existing bodies_main.", this);
+                _processingDone = true;
+                _processingRoutine = null;
+                yield break;
+            }
+
             _converter = new FusedTakeConverter();
             bool started = _converter.Start(_takeRoot, new FusedTakeConverter.Options
             {

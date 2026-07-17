@@ -1,8 +1,8 @@
-// ScriptableObject configuration for the visitor experience (Phase 5,
-// Plans/phase5-director-plan.md). Everything the operator tunes lives here:
-// timings/skips, visitor-facing texts (hiragana, kids), sphere layout, dry-run
-// publishing, sensing thresholds pushed into PresenceDetector on mode enter.
-// The LFKS token is NOT here (gitignored local file / env var — Phase 7).
+// ScriptableObject configuration for the visitor experience. Everything the
+// operator tunes lives here: timings/skips, visitor-facing texts (hiragana,
+// kids), pose-detection thresholds, v11s conversion, dry-run publishing,
+// sensing thresholds pushed into PresenceDetector on mode enter.
+// The LFKS token is NOT here (gitignored local file / env var).
 
 using UnityEngine;
 
@@ -51,6 +51,12 @@ namespace Experience
                  "cameras needed). Point at a full RCSV take root.")]
         public string devCannedTakeRoot =
             @"D:\Dropbox\projects\ICC\Recordings\RecordingBase\2026-07-14_15-50-24";
+
+        [Tooltip("Dev: allow the Processing state to run the v11s conversion on the " +
+                 "CANNED take (skipExplore). The conversion rewrites bodies_main IN " +
+                 "PLACE — leave this OFF unless devCannedTakeRoot points at a " +
+                 "disposable copy, or a canonical recording gets mutated.")]
+        public bool allowCannedTakeConversion = false;
 
         [Range(0, 16)]
         [Tooltip("SensorRecorder.playbackRenderDelayFrames during visitor playback — " +
