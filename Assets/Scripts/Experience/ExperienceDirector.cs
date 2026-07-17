@@ -210,6 +210,27 @@ namespace Experience
             _fsm.Tick(Time.deltaTime, in inputs, config.timings);
             UpdateBanzaiDetection();
             UpdateCrowdNotice();
+
+            // Fused source died mid-session (CUDA fault, component disabled):
+            // bring up the k4abt fallback feed so calibration/banzai/presence
+            // keep a live-skeleton provider.
+            if (_liveFeed == null && !LfbsActive)
+            {
+                Debug.LogWarning($"[{nameof(ExperienceDirector)}] live fused source inactive — " +
+                                 "spawning the k4abt LiveSkeletonFeed fallback.", this);
+                SpawnLiveFeed();
+            }
+        }
+
+        private void SpawnLiveFeed()
+        {
+            _liveFeed = new GameObject("_ExperienceLiveFeed").AddComponent<LiveSkeletonFeed>();
+            _liveFeed.transform.SetParent(transform, false);
+            _liveFeed.workerHost = merger != null ? merger.workerHost : null;
+            _liveFeed.merger = merger;
+            _liveFeed.sensorManager = sensorManager;
+            _liveFeed.recorder = sensorRecorder;
+            _liveFeed.trackingVolume = boundingVolume;
         }
 
         // While recorded bodies drive the merge (visitor playback; attract with
@@ -296,22 +317,12 @@ namespace Experience
             _presence.occupancyThreshold = config.occupancyThreshold;
             // k4abt live-skeleton feed: only when no live CUDA fusion runs — with
             // LiveFusedBodySource active, pose detection reads the fused skeleton
-            // and spawning k4abt workers would just fight it for the GPU.
-            if (!LfbsActive)
-            {
-                _liveFeed = new GameObject("_ExperienceLiveFeed").AddComponent<LiveSkeletonFeed>();
-                _liveFeed.transform.SetParent(transform, false);
-                _liveFeed.workerHost = merger != null ? merger.workerHost : null;
-                _liveFeed.merger = merger;
-                _liveFeed.sensorManager = sensorManager;
-                _liveFeed.recorder = sensorRecorder;
-                _liveFeed.trackingVolume = boundingVolume;
-            }
-            else
-            {
-                Debug.Log($"[{nameof(ExperienceDirector)}] live fused source active — " +
-                          "k4abt LiveSkeletonFeed dormant for this session.", this);
-            }
+            // and spawning k4abt workers would just fight it for the GPU. Update()
+            // watches for a mid-session fused-source death and spawns the feed
+            // then, so the k4abt fallback branches always have a provider.
+            if (!LfbsActive) SpawnLiveFeed();
+            else Debug.Log($"[{nameof(ExperienceDirector)}] live fused source active — " +
+                           "k4abt LiveSkeletonFeed dormant unless the fusion stops.", this);
 
             // body-source snapshot (restored on Exit)
             if (merger != null) _savedIgnoreRecorded = merger.ignoreRecordedBodies;
