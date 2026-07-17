@@ -941,7 +941,7 @@ namespace TSDF
             string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
                                       "Documents", "FloatingVectorsPrints");
             string stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-            string stlPath = Path.Combine(dir, $"print_{stamp}.stl");
+            string stlPath = Path.Combine(dir, $"print_{stamp}{FrameSuffix()}.stl");
             try
             {
                 Directory.CreateDirectory(dir);
@@ -986,7 +986,7 @@ namespace TSDF
 
             string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
                                       "Documents", "FloatingVectorsPrints");
-            string path3mf = Path.Combine(dir, $"print_{DateTime.Now:yyyyMMdd_HHmmss}.3mf");
+            string path3mf = Path.Combine(dir, $"print_{DateTime.Now:yyyyMMdd_HHmmss}{FrameSuffix()}.3mf");
             try
             {
                 Directory.CreateDirectory(dir);
@@ -1046,7 +1046,7 @@ namespace TSDF
 
             string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
                                       "Documents", "FloatingVectorsPrints");
-            string pathObj = Path.Combine(dir, $"print_{DateTime.Now:yyyyMMdd_HHmmss}.obj");
+            string pathObj = Path.Combine(dir, $"print_{DateTime.Now:yyyyMMdd_HHmmss}{FrameSuffix()}.obj");
             try
             {
                 Directory.CreateDirectory(dir);
@@ -1756,6 +1756,16 @@ namespace TSDF
         }
 
         // ---------------- shared ----------------
+
+        /// <summary>Playback frame index suffix for export names ("_f01234") —
+        /// traces a print back to its exact take frame. Empty when no recorder
+        /// playback is loaded.</summary>
+        private static string FrameSuffix()
+        {
+            var rec = UnityEngine.Object.FindFirstObjectByType<PointCloud.SensorRecorder>();
+            return rec != null && rec.CurrentPlaybackFrame > 0
+                ? $"_f{rec.CurrentPlaybackFrame:00000}" : "";
+        }
 
         /// <summary>Print scale (mm per metre). A crop uses the FULL sculpture's
         /// reference height so test prints come out at the exact production
