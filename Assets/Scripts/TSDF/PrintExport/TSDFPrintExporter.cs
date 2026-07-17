@@ -91,6 +91,13 @@ namespace TSDF
                  "print as a real bond instead of a knife-edge seam. White span.")]
         public bool stlContactBeads = true;
 
+        [Range(0f, 1f)]
+        [Tooltip("Fraction of curve tubes printed in the BODY (black) colour, " +
+                 "assigned per line by a stable seed hash. Black lines recede " +
+                 "visually while carrying the structure; the white lines read " +
+                 "as a sparse artwork inside a dense, printable cloud.")]
+        public float stlBlackLineRatio = 0.5f;
+
         [Range(1f, 2f)]
         [Tooltip("Bead strut radius as a multiple of the thicker contact radius.")]
         public float stlContactBeadScale = 1.15f;
@@ -680,7 +687,7 @@ namespace TSDF
         {
             public readonly List<Vector3> Pos = new List<Vector3>();
             public readonly List<int> Tri = new List<int>();
-            public int CurveTriStart, WireTriStart, SupportTriStart, FloorPillarTriStart, FloorTriStart;
+            public int CurveTriStart, TubeBlackTriStart, WireTriStart, SupportTriStart, FloorPillarTriStart, FloorTriStart;
             public int BodyTris, TubeCount, BridgeCount, WireCount, SupportCount, FloorTris;
             public double BodyVol;
             public Vector2 FloorAt;
@@ -737,7 +744,7 @@ namespace TSDF
                 BuildCurveAndBridgeTubes(tp, tn, tc, ti, out asm.TubeCount, out asm.BridgeCount,
                                          includeBridges: stlIncludeBody || wireframe,
                                          rootWireframe: wireframe, out asm.WireCount,
-                                         out int wireTriStartLocal,
+                                         out int wireTriStartLocal, out int tubeBlackTriStartLocal,
                                          supportPts, supportCands, chainLows);
                 if (ti.Count > 0)
                 {
@@ -745,10 +752,12 @@ namespace TSDF
                     pos.AddRange(tp);
                     for (int i = 0; i < ti.Count; i++) tri.Add(ti[i] + vOff);
                     OrientOutward(pos, tri, iBase, tri.Count - iBase);
+                    asm.TubeBlackTriStart = tubeBlackTriStartLocal >= 0 ? iBase + tubeBlackTriStartLocal : tri.Count;
                     asm.WireTriStart = wireTriStartLocal >= 0 ? iBase + wireTriStartLocal : tri.Count;
                 }
                 else
                 {
+                    asm.TubeBlackTriStart = tri.Count;
                     asm.WireTriStart = tri.Count;
                     Debug.LogWarning("[TSDFPrintExporter] STL: no curve tubes emitted " +
                                      "(no curves component / seeds all culled?) — exporting " +
@@ -881,7 +890,10 @@ namespace TSDF
             }
             if (tri.Count == 0) { Fail("nothing to export (body and tubes both off/empty)"); return null; }
             if (!stlIncludeCurveTubes)
-            { asm.WireTriStart = tri.Count; asm.SupportTriStart = tri.Count; asm.FloorPillarTriStart = tri.Count; }
+            {
+                asm.TubeBlackTriStart = tri.Count; asm.WireTriStart = tri.Count;
+                asm.SupportTriStart = tri.Count; asm.FloorPillarTriStart = tri.Count;
+            }
             asm.FloorTriStart = tri.Count;
 
             // Floor plate: after the tubes so its top can sink into the lowest
@@ -1009,7 +1021,8 @@ namespace TSDF
                 if (count > 0) spans.Add(new ThreeMfWriter.Span { StartTri = start, TriCount = count, Material = mat });
             }
             Add(0, asm.CurveTriStart, 0);                          // body
-            Add(asm.CurveTriStart, asm.WireTriStart, 1);           // tubes + bridges
+            Add(asm.CurveTriStart, asm.TubeBlackTriStart, 1);      // white lines
+            Add(asm.TubeBlackTriStart, asm.WireTriStart, 0);       // black lines (+ bridges)
             Add(asm.WireTriStart, asm.SupportTriStart, 0);         // wireframe + isolation links
             Add(asm.SupportTriStart, asm.FloorPillarTriStart, 1);  // curve-to-curve struts
             Add(asm.FloorPillarTriStart, asm.Tri.Count, 0);        // floor pillars + plate
@@ -1101,11 +1114,12 @@ namespace TSDF
                                               out int tubeCount, out int bridgeCount,
                                               bool includeBridges, bool rootWireframe,
                                               out int wireCount, out int wireTriStartLocal,
+                                              out int tubeBlackTriStartLocal,
                                               List<(Vector3 p, int chain, float r, Vector3 tan)> supportPts = null,
                                               List<(Vector3 p, int chain, float r, Vector3 tan)> supportCandidates = null,
                                               List<Vector3> chainLows = null)
         {
-            tubeCount = 0; bridgeCount = 0; wireCount = 0; wireTriStartLocal = -1;
+            tubeCount = 0; bridgeCount = 0; wireCount = 0; wireTriStartLocal = -1; tubeBlackTriStartLocal = -1;
             if (curves == null) return;
             int segCap = curves.MaxPrintSegs(printSeedStride);
             var segBuf = new ComputeBuffer(segCap, TrailBakeOps.SegStride);
@@ -1241,15 +1255,14 @@ namespace TSDF
 
                 var cropB = new Bounds(cropCenter, cropSize);
                 var run = new List<Vector3>(64);
-                foreach (var kv in chains)
+                void EmitWhole(uint seed, List<int> idxs)
                 {
-                    var idxs = kv.Value;
                     pts.Clear();
                     pts.Add(segs[idxs[0]].a);
                     foreach (int i in idxs) pts.Add(segs[i].b);
-                    if (pts.Count < 2) continue;
+                    if (pts.Count < 2) return;
                     Vector3 colour = segs[idxs[0]].color;
-                    if (!cropEnabled) { EmitChain(pts, colour); continue; }
+                    if (!cropEnabled) { EmitChain(pts, colour); return; }
                     // crop: each maximal in-box run becomes its own tube; drop
                     // stubs under 5 cm — chopped fragments read as debris
                     void EmitRun()
@@ -1267,6 +1280,16 @@ namespace TSDF
                     }
                     EmitRun();
                 }
+
+                // per-line random black/white split ("curved lineの色を白と黒で
+                // ランダムに"): stable seed hash, so the assignment survives
+                // re-exports. White lines first, black lines second — the colour
+                // spans stay two contiguous runs.
+                bool BlackSeed(uint seed) =>
+                    ((seed * 2654435761u) % 10000u) / 10000f < stlBlackLineRatio;
+                foreach (var kv in chains) if (!BlackSeed(kv.Key)) EmitWhole(kv.Key, kv.Value);
+                tubeBlackTriStartLocal = ti.Count;
+                foreach (var kv in chains) if (BlackSeed(kv.Key)) EmitWhole(kv.Key, kv.Value);
                 tubeCount = tubesOut;
 
                 if (stlContactBeads)
