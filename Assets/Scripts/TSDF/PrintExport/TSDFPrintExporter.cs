@@ -120,6 +120,27 @@ namespace TSDF
                  "tubes' floor-contact band instead.")]
         public bool stlIncludeBody = true;
 
+        [Header("STL root wireframe (tubes-only mode)")]
+        [Tooltip("With the body OFF, connect the curves' body-side anchor points to " +
+                 "each other with thin wires: a minimum spanning tree (guarantees ONE " +
+                 "connected piece — powder printing drops disconnected parts) plus " +
+                 "N-nearest-neighbour edges for density. The anchors sit on the " +
+                 "dancer's surface at bone-classified points, so the graph reads as a " +
+                 "ghost-body wireframe. Bridges then connect each curve to it.")]
+        public bool stlRootWireframe = true;
+
+        [Range(0, 4)]
+        [Tooltip("Extra wires from every anchor to its N nearest anchors (on top of " +
+                 "the spanning tree). 0 = tree only (sparsest); 2 reads as a mesh-y " +
+                 "wireframe.")]
+        public int stlWireframeNeighbors = 2;
+
+        [Range(0.05f, 0.5f)]
+        [Tooltip("Skip neighbour wires longer than this (m) — stops e.g. hand-to-hip " +
+                 "chords cutting across the body. Spanning-tree edges ignore the cap " +
+                 "(connectivity beats aesthetics).")]
+        public float stlWireframeMaxEdge = 0.25f;
+
         [Header("STL curve tubes")]
         [Tooltip("Append the curved lines to the STL as closed tube meshes plus their " +
                  "body bridges as tapered tubes, all rebuilt from one CSEmitSegs pass " +
@@ -595,15 +616,18 @@ namespace TSDF
             // would bake), so every tube has its matching bridge — the drawn
             // ribbon buffer is a DIFFERENT nondeterministic seed subset and is
             // deliberately not used here.
-            int tubeCount = 0, bridgeCount = 0;
+            int tubeCount = 0, bridgeCount = 0, wireCount = 0;
             if (stlIncludeCurveTubes)
             {
                 var tp = new List<Vector3>(); var tn = new List<Vector3>();
                 var tc = new List<Vector3>(); var ti = new List<int>();
-                // bridges only exist to attach tubes to the body — skip them in
-                // the tubes-only variant (they would be floating spikes)
+                // bridges attach tubes to the body — or, in tubes-only mode with
+                // the root wireframe, to the anchor graph. Without either target
+                // they would be floating spikes, so they are skipped.
+                bool wireframe = !stlIncludeBody && stlRootWireframe;
                 BuildCurveAndBridgeTubes(tp, tn, tc, ti, out tubeCount, out bridgeCount,
-                                         includeBridges: stlIncludeBody);
+                                         includeBridges: stlIncludeBody || wireframe,
+                                         rootWireframe: wireframe, out wireCount);
                 if (ti.Count > 0)
                 {
                     int vOff = pos.Count, iBase = tri.Count;
@@ -659,8 +683,9 @@ namespace TSDF
                 string floorNote = floorTris > 0
                     ? $" + {stlFloorSize:0.0#} m floor @ ({floorAt.x:0.00}, {floorAt.y:0.00})"
                     : "";
+                string wireNote = wireCount > 0 ? $" + {wireCount} wires" : "";
                 _status = $"STL: {tri.Count / 3} tris ({bodyTris} body + {tubeCount} tubes / " +
-                          $"{bridgeCount} bridges{floorNote}), {pos.Count} verts, " +
+                          $"{bridgeCount} bridges{wireNote}{floorNote}), {pos.Count} verts, " +
                           $"{bytes / (1024 * 1024)} MB -> {stlPath} " +
                           $"(height {targetHeightMm:0} mm, smooth x{smoothIterations}, " +
                           $"bodyVol {bodyVol:0.0000} m^3, " +
@@ -717,9 +742,10 @@ namespace TSDF
         private void BuildCurveAndBridgeTubes(List<Vector3> tp, List<Vector3> tn,
                                               List<Vector3> tc, List<int> ti,
                                               out int tubeCount, out int bridgeCount,
-                                              bool includeBridges = true)
+                                              bool includeBridges, bool rootWireframe,
+                                              out int wireCount)
         {
-            tubeCount = 0; bridgeCount = 0;
+            tubeCount = 0; bridgeCount = 0; wireCount = 0;
             if (curves == null) return;
             int segCap = curves.MaxPrintSegs(printSeedStride);
             var segBuf = new ComputeBuffer(segCap, TrailBakeOps.SegStride);
@@ -774,6 +800,7 @@ namespace TSDF
                 }
 
                 if (!includeBridges) return;
+                var anchors = new List<Vector3>(bridges.Count);
                 foreach (int i in bridges)
                 {
                     if ((segs[i].b - segs[i].a).sqrMagnitude < 1e-10f) continue;
@@ -784,9 +811,88 @@ namespace TSDF
                         0f, Vector3.zero, 0f, tp, tn, tc, ti,
                         tipTaper: Mathf.Clamp01(segs[i].ra / rb), exportSpace: false);
                     bridgeCount++;
+                    anchors.Add(segs[i].b); // body-side anchor = wireframe node
                 }
+
+                if (rootWireframe)
+                    wireCount = AppendRootWireframe(anchors, line, col, tp, tn, tc, ti);
             }
             finally { segBuf.Release(); }
+        }
+
+        /// <summary>Tubes-only mode: wire the curves' body-side anchors into ONE
+        /// connected graph — a minimum spanning tree (powder printing drops
+        /// disconnected parts, so connectivity is structural, not aesthetic)
+        /// plus stlWireframeNeighbors nearest-neighbour edges for density. The
+        /// anchors lie on the dancer's surface, so the graph reads as a
+        /// ghost-body wireframe. Returns the number of wires appended.</summary>
+        private int AppendRootWireframe(List<Vector3> anchors,
+                                        List<Vector3[]> line, List<Vector3> col,
+                                        List<Vector3> tp, List<Vector3> tn,
+                                        List<Vector3> tc, List<int> ti)
+        {
+            int n = anchors.Count;
+            if (n < 2) return 0;
+
+            var edges = new HashSet<long>();
+            long Key(int i, int j) => i < j ? ((long)i << 32) | (uint)j : ((long)j << 32) | (uint)i;
+
+            // Prim's MST (O(n^2), n ~ hundreds) — unconditional edges: the tree
+            // is what makes the sculpture one piece.
+            var inTree = new bool[n];
+            var bestD = new float[n];
+            var bestJ = new int[n];
+            for (int i = 0; i < n; i++) { bestD[i] = float.MaxValue; bestJ[i] = -1; }
+            inTree[0] = true;
+            for (int i = 1; i < n; i++) { bestD[i] = (anchors[i] - anchors[0]).sqrMagnitude; bestJ[i] = 0; }
+            for (int step = 1; step < n; step++)
+            {
+                int k = -1; float kd = float.MaxValue;
+                for (int i = 0; i < n; i++)
+                    if (!inTree[i] && bestD[i] < kd) { kd = bestD[i]; k = i; }
+                if (k < 0) break;
+                inTree[k] = true;
+                if (kd > 1e-8f) edges.Add(Key(k, bestJ[k])); // skip coincident anchors
+                for (int i = 0; i < n; i++)
+                {
+                    if (inTree[i]) continue;
+                    float d = (anchors[i] - anchors[k]).sqrMagnitude;
+                    if (d < bestD[i]) { bestD[i] = d; bestJ[i] = k; }
+                }
+            }
+
+            // density pass: N nearest neighbours per anchor, capped by edge length
+            float maxSq = stlWireframeMaxEdge * stlWireframeMaxEdge;
+            if (stlWireframeNeighbors > 0)
+            {
+                var dist = new List<(float d, int j)>(n);
+                for (int i = 0; i < n; i++)
+                {
+                    dist.Clear();
+                    for (int j = 0; j < n; j++)
+                    {
+                        if (j == i) continue;
+                        float d = (anchors[j] - anchors[i]).sqrMagnitude;
+                        if (d > 1e-8f && d <= maxSq) dist.Add((d, j));
+                    }
+                    dist.Sort((a, b) => a.d.CompareTo(b.d));
+                    for (int k = 0; k < Mathf.Min(stlWireframeNeighbors, dist.Count); k++)
+                        edges.Add(Key(i, dist[k].j));
+                }
+            }
+
+            int wires = 0;
+            foreach (long key in edges)
+            {
+                int i = (int)(key >> 32), j = (int)(key & 0xFFFFFFFF);
+                line[0] = new[] { anchors[i], anchors[j] };
+                col[0] = Vector3.one;
+                CurveTubeBuilder.AppendCurveTubes(line, col, 1f, printRadius, stlCurveSides,
+                    0f, Vector3.zero, 0f, tp, tn, tc, ti,
+                    tipTaper: 1f, exportSpace: false);
+                wires++;
+            }
+            return wires;
         }
 
         // Floor plate: how deep the plate top sinks into the lowest geometry

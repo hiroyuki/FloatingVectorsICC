@@ -142,6 +142,21 @@ namespace TSDF.EditorTools
             int stlSides = EditorGUILayout.IntSlider(
                 new GUIContent("STL Curve Sides", "STL チューブ断面の角数。2mm ワイヤ相当なら 6 で丸く見える。"),
                 pe.stlCurveSides, 3, 12);
+            bool wire = EditorGUILayout.ToggleLeft(
+                new GUIContent("STL: Root Wireframe (体OFF時、根本同士をワイヤ接続)",
+                    "体を出さないとき、カーブの体側アンカー点同士を細いワイヤで接続する。" +
+                    "最小全域木で必ず1つの連結部品にし（粉末プリントは非連結パーツが脱落する）、" +
+                    "さらに近傍N本を追加。アンカーはダンサー表面の点なので、" +
+                    "薄っすら身体のワイヤーフレームに見える。ブリッジはカーブ→ワイヤ網の接続として残る。"),
+                pe.stlRootWireframe);
+            int wireN = EditorGUILayout.IntSlider(
+                new GUIContent("Wireframe Neighbors", "全域木に加えて各アンカーから近い順に何本ワイヤを張るか。" +
+                    "0=木のみ（最疎）、2でメッシュらしい密度。"),
+                pe.stlWireframeNeighbors, 0, 4);
+            float wireMax = EditorGUILayout.Slider(
+                new GUIContent("Wireframe Max Edge (m)", "近傍ワイヤの最長（これ以上は張らない — " +
+                    "手→腰のような体を横切る弦を防ぐ）。全域木の辺は連結優先でこの制限を受けない。"),
+                pe.stlWireframeMaxEdge, 0.05f, 0.5f);
             // 床プレートは常に同梱（無いと自立しない — 2026-07-17 のルール）。トグルは無い。
             float stlFloorSz = EditorGUILayout.Slider(
                 new GUIContent("STL Floor Size (m)", "床プレートの一辺（実寸 m の正方形、常に同梱 — " +
@@ -196,6 +211,9 @@ namespace TSDF.EditorTools
                 pe.stlIncludeBody = stlBody;
                 pe.stlIncludeCurveTubes = stlTubes;
                 pe.stlCurveSides = stlSides;
+                pe.stlRootWireframe = wire;
+                pe.stlWireframeNeighbors = wireN;
+                pe.stlWireframeMaxEdge = wireMax;
                 pe.stlFloorSize = stlFloorSz;
                 pe.stlFloorThickness = stlFloorTh;
                 pe.webIncludeCurves = webCurves;
