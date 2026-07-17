@@ -298,6 +298,12 @@ namespace TSDF.EditorTools
 
             using (new EditorGUI.DisabledScope(!ready))
             {
+                if (GUILayout.Button(new GUIContent("Export OBJ (2マテリアル — プレビュー用)",
+                        "STL と同一ジオメトリを Body/Curves の 2 マテリアル付き OBJ+MTL で書き出す。" +
+                        "MeshLab や Blender で色分けをプレビューでき、Bambu Studio の色付き OBJ " +
+                        "インポートでも読める。色の確認はこれで、本番スライスは 3MF で。"),
+                        GUILayout.Height(26)))
+                    pe.ExportObj();
                 if (GUILayout.Button(new GUIContent("Export 3MF (2色 — Bambu AMS 用)",
                         "STL と同一ジオメトリを、体+床=Body Color / カーブ+ワイヤ=Curve Color の" +
                         "面カラー付き Standard 3MF で書き出す。Bambu Studio が読み込み時に" +

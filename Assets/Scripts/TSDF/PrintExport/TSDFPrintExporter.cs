@@ -121,13 +121,20 @@ namespace TSDF
         public bool stlIncludeBody = true;
 
         [Header("STL curve supports")]
-        [Tooltip("Drop thin vertical pillars from each curve's endpoints (plus " +
-                 "interior points every Support Spacing of arc length) down to the " +
-                 "sculpture's lowest level — self-made supports, because slicer " +
-                 "support material inside the wire tangle is impractical to remove " +
-                 "(FDM/A2L). The floor plate top sinks 5 mm into the lowest " +
-                 "geometry, so the pillar tips land inside it and union.")]
+        [Tooltip("Self-made supports for the curves (slicer support inside the wire " +
+                 "tangle cannot be removed — FDM/A2L). From each curve endpoint " +
+                 "(plus interior points every Support Spacing), a SHORT strut " +
+                 "connects to the nearest point of another curve inside a 45° " +
+                 "downward cone — struts hide inside the curve cloud instead of " +
+                 "forming a pillar forest. Only points with nothing below them " +
+                 "drop a pillar to the floor plate.")]
         public bool stlCurveSupportPillars = true;
+
+        [Range(0.05f, 0.5f)]
+        [Tooltip("Horizontal search radius (m) for the strut target below. Wider " +
+                 "finds more curve-to-curve struts (fewer floor pillars) but allows " +
+                 "longer, more visible struts.")]
+        public float stlSupportSearchRadius = 0.15f;
 
         [Range(0f, 1f)]
         [Tooltip("Arc-length spacing (m) for interior support pillars along each " +
@@ -665,11 +672,12 @@ namespace TSDF
                 // the root wireframe, to the anchor graph. Without either target
                 // they would be floating spikes, so they are skipped.
                 bool wireframe = !stlIncludeBody && stlRootWireframe;
-                var supportPts = stlCurveSupportPillars ? new List<Vector3>() : null;
+                var supportPts = stlCurveSupportPillars ? new List<(Vector3 p, int chain)>() : null;
+                var supportCands = stlCurveSupportPillars ? new List<(Vector3 p, int chain)>() : null;
                 BuildCurveAndBridgeTubes(tp, tn, tc, ti, out asm.TubeCount, out asm.BridgeCount,
                                          includeBridges: stlIncludeBody || wireframe,
                                          rootWireframe: wireframe, out asm.WireCount,
-                                         supportPts);
+                                         supportPts, supportCands);
                 if (ti.Count > 0)
                 {
                     int vOff = pos.Count, iBase = tri.Count;
@@ -682,28 +690,77 @@ namespace TSDF
                                      "(no curves component / seeds all culled?) — exporting " +
                                      "the body only.", this);
 
-                // Self-made supports: vertical pillars from the collected curve
-                // points down to the sculpture's CURRENT lowest surface (body +
-                // tubes). The floor plate top later sinks 5 mm into the lowest
-                // geometry, so pillar tips land inside the plate and union.
+                // Self-made supports: from each support point, a SHORT strut to
+                // the nearest OTHER curve's point inside a 45° downward cone —
+                // struts hide inside the curve cloud instead of forming a pillar
+                // forest ("地面から脚を生やすと全部埋もれる", 2026-07-17). Only
+                // points with no target below drop a pillar to the lowest level,
+                // where the floor plate (top sunk 5 mm into the lowest geometry)
+                // catches them.
                 if (supportPts != null && supportPts.Count > 0 && pos.Count > 0)
                 {
                     float minY = float.PositiveInfinity;
                     foreach (var p in pos) if (p.y < minY) minY = p.y;
+
+                    // XZ spatial hash over the strut target candidates
+                    float cell = Mathf.Max(0.05f, stlSupportSearchRadius);
+                    var grid = new Dictionary<long, List<int>>();
+                    long CellKey(float x, float z)
+                        => ((long)Mathf.FloorToInt(x / cell) << 32) ^ (uint)Mathf.FloorToInt(z / cell);
+                    for (int i = 0; i < supportCands.Count; i++)
+                    {
+                        long k = CellKey(supportCands[i].p.x, supportCands[i].p.z);
+                        if (!grid.TryGetValue(k, out var list)) grid[k] = list = new List<int>(8);
+                        list.Add(i);
+                    }
+
                     var sp = new List<Vector3>(); var sn = new List<Vector3>();
                     var sc = new List<Vector3>(); var si = new List<int>();
-                    var pillarLine = new List<Vector3[]> { null };
-                    var pillarCol = new List<Vector3> { Vector3.one };
-                    foreach (var p in supportPts)
+                    var strutLine = new List<Vector3[]> { null };
+                    var strutCol = new List<Vector3> { Vector3.one };
+                    float minDrop = stlSupportRadius * 3f;
+                    int floorPillars = 0;
+                    foreach (var (p, chain) in supportPts)
                     {
-                        // skip points already at/near the bottom — nothing to hold up
-                        if (p.y - minY < stlSupportRadius * 3f) continue;
-                        pillarLine[0] = new[] { p, new Vector3(p.x, minY, p.z) };
-                        CurveTubeBuilder.AppendCurveTubes(pillarLine, pillarCol, 1f, stlSupportRadius,
+                        // nearest other-chain point inside the 45° downward cone
+                        Vector3 best = default; float bestSq = float.MaxValue; bool found = false;
+                        int cx = Mathf.FloorToInt(p.x / cell), cz = Mathf.FloorToInt(p.z / cell);
+                        for (int gx = cx - 1; gx <= cx + 1; gx++)
+                            for (int gz = cz - 1; gz <= cz + 1; gz++)
+                            {
+                                if (!grid.TryGetValue(((long)gx << 32) ^ (uint)gz, out var list)) continue;
+                                foreach (int ci in list)
+                                {
+                                    var (q, qChain) = supportCands[ci];
+                                    if (qChain == chain) continue;
+                                    float dy = p.y - q.y;
+                                    if (dy < minDrop) continue;                  // must be below
+                                    float hx = q.x - p.x, hz = q.z - p.z;
+                                    float horizSq = hx * hx + hz * hz;
+                                    if (horizSq > dy * dy) continue;             // outside 45° cone
+                                    if (horizSq > stlSupportSearchRadius * stlSupportSearchRadius) continue;
+                                    float dSq = horizSq + dy * dy;
+                                    if (dSq < bestSq) { bestSq = dSq; best = q; found = true; }
+                                }
+                            }
+
+                        if (!found)
+                        {
+                            // nothing below inside the cone: bottom-layer point →
+                            // pillar to the floor (skip if already at the bottom)
+                            if (p.y - minY < minDrop) continue;
+                            best = new Vector3(p.x, minY, p.z);
+                            floorPillars++;
+                        }
+                        strutLine[0] = new[] { p, best };
+                        CurveTubeBuilder.AppendCurveTubes(strutLine, strutCol, 1f, stlSupportRadius,
                             stlCurveSides, 0f, Vector3.zero, 0f, sp, sn, sc, si,
                             tipTaper: 1f, exportSpace: false);
                         asm.SupportCount++;
                     }
+                    if (floorPillars > 0)
+                        Debug.Log($"[TSDFPrintExporter] supports: {asm.SupportCount} struts, " +
+                                  $"{floorPillars} of them floor pillars (bottom layer).", this);
                     if (si.Count > 0)
                     {
                         int vOff = pos.Count, iBase = tri.Count;
@@ -831,6 +888,48 @@ namespace TSDF
             }
         }
 
+        /// <summary>Two-material OBJ+MTL (same shells and spans as Export3mf) —
+        /// the PREVIEWABLE colour variant: MeshLab/Blender render the materials,
+        /// and Bambu Studio's colored-OBJ import maps them to filaments too.
+        /// Check colours here first, then ship the 3MF.</summary>
+        public void ExportObj()
+        {
+            if (!Guard(needCurves: !stlIncludeBody)) return;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var asm = AssembleShells();
+            if (asm == null) return;
+
+            float scale = targetHeightMm / asm.Size.y;
+            var spans = new List<ThreeMfWriter.Span>(3);
+            int curveT0 = asm.CurveTriStart / 3, floorT0 = asm.FloorTriStart / 3, total = asm.Tri.Count / 3;
+            if (curveT0 > 0) spans.Add(new ThreeMfWriter.Span { StartTri = 0, TriCount = curveT0, Material = 0 });
+            if (floorT0 > curveT0) spans.Add(new ThreeMfWriter.Span { StartTri = curveT0, TriCount = floorT0 - curveT0, Material = 1 });
+            if (total > floorT0) spans.Add(new ThreeMfWriter.Span { StartTri = floorT0, TriCount = total - floorT0, Material = 0 });
+
+            string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                                      "Documents", "FloatingVectorsPrints");
+            string pathObj = Path.Combine(dir, $"print_{DateTime.Now:yyyyMMdd_HHmmss}.obj");
+            try
+            {
+                Directory.CreateDirectory(dir);
+                ObjMaterialWriter.Write(pathObj, asm.Pos, asm.Tri, spans,
+                    new[] { ("Body", threeMfBodyColor), ("Curves", threeMfCurveColor) },
+                    asm.Center, scale);
+                long bytes = new FileInfo(pathObj).Length;
+                string wireNote = asm.WireCount > 0 ? $" + {asm.WireCount} wires" : "";
+                string supNote = asm.SupportCount > 0 ? $" + {asm.SupportCount} supports" : "";
+                _status = $"OBJ: {total} tris ({asm.BodyTris} body + {asm.TubeCount} tubes / " +
+                          $"{asm.BridgeCount} bridges{wireNote}{supNote} + floor), 2 materials, " +
+                          $"{bytes / (1024 * 1024)} MB -> {pathObj} " +
+                          $"(height {targetHeightMm:0} mm, total {sw.ElapsedMilliseconds / 1000.0:0.0}s)";
+                Debug.Log("[TSDFPrintExporter] " + _status, this);
+            }
+            catch (Exception e)
+            {
+                Fail($"OBJ write failed: {e.Message}");
+            }
+        }
+
         /// <summary>Signed volume of tri[start..start+count) about the submesh
         /// bbox centre; flips the range in place when negative so it winds
         /// outward. Returns the absolute volume (m^3). The reference point only
@@ -877,7 +976,8 @@ namespace TSDF
                                               out int tubeCount, out int bridgeCount,
                                               bool includeBridges, bool rootWireframe,
                                               out int wireCount,
-                                              List<Vector3> supportPts = null)
+                                              List<(Vector3 p, int chain)> supportPts = null,
+                                              List<(Vector3 p, int chain)> supportCandidates = null)
         {
             tubeCount = 0; bridgeCount = 0; wireCount = 0;
             if (curves == null) return;
@@ -932,21 +1032,27 @@ namespace TSDF
                         stlCurveSides, webCurveTolerance, Vector3.zero, 0f, tp, tn, tc, ti,
                         tipTaper: 1f, exportSpace: false);
 
-                    // support-pillar anchor points: endpoints + interior samples
-                    // every stlSupportSpacing of arc length (0 = endpoints only)
+                    // support-strut anchor points (endpoints + interior samples
+                    // every stlSupportSpacing of arc length; 0 = endpoints only)
+                    // and strut TARGET candidates (all chain points, tagged with
+                    // the chain id so a curve never "supports" itself)
                     if (supportPts != null)
                     {
-                        supportPts.Add(pts[0]);
-                        supportPts.Add(pts[pts.Count - 1]);
+                        int chainId = (int)kv.Key;
+                        supportPts.Add((pts[0], chainId));
+                        supportPts.Add((pts[pts.Count - 1], chainId));
                         if (stlSupportSpacing > 1e-4f)
                         {
                             float since = 0f;
                             for (int i = 1; i < pts.Count - 1; i++)
                             {
                                 since += (pts[i] - pts[i - 1]).magnitude;
-                                if (since >= stlSupportSpacing) { supportPts.Add(pts[i]); since = 0f; }
+                                if (since >= stlSupportSpacing) { supportPts.Add((pts[i], chainId)); since = 0f; }
                             }
                         }
+                        if (supportCandidates != null)
+                            for (int i = 0; i < pts.Count; i++)
+                                supportCandidates.Add((pts[i], chainId));
                     }
                 }
 
