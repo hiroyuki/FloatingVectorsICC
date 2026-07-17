@@ -24,7 +24,7 @@ using UnityEngine.Rendering;
 namespace PointCloud
 {
     [DisallowMultipleComponent]
-    public class SensorRecorder : MonoBehaviour, Shared.IRecorderTransport
+    public class SensorRecorder : MonoBehaviour, Shared.IRecorderTransport, Shared.IPanelTunable
     {
         public enum State { Idle, Recording, Playing }
 
@@ -112,6 +112,28 @@ namespace PointCloud
                  "quality is not bound to the editor frame rate; the k4abt worker path " +
                  "leaves this off — workers only want the freshest frame.")]
         public bool deliverAllPlaybackFrames = false;
+
+        [Tooltip("Playback: render the point cloud from this many frames BEHIND the " +
+                 "playhead (events/fusion still get the newest frame). Aligns the " +
+                 "displayed cloud with the live-fused skeleton, whose output lags " +
+                 "~100-130ms (burst close + median-lag filter + inference). ~4 at " +
+                 "30fps. 0 = off. Note: recorded-bodies playback matches bodies to " +
+                 "the playhead, so leave this 0 when viewing recorded bodies. Only " +
+                 "applies to natural playback — manual seek/step always renders the " +
+                 "exact cursor frame.")]
+        [Range(0, 15)]
+        public int playbackRenderDelayFrames = 0;
+
+        // ---- Shared.IPanelTunable (one-stop Control Panel) ----
+        public string TuningLabel => "Playback";
+        public int TunableCount => 1;
+        public string TunableName(int i) => "Render delay (frames)";
+        public float TunableValue(int i) => playbackRenderDelayFrames;
+        public void SetTunableValue(int i, float value)
+            => playbackRenderDelayFrames = Mathf.Clamp(Mathf.RoundToInt(value), 0, 15);
+        public float TunableMin(int i) => 0f;
+        public float TunableMax(int i) => 15f;
+        public bool TunableIsInt(int i) => true;
 
         [Tooltip("Dataset name written into dataset.yaml. Defaults to the recording folder name.")]
         public string datasetName = "";
@@ -1022,7 +1044,10 @@ namespace PointCloud
         // natural-playback advance and SetCursorAndEmit's frame stepping (3-1 dedup),
         // so the two paths are identical by construction — not by the parallel
         // maintenance the old "visually identical" comment had to promise.
-        private void EmitFrameAt(DeviceTrack track, int cursor)
+        // applyRenderDelay: only natural playback delays the rendered cloud —
+        // manual seek/step must show EXACTLY the cursor frame (frame inspection
+        // relies on cursor == shown geometry).
+        private void EmitFrameAt(DeviceTrack track, int cursor, bool applyRenderDelay = false)
         {
             track.PlaybackCursor = cursor;
             var depthFrame = track.DepthFrames[cursor];
@@ -1046,8 +1071,31 @@ namespace PointCloud
                 ProjectorMask.Apply(track.Serial, depthFrame.Bytes, depthFrame.ByteCount,
                     track.DepthWidth, track.DepthHeight,
                     irFrame?.Bytes, irFrame?.ByteCount ?? 0, track.IRWidth, track.IRHeight);
-            ReconstructAndUpload(track, depthFrame, colorFrame);
-            FirePlaybackEvent(track, depthFrame, colorFrame, irFrame);
+
+            int delay = applyRenderDelay ? Mathf.Max(0, playbackRenderDelayFrames) : 0;
+            if (delay == 0)
+            {
+                ReconstructAndUpload(track, depthFrame, colorFrame);
+                FirePlaybackEvent(track, depthFrame, colorFrame, irFrame);
+            }
+            else
+            {
+                // event first (subscribers copy synchronously), THEN re-index for the
+                // delayed render frame — the streams reuse one scratch buffer per
+                // track, so the second indexer call invalidates depthFrame's bytes
+                FirePlaybackEvent(track, depthFrame, colorFrame, irFrame);
+                int rIdx = Mathf.Max(0, cursor - delay);
+                var dDelayed = track.DepthFrames[rIdx];
+                PointCloudRecording.Frame cDelayed = track.ColorFrames.Count > 0
+                    ? track.ColorFrames[Mathf.Min(rIdx, track.ColorFrames.Count - 1)] : null;
+                PointCloudRecording.Frame iDelayed = track.IRFrames.Count > 0
+                    ? track.IRFrames[Mathf.Min(rIdx, track.IRFrames.Count - 1)] : null;
+                if (maskRivalProjectors && dDelayed?.Bytes != null)
+                    ProjectorMask.Apply(track.Serial, dDelayed.Bytes, dDelayed.ByteCount,
+                        track.DepthWidth, track.DepthHeight,
+                        iDelayed?.Bytes, iDelayed?.ByteCount ?? 0, track.IRWidth, track.IRHeight);
+                ReconstructAndUpload(track, dDelayed, cDelayed);
+            }
             FeedCumulative(track);
         }
 
@@ -2130,7 +2178,7 @@ namespace PointCloud
                         for (int i = first; i < cursor; i++)
                             FirePlaybackEventOnlyAt(track, i);
                     }
-                    EmitFrameAt(track, cursor);
+                    EmitFrameAt(track, cursor, applyRenderDelay: true); // natural playback only
                 }
                 AdvanceBodyCursor(track, playheadNs);
                 ApplyBoundingBoxFilter(track);
