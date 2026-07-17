@@ -276,9 +276,16 @@ namespace Experience
         {
             if (_presence == null) return false;
             var s = _fsm.State;
-            bool ghostDrivesMerge =
+            bool playbackState =
                 s == ExperienceState.Watch || s == ExperienceState.BanzaiWait
-                || s == ExperienceState.Exporting || s == ExperienceState.QrShow
+                || s == ExperienceState.Exporting || s == ExperienceState.QrShow;
+            // The merged-BT presence path only lies when RECORDED bodies own the
+            // merge. In the no-bodies fallback the merger re-runs k4abt on the
+            // playback — the "ghost" it sees IS the visitor's own take, and
+            // excluding it would end the show whenever occupancy under-fires
+            // (the overstay risk is bounded: loops → capture → QR timeout).
+            bool ghostDrivesMerge =
+                (playbackState && _takeHasBodies)
                 || (s == ExperienceState.Attract && config.attractUseRecordedBodies && _attract != null);
             if (!ghostDrivesMerge) return _presence.IsPresent;
             return _presence.OccupancyActive
@@ -530,6 +537,7 @@ namespace Experience
             _debugBanzaiPulse = false;
             _exportDone = _exportFailed = false;
             _playbackLoops = 0;
+            _takeHasBodies = true;
             _qrUrl = null;
             _crowdShowing = false;
             _starHold?.Reset();
