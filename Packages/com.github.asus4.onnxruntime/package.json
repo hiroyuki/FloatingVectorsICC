@@ -1,6 +1,6 @@
 {
   "name": "com.github.asus4.onnxruntime",
-  "version": "0.4.5",
+  "version": "0.4.8",
   "displayName": "ONNX Runtime",
   "description": "ONNX Runtime Plugin for Unity",
   "keywords": [
@@ -12,7 +12,7 @@
   "repository": {
     "url": "git@github.com:asus4/onnxruntime-unity.git",
     "type": "git",
-    "revision": "ebb6f9b9dc2057d9503bd562378ebe62d74e6229"
+    "revision": "fb3ca32135ec720089c4e5ef006f08e22f772c3d"
   },
   "documentationUrl": "https://github.com/asus4/onnxruntime-unity",
   "changelogUrl": "https://github.com/asus4/onnxruntime-unity/releases",
@@ -20,6 +20,5 @@
   "author": {
     "name": "Koki Ibukuro",
     "url": "https://github.com/asus4"
-  },
-  "_fingerprint": "0e6f16bf00e48b2c62c24db3fa7e078493473f99"
+  }
 }

@@ -152,6 +152,69 @@ live-sim(15-50-24-rtmfused 再生、4 カメラ 26.5fps)での段階的結果:
 - 計測カウンタ: FreshFusedHz / HeldEmitHz(LiveFusedBodySource)、
   per-stage ms リング(RtmPoseAdapter.LiftMs/DetectMs/PreMs/PoseMs)
 
+## Phase 3 追補 — live-sim 配信アーキテクチャの再設計(2026-07-17 午後)
+
+「ライブがv11sより汚い」の定量検証(`eval/results/live_v11s_*.md`、検証ツール
+`LiveV11sVerify`)で、劣化の主因は融合品質ではなく**フレーム配信**と判明。
+順に対処した最終形:
+
+1. **SensorRecorder の再生イベントは「最新フレームのみ」発火**(描画都合の設計)
+   → エディタ fps に融合レートが直結していた(非フォーカス時 2fps まで絞られ 20.9Hz/v11s 29.7Hz)
+2. 対策 1: `deliverAllPlaybackFrames`(全フレーム発火)→ **メインスレッドの
+   ディスク読み+コピーが雪だるま式に増え 2.5fps に崩壊**(62GB take、2周目でキャッシュ溢れ)
+   → 上限 8 フレーム/カメラ/tick を入れても不十分
+3. **最終形: playback tap(リーダースレッド)** — LiveFusedBodySource が専用スレッドで
+   RCSV を自前ストリーミング(`ReaderLoop`、IR は読まない)。recorder の
+   `CurrentPlayheadNs` にペーシング、イベント経路はメタデータ(CamParam/Transform)専用。
+   メインスレッドの配信コスト**ゼロ**、エディタ 27.8fps と Fresh 28.5Hz が両立
+4. 付随修正:
+   - Slot を深さ 16 のリングキューに(1 スロット上書きドロップの根絶、遅延確保)
+   - **再生駆動中は wall-clock Heartbeat 無効**(バッチ配信の隙間で発火した合成 ts が
+     録画時刻を追い越し、単調性ガードが実フレームを大量廃棄していた — 9m 級スパイクの正体)
+   - Editor Interaction Mode → No Throttling(非フォーカス 2fps 化の抑止、ユーザー環境設定)
+5. 残る既知事象: **ループ 2 周目にエディタ描画 fps が落ちる**(8-14fps)のは
+   ポイントクラウド描画自体のメインスレッド・ディスク読みがキャッシュ溢れで遅くなる
+   既存挙動(融合レートとカーブ品質には影響しない — fused 結果は全件キュー渡し)
+
+検証数値(take 2026-07-14_14-41-01、非フォーカス環境):
+
+| 構成 | Fresh Hz | dt p95 | gaps>60ms |
+|---|---|---|---|
+| v11s(基準) | 29.7 | 33.8ms | 2 |
+| 修正前 live | 20.9 | 99.5ms | 737 |
+| 最終形(tap) | 25.5〜28.5 | 34.2ms | 数十(エディタ大停止時のみ) |
+
+ジッタ(加速度RMS)は胴体・脚で v11s 同等以下。手首のみやや高く、クリーン環境での
+再計測が持ち越し(計測時のツール起因ヒッチで汚染の疑い)。
+
+## Phase 3 追補 2 — 推論数値の完全検証(2026-07-17 午後、オフライン A/B)
+
+「ライブのスパイクが v11s より多い」の残差を、配信変数ゼロのオフライン書き出し
+(`FusedBodiesExport` + `LiveV11sVerify.CompareTakes`、take 15-50-24 全 1816 フレーム)で追跡:
+
+| 比較 | 結果 |
+|---|---|
+| CUDA(use_tf32=0 + cudnn_conv_algo_search=DEFAULT) vs CPU 実行 | **max 1.6mm — 実質一致** |
+| CUDA 既定(TF32 + EXHAUSTIVE)vs CPU | 手首 accel +44%、max 546mm → **2 オプション必須** |
+| 前処理の行並列 vs 直列 | **全関節 0.0mm ビット一致**(並列化は無罪) |
+| ORT 1.25.1 vs 1.26.0(GPU ビルド) | **ビット一致**(版は無関係) |
+| 現行 vs 保存済み v11s アーカイブ | 骨盤・脚・足首 ≤1.1mm、**腕のみ**数フレームで max 344mm、手首 accel 30.3k→38.2k |
+
+**残差の正体 = onnxruntime.dll のビルドフレーバー**。アーカイブは worktree
+(素の asus4 0.4.8 = Microsoft **CPU** NuGet のビルド)で生成、現行は **GPU** NuGet の
+ビルド(CUDA 経路に必須)。同じ ORT 1.26.0 でも 2 つのビルドは CPU カーネルの数値が
+僅かに違い、ブレた腕の境界フレームだけ argmax が別解に倒れる。CUDA を使う限り
+GPU ビルド数値からは逃げられない。
+
+対処の選択肢:
+- **(推奨) v11s リファレンスを現行 CUDA バックエンドで再生成**(FusedBatchConvert、
+  29 take ≈ 2h 自動)→ 以後「ライブ = リファレンス」が 1.6mm 精度で成立
+- 受容: 差は数フレーム/分の腕のみ(p95=0.0mm)
+
+付随修正: ドメインリロード時に ORT セッション生存でエディタごとクラッシュする問題を
+`BtFrameInspectorWindow.RegisterReloadCleanup`(beforeAssemblyReload で確定 dispose)で恒久対策。
+embed パッケージは managed 0.4.8 + native Gpu.Windows **1.26.0** に更新済み。
+
 ## Phase 4 — 本番機への展開(実機日)
 
 - 本番リグの PC にも Phase 1 と同じインストール(GPU 型番を先に確認 — 4070 未満なら

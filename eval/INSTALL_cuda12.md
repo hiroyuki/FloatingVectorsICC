@@ -57,8 +57,11 @@ where.exe cudnn64_9.dll     # cuDNN 9 が PATH にあること
 (全体 657MB、providers_cuda だけで 294MB)。C# レイヤと .meta はコミット済み。
 Windows x64 の復元手順(本プロジェクトの動作にはこれだけで十分):
 
-1. https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime.Gpu.Windows/1.25.1 を取得
-   (zip として展開可能)
+1. https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime.Gpu.Windows/**1.26.0** を取得
+   (zip として展開可能)。
+   > 版は embed パッケージの managed 層(asus4 0.4.8 = ORT 1.26.0)と必ず一致させる。
+   > 1.25.1 と 1.26.0 では境界フレームの推論結果が変わり、録画済み v11s と
+   > 骨格が一致しなくなる(eval/results/offline_ab_*.md で実証済み)
 2. `runtimes/win-x64/native/` から以下 4 つを
    `Packages/com.github.asus4.onnxruntime/Plugins/Windows/x64/` にコピー:
    - `onnxruntime.dll`(**GPU ビルド本体** — asus4 配布の CPU 版とは別物)

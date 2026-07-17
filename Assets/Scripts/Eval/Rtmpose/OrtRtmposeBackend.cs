@@ -97,7 +97,28 @@ namespace BodyTracking.Eval.Rtmpose
                             break;
                         case OrtProvider.Cuda:
                             using (var cudaOpts = new OrtCUDAProviderOptions())
+                            {
+                                // Match the CPU (v11s reference) numerics as closely
+                                // as CUDA allows — both knobs measurably reduced
+                                // wrist spike rate in the offline A/B (eval/results/
+                                // offline_ab_*.md):
+                                //  - use_tf32=0: Ampere+ otherwise runs FP32 convs
+                                //    as TF32 (10-bit mantissa)
+                                //  - cudnn_conv_algo_search: EXHAUSTIVE picks
+                                //    Winograd-class algos whose larger FP error flips
+                                //    SimCC argmax on motion-blurred frames. DEFAULT
+                                //    matches CPU numerics but is pathologically slow
+                                //    on ORT 1.26 + cuDNN 9 (~505ms/inference);
+                                //    HEURISTIC keeps the deterministic GEMM-class
+                                //    choice at full speed (verify parity via
+                                //    LiveV11sVerify.CompareTakes after ORT bumps).
+                                cudaOpts.UpdateOptions(new Dictionary<string, string>
+                                {
+                                    { "use_tf32", "0" },
+                                    { "cudnn_conv_algo_search", "HEURISTIC" },
+                                });
                                 opt.AppendExecutionProvider_CUDA(cudaOpts);
+                            }
                             break;
                         case OrtProvider.DirectML: opt.AppendExecutionProvider("DML"); break;
                     }
@@ -134,7 +155,13 @@ namespace BodyTracking.Eval.Rtmpose
         {
             if (!Ready) return 0;
             lock (_detectLock)
+            {
+                // an async detect (thread pool, not joined by session teardown) can
+                // pass the outer Ready check and then lose the lock race to
+                // Dispose — recheck under the lock so it no-ops on dead sessions
+                if (!Ready) return 0;
                 return DetectLocked(rgb, w, h, outBoxes);
+            }
         }
 
         private int DetectLocked(byte[] rgb, int w, int h, DetBox[] outBoxes)
@@ -172,9 +199,22 @@ namespace BodyTracking.Eval.Rtmpose
             return count;
         }
 
+        /// <summary>A/B probe: serialize concurrent Pose calls. Live fusion runs the
+        /// four cameras' Pose concurrently on ONE session; if the CUDA EP's shared
+        /// per-session scratch corrupts overlapping runs, serializing restores the
+        /// offline (sequential) numerics at ~4x pose latency per burst.</summary>
+        public static bool SerializePose = false;
+        private readonly object _poseLock = new object();
+
         public bool Pose(float[] nchwInput, float[] simccX, float[] simccY)
         {
             if (!Ready) return false;
+            if (SerializePose) { lock (_poseLock) return PoseUnlocked(nchwInput, simccX, simccY); }
+            return PoseUnlocked(nchwInput, simccX, simccY);
+        }
+
+        private bool PoseUnlocked(float[] nchwInput, float[] simccX, float[] simccY)
+        {
             using var inp = OrtValue.CreateTensorValueFromMemory(nchwInput, _poseShape);
             var in1 = new OrtValue[] { inp }; // local: Pose runs concurrently per camera
             using var runOpt = new RunOptions(); // per-call: RunOptions native state must not be shared across concurrent Runs
@@ -196,10 +236,20 @@ namespace BodyTracking.Eval.Rtmpose
             // Inspector's s_backend cache, ad-hoc eval scripts) hard-crashed the
             // editor when a later adapter used the already-disposed session.
             Ready = false;
-            _yolox?.Dispose();
-            _rtmpose?.Dispose();
-            _runOpt?.Dispose();
-            _opt?.Dispose();
+            // Async detects run on the THREAD POOL and are not joined by session
+            // teardown (LiveFusedBodySource joins only its worker). Taking the
+            // detect lock waits out an in-flight Detect; one that lost the lock
+            // race rechecks Ready inside the lock and no-ops. Poses cannot be in
+            // flight here: they only run inside SubmitBurst on the (already
+            // joined) worker, and the stuck-worker path abandons instead of
+            // disposing.
+            lock (_detectLock)
+            {
+                _yolox?.Dispose();
+                _rtmpose?.Dispose();
+                _runOpt?.Dispose();
+                _opt?.Dispose();
+            }
         }
 
         // ------------------------------------------------------------------
@@ -212,6 +262,30 @@ namespace BodyTracking.Eval.Rtmpose
             padX = (YoloxSize - newW) / 2; padY = (YoloxSize - newH) / 2;
             int plane = YoloxSize * YoloxSize;
             int c0 = yoloxBgr ? 2 : 0, c2 = yoloxBgr ? 0 : 2; // swap R/B if BGR
+            // A/B numerics probe — see RtmposePreprocess.RowParallel
+            if (!RtmposePreprocess.RowParallel)
+            {
+                for (int dy = 0; dy < YoloxSize; dy++)
+                {
+                    for (int dx = 0; dx < YoloxSize; dx++)
+                    {
+                        int o = dy * YoloxSize + dx;
+                        float r = 114f, g = 114f, b = 114f;
+                        int sx = dx - padX, sy = dy - padY;
+                        if (sx >= 0 && sy >= 0 && sx < newW && sy < newH)
+                        {
+                            int ix = Mathf.Min((int)(sx / scale), w - 1);
+                            int iy = Mathf.Min((int)(sy / scale), h - 1);
+                            int si = (iy * w + ix) * 3;
+                            r = rgb[si]; g = rgb[si + 1]; b = rgb[si + 2];
+                        }
+                        dst[c0 * plane + o] = r;
+                        dst[1 * plane + o] = g;
+                        dst[c2 * plane + o] = b;
+                    }
+                }
+                return;
+            }
             float s = scale; int px = padX, py = padY; // no out params inside the lambda
             // Row-parallel: disjoint dst rows, read-only rgb (same pattern as
             // RtmposePreprocess.BuildInput — this was ~half of the 39ms detect cost).

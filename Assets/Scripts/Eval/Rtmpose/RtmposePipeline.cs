@@ -60,12 +60,36 @@ namespace BodyTracking.Eval.Rtmpose
         /// Warp the ROI out of an RGB8 image into a normalized NCHW float tensor
         /// (length 3*InH*InW), bilinear sampled. RGB channel order.
         /// </summary>
+        /// <summary>A/B numerics probe (editor tooling flips this): false runs the
+        /// pre-parallelization serial loop verbatim.</summary>
+        public static bool RowParallel = true;
+
         public static float[] BuildInput(byte[] rgb, int imgW, int imgH, in PersonRoi roi, in RtmposeSpec spec, float[] reuse = null)
         {
             int ow = spec.InW, oh = spec.InH, plane = ow * oh;
             var dst = (reuse != null && reuse.Length == 3 * plane) ? reuse : new float[3 * plane];
             float x0 = roi.Cx - 0.5f * roi.Bw, y0 = roi.Cy - 0.5f * roi.Bh;
             float bw = roi.Bw, bh = roi.Bh;
+            // A/B probe: false = the pre-parallelization loop VERBATIM, for
+            // bit-exactness checks against archived exports (numerics can differ
+            // between the inline loop and the lambda via JIT FP contraction).
+            if (!RowParallel)
+            {
+                for (int dy = 0; dy < oh; dy++)
+                {
+                    float sy0 = y0 + (dy + 0.5f) / oh * roi.Bh - 0.5f;
+                    for (int dx = 0; dx < ow; dx++)
+                    {
+                        float sx0 = x0 + (dx + 0.5f) / ow * roi.Bw - 0.5f;
+                        SampleBilinear(rgb, imgW, imgH, sx0, sy0, out float r0, out float g0, out float b0);
+                        int idx0 = dy * ow + dx;
+                        dst[0 * plane + idx0] = (r0 - Mean[0]) / Std[0];
+                        dst[1 * plane + idx0] = (g0 - Mean[1]) / Std[1];
+                        dst[2 * plane + idx0] = (b0 - Mean[2]) / Std[2];
+                    }
+                }
+                return dst;
+            }
             // Row-parallel: each dy writes a disjoint slice of dst, rgb is read-only.
             // This was the hot CPU stage of the live pipeline (~7.6ms/frame serial,
             // 4 cameras × 26fps saturated the worker thread — see PLAN_live_gpu Phase 3).

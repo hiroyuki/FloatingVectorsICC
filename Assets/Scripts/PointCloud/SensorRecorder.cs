@@ -106,6 +106,13 @@ namespace PointCloud
                  "Off = legacy behavior (playback frees the live pipelines).")]
         public bool keepLiveRenderersOnLoad = false;
 
+        [Tooltip("Playback: fire OnPlaybackRawFrame for EVERY frame the playhead crossed " +
+                 "this Update, not only the newest one (mesh upload stays newest-only). " +
+                 "Live-sim consumers (LiveFusedBodySource) need every frame so fusion " +
+                 "quality is not bound to the editor frame rate; the k4abt worker path " +
+                 "leaves this off — workers only want the freshest frame.")]
+        public bool deliverAllPlaybackFrames = false;
+
         [Tooltip("Dataset name written into dataset.yaml. Defaults to the recording folder name.")]
         public string datasetName = "";
 
@@ -483,6 +490,11 @@ namespace PointCloud
         private ulong _playbackTrackStartNs;
         private double _pauseWallStart;
         private ulong _lastPlayheadNs;   // most recent playhead (for readout / time-seek)
+
+        /// <summary>Absolute playhead in recorded-timestamp nanoseconds. Consumers
+        /// that stream the RCSV files themselves (LiveFusedBodySource's playback
+        /// tap) pace their own cursors off this.</summary>
+        public ulong CurrentPlayheadNs => _lastPlayheadNs;
 
         [Header("Diagnostics")]
         [Tooltip("Log per-second playback fire counts per serial (FirePlaybackEvent rate). " +
@@ -1037,6 +1049,24 @@ namespace PointCloud
             ReconstructAndUpload(track, depthFrame, colorFrame);
             FirePlaybackEvent(track, depthFrame, colorFrame, irFrame);
             FeedCumulative(track);
+        }
+
+        // deliver-all support: fire ONLY the playback event for a crossed
+        // intermediate frame — no cursor move, no mesh reconstruction, no
+        // cumulative feed. Same masking as EmitFrameAt so every consumer sees
+        // the same depth bytes regardless of which path delivered the frame.
+        private void FirePlaybackEventOnlyAt(DeviceTrack track, int cursor)
+        {
+            var depthFrame = track.DepthFrames[cursor];
+            PointCloudRecording.Frame colorFrame = track.ColorFrames.Count > 0
+                ? track.ColorFrames[Mathf.Min(cursor, track.ColorFrames.Count - 1)] : null;
+            PointCloudRecording.Frame irFrame = track.IRFrames.Count > 0
+                ? track.IRFrames[Mathf.Min(cursor, track.IRFrames.Count - 1)] : null;
+            if (maskRivalProjectors && depthFrame?.Bytes != null)
+                ProjectorMask.Apply(track.Serial, depthFrame.Bytes, depthFrame.ByteCount,
+                    track.DepthWidth, track.DepthHeight,
+                    irFrame?.Bytes, irFrame?.ByteCount ?? 0, track.IRWidth, track.IRHeight);
+            FirePlaybackEvent(track, depthFrame, colorFrame, irFrame);
         }
 
         private void SetCursorAndEmit(DeviceTrack track, int cursor)
@@ -2082,7 +2112,26 @@ namespace PointCloud
                 // Only emit on real cursor advances so a paused playhead doesn't
                 // re-reconstruct / re-snapshot the same frame every Update tick.
                 if (cursor != track.PlaybackCursor)
+                {
+                    // deliver-all: the crossed intermediates exist only as the raw
+                    // event (no mesh upload) — consumers copy synchronously, the
+                    // frame streams reuse one scratch buffer per track.
+                    // The catch-up is CAPPED: each delivered frame costs main-thread
+                    // time (disk read + subscriber copy), so an unbounded catch-up
+                    // snowballs after any hitch (slower tick -> more crossed frames
+                    // -> slower tick) and pins the editor at ~2fps. Beyond the cap
+                    // the OLDEST crossed frames are skipped, keeping the delivered
+                    // run contiguous with the rendered frame.
+                    if (deliverAllPlaybackFrames && cursorBeforeAdvance >= 0)
+                    {
+                        const int MaxCatchUpPerTick = 8;
+                        int first = cursorBeforeAdvance + 1;
+                        if (cursor - first > MaxCatchUpPerTick) first = cursor - MaxCatchUpPerTick;
+                        for (int i = first; i < cursor; i++)
+                            FirePlaybackEventOnlyAt(track, i);
+                    }
                     EmitFrameAt(track, cursor);
+                }
                 AdvanceBodyCursor(track, playheadNs);
                 ApplyBoundingBoxFilter(track);
             }

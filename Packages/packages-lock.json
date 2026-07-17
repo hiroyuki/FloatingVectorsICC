@@ -24,11 +24,11 @@
       "dependencies": {}
     },
     "com.github.asus4.onnxruntime.unity": {
-      "version": "0.4.5",
+      "version": "0.4.8",
       "depth": 0,
       "source": "registry",
       "dependencies": {
-        "com.github.asus4.onnxruntime": "0.4.5"
+        "com.github.asus4.onnxruntime": "0.4.8"
       },
       "url": "https://registry.npmjs.com"
     },

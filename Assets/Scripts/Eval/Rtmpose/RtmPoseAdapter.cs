@@ -33,6 +33,24 @@ namespace BodyTracking.Eval.Rtmpose
         public float minTrackConf = 0.35f;   // below this mean keypoint score, re-detect
         public float trackPad = 0.15f;       // keypoint-bbox padding fraction for the next box
 
+        /// <summary>Run detection on a background thread instead of blocking the
+        /// submit call. LIVE ONLY: a 40-56ms YOLOX pass inside the burst barrier
+        /// stalls all four cameras exactly at hard-motion moments (frequent track
+        /// loss), overflowing the frame ring — the visible "shape collapse"
+        /// (eval/results/live_v11s_*). While a detect is pending the camera skips
+        /// its frames (fusion continues on the others) and adopts the box on
+        /// completion. Offline exports keep this OFF: skipping frames there would
+        /// change deterministic output for no gain (they have no time budget).</summary>
+        public bool asyncDetect = false;
+
+        /// <summary>asyncDetect only: after losing the track, keep using the last
+        /// box for up to this many frames while the background detect runs.
+        /// DEFAULT 0 (off): measured on 15-50-24, riding a stale box across a
+        /// fast turn produced garbage poses with passable confidence (2.5m
+        /// shoulder spikes, pelvis accel x1.8) — worse than sitting the frames
+        /// out. Kept for experimentation.</summary>
+        public int trackGraceFrames = 0;
+
         private readonly IRtmposeBackend _backend;
         private readonly DepthLift _lift = new DepthLift();
         private readonly Dictionary<string, ObCameraParam?> _cam = new Dictionary<string, ObCameraParam?>();
@@ -41,7 +59,7 @@ namespace BodyTracking.Eval.Rtmpose
         private Vector3 _volCenter, _volHalf;
         private bool _hasVolume;
 
-        private struct Track { public float X1, Y1, X2, Y2; public int Age; public bool Valid; }
+        private struct Track { public float X1, Y1, X2, Y2; public int Age; public bool Valid; public int Grace; }
         private readonly Dictionary<string, Track> _track = new Dictionary<string, Track>();
 
         private const int MaxDet = 8;
@@ -64,6 +82,39 @@ namespace BodyTracking.Eval.Rtmpose
         public readonly float[] PoseMs = new float[TimingCap];
         public int LiftN, DetectN, PreN, PoseN; // total counts (ring index = N % cap)
         public int StatTrackCalls, StatDetectCalls, StatNoDetect;
+        public int StatAsyncKicks, StatAsyncSkippedFrames; // async-detect diagnostics
+
+        // ---- async detect state ----
+        // Owner thread = the adapter's single submit thread; the detect job runs
+        // on the thread pool and touches ONLY its own copies. Handoff via
+        // _asyncState (volatile): 0=idle (worker owns), 1=running (pool owns),
+        // 2=done (worker adopts, then resets to 0).
+        private byte[] _detColorCopy = System.Array.Empty<byte>();
+        private readonly DetBox[] _asyncBoxes = new DetBox[MaxDet];
+        private volatile int _asyncState;
+        private int _asyncCount, _asyncW, _asyncH;
+
+        private void KickAsyncDetect(byte[] rgb, int w, int h)
+        {
+            if (_asyncState != 0) return; // one in flight per camera
+            int bytes = w * h * 3;
+            if (_detColorCopy.Length < bytes) _detColorCopy = new byte[bytes];
+            Buffer.BlockCopy(rgb, 0, _detColorCopy, 0, bytes);
+            _asyncW = w; _asyncH = h;
+            StatAsyncKicks++;
+            _asyncState = 1;
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+                try { _asyncCount = _backend.Detect(_detColorCopy, _asyncW, _asyncH, _asyncBoxes); }
+                catch { _asyncCount = 0; }
+                finally
+                {
+                    DetectMs[DetectN++ % TimingCap] = MsSince(t0);
+                    _asyncState = 2;
+                }
+            });
+        }
 
         static float MsSince(long t0) => (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000f / System.Diagnostics.Stopwatch.Frequency;
 
@@ -106,8 +157,55 @@ namespace BodyTracking.Eval.Rtmpose
             LiftMs[LiftN++ % TimingCap] = MsSince(t0);
 
             // detect (to acquire) vs track (reuse previous keypoint box)
-            DetBox box; bool tracking = false;
-            if (_track.TryGetValue(serial, out var tr) && tr.Valid && tr.Age < redetectEveryN)
+            DetBox box = default; bool tracking = false;
+            bool haveTrack = _track.TryGetValue(serial, out var tr) && tr.Valid;
+
+            if (asyncDetect)
+            {
+                bool adopted = false;
+                // adopt a finished background detect; person selection runs HERE,
+                // against the CURRENT frame's depth lift (fresher than the detect's
+                // own source frame — the padded pose crop absorbs the small drift)
+                if (_asyncState == 2)
+                {
+                    int nDet = Mathf.Min(_asyncCount, MaxDet);
+                    if (nDet > 0) Array.Copy(_asyncBoxes, _boxes, nDet);
+                    int sel = nDet > 0 ? SelectPerson(nDet, serial, cam, have3d, cw, ch) : -1;
+                    _asyncState = 0;
+                    if (nDet <= 0) StatNoDetect++;
+                    if (sel >= 0) { box = _boxes[sel]; adopted = true; StatDetectCalls++; }
+                }
+                if (!adopted)
+                {
+                    if (haveTrack)
+                    {
+                        box = new DetBox { X1 = tr.X1, Y1 = tr.Y1, X2 = tr.X2, Y2 = tr.Y2, Score = 1f };
+                        tracking = true;
+                        StatTrackCalls++;
+                        // safety refresh: keep tracking while the detect runs
+                        if (tr.Age >= redetectEveryN) KickAsyncDetect(frame.ColorBytes, cw, ch);
+                    }
+                    else if (_track.TryGetValue(serial, out var stale) && stale.Grace > 0)
+                    {
+                        // grace bridge: ride the last box while the detect runs
+                        KickAsyncDetect(frame.ColorBytes, cw, ch);
+                        box = new DetBox { X1 = stale.X1, Y1 = stale.Y1, X2 = stale.X2, Y2 = stale.Y2, Score = 1f };
+                        tracking = true;
+                        stale.Grace--;
+                        _track[serial] = stale;
+                    }
+                    else
+                    {
+                        // track lost and grace spent: this camera sits the frame out
+                        // (fusion keeps running on the others) instead of stalling
+                        // the burst
+                        KickAsyncDetect(frame.ColorBytes, cw, ch);
+                        StatAsyncSkippedFrames++;
+                        return;
+                    }
+                }
+            }
+            else if (haveTrack && tr.Age < redetectEveryN)
             {
                 box = new DetBox { X1 = tr.X1, Y1 = tr.Y1, X2 = tr.X2, Y2 = tr.Y2, Score = 1f };
                 tracking = true;
@@ -164,7 +262,7 @@ namespace BodyTracking.Eval.Rtmpose
             if (tracking && _hasVolume && have3d && _colorToWorld.TryGetValue(serial, out var e))
             {
                 ref var pelvis = ref _skel.Joints[(int)EvalJointId.Pelvis];
-                if (pelvis.Valid && !InVolume(ToWorld(pelvis.PositionMm, e))) { _track.Remove(serial); return; }
+                if (pelvis.Valid && !InVolume(ToWorld(pelvis.PositionMm, e))) { InvalidateTrack(serial); return; }
             }
 
             // update the tracked box from the keypoint bounds (padded) for the next frame
@@ -172,18 +270,39 @@ namespace BodyTracking.Eval.Rtmpose
             if (confN >= 3 && x2 > x1 && y2 > y1)
             {
                 float pw = (x2 - x1) * trackPad, ph = (y2 - y1) * trackPad;
+                bool validNow = meanConf >= minTrackConf;
                 _track[serial] = new Track
                 {
                     X1 = x1 - pw, Y1 = y1 - ph, X2 = x2 + pw, Y2 = y2 + ph,
                     Age = tracking ? tr.Age + 1 : 0,
-                    Valid = meanConf >= minTrackConf,
+                    Valid = validNow,
+                    // a valid track re-arms the grace budget; an invalid one keeps
+                    // whatever the bridge has left (granted at the transition)
+                    Grace = validNow ? trackGraceFrames
+                        : (_track.TryGetValue(serial, out var cur) ? (cur.Valid ? trackGraceFrames : cur.Grace) : 0),
                 };
             }
-            else _track.Remove(serial);
+            else InvalidateTrack(serial);
 
             _frame.Reset(Name, serial, tsNs);
             _frame.Bodies.Add(_skel);
             OnSkeletons?.Invoke(_frame);
+        }
+
+        /// <summary>Drop the track — but under asyncDetect keep the last box as an
+        /// INVALID entry with a grace budget, so the bridge can ride it while the
+        /// background detect re-acquires. Sync mode removes outright (original
+        /// behavior; the next frame blocks on a fresh detect anyway).</summary>
+        private void InvalidateTrack(string serial)
+        {
+            if (asyncDetect && _track.TryGetValue(serial, out var prev))
+                _track[serial] = new Track
+                {
+                    X1 = prev.X1, Y1 = prev.Y1, X2 = prev.X2, Y2 = prev.Y2,
+                    Age = prev.Age, Valid = false,
+                    Grace = prev.Valid ? trackGraceFrames : prev.Grace,
+                };
+            else _track.Remove(serial);
         }
 
         private int SelectPerson(int nDet, string serial, ObCameraParam? cam, bool have3d, int cw, int ch)

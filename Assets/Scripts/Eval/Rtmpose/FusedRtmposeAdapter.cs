@@ -148,7 +148,15 @@ namespace BodyTracking.Eval.Rtmpose
         readonly object _adapterLock = new();  // guards _perSerial mutation
         readonly object _ingestLock = new();   // guards _latest ingestion from parallel workers
         float _confThreshold = 0.3f;
+        bool _asyncDetect;
         Vector3 _volCenterCfg, _volHalfCfg; bool _hasVolumeCfg;
+
+        /// <summary>Forwarded to every per-camera adapter — see RtmPoseAdapter.asyncDetect.</summary>
+        public bool AsyncDetect
+        {
+            get => _asyncDetect;
+            set { _asyncDetect = value; lock (_adapterLock) foreach (var a in _perSerial.Values) a.asyncDetect = value; }
+        }
 
         /// <summary>Per-camera adapters (bench probes aggregate their timings).</summary>
         public IEnumerable<RtmPoseAdapter> InnerAdapters { get { lock (_adapterLock) return new List<RtmPoseAdapter>(_perSerial.Values); } }
@@ -161,7 +169,7 @@ namespace BodyTracking.Eval.Rtmpose
             lock (_adapterLock)
             {
                 if (_perSerial.TryGetValue(serial, out var a)) return a;
-                a = new RtmPoseAdapter(_backend) { confThreshold = _confThreshold };
+                a = new RtmPoseAdapter(_backend) { confThreshold = _confThreshold, asyncDetect = _asyncDetect };
                 if (_hasVolumeCfg) a.SetCaptureVolume(_volCenterCfg, _volHalfCfg);
                 a.OnSkeletons += OnInnerSkeletons;
                 _perSerial[serial] = a;

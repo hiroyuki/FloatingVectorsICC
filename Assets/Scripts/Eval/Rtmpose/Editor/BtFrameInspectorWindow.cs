@@ -331,8 +331,27 @@ namespace BodyTracking.Eval.Rtmpose
 
         /// <summary>Requested EP for the shared backend. Changing it does not
         /// recreate an already-cached backend of a different provider — call
-        /// SharedBackend() after the cache expired, or dispose the cached one.</summary>
+        /// DisposeSharedBackend() first to force a rebuild.</summary>
         internal static OrtProvider SharedProvider = OrtProvider.Cuda;
+
+        /// <summary>Deterministically drop the cached backend (next SharedBackend()
+        /// call rebuilds with the current SharedProvider).</summary>
+        internal static void DisposeSharedBackend()
+        {
+            s_backend?.Dispose();
+            s_backend = null;
+        }
+
+        [UnityEditor.InitializeOnLoadMethod]
+        static void RegisterReloadCleanup()
+        {
+            // A live ORT CUDA session torn down by FINALIZERS during domain reload
+            // crashes the editor inside onnxruntime.dll (SessionOptions.ReleaseHandle
+            // runs after the ORT env is already gone — observed 2026-07-17, see
+            // Editor-prev.log 'Crash!!!' with onnxruntime.dll frames). Dispose the
+            // cached backend deterministically before every reload instead.
+            UnityEditor.AssemblyReloadEvents.beforeAssemblyReload += DisposeSharedBackend;
+        }
 
         /// <summary>Process-wide cached ONNX backend for eval tooling (loads on
         /// first use; reloads if a caller disposed the cached one — Ready goes
