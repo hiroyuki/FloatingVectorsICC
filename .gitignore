@@ -138,3 +138,12 @@ AGENTS.md
 
 # LFKS upload guide contains the access token — never commit.
 lfks-upload-guide.md
+
+# ONNX Runtime native binaries in the embedded asus4 package — too large for git
+# (whole package is 657MB; providers_cuda alone 294MB). The managed C# layer and
+# .meta files ARE committed. Restore steps: eval/INSTALL_cuda12.md
+/Packages/com.github.asus4.onnxruntime/Plugins/**/*.dll
+/Packages/com.github.asus4.onnxruntime/Plugins/**/*.aar
+/Packages/com.github.asus4.onnxruntime/Plugins/**/*.dylib
+/Packages/com.github.asus4.onnxruntime/Plugins/**/*.so
+/Packages/com.github.asus4.onnxruntime/Plugins/iOS~/

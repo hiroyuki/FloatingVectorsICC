@@ -138,8 +138,36 @@ namespace BodyTracking.Eval.Rtmpose
 
         public BodyProfile Profile;
 
-        readonly RtmPoseAdapter _inner;
-        public RtmPoseAdapter Inner => _inner;
+        // One RtmPoseAdapter PER CAMERA so SubmitBurst can run the four cameras'
+        // inference concurrently: each adapter's scratch buffers (input tensor,
+        // simcc outputs, depth lift) are then thread-confined. Behavior-identical
+        // to the old shared adapter — its per-camera state (track box, intrinsics)
+        // was already keyed by serial.
+        readonly OrtRtmposeBackend _backend;
+        readonly Dictionary<string, RtmPoseAdapter> _perSerial = new();
+        readonly object _adapterLock = new();  // guards _perSerial mutation
+        readonly object _ingestLock = new();   // guards _latest ingestion from parallel workers
+        float _confThreshold = 0.3f;
+        Vector3 _volCenterCfg, _volHalfCfg; bool _hasVolumeCfg;
+
+        /// <summary>Per-camera adapters (bench probes aggregate their timings).</summary>
+        public IEnumerable<RtmPoseAdapter> InnerAdapters { get { lock (_adapterLock) return new List<RtmPoseAdapter>(_perSerial.Values); } }
+
+        /// <summary>Per-camera (pre-fusion) skeleton stream — the old Inner.OnSkeletons.</summary>
+        public event Action<EvalSkeletonFrame> OnPerCameraSkeletons;
+
+        RtmPoseAdapter PerSerial(string serial)
+        {
+            lock (_adapterLock)
+            {
+                if (_perSerial.TryGetValue(serial, out var a)) return a;
+                a = new RtmPoseAdapter(_backend) { confThreshold = _confThreshold };
+                if (_hasVolumeCfg) a.SetCaptureVolume(_volCenterCfg, _volHalfCfg);
+                a.OnSkeletons += OnInnerSkeletons;
+                _perSerial[serial] = a;
+                return a;
+            }
+        }
 
         // per-serial world transform (OpenCV frame, mm): world = R·cam + T
         sealed class WorldTr { public float[] R; public float[] T; }
@@ -212,6 +240,10 @@ namespace BodyTracking.Eval.Rtmpose
 
         // diagnostics (per session, read for reporting)
         public int StatConsensus, StatSingleAccepted, StatRelifted, StatHeld, StatDroppedLen, StatOutliers, StatJumpHeld, StatLenProjected, StatOccDropped;
+        // frame-level emit split: fresh = new fusion result, held = Heartbeat's
+        // temporal-hold frame. FreshFusedHz (bench gate) counts only the former —
+        // held frames keep the cadence and would fake a 30Hz FusedHz on a slow EP.
+        public int StatFreshEmits, StatHeldEmits;
 
         // Debug probe: when dbgJoint >= 0, every fusion of that joint inside
         // [dbgFromNs, dbgToNs] appends its per-camera candidates (with stage-1
@@ -224,23 +256,30 @@ namespace BodyTracking.Eval.Rtmpose
 
         public FusedRtmposeAdapter(OrtRtmposeBackend backend)
         {
-            _inner = new RtmPoseAdapter(backend);
-            _inner.OnSkeletons += OnInnerSkeletons;
+            _backend = backend;
         }
 
-        public float ConfThreshold { get => _inner.confThreshold; set => _inner.confThreshold = value; }
+        public float ConfThreshold
+        {
+            get => _confThreshold;
+            set { _confThreshold = value; lock (_adapterLock) foreach (var a in _perSerial.Values) a.confThreshold = value; }
+        }
 
         public void SetWorldTransform(string serial, ObExtrinsic ext)
         {
-            _inner.SetWorldTransform(serial, ext);
+            PerSerial(serial).SetWorldTransform(serial, ext);
             _world[serial] = new WorldTr { R = (float[])ext.Rot.Clone(), T = (float[])ext.Trans.Clone() };
         }
 
-        public void SetCaptureVolume(Vector3 centerMm, Vector3 halfMm) => _inner.SetCaptureVolume(centerMm, halfMm);
+        public void SetCaptureVolume(Vector3 centerMm, Vector3 halfMm)
+        {
+            _volCenterCfg = centerMm; _volHalfCfg = halfMm; _hasVolumeCfg = true;
+            lock (_adapterLock) foreach (var a in _perSerial.Values) a.SetCaptureVolume(centerMm, halfMm);
+        }
 
         public void Configure(in EvalCameraContext ctx)
         {
-            _inner.Configure(ctx);
+            PerSerial(ctx.Serial).Configure(ctx);
             if (ctx.CameraParam.HasValue)
             {
                 var cp = ctx.CameraParam.Value;
@@ -280,10 +319,53 @@ namespace BodyTracking.Eval.Rtmpose
                 FusePendingBurst();
 
             StashDepth(serial, frame);
-            _inner.SubmitFrame(serial, frame, tsNs); // synchronous → OnInnerSkeletons fires inside
+            PerSerial(serial).SubmitFrame(serial, frame, tsNs); // synchronous → OnInnerSkeletons fires inside
 
             if (_pendingBurstTs == 0) _pendingBurstTs = tsNs;
             else if (tsNs > _pendingBurstTs) _pendingBurstTs = tsNs; // same burst, later stamp
+        }
+
+        public struct BurstItem { public string Serial; public RawFrameData Frame; public ulong TsNs; }
+
+        /// <summary>Submit one drained wake's frames (at most one per serial),
+        /// running the per-camera inference CONCURRENTLY. Semantics match calling
+        /// SubmitFrame sequentially in timestamp order: items are sorted, split
+        /// into burst groups (consecutive gap ≤ BurstGapNs), the pending burst is
+        /// closed before a group that starts a new one, and fusion state is only
+        /// touched on this (the caller's) thread. Requires Configure to have run
+        /// for every serial (LiveFusedBodySource.EnsureConfigured does).</summary>
+        public void SubmitBurst(List<BurstItem> items)
+        {
+            if (items == null || items.Count == 0) return;
+            if (items.Count == 1) { SubmitFrame(items[0].Serial, items[0].Frame, items[0].TsNs); return; }
+            items.Sort((a, b) => a.TsNs.CompareTo(b.TsNs));
+            int start = 0;
+            while (start < items.Count)
+            {
+                int end = start + 1;
+                while (end < items.Count && items[end].TsNs - items[end - 1].TsNs <= BurstGapNs) end++;
+
+                // sequential-submit equivalence: a close can only trigger before a
+                // group's first frame — within a group each later ts is within
+                // BurstGapNs of the (already advanced) pending stamp
+                if (_pendingBurstTs != 0 && items[start].TsNs > _pendingBurstTs + BurstGapNs)
+                    FusePendingBurst();
+
+                var group = items; // capture list, not the loop range vars, in the lambda
+                System.Threading.Tasks.Parallel.For(start, end, i =>
+                {
+                    var it = group[i];
+                    try { PerSerial(it.Serial).SubmitFrame(it.Serial, it.Frame, it.TsNs); }
+                    catch (Exception e) { Debug.LogException(e); }
+                });
+
+                for (int i = start; i < end; i++)
+                {
+                    StashDepth(items[i].Serial, items[i].Frame);
+                    if (_pendingBurstTs == 0 || items[i].TsNs > _pendingBurstTs) _pendingBurstTs = items[i].TsNs;
+                }
+                start = end;
+            }
         }
 
         void FusePendingBurst()
@@ -359,7 +441,7 @@ namespace BodyTracking.Eval.Rtmpose
         }
 
         public void SubmitRecordedBodies(string serial, byte[] payload, int byteCount, ulong tsNs) { }
-        public void Pump() => _inner.Pump();
+        public void Pump() { lock (_adapterLock) foreach (var a in _perSerial.Values) a.Pump(); }
 
         // The inner adapter runs on the shared cached backend (see
         // BtFrameInspectorWindow.SharedBackend) — disposing it here would kill
@@ -371,14 +453,21 @@ namespace BodyTracking.Eval.Rtmpose
             var p = f.Primary();
             if (p == null) return;
             if (!_world.TryGetValue(f.Serial, out var tr)) return;
-            if (!_latest.TryGetValue(f.Serial, out var s)) { s = new CamSample(); _latest[f.Serial] = s; }
-            s.Ts = f.TimestampNs;
-            for (int j = 0; j < (int)EvalJointId.Count; j++)
+            // SubmitBurst fires this concurrently from per-camera workers; the
+            // lock guards the _latest dictionary (different serials → different
+            // CamSample instances, but dictionary insertion itself races).
+            lock (_ingestLock)
             {
-                s.Valid[j] = p.Joints[j].Valid;
-                s.Conf[j] = p.Joints[j].Confidence;
-                if (s.Valid[j]) s.World[j] = ToWorld(tr, p.Joints[j].PositionMm);
+                if (!_latest.TryGetValue(f.Serial, out var s)) { s = new CamSample(); _latest[f.Serial] = s; }
+                s.Ts = f.TimestampNs;
+                for (int j = 0; j < (int)EvalJointId.Count; j++)
+                {
+                    s.Valid[j] = p.Joints[j].Valid;
+                    s.Conf[j] = p.Joints[j].Confidence;
+                    if (s.Valid[j]) s.World[j] = ToWorld(tr, p.Joints[j].PositionMm);
+                }
             }
+            OnPerCameraSkeletons?.Invoke(f);
         }
 
         static Vector3 ToWorld(WorldTr tr, Vector3 camMm) => new Vector3(
@@ -598,6 +687,7 @@ namespace BodyTracking.Eval.Rtmpose
                 _histPos[j] = fusedPos[j]; _histTs[j] = nowTs; _histHas[j] = true;
             }
 
+            StatFreshEmits++;
             PushLagAndEmit(nowTs);
         }
 
@@ -639,6 +729,7 @@ namespace BodyTracking.Eval.Rtmpose
             }
             if (heldJoints == 0) return;
             StatHeld += heldJoints;
+            StatHeldEmits++;
             ProjectBoneLengths(_fused);
             PushLagAndEmit(nowTs);
         }

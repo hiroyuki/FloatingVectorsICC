@@ -55,6 +55,18 @@ namespace BodyTracking.Eval.Rtmpose
         private readonly EvalSkeleton _skel = new EvalSkeleton();
         private readonly EvalSkeletonFrame _frame = new EvalSkeletonFrame();
 
+        // Per-stage timing (worker thread; bench probe reads snapshots — a torn
+        // read only skews one sample). Ring of the last TimingCap per-call ms.
+        public const int TimingCap = 4096;
+        public readonly float[] LiftMs = new float[TimingCap];
+        public readonly float[] DetectMs = new float[TimingCap];
+        public readonly float[] PreMs = new float[TimingCap];
+        public readonly float[] PoseMs = new float[TimingCap];
+        public int LiftN, DetectN, PreN, PoseN; // total counts (ring index = N % cap)
+        public int StatTrackCalls, StatDetectCalls, StatNoDetect;
+
+        static float MsSince(long t0) => (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000f / System.Diagnostics.Stopwatch.Frequency;
+
         public RtmPoseAdapter(IRtmposeBackend backend = null)
         {
             _backend = backend ?? new NullRtmposeBackend();
@@ -88,8 +100,10 @@ namespace BodyTracking.Eval.Rtmpose
             // otherwise lift against the PREVIOUS frame's stale depth.
             bool depthValid = frame.DepthBytes != null &&
                               frame.DepthByteCount >= frame.DepthWidth * frame.DepthHeight * 2;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
             bool have3d = cam.HasValue && depthValid &&
                           _lift.BuildAligned(frame.DepthBytes, frame.DepthWidth, frame.DepthHeight, cw, ch, cam.Value);
+            LiftMs[LiftN++ % TimingCap] = MsSince(t0);
 
             // detect (to acquire) vs track (reuse previous keypoint box)
             DetBox box; bool tracking = false;
@@ -97,11 +111,15 @@ namespace BodyTracking.Eval.Rtmpose
             {
                 box = new DetBox { X1 = tr.X1, Y1 = tr.Y1, X2 = tr.X2, Y2 = tr.Y2, Score = 1f };
                 tracking = true;
+                StatTrackCalls++;
             }
             else
             {
+                StatDetectCalls++;
+                t0 = System.Diagnostics.Stopwatch.GetTimestamp();
                 int nDet = _backend.Detect(frame.ColorBytes, cw, ch, _boxes);
-                if (nDet <= 0) { _track.Remove(serial); return; }
+                DetectMs[DetectN++ % TimingCap] = MsSince(t0);
+                if (nDet <= 0) { _track.Remove(serial); StatNoDetect++; return; }
                 if (nDet > MaxDet) nDet = MaxDet;
                 int sel = SelectPerson(nDet, serial, cam, have3d, cw, ch);
                 if (sel < 0) { _track.Remove(serial); return; }
@@ -110,8 +128,13 @@ namespace BodyTracking.Eval.Rtmpose
 
             var spec = _backend.Spec;
             var roi = RtmposePreprocess.RoiFromBox(box.X1, box.Y1, box.X2, box.Y2, spec);
+            t0 = System.Diagnostics.Stopwatch.GetTimestamp();
             RtmposePreprocess.BuildInput(frame.ColorBytes, cw, ch, roi, spec, _input);
-            if (!_backend.Pose(_input, _simccX, _simccY)) { _track.Remove(serial); return; }
+            PreMs[PreN++ % TimingCap] = MsSince(t0);
+            t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            bool poseOk = _backend.Pose(_input, _simccX, _simccY);
+            PoseMs[PoseN++ % TimingCap] = MsSince(t0);
+            if (!poseOk) { _track.Remove(serial); return; }
 
             int k = _backend.NumKeypoints;
             SimccDecoder.Decode(_simccX, _simccY, k, roi, spec, _coco, _cocoScore);

@@ -329,6 +329,11 @@ namespace BodyTracking.Eval.Rtmpose
 
         void EnsureBackend() => SharedBackend();
 
+        /// <summary>Requested EP for the shared backend. Changing it does not
+        /// recreate an already-cached backend of a different provider — call
+        /// SharedBackend() after the cache expired, or dispose the cached one.</summary>
+        internal static OrtProvider SharedProvider = OrtProvider.Cuda;
+
         /// <summary>Process-wide cached ONNX backend for eval tooling (loads on
         /// first use; reloads if a caller disposed the cached one — Ready goes
         /// false on Dispose). Callers must NOT dispose the returned instance.</summary>
@@ -340,7 +345,7 @@ namespace BodyTracking.Eval.Rtmpose
                 string yolox = FirstOnnxStatic(Path.Combine(modelsDir, "yolox-m"));
                 string rtm = FirstOnnxStatic(Path.Combine(modelsDir, "rtmpose-m"));
                 if (yolox == null || rtm == null) throw new Exception("ONNX models not found under eval/models");
-                s_backend = new OrtRtmposeBackend(yolox, rtm);
+                s_backend = new OrtRtmposeBackend(yolox, rtm, SharedProvider);
             }
             return s_backend;
         }

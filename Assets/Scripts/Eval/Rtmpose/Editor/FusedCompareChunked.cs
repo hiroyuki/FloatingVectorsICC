@@ -51,7 +51,7 @@ namespace BodyTracking.Eval.Rtmpose
             if (File.Exists(profilePath)) _fused.Profile = BodyProfile.Load(profilePath);
 
             _baseline.OnSkeletons += f => _metrics.AddFrame("k4abt", f);
-            _fused.Inner.OnSkeletons += f => _metrics.AddFrame("rtmpose", f);
+            _fused.OnPerCameraSkeletons += f => _metrics.AddFrame("rtmpose", f);
             _fused.OnSkeletons += f =>
             {
                 _metrics.AddFrame("rtmfused", f);

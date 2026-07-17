@@ -63,6 +63,11 @@ namespace BodyTracking.Eval.Rtmpose
                  "the project root. Empty = fusion runs without bone-length priors.")]
         public string bodyProfilePath = "eval/body_profile.json";
 
+        [Tooltip("ONNX Runtime execution provider. Falls back downward only " +
+                 "(Cuda→DirectML→Cpu); a mismatch between requested and actual " +
+                 "EP is logged as an error. 30Hz fusion needs Cuda.")]
+        public OrtProvider provider = OrtProvider.Cuda;
+
         [Tooltip("RTMPose keypoint confidence threshold (person selection & joints).")]
         public float confThreshold = 0.3f;
 
@@ -77,8 +82,26 @@ namespace BodyTracking.Eval.Rtmpose
                  "hole with a straight kink.")]
         public int heartbeatMs = 40;
 
-        /// <summary>Fused frames emitted per second (diagnostic, worker-thread rate).</summary>
+        [Tooltip("Median-5 fixed-lag smoothing on the fused output (~2 frames of " +
+                 "latency, 66ms at 30Hz). Designed for 30Hz fusion; at low rates the " +
+                 "lag grows proportionally. Applied on (re)build of the session adapter.")]
+        public bool medianLagFilter = true;
+
+        /// <summary>Fused frames emitted per second (diagnostic, worker-thread rate).
+        /// Includes Heartbeat temporal-hold frames — use FreshFusedHz for benchmarks.</summary>
         public float FusedHz => _session != null ? _session.FusedHz : 0f;
+
+        /// <summary>New fusion results per second, EXCLUDING temporal-hold (held)
+        /// frames. This is the 30Hz benchmark gate (eval/PLAN_live_gpu.md Phase 3).</summary>
+        public float FreshFusedHz => _session != null ? _session.FreshFusedHz : 0f;
+
+        /// <summary>Heartbeat temporal-hold frames per second. ~0 when inference
+        /// keeps up with the camera rate.</summary>
+        public float HeldEmitHz => _session != null ? _session.HeldEmitHz : 0f;
+
+        /// <summary>Bench probe access to the live fusion adapter (stage timings,
+        /// fresh/held counters). Null when no session is running.</summary>
+        public FusedRtmposeAdapter CurrentAdapter => _session?.Fused;
 
         // ---- per-serial frame slot (main thread writes, worker consumes) ----
         // Double-buffered: Ingest writes the PENDING arrays under the session's
@@ -136,6 +159,8 @@ namespace BodyTracking.Eval.Rtmpose
             public byte[] EncodeScratch;
             public int FusedEmitted;
             public float FusedHz;
+            public float FreshFusedHz;
+            public float HeldEmitHz;
         }
 
         private Session _session;
@@ -167,8 +192,8 @@ namespace BodyTracking.Eval.Rtmpose
                     enabled = false;
                     return;
                 }
-                s.Backend = new OrtRtmposeBackend(yolox, rtm);
-                s.Fused = new FusedRtmposeAdapter(s.Backend) { ConfThreshold = confThreshold };
+                s.Backend = new OrtRtmposeBackend(yolox, rtm, provider);
+                s.Fused = new FusedRtmposeAdapter(s.Backend) { ConfThreshold = confThreshold, medianLagFilter = medianLagFilter };
                 string profile = Path.Combine(root, bodyProfilePath);
                 if (!string.IsNullOrEmpty(bodyProfilePath) && File.Exists(profile))
                     s.Fused.Profile = BodyProfile.Load(profile);
@@ -347,9 +372,11 @@ namespace BodyTracking.Eval.Rtmpose
         private void WorkerLoop(Session s)
         {
             var burst = new List<Slot>(8);
+            var items = new List<FusedRtmposeAdapter.BurstItem>(8);
             long lastFrameWallMs = Environment.TickCount;
             ulong lastTsNs = 0;
             long rateWindowStart = Environment.TickCount;
+            int lastFreshEmits = 0, lastHeldEmits = 0;
 
             while (!s.Stop)
             {
@@ -361,6 +388,7 @@ namespace BodyTracking.Eval.Rtmpose
                     s.ResetPending = false;
                     RebuildAdapter(s);
                     lastTsNs = 0;
+                    lastFreshEmits = 0; lastHeldEmits = 0; // fresh adapter, counters restart
                 }
 
                 burst.Clear();
@@ -395,21 +423,27 @@ namespace BodyTracking.Eval.Rtmpose
                     continue;
                 }
 
+                items.Clear();
                 foreach (var slot in burst)
                 {
                     if (s.Stop) break;
                     try
                     {
-                        EnsureConfigured(s, slot);
+                        EnsureConfigured(s, slot); // must precede SubmitBurst (adapter creation is not parallel-safe by design)
                         var raw = new RawFrameData(
                             slot.ProcDepth, slot.ProcDepthCount, slot.PDW, slot.PDH,
                             slot.ProcColor, slot.ProcColorCount, slot.PCW, slot.PCH,
                             slot.ProcIR, slot.ProcIRCount, slot.PIW, slot.PIH,
                             slot.ProcTsNs / 1000UL);
-                        s.Fused.SubmitFrame(slot.Serial, raw, slot.ProcTsNs);
+                        items.Add(new FusedRtmposeAdapter.BurstItem { Serial = slot.Serial, Frame = raw, TsNs = slot.ProcTsNs });
                         lastTsNs = slot.ProcTsNs > lastTsNs ? slot.ProcTsNs : lastTsNs;
                         lastFrameWallMs = Environment.TickCount;
                     }
+                    catch (Exception e) { Debug.LogException(e, this); }
+                }
+                if (items.Count > 0 && !s.Stop)
+                {
+                    try { s.Fused.SubmitBurst(items); } // per-camera inference runs concurrently
                     catch (Exception e) { Debug.LogException(e, this); }
                 }
 
@@ -418,6 +452,16 @@ namespace BodyTracking.Eval.Rtmpose
                 {
                     // actual fused OUTPUT rate (OnFusedSkeletons emissions)
                     s.FusedHz = Interlocked.Exchange(ref s.FusedEmitted, 0) * 1000f / win;
+                    // fresh vs held split from the adapter (counters live on this
+                    // worker thread). FreshFusedHz is the 30Hz bench gate: held
+                    // frames keep the cadence and would fake the rate on a slow EP.
+                    if (s.Fused != null)
+                    {
+                        s.FreshFusedHz = (s.Fused.StatFreshEmits - lastFreshEmits) * 1000f / win;
+                        s.HeldEmitHz = (s.Fused.StatHeldEmits - lastHeldEmits) * 1000f / win;
+                        lastFreshEmits = s.Fused.StatFreshEmits;
+                        lastHeldEmits = s.Fused.StatHeldEmits;
+                    }
                     rateWindowStart = Environment.TickCount;
                 }
             }
@@ -431,7 +475,7 @@ namespace BodyTracking.Eval.Rtmpose
         {
             try
             {
-                var next = new FusedRtmposeAdapter(s.Backend) { ConfThreshold = confThreshold };
+                var next = new FusedRtmposeAdapter(s.Backend) { ConfThreshold = confThreshold, medianLagFilter = medianLagFilter };
                 next.Profile = s.Fused?.Profile;
                 next.SetCaptureVolume(captureVolumeCenterMm, captureVolumeHalfMm);
                 foreach (var kv in s.Xform) next.SetWorldTransform(kv.Key, kv.Value.G);

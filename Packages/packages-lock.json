@@ -18,18 +18,17 @@
       "hash": "8618f83fe17bf4983699d0290d39217710fafe91"
     },
     "com.github.asus4.onnxruntime": {
-      "version": "0.4.8",
+      "version": "file:com.github.asus4.onnxruntime",
       "depth": 0,
-      "source": "registry",
-      "dependencies": {},
-      "url": "https://registry.npmjs.com"
+      "source": "embedded",
+      "dependencies": {}
     },
     "com.github.asus4.onnxruntime.unity": {
-      "version": "0.4.8",
+      "version": "0.4.5",
       "depth": 0,
       "source": "registry",
       "dependencies": {
-        "com.github.asus4.onnxruntime": "0.4.8"
+        "com.github.asus4.onnxruntime": "0.4.5"
       },
       "url": "https://registry.npmjs.com"
     },

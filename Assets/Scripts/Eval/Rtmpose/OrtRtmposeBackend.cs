@@ -19,9 +19,19 @@ using UnityEngine;
 
 namespace BodyTracking.Eval.Rtmpose
 {
+    /// <summary>Execution provider request for OrtRtmposeBackend. The backend
+    /// falls back DOWNWARD only from the requested provider (TensorRt→Cuda→
+    /// DirectML→Cpu); a higher-tier EP is never tried unless requested.</summary>
+    public enum OrtProvider { Cpu, DirectML, Cuda, TensorRt }
+
     public sealed class OrtRtmposeBackend : IRtmposeBackend
     {
         public bool Ready { get; private set; }
+
+        /// <summary>The EP both sessions actually constructed with. Only valid
+        /// after the ctor returns; differs from the requested provider when the
+        /// fallback chain kicked in (also surfaced as a LogError).</summary>
+        public OrtProvider ActiveProvider { get; private set; } = OrtProvider.Cpu;
         public RtmposeSpec Spec { get; } = RtmposeSpec.Body256x192;
         public int NumKeypoints => Coco.Count;
 
@@ -38,21 +48,77 @@ namespace BodyTracking.Eval.Rtmpose
         // Hoisted allocations (reused every frame to avoid GC in the hot path).
         private readonly long[] _yoloxShape = { 1, 3, YoloxSize, YoloxSize };
         private readonly long[] _poseShape;
-        private readonly OrtValue[] _in1 = new OrtValue[1];
-        private readonly RunOptions _runOpt = new RunOptions(); // vendored ORT NREs on a null RunOptions
+        // Used ONLY by Detect (always under _detectLock) — a RunOptions handle has
+        // mutable native state, so concurrent Run calls must not share one.
+        // Pose creates a per-call RunOptions instead (vendored ORT NREs on null).
+        private readonly RunOptions _runOpt = new RunOptions();
+
+        // Pose is called CONCURRENTLY (one caller per camera, see
+        // FusedRtmposeAdapter.SubmitBurst): InferenceSession.Run supports
+        // concurrent calls, so Pose only uses locals + caller-owned buffers.
+        // Detect keeps shared scratch (_yoloxInput, letterbox params) and is
+        // serialized by _detectLock — detects are rare (redetectEveryN).
+        private readonly object _detectLock = new object();
 
         private float _lbScale; private int _lbPadX, _lbPadY;
 
         public OrtRtmposeBackend(string yoloxPath, string rtmposePath, bool useDirectML = true)
+            : this(yoloxPath, rtmposePath, useDirectML ? OrtProvider.DirectML : OrtProvider.Cpu) { }
+
+        public OrtRtmposeBackend(string yoloxPath, string rtmposePath, OrtProvider requested)
         {
-            _opt = new SessionOptions { GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL };
-            if (useDirectML)
+            // ActiveProvider is only assigned once BOTH sessions constructed with
+            // the candidate EP — AppendExecutionProvider alone is not proof (missing
+            // cuDNN/CUDA DLLs surface at InferenceSession creation). On a partial
+            // failure the surviving session is disposed too, so a mixed-EP pair can
+            // never exist.
+            byte[] yoloxBytes = File.ReadAllBytes(yoloxPath);
+            byte[] rtmposeBytes = File.ReadAllBytes(rtmposePath);
+            foreach (OrtProvider p in FallbackChain(requested))
             {
-                try { _opt.AppendExecutionProvider_DML(0); }
-                catch (Exception e) { Debug.LogWarning($"[rtmpose] DirectML unavailable, using CPU: {e.Message}"); }
+                SessionOptions opt = null;
+                InferenceSession yolox = null, rtmpose = null;
+                try
+                {
+                    opt = new SessionOptions { GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL };
+                    // ORT 1.25 dropped the legacy OrtSessionOptionsAppendExecutionProvider_*
+                    // C exports (the int-overload C# wrappers P/Invoke those directly and
+                    // throw EntryPointNotFound). DML goes through the generic named-EP API;
+                    // CUDA/TensorRT go through the V2 options API — both ride the OrtApi
+                    // function table, which is version-stable. The V2 append copies the
+                    // options into SessionOptions, so disposing them right after is safe.
+                    switch (p)
+                    {
+                        case OrtProvider.TensorRt:
+                            using (var trtOpts = new OrtTensorRTProviderOptions())
+                                opt.AppendExecutionProvider_Tensorrt(trtOpts);
+                            using (var cudaOpts = new OrtCUDAProviderOptions())
+                                opt.AppendExecutionProvider_CUDA(cudaOpts); // TRT-unsupported nodes run on CUDA
+                            break;
+                        case OrtProvider.Cuda:
+                            using (var cudaOpts = new OrtCUDAProviderOptions())
+                                opt.AppendExecutionProvider_CUDA(cudaOpts);
+                            break;
+                        case OrtProvider.DirectML: opt.AppendExecutionProvider("DML"); break;
+                    }
+                    yolox = new InferenceSession(yoloxBytes, opt);
+                    rtmpose = new InferenceSession(rtmposeBytes, opt);
+                    _opt = opt; _yolox = yolox; _rtmpose = rtmpose;
+                    ActiveProvider = p;
+                    break;
+                }
+                catch (Exception e)
+                {
+                    rtmpose?.Dispose(); yolox?.Dispose(); opt?.Dispose();
+                    if (p == OrtProvider.Cpu) throw; // terminal: nothing left to try
+                    Debug.LogWarning($"[rtmpose] EP {p} failed, trying next in chain: {e.Message}");
+                }
             }
-            _yolox = new InferenceSession(File.ReadAllBytes(yoloxPath), _opt);
-            _rtmpose = new InferenceSession(File.ReadAllBytes(rtmposePath), _opt);
+            if (ActiveProvider == requested)
+                Debug.Log($"[rtmpose] EP={ActiveProvider} (requested={requested})");
+            else
+                Debug.LogError($"[rtmpose] EP fallback: requested={requested} actual={ActiveProvider} — " +
+                               "any benchmark on this backend does NOT measure the requested provider");
             _detsIdx = FindOr(_yolox.OutputNames, "dets", 0);
             _labelsIdx = FindOr(_yolox.OutputNames, "labels", 1);
             _simccXIdx = FindOr(_rtmpose.OutputNames, "simcc_x", 0);
@@ -67,10 +133,16 @@ namespace BodyTracking.Eval.Rtmpose
         public int Detect(byte[] rgb, int w, int h, DetBox[] outBoxes)
         {
             if (!Ready) return 0;
+            lock (_detectLock)
+                return DetectLocked(rgb, w, h, outBoxes);
+        }
+
+        private int DetectLocked(byte[] rgb, int w, int h, DetBox[] outBoxes)
+        {
             Letterbox(rgb, w, h, _yoloxInput, out _lbScale, out _lbPadX, out _lbPadY);
             using var inp = OrtValue.CreateTensorValueFromMemory(_yoloxInput, _yoloxShape);
-            _in1[0] = inp;
-            using var res = _yolox.Run(_runOpt, _yolox.InputNames, _in1, _yolox.OutputNames);
+            var in1 = new OrtValue[] { inp };
+            using var res = _yolox.Run(_runOpt, _yolox.InputNames, in1, _yolox.OutputNames);
 
             var dets = res[_detsIdx].GetTensorDataAsSpan<float>();
             var shape = res[_detsIdx].GetTensorTypeAndShape().Shape; // [1,N,5]
@@ -104,8 +176,9 @@ namespace BodyTracking.Eval.Rtmpose
         {
             if (!Ready) return false;
             using var inp = OrtValue.CreateTensorValueFromMemory(nchwInput, _poseShape);
-            _in1[0] = inp;
-            using var res = _rtmpose.Run(_runOpt, _rtmpose.InputNames, _in1, _rtmpose.OutputNames);
+            var in1 = new OrtValue[] { inp }; // local: Pose runs concurrently per camera
+            using var runOpt = new RunOptions(); // per-call: RunOptions native state must not be shared across concurrent Runs
+            using var res = _rtmpose.Run(runOpt, _rtmpose.InputNames, in1, _rtmpose.OutputNames);
             var sx = res[_simccXIdx].GetTensorDataAsSpan<float>();
             var sy = res[_simccYIdx].GetTensorDataAsSpan<float>();
             if (sx.Length > simccX.Length || sy.Length > simccY.Length) return false;
@@ -139,17 +212,20 @@ namespace BodyTracking.Eval.Rtmpose
             padX = (YoloxSize - newW) / 2; padY = (YoloxSize - newH) / 2;
             int plane = YoloxSize * YoloxSize;
             int c0 = yoloxBgr ? 2 : 0, c2 = yoloxBgr ? 0 : 2; // swap R/B if BGR
-            for (int dy = 0; dy < YoloxSize; dy++)
+            float s = scale; int px = padX, py = padY; // no out params inside the lambda
+            // Row-parallel: disjoint dst rows, read-only rgb (same pattern as
+            // RtmposePreprocess.BuildInput — this was ~half of the 39ms detect cost).
+            System.Threading.Tasks.Parallel.For(0, YoloxSize, dy =>
             {
                 for (int dx = 0; dx < YoloxSize; dx++)
                 {
                     int o = dy * YoloxSize + dx;
                     float r = 114f, g = 114f, b = 114f;
-                    int sx = dx - padX, sy = dy - padY;
+                    int sx = dx - px, sy = dy - py;
                     if (sx >= 0 && sy >= 0 && sx < newW && sy < newH)
                     {
-                        int ix = Mathf.Min((int)(sx / scale), w - 1);
-                        int iy = Mathf.Min((int)(sy / scale), h - 1);
+                        int ix = Mathf.Min((int)(sx / s), w - 1);
+                        int iy = Mathf.Min((int)(sy / s), h - 1);
                         int si = (iy * w + ix) * 3;
                         r = rgb[si]; g = rgb[si + 1]; b = rgb[si + 2];
                     }
@@ -157,7 +233,15 @@ namespace BodyTracking.Eval.Rtmpose
                     dst[1 * plane + o] = g;
                     dst[c2 * plane + o] = b;
                 }
-            }
+            });
+        }
+
+        private static IEnumerable<OrtProvider> FallbackChain(OrtProvider requested)
+        {
+            if (requested >= OrtProvider.TensorRt) yield return OrtProvider.TensorRt;
+            if (requested >= OrtProvider.Cuda) yield return OrtProvider.Cuda;
+            if (requested >= OrtProvider.DirectML) yield return OrtProvider.DirectML;
+            yield return OrtProvider.Cpu;
         }
 
         private static int FindOr(IReadOnlyList<string> names, string name, int fallback)

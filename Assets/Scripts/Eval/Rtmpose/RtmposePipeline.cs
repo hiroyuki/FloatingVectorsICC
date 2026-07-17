@@ -65,19 +65,23 @@ namespace BodyTracking.Eval.Rtmpose
             int ow = spec.InW, oh = spec.InH, plane = ow * oh;
             var dst = (reuse != null && reuse.Length == 3 * plane) ? reuse : new float[3 * plane];
             float x0 = roi.Cx - 0.5f * roi.Bw, y0 = roi.Cy - 0.5f * roi.Bh;
-            for (int dy = 0; dy < oh; dy++)
+            float bw = roi.Bw, bh = roi.Bh;
+            // Row-parallel: each dy writes a disjoint slice of dst, rgb is read-only.
+            // This was the hot CPU stage of the live pipeline (~7.6ms/frame serial,
+            // 4 cameras × 26fps saturated the worker thread — see PLAN_live_gpu Phase 3).
+            System.Threading.Tasks.Parallel.For(0, oh, dy =>
             {
-                float sy = y0 + (dy + 0.5f) / oh * roi.Bh - 0.5f;
+                float sy = y0 + (dy + 0.5f) / oh * bh - 0.5f;
                 for (int dx = 0; dx < ow; dx++)
                 {
-                    float sx = x0 + (dx + 0.5f) / ow * roi.Bw - 0.5f;
+                    float sx = x0 + (dx + 0.5f) / ow * bw - 0.5f;
                     SampleBilinear(rgb, imgW, imgH, sx, sy, out float r, out float g, out float b);
                     int idx = dy * ow + dx;
                     dst[0 * plane + idx] = (r - Mean[0]) / Std[0];
                     dst[1 * plane + idx] = (g - Mean[1]) / Std[1];
                     dst[2 * plane + idx] = (b - Mean[2]) / Std[2];
                 }
-            }
+            });
             return dst;
         }
 
