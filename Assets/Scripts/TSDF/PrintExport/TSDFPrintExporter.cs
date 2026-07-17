@@ -115,8 +115,9 @@ namespace TSDF
         [Tooltip("Include the body (TSDF Marching-Cubes shell) in the STL. Off = " +
                  "curve tubes only — an aesthetic variant without the body and " +
                  "WITHOUT the body bridges (they'd be floating spikes with nothing " +
-                 "to attach to). The floor plane keeps its own toggle; with the " +
-                 "body off it centres on the tubes' floor-contact band instead.")]
+                 "to attach to). The floor plate is ALWAYS included (the print " +
+                 "cannot stand without it); with the body off it centres on the " +
+                 "tubes' floor-contact band instead.")]
         public bool stlIncludeBody = true;
 
         [Header("STL curve tubes")]
@@ -135,13 +136,14 @@ namespace TSDF
         public int stlCurveSides = 6;
 
         [Header("STL floor plane")]
-        [Tooltip("Append a square floor plate under the sculpture as its own closed shell " +
-                 "(the slicer unions whatever overlaps it). Centred on the dancer — the " +
-                 "centroid of the body shell's floor-contact band, NOT the mesh bbox " +
-                 "centre, which trails and outstretched arms would drag off the body. " +
-                 "Lies in the volume grid frame, so it stays parallel to the sculpture's " +
-                 "floor-crop plane even with the bbox tilted to the real floor.")]
-        public bool stlIncludeFloorPlane = true;
+        // The floor plate is NOT optional: the print cannot stand without it
+        // (user rule 2026-07-17). A square plate is always appended as its own
+        // closed shell (the slicer unions whatever overlaps it). Centred on the
+        // dancer — the centroid of the body shell's floor-contact band (tubes'
+        // band when the body is off), NOT the mesh bbox centre, which trails and
+        // outstretched arms would drag off the body. Lies in the volume grid
+        // frame, so it stays parallel to the sculpture's floor-crop plane even
+        // with the bbox tilted to the real floor.
 
         [Range(0.5f, 3f)]
         [Tooltip("Floor plate side length (m, square, real-world scale — printed size " +
@@ -619,11 +621,10 @@ namespace TSDF
             // Floor plate: after the tubes so its top can sink into the lowest
             // geometry of EVERYTHING (a tube dipping below the feet would
             // otherwise poke through the plate).
-            int floorTris = 0;
-            Vector2 floorAt = Vector2.zero;
-            if (stlIncludeFloorPlane)
-                // contact band scans the body verts; tubes-only falls back to all verts
-                floorTris = AppendFloorPlane(pos, tri, bodyVerts > 0 ? bodyVerts : pos.Count, out floorAt);
+            // always present — the print cannot stand without its floor plate.
+            // contact band scans the body verts; tubes-only falls back to all verts
+            Vector2 floorAt;
+            int floorTris = AppendFloorPlane(pos, tri, bodyVerts > 0 ? bodyVerts : pos.Count, out floorAt);
 
             // Bounds over EVERYTHING: tubes can reach past the body bbox and
             // they must land inside the printed height too.
