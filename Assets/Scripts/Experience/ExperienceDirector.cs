@@ -785,16 +785,28 @@ namespace Experience
             }
 
             float deadline = Time.realtimeSinceStartup + config.timings.processingTimeoutSeconds;
-            bool timeoutLogged = false;
+            float abandonAt = float.PositiveInfinity;
             while (_converter.Status == FusedTakeConverter.ConvertStatus.Running)
             {
-                if (!timeoutLogged && Time.realtimeSinceStartup > deadline)
+                float now = Time.realtimeSinceStartup;
+                if (float.IsInfinity(abandonAt) && now > deadline)
                 {
                     Debug.LogWarning($"[{nameof(ExperienceDirector)}] v11s conversion exceeded " +
                                      $"{config.timings.processingTimeoutSeconds:0}s — aborting, " +
                                      "falling back to recorded k4abt bodies.", this);
                     _converter.Abort();
-                    timeoutLogged = true;
+                    abandonAt = now + 5f; // grace for the cooperative stop
+                }
+                // Abort() is cooperative — a worker stuck inside a native ORT call
+                // can't observe it. Don't hold the visitor hostage: abandon the
+                // thread after the grace window. The converter re-checks its stop
+                // flag before ever touching bodies_main, so the abandoned thread
+                // can only end Aborted, never promote under the k4abt playback.
+                if (now > abandonAt)
+                {
+                    Debug.LogWarning($"[{nameof(ExperienceDirector)}] converter did not stop within " +
+                                     "the grace window — abandoning it and continuing with k4abt bodies.", this);
+                    break;
                 }
                 _ui.ShowProgress(_converter.Progress, config.processingText);
                 yield return null;

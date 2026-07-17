@@ -158,6 +158,9 @@ namespace Experience
                 ui.poseGroup.SetActive(true);
                 ui.qrGroup.SetActive(false);
                 ui.progressGroup.SetActive(false);
+                // Drop any previous state's message; ShowCountdown re-activates
+                // the slot when digits need to overlay the guide.
+                ui.message.gameObject.SetActive(false);
             }
         }
 

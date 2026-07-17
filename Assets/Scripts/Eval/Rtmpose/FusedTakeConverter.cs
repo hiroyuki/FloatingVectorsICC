@@ -272,6 +272,12 @@ namespace BodyTracking.Eval.Rtmpose
 
                 foreach (var t in tracks) { t.Writer.Dispose(); t.Writer = null; }
 
+                // A stop requested while we were stuck inside the last native
+                // inference call (the director may have abandoned this thread and
+                // already started k4abt playback) must NEVER promote — check one
+                // last time before touching bodies_main.
+                if (_stop) { CleanupTemps(tracks); _status = ConvertStatus.Aborted; return; }
+
                 if (written == 0)
                 {
                     CleanupTemps(tracks);
