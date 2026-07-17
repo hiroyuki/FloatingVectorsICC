@@ -83,8 +83,11 @@ namespace TSDF
         [Header("Hole closing")]
         [Range(1, 16)]
         [Tooltip("Morphological closing radius in voxels: seals openings up to ~2x this " +
-                 "wide (5 voxels @ 7 mm ≈ 7 cm openings). Bigger also rounds off concavities.")]
-        public int closeRadiusVoxels = 5;
+                 "wide. Bigger also rounds off concavities. With direct curve tubes " +
+                 "(stlIncludeCurveTubes) the closing no longer needs to swallow curves " +
+                 "into the body volume, so a small radius that just seals camera-unseen " +
+                 "gaps is enough — 2 by default (was 5 in the voxel-fuse era).")]
+        public int closeRadiusVoxels = 2;
 
         [Tooltip("Cull every solid component except the largest after closing. The removed " +
                  "voxel count is the 'floating debris / unattached curves' detector.")]
