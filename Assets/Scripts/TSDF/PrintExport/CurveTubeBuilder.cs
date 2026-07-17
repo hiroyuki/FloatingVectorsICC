@@ -164,20 +164,23 @@ namespace TSDF
                         idx.Add(a); idx.Add(c2); idx.Add(d);
                     }
 
-                // End caps: ring verts duplicated with the axial normal + centre fan.
-                int capBase = pos.Count;
-                for (int k = 0; k < sides; k++) { pos.Add(pos[ringBase + k]); nrm.Add(-startT); col.Add(c); }
+                // End caps: centre fans that REUSE the ring vertices — caps and
+                // tube share topology, so the export is ONE connected closed
+                // shell per tube (duplicated cap verts split it into separate
+                // objects in OBJ viewers/slicers). The rim keeps its radial
+                // normals; only the centre vertex is axial — irrelevant for
+                // print, invisible in preview.
+                int c0 = pos.Count;
                 pos.Add(p[0]); nrm.Add(-startT); col.Add(c);
                 for (int k = 0; k < sides; k++)
-                { idx.Add(capBase + sides); idx.Add(capBase + (k + 1) % sides); idx.Add(capBase + k); }
+                { idx.Add(c0); idx.Add(ringBase + (k + 1) % sides); idx.Add(ringBase + k); }
 
-                capBase = pos.Count;
+                int cN = pos.Count;
                 int lastRing = ringBase + (rings - 1) * sides;
                 Vector3 pole = headCap ? p[n - 1] + endT * headR : p[n - 1];
-                for (int k = 0; k < sides; k++) { pos.Add(pos[lastRing + k]); nrm.Add(endT); col.Add(c); }
                 pos.Add(pole); nrm.Add(endT); col.Add(c);
                 for (int k = 0; k < sides; k++)
-                { idx.Add(capBase + sides); idx.Add(capBase + k); idx.Add(capBase + (k + 1) % sides); }
+                { idx.Add(cN); idx.Add(lastRing + k); idx.Add(lastRing + (k + 1) % sides); }
             }
             return tubes;
         }
