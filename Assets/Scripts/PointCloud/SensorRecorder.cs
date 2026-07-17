@@ -595,6 +595,14 @@ namespace PointCloud
             else StartRecording();
         }
 
+        /// <summary>
+        /// Root folder of the most recent recording (the timestamped take folder when
+        /// autoTimestampFolder is on). Set by StartRecording and left intact by
+        /// StopRecording, so a caller that drives Rec programmatically (experience
+        /// flow) can find the take it just captured. Null before the first Rec.
+        /// </summary>
+        public string LastRecordingRoot => _recordRoot;
+
         [ContextMenu("Toggle Play")]
         public void TogglePlay()
         {
@@ -1650,7 +1658,9 @@ namespace PointCloud
 
         // --- Recording ---
 
-        private void StartRecording()
+        // Public since the experience flow drives Rec programmatically (Explore
+        // state records the visitor's take); Inspector buttons keep using ToggleRecord.
+        public void StartRecording()
         {
             if (CurrentState == State.Playing) StopPlayback();
             UnfreezeLiveIfFrozen();
@@ -1718,7 +1728,7 @@ namespace PointCloud
             SetStatus($"Recording ({_subscribed.Count} device(s)) → {_recordRoot}");
         }
 
-        private void StopRecording()
+        public void StopRecording()
         {
             UnsubscribeAll();
             CurrentState = State.Idle;
