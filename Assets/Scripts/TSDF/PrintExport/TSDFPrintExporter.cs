@@ -76,8 +76,9 @@ namespace TSDF
         [Tooltip("Raindrop silhouette along each tube: spherical head at the " +
                  "NEWEST end (motion direction), chopstick tail thinning into " +
                  "the past (tail tip = Tube Tail Taper * head radius). Off = " +
-                 "plain linear taper.")]
-        public bool tubeRaindrop = true;
+                 "plain linear taper (with Curve Sides 4 + low taper, each " +
+                 "trail reads as a long square pyramid — the chosen look).")]
+        public bool tubeRaindrop = false;
 
         [Range(1f, 3f)]
         [Tooltip("Bridge body-side radius multiplier — a fillet root where the tube " +
