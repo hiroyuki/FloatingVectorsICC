@@ -621,7 +621,7 @@ namespace TSDF
         {
             public readonly List<Vector3> Pos = new List<Vector3>();
             public readonly List<int> Tri = new List<int>();
-            public int CurveTriStart, FloorTriStart;
+            public int CurveTriStart, WireTriStart, SupportTriStart, FloorTriStart;
             public int BodyTris, TubeCount, BridgeCount, WireCount, SupportCount, FloorTris;
             public double BodyVol;
             public Vector2 FloorAt;
@@ -677,6 +677,7 @@ namespace TSDF
                 BuildCurveAndBridgeTubes(tp, tn, tc, ti, out asm.TubeCount, out asm.BridgeCount,
                                          includeBridges: stlIncludeBody || wireframe,
                                          rootWireframe: wireframe, out asm.WireCount,
+                                         out int wireTriStartLocal,
                                          supportPts, supportCands);
                 if (ti.Count > 0)
                 {
@@ -684,11 +685,15 @@ namespace TSDF
                     pos.AddRange(tp);
                     for (int i = 0; i < ti.Count; i++) tri.Add(ti[i] + vOff);
                     OrientOutward(pos, tri, iBase, tri.Count - iBase);
+                    asm.WireTriStart = wireTriStartLocal >= 0 ? iBase + wireTriStartLocal : tri.Count;
                 }
                 else
+                {
+                    asm.WireTriStart = tri.Count;
                     Debug.LogWarning("[TSDFPrintExporter] STL: no curve tubes emitted " +
                                      "(no curves component / seeds all culled?) — exporting " +
                                      "the body only.", this);
+                }
 
                 // Self-made supports: from each support point, a SHORT strut to
                 // the nearest OTHER curve's point inside a 45° downward cone —
@@ -697,6 +702,7 @@ namespace TSDF
                 // points with no target below drop a pillar to the lowest level,
                 // where the floor plate (top sunk 5 mm into the lowest geometry)
                 // catches them.
+                asm.SupportTriStart = tri.Count;
                 if (supportPts != null && supportPts.Count > 0 && pos.Count > 0)
                 {
                     float minY = float.PositiveInfinity;
@@ -771,6 +777,7 @@ namespace TSDF
                 }
             }
             if (tri.Count == 0) { Fail("nothing to export (body and tubes both off/empty)"); return null; }
+            if (!stlIncludeCurveTubes) { asm.WireTriStart = tri.Count; asm.SupportTriStart = tri.Count; }
             asm.FloorTriStart = tri.Count;
 
             // Floor plate: after the tubes so its top can sink into the lowest
@@ -858,11 +865,8 @@ namespace TSDF
             if (asm == null) return;
 
             float scale = targetHeightMm / asm.Size.y; // metres -> printed mm
-            var spans = new List<ThreeMfWriter.Span>(3);
-            int curveT0 = asm.CurveTriStart / 3, floorT0 = asm.FloorTriStart / 3, total = asm.Tri.Count / 3;
-            if (curveT0 > 0) spans.Add(new ThreeMfWriter.Span { StartTri = 0, TriCount = curveT0, Material = 0 });
-            if (floorT0 > curveT0) spans.Add(new ThreeMfWriter.Span { StartTri = curveT0, TriCount = floorT0 - curveT0, Material = 1 });
-            if (total > floorT0) spans.Add(new ThreeMfWriter.Span { StartTri = floorT0, TriCount = total - floorT0, Material = 0 });
+            var spans = BuildColourSpans(asm);
+            int total = asm.Tri.Count / 3;
 
             string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
                                       "Documents", "FloatingVectorsPrints");
@@ -888,6 +892,25 @@ namespace TSDF
             }
         }
 
+        /// <summary>Colour spans over the assembled shells. Material 0 = Body
+        /// colour (body mesh, root WIREFRAME — the ghost body — and the floor),
+        /// material 1 = Curve colour (tubes, bridges, support struts).</summary>
+        private static List<ThreeMfWriter.Span> BuildColourSpans(ShellAssembly asm)
+        {
+            var spans = new List<ThreeMfWriter.Span>(5);
+            void Add(int fromTriIdx, int toTriIdx, int mat)
+            {
+                int start = fromTriIdx / 3, count = (toTriIdx - fromTriIdx) / 3;
+                if (count > 0) spans.Add(new ThreeMfWriter.Span { StartTri = start, TriCount = count, Material = mat });
+            }
+            Add(0, asm.CurveTriStart, 0);                       // body
+            Add(asm.CurveTriStart, asm.WireTriStart, 1);        // tubes + bridges
+            Add(asm.WireTriStart, asm.SupportTriStart, 0);      // wireframe = ghost body
+            Add(asm.SupportTriStart, asm.FloorTriStart, 1);     // support struts
+            Add(asm.FloorTriStart, asm.Tri.Count, 0);           // floor plate
+            return spans;
+        }
+
         /// <summary>Two-material OBJ+MTL (same shells and spans as Export3mf) —
         /// the PREVIEWABLE colour variant: MeshLab/Blender render the materials,
         /// and Bambu Studio's colored-OBJ import maps them to filaments too.
@@ -900,11 +923,8 @@ namespace TSDF
             if (asm == null) return;
 
             float scale = targetHeightMm / asm.Size.y;
-            var spans = new List<ThreeMfWriter.Span>(3);
-            int curveT0 = asm.CurveTriStart / 3, floorT0 = asm.FloorTriStart / 3, total = asm.Tri.Count / 3;
-            if (curveT0 > 0) spans.Add(new ThreeMfWriter.Span { StartTri = 0, TriCount = curveT0, Material = 0 });
-            if (floorT0 > curveT0) spans.Add(new ThreeMfWriter.Span { StartTri = curveT0, TriCount = floorT0 - curveT0, Material = 1 });
-            if (total > floorT0) spans.Add(new ThreeMfWriter.Span { StartTri = floorT0, TriCount = total - floorT0, Material = 0 });
+            var spans = BuildColourSpans(asm);
+            int total = asm.Tri.Count / 3;
 
             string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
                                       "Documents", "FloatingVectorsPrints");
@@ -975,11 +995,11 @@ namespace TSDF
                                               List<Vector3> tc, List<int> ti,
                                               out int tubeCount, out int bridgeCount,
                                               bool includeBridges, bool rootWireframe,
-                                              out int wireCount,
+                                              out int wireCount, out int wireTriStartLocal,
                                               List<(Vector3 p, int chain)> supportPts = null,
                                               List<(Vector3 p, int chain)> supportCandidates = null)
         {
-            tubeCount = 0; bridgeCount = 0; wireCount = 0;
+            tubeCount = 0; bridgeCount = 0; wireCount = 0; wireTriStartLocal = -1;
             if (curves == null) return;
             int segCap = curves.MaxPrintSegs(printSeedStride);
             var segBuf = new ComputeBuffer(segCap, TrailBakeOps.SegStride);
@@ -1072,7 +1092,10 @@ namespace TSDF
                 }
 
                 if (rootWireframe)
+                {
+                    wireTriStartLocal = ti.Count; // wires get their own colour span
                     wireCount = AppendRootWireframe(anchors, line, col, tp, tn, tc, ti);
+                }
             }
             finally { segBuf.Release(); }
         }
