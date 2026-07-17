@@ -120,6 +120,33 @@ namespace TSDF
                  "tubes' floor-contact band instead.")]
         public bool stlIncludeBody = true;
 
+        [Header("STL curve supports")]
+        [Tooltip("Drop thin vertical pillars from each curve's endpoints (plus " +
+                 "interior points every Support Spacing of arc length) down to the " +
+                 "sculpture's lowest level — self-made supports, because slicer " +
+                 "support material inside the wire tangle is impractical to remove " +
+                 "(FDM/A2L). The floor plate top sinks 5 mm into the lowest " +
+                 "geometry, so the pillar tips land inside it and union.")]
+        public bool stlCurveSupportPillars = true;
+
+        [Range(0f, 1f)]
+        [Tooltip("Arc-length spacing (m) for interior support pillars along each " +
+                 "curve. 0 = endpoints only.")]
+        public float stlSupportSpacing = 0f;
+
+        [Range(0.001f, 0.02f)]
+        [Tooltip("Support pillar radius (m). Print Radius-sized reads as part of " +
+                 "the artwork; thinner reads as strings holding the curves.")]
+        public float stlSupportRadius = 0.004f;
+
+        [Header("3MF colours (Bambu multi-filament)")]
+        [Tooltip("Body + floor plate colour in the 3MF export. Bambu Studio's " +
+                 "Standard-3MF colour parsing maps it to the closest filament.")]
+        public Color threeMfBodyColor = Color.black;
+
+        [Tooltip("Curve tubes + bridges + wireframe colour in the 3MF export.")]
+        public Color threeMfCurveColor = Color.white;
+
         [Header("STL root wireframe (tubes-only mode)")]
         [Tooltip("With the body OFF, connect the curves' body-side anchor points to " +
                  "each other with thin wires: a minimum spanning tree (guarantees ONE " +
@@ -131,9 +158,9 @@ namespace TSDF
 
         [Range(0, 4)]
         [Tooltip("Extra wires from every anchor to its N nearest anchors (on top of " +
-                 "the spanning tree). 0 = tree only (sparsest); 2 reads as a mesh-y " +
-                 "wireframe.")]
-        public int stlWireframeNeighbors = 2;
+                 "the spanning tree). 0 = tree only (sparsest — the picked look, " +
+                 "2026-07-17); 2 reads as a mesh-y wireframe.")]
+        public int stlWireframeNeighbors = 0;
 
         [Range(0.05f, 0.5f)]
         [Tooltip("Skip neighbour wires longer than this (m) — stops e.g. hand-to-hip " +
@@ -578,17 +605,30 @@ namespace TSDF
         /// CSEmitSegs readback (no voxel fuse, no resolution loss — see
         /// BuildCurveAndBridgeTubes); the slicer unions the overlapping shells.
         /// Every shell is wound outward via its own signed volume.</summary>
-        public void ExportStl()
+        /// <summary>Everything ExportStl/Export3mf share: the assembled shells
+        /// (body + curve tubes/bridges/wires + floor plate) with the triangle
+        /// spans of each colour family, plus bounds. Tri-index boundaries:
+        /// body = [0, CurveTriStart), curves = [CurveTriStart, FloorTriStart),
+        /// floor = [FloorTriStart, Tri.Count).</summary>
+        private sealed class ShellAssembly
         {
-            if (!Guard(needCurves: !stlIncludeBody)) return;
-            var sw = System.Diagnostics.Stopwatch.StartNew();
+            public readonly List<Vector3> Pos = new List<Vector3>();
+            public readonly List<int> Tri = new List<int>();
+            public int CurveTriStart, FloorTriStart;
+            public int BodyTris, TubeCount, BridgeCount, WireCount, SupportCount, FloorTris;
+            public double BodyVol;
+            public Vector2 FloorAt;
+            public Vector3 Center, Size;
+        }
+
+        private ShellAssembly AssembleShells()
+        {
+            var asm = new ShellAssembly();
+            var pos = asm.Pos; var tri = asm.Tri;
 
             // Body shell: drop weld-collapsed slivers, then wind outward (MC
             // emits inside = sdf < iso, so a negative volume means inward).
             // stlIncludeBody=false skips the whole capture — tubes-only variant.
-            var pos = new List<Vector3>();
-            var tri = new List<int>();
-            double bodyVol = 0;
             if (stlIncludeBody)
             {
                 var opt = WebCaptureOptions();
@@ -596,7 +636,7 @@ namespace TSDF
                 opt.includeCurves = false;  // STL curves come from the CSEmitSegs readback below,
                                             // NOT the drawn ribbon buffer — see BuildCurveAndBridgeTubes
                 var snap = TSDFSnapshotBuilder.Capture(volume, null, opt, out string err);
-                if (snap == null) { Fail(err); return; }
+                if (snap == null) { Fail(err); return null; }
                 pos.AddRange(snap.pos);
                 tri.Capacity = snap.tri.Length;
                 for (int t = 0; t + 2 < snap.tri.Length; t += 3)
@@ -605,18 +645,18 @@ namespace TSDF
                     if (i0 == i1 || i1 == i2 || i0 == i2) continue;
                     tri.Add(i0); tri.Add(i1); tri.Add(i2);
                 }
-                if (tri.Count == 0) { Fail("no non-degenerate triangles after weld"); return; }
-                bodyVol = OrientOutward(pos, tri, 0, tri.Count);
+                if (tri.Count == 0) { Fail("no non-degenerate triangles after weld"); return null; }
+                asm.BodyVol = OrientOutward(pos, tri, 0, tri.Count);
             }
-            int bodyTris = tri.Count / 3;
+            asm.BodyTris = tri.Count / 3;
             int bodyVerts = pos.Count; // floor-plate contact band scans pos[0..this)
+            asm.CurveTriStart = tri.Count;
 
             // Curve tubes + body bridges as their own outward-wound shells. Both
             // come from ONE CSEmitSegs readback (the exact seed set Fuse curves
             // would bake), so every tube has its matching bridge — the drawn
             // ribbon buffer is a DIFFERENT nondeterministic seed subset and is
             // deliberately not used here.
-            int tubeCount = 0, bridgeCount = 0, wireCount = 0;
             if (stlIncludeCurveTubes)
             {
                 var tp = new List<Vector3>(); var tn = new List<Vector3>();
@@ -625,9 +665,11 @@ namespace TSDF
                 // the root wireframe, to the anchor graph. Without either target
                 // they would be floating spikes, so they are skipped.
                 bool wireframe = !stlIncludeBody && stlRootWireframe;
-                BuildCurveAndBridgeTubes(tp, tn, tc, ti, out tubeCount, out bridgeCount,
+                var supportPts = stlCurveSupportPillars ? new List<Vector3>() : null;
+                BuildCurveAndBridgeTubes(tp, tn, tc, ti, out asm.TubeCount, out asm.BridgeCount,
                                          includeBridges: stlIncludeBody || wireframe,
-                                         rootWireframe: wireframe, out wireCount);
+                                         rootWireframe: wireframe, out asm.WireCount,
+                                         supportPts);
                 if (ti.Count > 0)
                 {
                     int vOff = pos.Count, iBase = tri.Count;
@@ -639,24 +681,70 @@ namespace TSDF
                     Debug.LogWarning("[TSDFPrintExporter] STL: no curve tubes emitted " +
                                      "(no curves component / seeds all culled?) — exporting " +
                                      "the body only.", this);
+
+                // Self-made supports: vertical pillars from the collected curve
+                // points down to the sculpture's CURRENT lowest surface (body +
+                // tubes). The floor plate top later sinks 5 mm into the lowest
+                // geometry, so pillar tips land inside the plate and union.
+                if (supportPts != null && supportPts.Count > 0 && pos.Count > 0)
+                {
+                    float minY = float.PositiveInfinity;
+                    foreach (var p in pos) if (p.y < minY) minY = p.y;
+                    var sp = new List<Vector3>(); var sn = new List<Vector3>();
+                    var sc = new List<Vector3>(); var si = new List<int>();
+                    var pillarLine = new List<Vector3[]> { null };
+                    var pillarCol = new List<Vector3> { Vector3.one };
+                    foreach (var p in supportPts)
+                    {
+                        // skip points already at/near the bottom — nothing to hold up
+                        if (p.y - minY < stlSupportRadius * 3f) continue;
+                        pillarLine[0] = new[] { p, new Vector3(p.x, minY, p.z) };
+                        CurveTubeBuilder.AppendCurveTubes(pillarLine, pillarCol, 1f, stlSupportRadius,
+                            stlCurveSides, 0f, Vector3.zero, 0f, sp, sn, sc, si,
+                            tipTaper: 1f, exportSpace: false);
+                        asm.SupportCount++;
+                    }
+                    if (si.Count > 0)
+                    {
+                        int vOff = pos.Count, iBase = tri.Count;
+                        pos.AddRange(sp);
+                        for (int i = 0; i < si.Count; i++) tri.Add(si[i] + vOff);
+                        OrientOutward(pos, tri, iBase, tri.Count - iBase);
+                    }
+                }
             }
-            if (tri.Count == 0) { Fail("nothing to export (body and tubes both off/empty)"); return; }
+            if (tri.Count == 0) { Fail("nothing to export (body and tubes both off/empty)"); return null; }
+            asm.FloorTriStart = tri.Count;
 
             // Floor plate: after the tubes so its top can sink into the lowest
             // geometry of EVERYTHING (a tube dipping below the feet would
             // otherwise poke through the plate).
             // always present — the print cannot stand without its floor plate.
             // contact band scans the body verts; tubes-only falls back to all verts
-            Vector2 floorAt;
-            int floorTris = AppendFloorPlane(pos, tri, bodyVerts > 0 ? bodyVerts : pos.Count, out floorAt);
+            asm.FloorTris = AppendFloorPlane(pos, tri, bodyVerts > 0 ? bodyVerts : pos.Count, out asm.FloorAt);
 
             // Bounds over EVERYTHING: tubes can reach past the body bbox and
             // they must land inside the printed height too.
             Vector3 min = Vector3.positiveInfinity, max = Vector3.negativeInfinity;
             foreach (var p in pos) { min = Vector3.Min(min, p); max = Vector3.Max(max, p); }
-            Vector3 center = (min + max) * 0.5f;
-            Vector3 size = max - min;
-            if (size.y < 1e-4f) { Fail("degenerate mesh bounds"); return; }
+            asm.Center = (min + max) * 0.5f;
+            asm.Size = max - min;
+            if (asm.Size.y < 1e-4f) { Fail("degenerate mesh bounds"); return null; }
+            return asm;
+        }
+
+        public void ExportStl()
+        {
+            if (!Guard(needCurves: !stlIncludeBody)) return;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var asm = AssembleShells();
+            if (asm == null) return;
+            var pos = asm.Pos; var tri = asm.Tri;
+            int bodyTris = asm.BodyTris, tubeCount = asm.TubeCount, bridgeCount = asm.BridgeCount,
+                wireCount = asm.WireCount, floorTris = asm.FloorTris;
+            double bodyVol = asm.BodyVol;
+            Vector2 floorAt = asm.FloorAt;
+            Vector3 center = asm.Center, size = asm.Size;
 
             // Preflight: StlWriter builds the whole file in one MemoryStream, so
             // its hard ceiling is int.MaxValue bytes (~42M triangles at 50 B each).
@@ -684,8 +772,9 @@ namespace TSDF
                     ? $" + {stlFloorSize:0.0#} m floor @ ({floorAt.x:0.00}, {floorAt.y:0.00})"
                     : "";
                 string wireNote = wireCount > 0 ? $" + {wireCount} wires" : "";
+                string supNote = asm.SupportCount > 0 ? $" + {asm.SupportCount} supports" : "";
                 _status = $"STL: {tri.Count / 3} tris ({bodyTris} body + {tubeCount} tubes / " +
-                          $"{bridgeCount} bridges{wireNote}{floorNote}), {pos.Count} verts, " +
+                          $"{bridgeCount} bridges{wireNote}{supNote}{floorNote}), {pos.Count} verts, " +
                           $"{bytes / (1024 * 1024)} MB -> {stlPath} " +
                           $"(height {targetHeightMm:0} mm, smooth x{smoothIterations}, " +
                           $"bodyVol {bodyVol:0.0000} m^3, " +
@@ -695,6 +784,50 @@ namespace TSDF
             catch (Exception e)
             {
                 Fail($"write failed: {e.Message}");
+            }
+        }
+
+        /// <summary>Colour 3MF for multi-filament printing (Bambu AMS): the same
+        /// shells as ExportStl with per-triangle face colours — body + floor in
+        /// threeMfBodyColor, curves/bridges/wires in threeMfCurveColor. Bambu
+        /// Studio's Standard-3MF colour parsing dialog maps the two colours to
+        /// AMS filaments on import. Geometry/scale/orientation are identical to
+        /// the STL (mm, Unity axes, outward winding).</summary>
+        public void Export3mf()
+        {
+            if (!Guard(needCurves: !stlIncludeBody)) return;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var asm = AssembleShells();
+            if (asm == null) return;
+
+            float scale = targetHeightMm / asm.Size.y; // metres -> printed mm
+            var spans = new List<ThreeMfWriter.Span>(3);
+            int curveT0 = asm.CurveTriStart / 3, floorT0 = asm.FloorTriStart / 3, total = asm.Tri.Count / 3;
+            if (curveT0 > 0) spans.Add(new ThreeMfWriter.Span { StartTri = 0, TriCount = curveT0, Material = 0 });
+            if (floorT0 > curveT0) spans.Add(new ThreeMfWriter.Span { StartTri = curveT0, TriCount = floorT0 - curveT0, Material = 1 });
+            if (total > floorT0) spans.Add(new ThreeMfWriter.Span { StartTri = floorT0, TriCount = total - floorT0, Material = 0 });
+
+            string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                                      "Documents", "FloatingVectorsPrints");
+            string path3mf = Path.Combine(dir, $"print_{DateTime.Now:yyyyMMdd_HHmmss}.3mf");
+            try
+            {
+                Directory.CreateDirectory(dir);
+                ThreeMfWriter.Write(path3mf, asm.Pos, asm.Tri, spans,
+                    new[] { ("Body", threeMfBodyColor), ("Curves", threeMfCurveColor) },
+                    asm.Center, scale);
+                long bytes = new FileInfo(path3mf).Length;
+                string wireNote = asm.WireCount > 0 ? $" + {asm.WireCount} wires" : "";
+                string supNote = asm.SupportCount > 0 ? $" + {asm.SupportCount} supports" : "";
+                _status = $"3MF: {total} tris ({asm.BodyTris} body + {asm.TubeCount} tubes / " +
+                          $"{asm.BridgeCount} bridges{wireNote}{supNote} + floor), 2 colours, " +
+                          $"{bytes / (1024 * 1024)} MB -> {path3mf} " +
+                          $"(height {targetHeightMm:0} mm, total {sw.ElapsedMilliseconds / 1000.0:0.0}s)";
+                Debug.Log("[TSDFPrintExporter] " + _status, this);
+            }
+            catch (Exception e)
+            {
+                Fail($"3MF write failed: {e.Message}");
             }
         }
 
@@ -743,7 +876,8 @@ namespace TSDF
                                               List<Vector3> tc, List<int> ti,
                                               out int tubeCount, out int bridgeCount,
                                               bool includeBridges, bool rootWireframe,
-                                              out int wireCount)
+                                              out int wireCount,
+                                              List<Vector3> supportPts = null)
         {
             tubeCount = 0; bridgeCount = 0; wireCount = 0;
             if (curves == null) return;
@@ -797,6 +931,23 @@ namespace TSDF
                     tubeCount += CurveTubeBuilder.AppendCurveTubes(line, col, 1f, printRadius,
                         stlCurveSides, webCurveTolerance, Vector3.zero, 0f, tp, tn, tc, ti,
                         tipTaper: 1f, exportSpace: false);
+
+                    // support-pillar anchor points: endpoints + interior samples
+                    // every stlSupportSpacing of arc length (0 = endpoints only)
+                    if (supportPts != null)
+                    {
+                        supportPts.Add(pts[0]);
+                        supportPts.Add(pts[pts.Count - 1]);
+                        if (stlSupportSpacing > 1e-4f)
+                        {
+                            float since = 0f;
+                            for (int i = 1; i < pts.Count - 1; i++)
+                            {
+                                since += (pts[i] - pts[i - 1]).magnitude;
+                                if (since >= stlSupportSpacing) { supportPts.Add(pts[i]); since = 0f; }
+                            }
+                        }
+                    }
                 }
 
                 if (!includeBridges) return;

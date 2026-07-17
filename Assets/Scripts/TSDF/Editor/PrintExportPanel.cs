@@ -157,6 +157,19 @@ namespace TSDF.EditorTools
                 new GUIContent("Wireframe Max Edge (m)", "近傍ワイヤの最長（これ以上は張らない — " +
                     "手→腰のような体を横切る弦を防ぐ）。全域木の辺は連結優先でこの制限を受けない。"),
                 pe.stlWireframeMaxEdge, 0.05f, 0.5f);
+            bool supports = EditorGUILayout.ToggleLeft(
+                new GUIContent("STL: Curve Support Pillars (カーブ支持柱)",
+                    "各カーブの始点・終点（＋Support Spacing 間隔の中間点）から床まで垂直の細柱を" +
+                    "落とす。ワイヤの絡みの中のスライサーサポートは除去不能なので、造形として" +
+                    "支持を組み込む（FDM/A2L 用）。柱の先端は床プレートに 5mm 食い込んで union される。"),
+                pe.stlCurveSupportPillars);
+            float supSpacing = EditorGUILayout.Slider(
+                new GUIContent("Support Spacing (m)", "カーブに沿った中間支持柱の間隔（弧長）。0=始点・終点のみ。"),
+                pe.stlSupportSpacing, 0f, 1f);
+            float supRadius = EditorGUILayout.Slider(
+                new GUIContent("Support Radius (m)", "支持柱の半径。Print Radius と同じなら作品の一部に、" +
+                    "細くすると糸で吊っているように見える。"),
+                pe.stlSupportRadius, 0.001f, 0.02f);
             // 床プレートは常に同梱（無いと自立しない — 2026-07-17 のルール）。トグルは無い。
             float stlFloorSz = EditorGUILayout.Slider(
                 new GUIContent("STL Floor Size (m)", "床プレートの一辺（実寸 m の正方形、常に同梱 — " +
@@ -214,6 +227,9 @@ namespace TSDF.EditorTools
                 pe.stlRootWireframe = wire;
                 pe.stlWireframeNeighbors = wireN;
                 pe.stlWireframeMaxEdge = wireMax;
+                pe.stlCurveSupportPillars = supports;
+                pe.stlSupportSpacing = supSpacing;
+                pe.stlSupportRadius = supRadius;
                 pe.stlFloorSize = stlFloorSz;
                 pe.stlFloorThickness = stlFloorTh;
                 pe.webIncludeCurves = webCurves;
@@ -278,6 +294,16 @@ namespace TSDF.EditorTools
                     pe.CloseHoles();
                     pe.ExportStl();
                 }
+            }
+
+            using (new EditorGUI.DisabledScope(!ready))
+            {
+                if (GUILayout.Button(new GUIContent("Export 3MF (2色 — Bambu AMS 用)",
+                        "STL と同一ジオメトリを、体+床=Body Color / カーブ+ワイヤ=Curve Color の" +
+                        "面カラー付き Standard 3MF で書き出す。Bambu Studio が読み込み時に" +
+                        "色→フィラメントのマッピングダイアログを出す。穴塞ぎは先に実行しておくこと。"),
+                        GUILayout.Height(26)))
+                    pe.Export3mf();
             }
 
             using (new EditorGUI.DisabledScope(!ready))
