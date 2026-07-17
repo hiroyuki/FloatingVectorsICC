@@ -135,6 +135,7 @@ namespace Experience
 
         // body-source snapshot (EnterMode) — restored on Exit
         private bool _savedIgnoreRecorded;
+        private bool _savedUseExternal;
         private bool _savedLfbsSubmit;
         private bool _savedLfbsLiveOnly;
 
@@ -367,7 +368,11 @@ namespace Experience
                            "k4abt LiveSkeletonFeed dormant unless the fusion stops.", this);
 
             // body-source snapshot (restored on Exit)
-            if (merger != null) _savedIgnoreRecorded = merger.ignoreRecordedBodies;
+            if (merger != null)
+            {
+                _savedIgnoreRecorded = merger.ignoreRecordedBodies;
+                _savedUseExternal = merger.useExternalBodies;
+            }
             if (liveFusedSource != null)
             {
                 _savedLfbsSubmit = liveFusedSource.submitToMerger;
@@ -440,16 +445,20 @@ namespace Experience
             StopVisitorPlayback();
             RestoreHistorySamples(); // in case a capture was mid-flight
 
-            // body-source restore (mirror of the EnterMode snapshot)
-            if (merger != null)
-            {
-                merger.ignoreRecordedBodies = _savedIgnoreRecorded;
-                merger.muteWorkerIngest = false;
-            }
+            // body-source restore (mirror of the EnterMode snapshot). The
+            // useExternalBodies write comes LAST — SetSubmitToMerger may touch
+            // the flag, and Dev mode must come back bit-identical even when the
+            // pre-session combination was unusual (e.g. submit off, flag on).
             if (liveFusedSource != null)
             {
                 liveFusedSource.SetSubmitToMerger(_savedLfbsSubmit);
                 liveFusedSource.liveFramesOnly = _savedLfbsLiveOnly;
+            }
+            if (merger != null)
+            {
+                merger.ignoreRecordedBodies = _savedIgnoreRecorded;
+                merger.muteWorkerIngest = false;
+                merger.useExternalBodies = _savedUseExternal;
             }
 
             if (_fsm != null) { _fsm.Changed -= OnStateChanged; _fsm = null; }
