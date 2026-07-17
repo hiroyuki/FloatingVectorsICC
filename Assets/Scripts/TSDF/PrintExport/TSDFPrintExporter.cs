@@ -111,6 +111,14 @@ namespace TSDF
         [Tooltip("Triangle capacity of the per-slab MC readback buffer (72 B each).")]
         public int triangleBudgetPerSlab = 2_000_000;
 
+        [Header("STL shells")]
+        [Tooltip("Include the body (TSDF Marching-Cubes shell) in the STL. Off = " +
+                 "curve tubes only — an aesthetic variant without the body and " +
+                 "WITHOUT the body bridges (they'd be floating spikes with nothing " +
+                 "to attach to). The floor plane keeps its own toggle; with the " +
+                 "body off it centres on the tubes' floor-contact band instead.")]
+        public bool stlIncludeBody = true;
+
         [Header("STL curve tubes")]
         [Tooltip("Append the curved lines to the STL as closed tube meshes plus their " +
                  "body bridges as tapered tubes, all rebuilt from one CSEmitSegs pass " +
@@ -549,28 +557,36 @@ namespace TSDF
         /// Every shell is wound outward via its own signed volume.</summary>
         public void ExportStl()
         {
-            if (!Guard(needCurves: false)) return;
+            if (!Guard(needCurves: !stlIncludeBody)) return;
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var opt = WebCaptureOptions();
-            opt.meshTargetTris = 0;     // print wants full resolution
-            opt.includeCurves = false;  // STL curves come from the CSEmitSegs readback below,
-                                        // NOT the drawn ribbon buffer — see BuildCurveAndBridgeTubes
-            var snap = TSDFSnapshotBuilder.Capture(volume, null, opt, out string err);
-            if (snap == null) { Fail(err); return; }
 
             // Body shell: drop weld-collapsed slivers, then wind outward (MC
             // emits inside = sdf < iso, so a negative volume means inward).
-            var pos = new List<Vector3>(snap.pos);
-            var tri = new List<int>(snap.tri.Length);
-            for (int t = 0; t + 2 < snap.tri.Length; t += 3)
+            // stlIncludeBody=false skips the whole capture — tubes-only variant.
+            var pos = new List<Vector3>();
+            var tri = new List<int>();
+            double bodyVol = 0;
+            if (stlIncludeBody)
             {
-                int i0 = snap.tri[t], i1 = snap.tri[t + 1], i2 = snap.tri[t + 2];
-                if (i0 == i1 || i1 == i2 || i0 == i2) continue;
-                tri.Add(i0); tri.Add(i1); tri.Add(i2);
+                var opt = WebCaptureOptions();
+                opt.meshTargetTris = 0;     // print wants full resolution
+                opt.includeCurves = false;  // STL curves come from the CSEmitSegs readback below,
+                                            // NOT the drawn ribbon buffer — see BuildCurveAndBridgeTubes
+                var snap = TSDFSnapshotBuilder.Capture(volume, null, opt, out string err);
+                if (snap == null) { Fail(err); return; }
+                pos.AddRange(snap.pos);
+                tri.Capacity = snap.tri.Length;
+                for (int t = 0; t + 2 < snap.tri.Length; t += 3)
+                {
+                    int i0 = snap.tri[t], i1 = snap.tri[t + 1], i2 = snap.tri[t + 2];
+                    if (i0 == i1 || i1 == i2 || i0 == i2) continue;
+                    tri.Add(i0); tri.Add(i1); tri.Add(i2);
+                }
+                if (tri.Count == 0) { Fail("no non-degenerate triangles after weld"); return; }
+                bodyVol = OrientOutward(pos, tri, 0, tri.Count);
             }
-            if (tri.Count == 0) { Fail("no non-degenerate triangles after weld"); return; }
-            double bodyVol = OrientOutward(pos, tri, 0, tri.Count);
             int bodyTris = tri.Count / 3;
+            int bodyVerts = pos.Count; // floor-plate contact band scans pos[0..this)
 
             // Curve tubes + body bridges as their own outward-wound shells. Both
             // come from ONE CSEmitSegs readback (the exact seed set Fuse curves
@@ -582,7 +598,10 @@ namespace TSDF
             {
                 var tp = new List<Vector3>(); var tn = new List<Vector3>();
                 var tc = new List<Vector3>(); var ti = new List<int>();
-                BuildCurveAndBridgeTubes(tp, tn, tc, ti, out tubeCount, out bridgeCount);
+                // bridges only exist to attach tubes to the body — skip them in
+                // the tubes-only variant (they would be floating spikes)
+                BuildCurveAndBridgeTubes(tp, tn, tc, ti, out tubeCount, out bridgeCount,
+                                         includeBridges: stlIncludeBody);
                 if (ti.Count > 0)
                 {
                     int vOff = pos.Count, iBase = tri.Count;
@@ -595,6 +614,7 @@ namespace TSDF
                                      "(no curves component / seeds all culled?) — exporting " +
                                      "the body only.", this);
             }
+            if (tri.Count == 0) { Fail("nothing to export (body and tubes both off/empty)"); return; }
 
             // Floor plate: after the tubes so its top can sink into the lowest
             // geometry of EVERYTHING (a tube dipping below the feet would
@@ -602,7 +622,8 @@ namespace TSDF
             int floorTris = 0;
             Vector2 floorAt = Vector2.zero;
             if (stlIncludeFloorPlane)
-                floorTris = AppendFloorPlane(pos, tri, snap.pos.Length, out floorAt);
+                // contact band scans the body verts; tubes-only falls back to all verts
+                floorTris = AppendFloorPlane(pos, tri, bodyVerts > 0 ? bodyVerts : pos.Count, out floorAt);
 
             // Bounds over EVERYTHING: tubes can reach past the body bbox and
             // they must land inside the printed height too.
@@ -694,7 +715,8 @@ namespace TSDF
         /// side (fillet root, like the voxel-fuse path had).</summary>
         private void BuildCurveAndBridgeTubes(List<Vector3> tp, List<Vector3> tn,
                                               List<Vector3> tc, List<int> ti,
-                                              out int tubeCount, out int bridgeCount)
+                                              out int tubeCount, out int bridgeCount,
+                                              bool includeBridges = true)
         {
             tubeCount = 0; bridgeCount = 0;
             if (curves == null) return;
@@ -750,6 +772,7 @@ namespace TSDF
                         tipTaper: 1f, exportSpace: false);
                 }
 
+                if (!includeBridges) return;
                 foreach (int i in bridges)
                 {
                     if ((segs[i].b - segs[i].a).sqrMagnitude < 1e-10f) continue;

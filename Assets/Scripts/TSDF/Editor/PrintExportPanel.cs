@@ -125,6 +125,12 @@ namespace TSDF.EditorTools
                 new GUIContent("Smooth Iterations", "書き出し時の Taubin 平滑化（縮まない）。0=OFF。" +
                     "MC の階段状ガタつきを除去する。表示中の TSDF mesh には影響しない。"),
                 pe.smoothIterations, 0, 30);
+            bool stlBody = EditorGUILayout.ToggleLeft(
+                new GUIContent("STL: Include Body (体のメッシュを同梱)",
+                    "OFF = チューブのみの STL（審美バリアント）。体シェルと、体に接続する" +
+                    "ブリッジ（接続先が無くなるため）を出力しない。床プレートは独立フラグのままで、" +
+                    "体 OFF 時はチューブの接地帯を中心にする。"),
+                pe.stlIncludeBody);
             bool stlTubes = EditorGUILayout.ToggleLeft(
                 new GUIContent("STL: Include Curve Tubes (フル解像度のチューブで同梱)",
                     "カーブ＋体への接続ブリッジを 1 回の CSEmitSegs（Fuse curves と同一のシード集合）" +
@@ -191,6 +197,7 @@ namespace TSDF.EditorTools
                 pe.keepLargestOnly = keepLargest;
                 pe.targetHeightMm = heightMm;
                 pe.smoothIterations = smooth;
+                pe.stlIncludeBody = stlBody;
                 pe.stlIncludeCurveTubes = stlTubes;
                 pe.stlCurveSides = stlSides;
                 pe.stlIncludeFloorPlane = stlFloor;
