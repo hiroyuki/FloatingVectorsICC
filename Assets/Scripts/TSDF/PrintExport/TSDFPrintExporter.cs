@@ -80,6 +80,36 @@ namespace TSDF
                  "trail reads as a long square pyramid — the chosen look).")]
         public bool tubeRaindrop = false;
 
+        [Tooltip("Align the cross-section to WORLD UP instead of the twisting " +
+                 "parallel-transport frame: with 4 sides one vertex always points " +
+                 "up, so horizontal runs print as self-supporting 45° diamond " +
+                 "roofs instead of flat overhangs (FDM).")]
+        public bool tubeAlignUp = true;
+
+        [Tooltip("Weld bead at the closest approach of every touching chain " +
+                 "pair: a short fat strut buried in the joint, so graze contacts " +
+                 "print as a real bond instead of a knife-edge seam. White span.")]
+        public bool stlContactBeads = true;
+
+        [Range(1f, 2f)]
+        [Tooltip("Bead strut radius as a multiple of the thicker contact radius.")]
+        public float stlContactBeadScale = 1.3f;
+
+        [Header("Crop (test prints)")]
+        [Tooltip("Export only the chains inside the crop box (chains are split " +
+                 "into their in-box runs). The floor plate shrinks to the box " +
+                 "footprint and the print SCALE comes from Full Height Ref, so a " +
+                 "crop prints at exactly the full sculpture's thickness.")]
+        public bool cropEnabled = false;
+
+        public Vector3 cropCenter = new Vector3(0f, 0.3f, 0f);
+
+        public Vector3 cropSize = new Vector3(0.6f, 0.6f, 0.6f);
+
+        [Tooltip("Full-sculpture height (m) used for the crop's print scale: " +
+                 "scale = Target Height Mm / this, identical to the full export.")]
+        public float stlFullHeightRef = 1.9f;
+
         [Range(1f, 3f)]
         [Tooltip("Bridge body-side radius multiplier — a fillet root where the tube " +
                  "meets the body, for strength.")]
@@ -880,7 +910,7 @@ namespace TSDF
                 return;
             }
 
-            float scale = targetHeightMm / size.y; // metres -> printed mm
+            float scale = ExportScale(size.y); // metres -> printed mm
             string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
                                       "Documents", "FloatingVectorsPrints");
             string stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
@@ -923,7 +953,7 @@ namespace TSDF
             var asm = AssembleShells();
             if (asm == null) return;
 
-            float scale = targetHeightMm / asm.Size.y; // metres -> printed mm
+            float scale = ExportScale(asm.Size.y); // metres -> printed mm
             var spans = BuildColourSpans(asm);
             int total = asm.Tri.Count / 3;
 
@@ -982,7 +1012,7 @@ namespace TSDF
             var asm = AssembleShells();
             if (asm == null) return;
 
-            float scale = targetHeightMm / asm.Size.y;
+            float scale = ExportScale(asm.Size.y);
             var spans = BuildColourSpans(asm);
             int total = asm.Tri.Count / 3;
 
@@ -1099,36 +1129,37 @@ namespace TSDF
                 var line = new List<Vector3[]> { null };
                 var col = new List<Vector3> { Vector3.one };
                 var pts = new List<Vector3>(64);
-                var linkPts = stlLinkIsolatedChains ? new List<(Vector3 p, float r)>() : null;
-                var linkRanges = stlLinkIsolatedChains ? new List<(int start, int count)>() : null;
-                foreach (var kv in chains)
+                bool wantLinkData = stlLinkIsolatedChains || stlContactBeads;
+                var linkPts = wantLinkData ? new List<(Vector3 p, float r)>() : null;
+                var linkRanges = wantLinkData ? new List<(int start, int count)>() : null;
+                int emittedChains = 0, tubesOut = 0;
+
+                // one emitted tube — a whole chain, or one in-crop run of it
+                void EmitChain(List<Vector3> cp, Vector3 colour)
                 {
-                    var idxs = kv.Value;
-                    pts.Clear();
-                    pts.Add(segs[idxs[0]].a);
-                    foreach (int i in idxs) pts.Add(segs[i].b);
-                    if (pts.Count < 2) continue;
-                    line[0] = pts.ToArray();
-                    col[0] = segs[idxs[0]].color;
-                    tubeCount += CurveTubeBuilder.AppendCurveTubes(line, col, 1f, printRadius,
+                    if (cp.Count < 2) return;
+                    int chainId = emittedChains++;
+                    line[0] = cp.ToArray();
+                    col[0] = colour;
+                    tubesOut += CurveTubeBuilder.AppendCurveTubes(line, col, 1f, printRadius,
                         stlCurveSides, webCurveTolerance, Vector3.zero, 0f, tp, tn, tc, ti,
                         tipTaper: Mathf.Clamp01(tubeTailTaper), exportSpace: false,
-                        raindrop: tubeRaindrop);
+                        raindrop: tubeRaindrop, alignUp: tubeAlignUp);
 
                     if (chainLows != null)
                     {
-                        Vector3 low = pts[0];
-                        for (int i = 1; i < pts.Count; i++) if (pts[i].y < low.y) low = pts[i];
+                        Vector3 low = cp[0];
+                        for (int i = 1; i < cp.Count; i++) if (cp[i].y < low.y) low = cp[i];
                         chainLows.Add(low);
                     }
 
                     if (linkPts != null)
                     {
-                        linkRanges.Add((linkPts.Count, pts.Count));
+                        linkRanges.Add((linkPts.Count, cp.Count));
                         float taper = Mathf.Clamp01(tubeTailTaper);
-                        for (int i = 0; i < pts.Count; i++)
-                            linkPts.Add((pts[i], printRadius * Mathf.Lerp(taper, 1f,
-                                pts.Count > 1 ? (float)i / (pts.Count - 1) : 1f)));
+                        for (int i = 0; i < cp.Count; i++)
+                            linkPts.Add((cp[i], printRadius * Mathf.Lerp(taper, 1f,
+                                cp.Count > 1 ? (float)i / (cp.Count - 1) : 1f)));
                     }
 
                     // support-strut anchor points (endpoints + interior samples
@@ -1137,23 +1168,48 @@ namespace TSDF
                     // the chain id so a curve never "supports" itself)
                     if (supportPts != null)
                     {
-                        int chainId = (int)kv.Key;
-                        supportPts.Add((pts[0], chainId));
-                        supportPts.Add((pts[pts.Count - 1], chainId));
+                        supportPts.Add((cp[0], chainId));
+                        supportPts.Add((cp[cp.Count - 1], chainId));
                         if (stlSupportSpacing > 1e-4f)
                         {
                             float since = 0f;
-                            for (int i = 1; i < pts.Count - 1; i++)
+                            for (int i = 1; i < cp.Count - 1; i++)
                             {
-                                since += (pts[i] - pts[i - 1]).magnitude;
-                                if (since >= stlSupportSpacing) { supportPts.Add((pts[i], chainId)); since = 0f; }
+                                since += (cp[i] - cp[i - 1]).magnitude;
+                                if (since >= stlSupportSpacing) { supportPts.Add((cp[i], chainId)); since = 0f; }
                             }
                         }
                         if (supportCandidates != null)
-                            for (int i = 0; i < pts.Count; i++)
-                                supportCandidates.Add((pts[i], chainId));
+                            for (int i = 0; i < cp.Count; i++)
+                                supportCandidates.Add((cp[i], chainId));
                     }
                 }
+
+                var cropB = new Bounds(cropCenter, cropSize);
+                var run = new List<Vector3>(64);
+                foreach (var kv in chains)
+                {
+                    var idxs = kv.Value;
+                    pts.Clear();
+                    pts.Add(segs[idxs[0]].a);
+                    foreach (int i in idxs) pts.Add(segs[i].b);
+                    if (pts.Count < 2) continue;
+                    Vector3 colour = segs[idxs[0]].color;
+                    if (!cropEnabled) { EmitChain(pts, colour); continue; }
+                    // crop: each maximal in-box run becomes its own tube
+                    run.Clear();
+                    foreach (var q in pts)
+                    {
+                        if (cropB.Contains(q)) { run.Add(q); continue; }
+                        EmitChain(run, colour);
+                        run.Clear();
+                    }
+                    EmitChain(run, colour);
+                }
+                tubeCount = tubesOut;
+
+                if (stlContactBeads)
+                    AppendContactBeads(linkPts, linkRanges, line, col, tp, tn, tc, ti);
 
                 if (includeBridges)
                 {
@@ -1178,10 +1234,81 @@ namespace TSDF
                     }
                 }
 
-                AppendIsolationLinks(linkPts, linkRanges, line, col, tp, tn, tc, ti,
-                                     ref wireTriStartLocal);
+                if (stlLinkIsolatedChains)
+                    AppendIsolationLinks(linkPts, linkRanges, line, col, tp, tn, tc, ti,
+                                         ref wireTriStartLocal);
             }
             finally { segBuf.Release(); }
+        }
+
+        /// <summary>Weld beads: ONE short fat strut at the closest approach of
+        /// every touching (or just-grazing) chain pair. A graze prints as a
+        /// knife-edge seam that snaps in handling; the bead buries real material
+        /// in the joint. Appended before the wire span, so it stays in the
+        /// artwork (Curve) colour.</summary>
+        private void AppendContactBeads(List<(Vector3 p, float r)> pts, List<(int start, int count)> ranges,
+                                        List<Vector3[]> line, List<Vector3> col,
+                                        List<Vector3> tp, List<Vector3> tn, List<Vector3> tc, List<int> ti)
+        {
+            if (pts == null || ranges == null || ranges.Count < 2) return;
+            int n = pts.Count;
+            var chainOf = new int[n];
+            for (int c = 0; c < ranges.Count; c++)
+                for (int i = 0; i < ranges[c].count; i++)
+                    chainOf[ranges[c].start + i] = c;
+
+            float cell = Mathf.Max(0.03f, printRadius * 4f);
+            var grid = new Dictionary<long, List<int>>(n / 2 + 1);
+            long Key(int kx, int ky, int kz) => (kx * 73856093L) ^ (ky * 19349663L) ^ (kz * 83492791L);
+            int C(float v) => Mathf.FloorToInt(v / cell);
+            for (int i = 0; i < n; i++)
+            {
+                long k = Key(C(pts[i].p.x), C(pts[i].p.y), C(pts[i].p.z));
+                if (!grid.TryGetValue(k, out var l)) grid[k] = l = new List<int>(8);
+                l.Add(i);
+            }
+
+            // closest approach per touching pair (visit each pair once: a < b)
+            var best = new Dictionary<long, (float dSq, Vector3 a, Vector3 b, float r)>();
+            for (int i = 0; i < n; i++)
+            {
+                var (p, r) = pts[i];
+                int cx = C(p.x), cy = C(p.y), cz = C(p.z);
+                for (int gx = cx - 1; gx <= cx + 1; gx++)
+                    for (int gy = cy - 1; gy <= cy + 1; gy++)
+                        for (int gz = cz - 1; gz <= cz + 1; gz++)
+                        {
+                            if (!grid.TryGetValue(Key(gx, gy, gz), out var l)) continue;
+                            foreach (int qi in l)
+                            {
+                                if (chainOf[qi] <= chainOf[i]) continue;
+                                var (q, qr) = pts[qi];
+                                float lim = (r + qr) * 1.1f; // touching or just grazing
+                                float dSq = (q - p).sqrMagnitude;
+                                if (dSq > lim * lim) continue;
+                                long pairKey = ((long)chainOf[i] << 32) | (uint)chainOf[qi];
+                                if (!best.TryGetValue(pairKey, out var cur) || dSq < cur.dSq)
+                                    best[pairKey] = (dSq, p, q, Mathf.Max(r, qr));
+                            }
+                        }
+            }
+
+            int beads = 0;
+            foreach (var kvp in best)
+            {
+                var (dSq, a, b, r) = kvp.Value;
+                float d = Mathf.Sqrt(dSq);
+                if (d < r * 0.5f) continue; // deep overlap welds itself
+                Vector3 dir = (b - a) / d;
+                line[0] = new[] { a - dir * (r * 0.5f), b + dir * (r * 0.5f) };
+                col[0] = Vector3.one;
+                CurveTubeBuilder.AppendCurveTubes(line, col, 1f, r * stlContactBeadScale,
+                    stlCurveSides, 0f, Vector3.zero, 0f, tp, tn, tc, ti,
+                    tipTaper: 1f, exportSpace: false);
+                beads++;
+            }
+            if (beads > 0)
+                Debug.Log($"[TSDFPrintExporter] contact beads: {beads} welds.", this);
         }
 
         /// <summary>Struts for chains that touch nothing: neither another chain
@@ -1417,7 +1544,11 @@ namespace TSDF
             float cx = (float)(sx / n), cz = (float)(sz / n); // n >= 1: the min vertex is in band
             floorAt = new Vector2(cx, cz);
 
-            float half = stlFloorSize * 0.5f;
+            // crop test prints get a plate matching the crop footprint
+            float floorSize = cropEnabled
+                ? Mathf.Min(stlFloorSize, Mathf.Max(cropSize.x, cropSize.z))
+                : stlFloorSize;
+            float half = floorSize * 0.5f;
             float topY = allMinY + kFloorEmbed;
             int iBase = tri.Count;
             // u × v = outward normal (component algebra) — all six faces
@@ -1430,8 +1561,8 @@ namespace TSDF
                 tri.Add(b); tri.Add(b + 1); tri.Add(b + 2);
                 tri.Add(b); tri.Add(b + 2); tri.Add(b + 3);
             }
-            var ux = new Vector3(stlFloorSize, 0f, 0f);
-            var uz = new Vector3(0f, 0f, stlFloorSize);
+            var ux = new Vector3(floorSize, 0f, 0f);
+            var uz = new Vector3(0f, 0f, floorSize);
             var ut = new Vector3(0f, stlFloorThickness, 0f);
             var c00 = new Vector3(cx - half, topY - stlFloorThickness, cz - half);
             Face(c00, ux, uz);                                            // bottom (-Y)
@@ -1500,6 +1631,13 @@ namespace TSDF
         }
 
         // ---------------- shared ----------------
+
+        /// <summary>Print scale (mm per metre). A crop uses the FULL sculpture's
+        /// reference height so test prints come out at the exact production
+        /// thickness; the full export scales its own bounds to targetHeightMm.</summary>
+        private float ExportScale(float sizeY)
+            => targetHeightMm / (cropEnabled ? Mathf.Max(0.1f, stlFullHeightRef) : Mathf.Max(1e-4f, sizeY));
+
         private bool Guard(bool needCurves)
         {
             if (!Application.isPlaying) { Fail("Play mode only"); return false; }

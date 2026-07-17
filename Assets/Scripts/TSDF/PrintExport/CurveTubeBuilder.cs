@@ -29,11 +29,15 @@ namespace TSDF
         // The body swells quadratically from headR*tipTaper at the tail to
         // headR at the head, meeting the hemisphere tangent-continuously.
         // Cross-section stays circular. Overrides the plain tipTaper ramp.
+        // alignUp: orient every ring to WORLD UP instead of the twisting
+        // parallel-transport frame — one profile vertex always points up, so a
+        // 4-sided tube prints as a self-supporting diamond (45° roofs) in FDM.
+        // Near-vertical segments reuse the previous ring's frame.
         public static int AppendCurveTubes(List<Vector3[]> lines, List<Vector3> lineCols, float brightness,
                                            float radius, int sides, float tolerance, Vector3 center, float minY,
                                            List<Vector3> pos, List<Vector3> nrm, List<Vector3> col,
                                            List<int> idx, float tipTaper = 1f, bool exportSpace = true,
-                                           bool raindrop = false)
+                                           bool raindrop = false, bool alignUp = false)
         {
             int tubes = 0;
             var p = new List<Vector3>(256);
@@ -70,13 +74,24 @@ namespace TSDF
                 Vector3 startT = (p[1] - p[0]).normalized;
                 Vector3 u = Vector3.Cross(startT, Mathf.Abs(startT.y) < 0.9f ? Vector3.up : Vector3.right).normalized;
                 Vector3 prevT = startT;
+                Vector3 dPrev = u;                       // alignUp fallback
+                Vector3 ruEnd = u, rvEnd = Vector3.zero; // last ring frame (head cap)
                 for (int i = 0; i < n; i++)
                 {
                     Vector3 t = p[Mathf.Min(i + 1, n - 1)] - p[Mathf.Max(i - 1, 0)];
                     t = t.sqrMagnitude > 1e-12f ? t.normalized : prevT;
                     u = (Quaternion.FromToRotation(prevT, t) * u).normalized;
                     prevT = t;
-                    Vector3 v = Vector3.Cross(t, u);
+                    Vector3 ru = u, rv = Vector3.Cross(t, u);
+                    if (alignUp)
+                    {
+                        Vector3 d = Vector3.up - t * t.y; // world up in the ring plane
+                        d = d.sqrMagnitude > 1e-6f ? d.normalized : dPrev;
+                        dPrev = d;
+                        rv = d;                          // profile +Y (sin) points up
+                        ru = Vector3.Cross(d, t);        // so that rv == cross(t, ru)
+                    }
+                    ruEnd = ru; rvEnd = rv;
                     float r;
                     bool drop = raindrop && len > 1e-6f;
                     if (drop)
@@ -92,7 +107,7 @@ namespace TSDF
                     for (int k = 0; k < sides; k++)
                     {
                         float ang = 2f * Mathf.PI * k / sides;
-                        Vector3 rd = Mathf.Cos(ang) * u + Mathf.Sin(ang) * v;
+                        Vector3 rd = Mathf.Cos(ang) * ru + Mathf.Sin(ang) * rv;
                         pos.Add(p[i] + rd * r);
                         nrm.Add(rd);
                         col.Add(c);
@@ -107,7 +122,7 @@ namespace TSDF
                 bool headCap = raindrop && len > 1e-6f;
                 if (headCap)
                 {
-                    Vector3 vEnd = Vector3.Cross(endT, u);
+                    if (rvEnd == Vector3.zero) rvEnd = Vector3.Cross(endT, ruEnd);
                     const int capRings = 5;
                     for (int j = 1; j <= capRings; j++)
                     {
@@ -117,7 +132,7 @@ namespace TSDF
                         for (int k = 0; k < sides; k++)
                         {
                             float ang = 2f * Mathf.PI * k / sides;
-                            Vector3 rd = Mathf.Cos(ang) * u + Mathf.Sin(ang) * vEnd;
+                            Vector3 rd = Mathf.Cos(ang) * ruEnd + Mathf.Sin(ang) * rvEnd;
                             pos.Add(cc + rd * cr);
                             nrm.Add((rd * Mathf.Cos(a) + endT * Mathf.Sin(a)).normalized);
                             col.Add(c);
