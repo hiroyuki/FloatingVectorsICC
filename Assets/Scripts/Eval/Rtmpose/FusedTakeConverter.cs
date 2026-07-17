@@ -109,6 +109,10 @@ namespace BodyTracking.Eval.Rtmpose
             _error = "";
             _report = "";
             _progress = 0f;
+            // A reused instance still carries the previous run's gate value (1 or
+            // 2) — the new worker would always lose the finalize CompareExchange
+            // and report Aborted despite succeeding. Reopen it.
+            Interlocked.Exchange(ref _finalizeGate, 0);
             _status = ConvertStatus.Running;
             _worker = new Thread(() => WorkerMain(sessionRoot, options, modelsDir, profilePath))
             {
@@ -170,22 +174,35 @@ namespace BodyTracking.Eval.Rtmpose
                 {
                     string depthPath = Path.Combine(deviceDir, PointCloudRecording.DepthSensorName);
                     string colorPath = Path.Combine(deviceDir, PointCloudRecording.ColorSensorName);
-                    if (!File.Exists(depthPath) || !File.Exists(colorPath)) continue;
+                    if (!File.Exists(depthPath)) continue; // no depth = not a playable camera
 
+                    // A PLAYABLE camera that cannot be converted must fail the
+                    // WHOLE take: promoting fused bodies for the other cameras
+                    // would make playback merge fused and k4abt streams — the
+                    // exact mixed state the all-or-nothing rename exists to
+                    // prevent. Failing keeps the take on consistent k4abt bodies.
                     PointCloudRecording.DeviceCalibration dc = null;
                     foreach (var c in calib)
                         if (string.Equals(c.Serial, serial, StringComparison.OrdinalIgnoreCase)) { dc = c; break; }
-                    // The fused skeleton can only be projected into cameras with a
-                    // world transform; others keep their k4abt bodies_main untouched.
-                    if (dc == null || !dc.GlobalTrColorCamera.HasValue) continue;
+                    if (!File.Exists(colorPath))
+                    { Fail($"device {serial} has depth but no color stream — whole take stays k4abt"); return; }
+                    if (dc == null || !dc.GlobalTrColorCamera.HasValue)
+                    { Fail($"device {serial} has no world transform in extrinsics.yaml — whole take stays k4abt"); return; }
 
                     var t = new Track { Serial = serial, DeviceDir = deviceDir };
                     t.Depth = new PointCloudRecording.RcsvFrameStream(depthPath);
                     t.Color = new PointCloudRecording.RcsvFrameStream(colorPath);
-                    if (t.Depth.Count == 0 || t.Color.Count == 0)
+                    if (t.Depth.Count == 0)
                     {
+                        // zero frames contribute nothing to playback — safe to skip
                         t.Depth.Dispose(); t.Color.Dispose();
                         continue;
+                    }
+                    if (t.Color.Count == 0)
+                    {
+                        t.Depth.Dispose(); t.Color.Dispose();
+                        Fail($"device {serial} has depth frames but an empty color stream — whole take stays k4abt");
+                        return;
                     }
                     (t.DW, t.DH) = PointCloudRecording.ReadRcsvHeaderDimensions(depthPath);
                     (t.CW, t.CH) = PointCloudRecording.ReadRcsvHeaderDimensions(colorPath);
