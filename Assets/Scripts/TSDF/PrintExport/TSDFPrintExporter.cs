@@ -152,6 +152,17 @@ namespace TSDF
                  "the artwork; thinner reads as strings holding the curves.")]
         public float stlSupportRadius = 0.004f;
 
+        [Range(0f, 0.2f)]
+        [Tooltip("Floor anchoring: chains whose lowest point is within this band " +
+                 "(m) above the global minimum get a thick pillar down to the " +
+                 "plate, bonding the feet-area curves to it. 0 = off.")]
+        public float stlFloorPillarBand = 0.05f;
+
+        [Range(0.004f, 0.03f)]
+        [Tooltip("Floor anchor pillar radius (m) — structural, thicker than the " +
+                 "curve-to-curve struts.")]
+        public float stlFloorPillarRadius = 0.012f;
+
         [Header("3MF colours (Bambu multi-filament)")]
         [Tooltip("Body + floor plate colour in the 3MF export. Bambu Studio's " +
                  "Standard-3MF colour parsing maps it to the closest filament.")]
@@ -680,11 +691,12 @@ namespace TSDF
                 bool wireframe = !stlIncludeBody && stlRootWireframe;
                 var supportPts = stlCurveSupportPillars ? new List<(Vector3 p, int chain)>() : null;
                 var supportCands = stlCurveSupportPillars ? new List<(Vector3 p, int chain)>() : null;
+                var chainLows = stlFloorPillarBand > 1e-4f ? new List<Vector3>() : null;
                 BuildCurveAndBridgeTubes(tp, tn, tc, ti, out asm.TubeCount, out asm.BridgeCount,
                                          includeBridges: stlIncludeBody || wireframe,
                                          rootWireframe: wireframe, out asm.WireCount,
                                          out int wireTriStartLocal,
-                                         supportPts, supportCands);
+                                         supportPts, supportCands, chainLows);
                 if (ti.Count > 0)
                 {
                     int vOff = pos.Count, iBase = tri.Count;
@@ -764,6 +776,44 @@ namespace TSDF
                         pos.AddRange(sp);
                         for (int i = 0; i < si.Count; i++) tri.Add(si[i] + vOff);
                         OrientOutward(pos, tri, iBase, tri.Count - iBase);
+                    }
+                }
+
+                // Floor anchors: chains whose lowest point sits within the band
+                // above the global minimum get a THICK pillar down to the plate
+                // ("足元がプレートにくっついてない…太めのサポートでいい") — the
+                // plate top sinks 5 mm into the lowest geometry, so a pillar to
+                // minY is embedded, not merely touching.
+                if (chainLows != null && chainLows.Count > 0 && pos.Count > 0)
+                {
+                    float minY = float.PositiveInfinity;
+                    foreach (var p in pos) if (p.y < minY) minY = p.y;
+
+                    var sp = new List<Vector3>(); var sn = new List<Vector3>();
+                    var sc = new List<Vector3>(); var si = new List<int>();
+                    var pilLine = new List<Vector3[]> { null };
+                    var pilCol = new List<Vector3> { Vector3.one };
+                    int pillars = 0;
+                    foreach (var p in chainLows)
+                    {
+                        float above = p.y - minY;
+                        if (above > stlFloorPillarBand) continue;      // not a feet-area chain
+                        if (above < stlFloorPillarRadius) continue;    // already inside the plate sink
+                        pilLine[0] = new[] { p, new Vector3(p.x, minY, p.z) };
+                        CurveTubeBuilder.AppendCurveTubes(pilLine, pilCol, 1f, stlFloorPillarRadius,
+                            stlCurveSides, 0f, Vector3.zero, 0f, sp, sn, sc, si,
+                            tipTaper: 1f, exportSpace: false);
+                        pillars++;
+                    }
+                    if (si.Count > 0)
+                    {
+                        int vOff = pos.Count, iBase = tri.Count;
+                        pos.AddRange(sp);
+                        for (int i = 0; i < si.Count; i++) tri.Add(si[i] + vOff);
+                        OrientOutward(pos, tri, iBase, tri.Count - iBase);
+                        asm.SupportCount += pillars;
+                        Debug.Log($"[TSDFPrintExporter] floor anchors: {pillars} pillars " +
+                                  $"(band {stlFloorPillarBand} m, r {stlFloorPillarRadius} m).", this);
                     }
                 }
             }
@@ -988,7 +1038,8 @@ namespace TSDF
                                               bool includeBridges, bool rootWireframe,
                                               out int wireCount, out int wireTriStartLocal,
                                               List<(Vector3 p, int chain)> supportPts = null,
-                                              List<(Vector3 p, int chain)> supportCandidates = null)
+                                              List<(Vector3 p, int chain)> supportCandidates = null,
+                                              List<Vector3> chainLows = null)
         {
             tubeCount = 0; bridgeCount = 0; wireCount = 0; wireTriStartLocal = -1;
             if (curves == null) return;
@@ -1041,6 +1092,13 @@ namespace TSDF
                     tubeCount += CurveTubeBuilder.AppendCurveTubes(line, col, 1f, printRadius,
                         stlCurveSides, webCurveTolerance, Vector3.zero, 0f, tp, tn, tc, ti,
                         tipTaper: Mathf.Clamp01(tubeTailTaper), exportSpace: false);
+
+                    if (chainLows != null)
+                    {
+                        Vector3 low = pts[0];
+                        for (int i = 1; i < pts.Count; i++) if (pts[i].y < low.y) low = pts[i];
+                        chainLows.Add(low);
+                    }
 
                     // support-strut anchor points (endpoints + interior samples
                     // every stlSupportSpacing of arc length; 0 = endpoints only)
