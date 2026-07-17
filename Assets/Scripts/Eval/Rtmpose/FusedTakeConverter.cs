@@ -279,25 +279,13 @@ namespace BodyTracking.Eval.Rtmpose
                     return;
                 }
 
-                // ---- rename dance ----
-                foreach (var t in tracks)
-                {
-                    string main = Path.Combine(t.DeviceDir, PointCloudRecording.BodiesSensorName);
-                    string temp = main + V11sSuffix;
-                    string backup = main + K4abtBackupSuffix;
-                    if (File.Exists(main))
-                    {
-                        if (File.Exists(backup)) File.Delete(backup);
-                        File.Move(main, backup);
-                    }
-                    try { File.Move(temp, main); }
-                    catch
-                    {
-                        // roll the backup back so the take stays playable
-                        if (!File.Exists(main) && File.Exists(backup)) File.Move(backup, main);
-                        throw;
-                    }
-                }
+                // ---- rename dance (all devices or none) ----
+                // A partial rename would leave the take half-converted: some
+                // cameras' bodies_main fused, others k4abt — the merger would mix
+                // the two skeleton streams. Stage per phase and roll back EVERY
+                // device on any failure so the failure contract ("the original
+                // k4abt take stays playable") holds for multi-camera takes.
+                PromoteAllOrRollback(tracks);
                 renamed = true;
                 _progress = 0.96f;
 
@@ -343,6 +331,62 @@ namespace BodyTracking.Eval.Rtmpose
             _error = message;
             _status = ConvertStatus.Failed;
             Debug.LogError($"[{nameof(FusedTakeConverter)}] {message}");
+        }
+
+        /// <summary>Promote every device's bodies_main.v11s to bodies_main
+        /// (originals backed up as .k4abt), atomically across devices: any
+        /// failure rolls back all completed moves and rethrows, leaving the
+        /// take exactly as it was.</summary>
+        static void PromoteAllOrRollback(List<Track> tracks)
+        {
+            // Phase 0: every temp must exist before anything is touched.
+            foreach (var t in tracks)
+            {
+                string temp = Path.Combine(t.DeviceDir, PointCloudRecording.BodiesSensorName + V11sSuffix);
+                if (!File.Exists(temp))
+                    throw new FileNotFoundException("fused temp missing before rename", temp);
+            }
+
+            var backedUp = new List<Track>();  // main moved -> backup
+            var promoted = new List<Track>();  // temp moved -> main
+            try
+            {
+                // Phase 1: park the originals.
+                foreach (var t in tracks)
+                {
+                    string main = Path.Combine(t.DeviceDir, PointCloudRecording.BodiesSensorName);
+                    string backup = main + K4abtBackupSuffix;
+                    if (!File.Exists(main)) continue; // take had no k4abt bodies for this cam
+                    if (File.Exists(backup)) File.Delete(backup);
+                    File.Move(main, backup);
+                    backedUp.Add(t);
+                }
+                // Phase 2: promote the fused temps.
+                foreach (var t in tracks)
+                {
+                    string main = Path.Combine(t.DeviceDir, PointCloudRecording.BodiesSensorName);
+                    File.Move(main + V11sSuffix, main);
+                    promoted.Add(t);
+                }
+            }
+            catch
+            {
+                // Roll back in reverse: fused mains -> temps, then backups -> mains.
+                foreach (var t in promoted)
+                {
+                    string main = Path.Combine(t.DeviceDir, PointCloudRecording.BodiesSensorName);
+                    try { if (File.Exists(main)) File.Move(main, main + V11sSuffix); }
+                    catch { /* best effort — the backup restore below still runs */ }
+                }
+                foreach (var t in backedUp)
+                {
+                    string main = Path.Combine(t.DeviceDir, PointCloudRecording.BodiesSensorName);
+                    string backup = main + K4abtBackupSuffix;
+                    try { if (!File.Exists(main) && File.Exists(backup)) File.Move(backup, main); }
+                    catch { /* best effort */ }
+                }
+                throw;
+            }
         }
 
         static void CleanupTemps(List<Track> tracks)
