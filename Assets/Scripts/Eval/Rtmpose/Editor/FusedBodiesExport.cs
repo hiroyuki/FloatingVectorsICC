@@ -136,68 +136,11 @@ namespace BodyTracking.Eval.Rtmpose
             {
                 string serial = kv.Key;
                 if (!_d2c.TryGetValue(serial, out var e) || !_gTr.TryGetValue(serial, out var g)) continue;
-
-                for (int i = 0; i < K4ABTConsts.K4ABT_JOINT_COUNT; i++)
-                    _snap.Joints[i] = new k4abt_joint_t
-                    {
-                        Position = new k4a_float3_t(),
-                        Orientation = new k4a_quaternion_t { W = 1f },
-                        ConfidenceLevel = k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_NONE,
-                    };
-
-                for (int j = 0; j < EvalSkeleton.JointCount; j++)
-                {
-                    if (!p.Joints[j].Valid) continue;
-                    Vector3 d = ToDepth(p.Joints[j].PositionMm, g, e);
-                    SetJoint(EvalSkeletonMap.K4abtSource[j], d, k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_MEDIUM);
-                }
-
-                bool hasPelvis = p.Joints[(int)EvalJointId.Pelvis].Valid;
-                bool hasNeck = p.Joints[(int)EvalJointId.Neck].Valid;
-                bool hasHead = p.Joints[(int)EvalJointId.Head].Valid;
-                if (hasPelvis && hasNeck)
-                {
-                    Vector3 pel = ToDepth(p.Joints[(int)EvalJointId.Pelvis].PositionMm, g, e);
-                    Vector3 nk = ToDepth(p.Joints[(int)EvalJointId.Neck].PositionMm, g, e);
-                    SetJoint(k4abt_joint_id_t.K4ABT_JOINT_SPINE_NAVEL, Vector3.Lerp(pel, nk, 1f / 3f), k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW);
-                    SetJoint(k4abt_joint_id_t.K4ABT_JOINT_SPINE_CHEST, Vector3.Lerp(pel, nk, 2f / 3f), k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW);
-                    SetJoint(k4abt_joint_id_t.K4ABT_JOINT_CLAVICLE_LEFT, nk, k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW);
-                    SetJoint(k4abt_joint_id_t.K4ABT_JOINT_CLAVICLE_RIGHT, nk, k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW);
-                }
-                if (hasHead)
-                {
-                    Vector3 hd = ToDepth(p.Joints[(int)EvalJointId.Head].PositionMm, g, e);
-                    SetJoint(k4abt_joint_id_t.K4ABT_JOINT_NOSE, hd, k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_LOW);
-                }
-
+                FusedSnapshotEncoder.Build(_snap, p, g, e);
                 int bytes = RecordedBodySerializer.Encode(new[] { _snap }, 1, _scratch);
                 kv.Value.WriteFrame(f.TimestampNs, _scratch, bytes);
             }
             _written++;
-        }
-
-        static void SetJoint(k4abt_joint_id_t id, Vector3 posMm, k4abt_joint_confidence_level_t conf)
-        {
-            _snap.Joints[(int)id] = new k4abt_joint_t
-            {
-                Position = new k4a_float3_t { X = posMm.x, Y = posMm.y, Z = posMm.z },
-                Orientation = new k4a_quaternion_t { W = 1f },
-                ConfidenceLevel = conf,
-            };
-        }
-
-        // world -> this camera's color frame -> depth frame (both inverses)
-        static Vector3 ToDepth(Vector3 world, in ObExtrinsic colorToWorld, in ObExtrinsic depthToColor)
-            => InverseTransform(InverseTransform(world, colorToWorld), depthToColor);
-
-        static Vector3 InverseTransform(Vector3 p, in ObExtrinsic e)
-        {
-            var R = e.Rot; var T = e.Trans;
-            float x = p.x - T[0], y = p.y - T[1], z = p.z - T[2];
-            return new Vector3(
-                R[0] * x + R[3] * y + R[6] * z,
-                R[1] * x + R[4] * y + R[7] * z,
-                R[2] * x + R[5] * y + R[8] * z);
         }
 
         public static string Step(int n)
