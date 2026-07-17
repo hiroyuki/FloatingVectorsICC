@@ -152,6 +152,11 @@ namespace TSDF
                  "the artwork; thinner reads as strings holding the curves.")]
         public float stlSupportRadius = 0.004f;
 
+        [Tooltip("Chains that touch neither another chain nor the floor band get " +
+                 "a strut (Support Radius) to the nearest other chain — rendered " +
+                 "in the BODY colour so the joins read as armature, not artwork.")]
+        public bool stlLinkIsolatedChains = true;
+
         [Range(0f, 0.2f)]
         [Tooltip("Floor anchoring: chains whose lowest point is within this band " +
                  "(m) above the global minimum get a thick pillar down to the " +
@@ -799,7 +804,11 @@ namespace TSDF
                         float above = p.y - minY;
                         if (above > stlFloorPillarBand) continue;      // not a feet-area chain
                         if (above < stlFloorPillarRadius) continue;    // already inside the plate sink
-                        pilLine[0] = new[] { p, new Vector3(p.x, minY, p.z) };
+                        // pillar top runs 5 cm past the chain's lowest point so it
+                        // embeds INTO the line — the exported tube centerline is
+                        // simplified and can drift off the raw low point, which
+                        // left some pillars floating next to their line.
+                        pilLine[0] = new[] { new Vector3(p.x, p.y + 0.05f, p.z), new Vector3(p.x, minY, p.z) };
                         CurveTubeBuilder.AppendCurveTubes(pilLine, pilCol, 1f, stlFloorPillarRadius,
                             stlCurveSides, 0f, Vector3.zero, 0f, sp, sn, sc, si,
                             tipTaper: 1f, exportSpace: false);
@@ -1080,6 +1089,8 @@ namespace TSDF
                 var line = new List<Vector3[]> { null };
                 var col = new List<Vector3> { Vector3.one };
                 var pts = new List<Vector3>(64);
+                var linkPts = stlLinkIsolatedChains ? new List<(Vector3 p, float r)>() : null;
+                var linkRanges = stlLinkIsolatedChains ? new List<(int start, int count)>() : null;
                 foreach (var kv in chains)
                 {
                     var idxs = kv.Value;
@@ -1098,6 +1109,15 @@ namespace TSDF
                         Vector3 low = pts[0];
                         for (int i = 1; i < pts.Count; i++) if (pts[i].y < low.y) low = pts[i];
                         chainLows.Add(low);
+                    }
+
+                    if (linkPts != null)
+                    {
+                        linkRanges.Add((linkPts.Count, pts.Count));
+                        float taper = Mathf.Clamp01(tubeTailTaper);
+                        for (int i = 0; i < pts.Count; i++)
+                            linkPts.Add((pts[i], printRadius * Mathf.Lerp(taper, 1f,
+                                pts.Count > 1 ? (float)i / (pts.Count - 1) : 1f)));
                     }
 
                     // support-strut anchor points (endpoints + interior samples
@@ -1124,28 +1144,144 @@ namespace TSDF
                     }
                 }
 
-                if (!includeBridges) return;
-                var anchors = new List<Vector3>(bridges.Count);
-                foreach (int i in bridges)
+                if (includeBridges)
                 {
-                    if ((segs[i].b - segs[i].a).sqrMagnitude < 1e-10f) continue;
-                    line[0] = new[] { segs[i].a, segs[i].b };
-                    col[0] = segs[i].color;
-                    float rb = Mathf.Max(segs[i].rb, 1e-4f);
-                    CurveTubeBuilder.AppendCurveTubes(line, col, 1f, rb, stlCurveSides,
-                        0f, Vector3.zero, 0f, tp, tn, tc, ti,
-                        tipTaper: Mathf.Clamp01(segs[i].ra / rb), exportSpace: false);
-                    bridgeCount++;
-                    anchors.Add(segs[i].b); // body-side anchor = wireframe node
+                    var anchors = new List<Vector3>(bridges.Count);
+                    foreach (int i in bridges)
+                    {
+                        if ((segs[i].b - segs[i].a).sqrMagnitude < 1e-10f) continue;
+                        line[0] = new[] { segs[i].a, segs[i].b };
+                        col[0] = segs[i].color;
+                        float rb = Mathf.Max(segs[i].rb, 1e-4f);
+                        CurveTubeBuilder.AppendCurveTubes(line, col, 1f, rb, stlCurveSides,
+                            0f, Vector3.zero, 0f, tp, tn, tc, ti,
+                            tipTaper: Mathf.Clamp01(segs[i].ra / rb), exportSpace: false);
+                        bridgeCount++;
+                        anchors.Add(segs[i].b); // body-side anchor = wireframe node
+                    }
+
+                    if (rootWireframe)
+                    {
+                        wireTriStartLocal = ti.Count; // wires get their own colour span
+                        wireCount = AppendRootWireframe(anchors, line, col, tp, tn, tc, ti);
+                    }
                 }
 
-                if (rootWireframe)
-                {
-                    wireTriStartLocal = ti.Count; // wires get their own colour span
-                    wireCount = AppendRootWireframe(anchors, line, col, tp, tn, tc, ti);
-                }
+                AppendIsolationLinks(linkPts, linkRanges, line, col, tp, tn, tc, ti,
+                                     ref wireTriStartLocal);
             }
             finally { segBuf.Release(); }
+        }
+
+        /// <summary>Struts for chains that touch nothing: neither another chain
+        /// (centreline distance <= r1+r2 anywhere along them) nor the floor-pillar
+        /// band. Each isolated chain gets ONE strut to the nearest point of
+        /// another chain, appended into the WIRE span so it prints in the Body
+        /// colour — the joins read as black armature, not artwork.</summary>
+        private void AppendIsolationLinks(List<(Vector3 p, float r)> pts, List<(int start, int count)> ranges,
+                                          List<Vector3[]> line, List<Vector3> col,
+                                          List<Vector3> tp, List<Vector3> tn, List<Vector3> tc, List<int> ti,
+                                          ref int wireTriStartLocal)
+        {
+            if (pts == null || ranges == null || ranges.Count < 2) return;
+
+            int n = pts.Count;
+            var chainOf = new int[n];
+            float minY = float.PositiveInfinity;
+            for (int c = 0; c < ranges.Count; c++)
+                for (int i = 0; i < ranges[c].count; i++)
+                    chainOf[ranges[c].start + i] = c;
+            for (int i = 0; i < n; i++) if (pts[i].p.y < minY) minY = pts[i].p.y;
+
+            // 3D spatial hash (hash collisions only add distance checks)
+            float cell = Mathf.Max(0.03f, printRadius * 4f);
+            var grid = new Dictionary<long, List<int>>(n / 2 + 1);
+            long Key(int kx, int ky, int kz)
+                => (kx * 73856093L) ^ (ky * 19349663L) ^ (kz * 83492791L);
+            int C(float v) => Mathf.FloorToInt(v / cell);
+            for (int i = 0; i < n; i++)
+            {
+                long k = Key(C(pts[i].p.x), C(pts[i].p.y), C(pts[i].p.z));
+                if (!grid.TryGetValue(k, out var l)) grid[k] = l = new List<int>(8);
+                l.Add(i);
+            }
+
+            int links = 0, unresolved = 0;
+            for (int c = 0; c < ranges.Count; c++)
+            {
+                var (start, count) = ranges[c];
+
+                // floor band → the pillar pass bonds it to the plate
+                float low = float.PositiveInfinity;
+                for (int i = 0; i < count; i++) low = Mathf.Min(low, pts[start + i].p.y);
+                if (stlFloorPillarBand > 1e-4f && low - minY <= stlFloorPillarBand) continue;
+
+                bool touching = false;
+                for (int i = 0; i < count && !touching; i++)
+                {
+                    var (p, r) = pts[start + i];
+                    int cx = C(p.x), cy = C(p.y), cz = C(p.z);
+                    for (int gx = cx - 1; gx <= cx + 1 && !touching; gx++)
+                        for (int gy = cy - 1; gy <= cy + 1 && !touching; gy++)
+                            for (int gz = cz - 1; gz <= cz + 1 && !touching; gz++)
+                            {
+                                if (!grid.TryGetValue(Key(gx, gy, gz), out var l)) continue;
+                                foreach (int qi in l)
+                                {
+                                    if (chainOf[qi] == c) continue;
+                                    var (q, qr) = pts[qi];
+                                    float lim = r + qr;
+                                    if ((q - p).sqrMagnitude <= lim * lim) { touching = true; break; }
+                                }
+                            }
+                }
+                if (touching) continue;
+
+                // isolated: nearest other-chain point, probed from both ends and
+                // the middle, expanding shell search capped at 0.5 m
+                Vector3 bestA = default, bestB = default; float bestSq = float.MaxValue;
+                int maxR = Mathf.CeilToInt(0.5f / cell);
+                foreach (int pi in new[] { start, start + count / 2, start + count - 1 })
+                {
+                    var (p, _) = pts[pi];
+                    int cx = C(p.x), cy = C(p.y), cz = C(p.z);
+                    int foundAt = -1;
+                    for (int R = 0; R <= maxR; R++)
+                    {
+                        if (foundAt >= 0 && R > foundAt + 1) break; // one shell past the hit
+                        for (int gx = cx - R; gx <= cx + R; gx++)
+                            for (int gy = cy - R; gy <= cy + R; gy++)
+                                for (int gz = cz - R; gz <= cz + R; gz++)
+                                {
+                                    if (Mathf.Max(Mathf.Abs(gx - cx),
+                                        Mathf.Max(Mathf.Abs(gy - cy), Mathf.Abs(gz - cz))) != R) continue;
+                                    if (!grid.TryGetValue(Key(gx, gy, gz), out var l)) continue;
+                                    foreach (int qi in l)
+                                    {
+                                        if (chainOf[qi] == c) continue;
+                                        float dSq = (pts[qi].p - p).sqrMagnitude;
+                                        if (dSq < bestSq)
+                                        {
+                                            bestSq = dSq; bestA = p; bestB = pts[qi].p;
+                                            if (foundAt < 0) foundAt = R;
+                                        }
+                                    }
+                                }
+                    }
+                }
+                if (bestSq == float.MaxValue) { unresolved++; continue; }
+
+                if (wireTriStartLocal < 0) wireTriStartLocal = ti.Count;
+                line[0] = new[] { bestA, bestB };
+                col[0] = Vector3.one;
+                CurveTubeBuilder.AppendCurveTubes(line, col, 1f, stlSupportRadius, stlCurveSides,
+                    0f, Vector3.zero, 0f, tp, tn, tc, ti, tipTaper: 1f, exportSpace: false);
+                links++;
+            }
+            if (links > 0 || unresolved > 0)
+                Debug.Log($"[TSDFPrintExporter] isolation links: {links} black struts" +
+                          (unresolved > 0 ? $", {unresolved} chains had no neighbour within 0.5 m" : "") +
+                          ".", this);
         }
 
         /// <summary>Tubes-only mode: wire the curves' body-side anchors into ONE
