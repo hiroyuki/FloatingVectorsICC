@@ -643,7 +643,7 @@ namespace TSDF
         {
             public readonly List<Vector3> Pos = new List<Vector3>();
             public readonly List<int> Tri = new List<int>();
-            public int CurveTriStart, WireTriStart, SupportTriStart, FloorTriStart;
+            public int CurveTriStart, WireTriStart, SupportTriStart, FloorPillarTriStart, FloorTriStart;
             public int BodyTris, TubeCount, BridgeCount, WireCount, SupportCount, FloorTris;
             public double BodyVol;
             public Vector2 FloorAt;
@@ -784,6 +784,7 @@ namespace TSDF
                     }
                 }
 
+                asm.FloorPillarTriStart = tri.Count;
                 // Floor anchors: chains whose lowest point sits within the band
                 // above the global minimum get a THICK pillar down to the plate
                 // ("足元がプレートにくっついてない…太めのサポートでいい") — the
@@ -827,7 +828,8 @@ namespace TSDF
                 }
             }
             if (tri.Count == 0) { Fail("nothing to export (body and tubes both off/empty)"); return null; }
-            if (!stlIncludeCurveTubes) { asm.WireTriStart = tri.Count; asm.SupportTriStart = tri.Count; }
+            if (!stlIncludeCurveTubes)
+            { asm.WireTriStart = tri.Count; asm.SupportTriStart = tri.Count; asm.FloorPillarTriStart = tri.Count; }
             asm.FloorTriStart = tri.Count;
 
             // Floor plate: after the tubes so its top can sink into the lowest
@@ -943,8 +945,9 @@ namespace TSDF
         }
 
         /// <summary>Colour spans over the assembled shells. Material 0 = Body
-        /// colour (body mesh, root WIREFRAME — the ghost body — and the floor),
-        /// material 1 = Curve colour (tubes, bridges, support struts).</summary>
+        /// colour (body mesh, root wireframe, isolation links, floor pillars and
+        /// the floor plate — the black armature), material 1 = Curve colour
+        /// (tubes, bridges, curve-to-curve struts — the white artwork).</summary>
         private static List<ThreeMfWriter.Span> BuildColourSpans(ShellAssembly asm)
         {
             var spans = new List<ThreeMfWriter.Span>(5);
@@ -953,11 +956,11 @@ namespace TSDF
                 int start = fromTriIdx / 3, count = (toTriIdx - fromTriIdx) / 3;
                 if (count > 0) spans.Add(new ThreeMfWriter.Span { StartTri = start, TriCount = count, Material = mat });
             }
-            Add(0, asm.CurveTriStart, 0);                       // body
-            Add(asm.CurveTriStart, asm.WireTriStart, 1);        // tubes + bridges
-            Add(asm.WireTriStart, asm.SupportTriStart, 0);      // wireframe = ghost body
-            Add(asm.SupportTriStart, asm.FloorTriStart, 1);     // support struts
-            Add(asm.FloorTriStart, asm.Tri.Count, 0);           // floor plate
+            Add(0, asm.CurveTriStart, 0);                          // body
+            Add(asm.CurveTriStart, asm.WireTriStart, 1);           // tubes + bridges
+            Add(asm.WireTriStart, asm.SupportTriStart, 0);         // wireframe + isolation links
+            Add(asm.SupportTriStart, asm.FloorPillarTriStart, 1);  // curve-to-curve struts
+            Add(asm.FloorPillarTriStart, asm.Tri.Count, 0);        // floor pillars + plate
             return spans;
         }
 
@@ -1237,13 +1240,16 @@ namespace TSDF
                 }
                 if (touching) continue;
 
-                // isolated: nearest other-chain point, probed from both ends and
-                // the middle, expanding shell search capped at 0.5 m
-                Vector3 bestA = default, bestB = default; float bestSq = float.MaxValue;
+                // isolated: one strut from EACH end ("先頭としっぽ") to that
+                // end's nearest other-chain point, expanding shell search
+                // capped at 0.5 m
                 int maxR = Mathf.CeilToInt(0.5f / cell);
-                foreach (int pi in new[] { start, start + count / 2, start + count - 1 })
+                int made = 0;
+                var probes = count > 1 ? new[] { start, start + count - 1 } : new[] { start };
+                foreach (int pi in probes)
                 {
                     var (p, _) = pts[pi];
+                    Vector3 best = default; float bestSq = float.MaxValue;
                     int cx = C(p.x), cy = C(p.y), cz = C(p.z);
                     int foundAt = -1;
                     for (int R = 0; R <= maxR; R++)
@@ -1262,21 +1268,22 @@ namespace TSDF
                                         float dSq = (pts[qi].p - p).sqrMagnitude;
                                         if (dSq < bestSq)
                                         {
-                                            bestSq = dSq; bestA = p; bestB = pts[qi].p;
+                                            bestSq = dSq; best = pts[qi].p;
                                             if (foundAt < 0) foundAt = R;
                                         }
                                     }
                                 }
                     }
-                }
-                if (bestSq == float.MaxValue) { unresolved++; continue; }
+                    if (bestSq == float.MaxValue) continue;
 
-                if (wireTriStartLocal < 0) wireTriStartLocal = ti.Count;
-                line[0] = new[] { bestA, bestB };
-                col[0] = Vector3.one;
-                CurveTubeBuilder.AppendCurveTubes(line, col, 1f, stlSupportRadius, stlCurveSides,
-                    0f, Vector3.zero, 0f, tp, tn, tc, ti, tipTaper: 1f, exportSpace: false);
-                links++;
+                    if (wireTriStartLocal < 0) wireTriStartLocal = ti.Count;
+                    line[0] = new[] { p, best };
+                    col[0] = Vector3.one;
+                    CurveTubeBuilder.AppendCurveTubes(line, col, 1f, stlSupportRadius, stlCurveSides,
+                        0f, Vector3.zero, 0f, tp, tn, tc, ti, tipTaper: 1f, exportSpace: false);
+                    links++; made++;
+                }
+                if (made == 0) unresolved++;
             }
             if (links > 0 || unresolved > 0)
                 Debug.Log($"[TSDFPrintExporter] isolation links: {links} black struts" +
