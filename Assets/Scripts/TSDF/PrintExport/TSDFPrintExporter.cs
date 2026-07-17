@@ -67,6 +67,12 @@ namespace TSDF
                  "Keep >= ~1 voxel or Marching Cubes breaks the tube up.")]
         public float printRadius = 0.006f;
 
+        [Range(0.05f, 1f)]
+        [Tooltip("Radius scale at the tube's PAST end (trail tail). 1 = constant " +
+                 "radius; smaller = the trail thins out into the past. Watch the " +
+                 "print minimum: taper * printRadius must stay above the wire floor.")]
+        public float tubeTailTaper = 1f;
+
         [Range(1f, 3f)]
         [Tooltip("Bridge body-side radius multiplier — a fillet root where the tube " +
                  "meets the body, for strength.")]
@@ -698,16 +704,12 @@ namespace TSDF
                 // Self-made supports: from each support point, a SHORT strut to
                 // the nearest OTHER curve's point inside a 45° downward cone —
                 // struts hide inside the curve cloud instead of forming a pillar
-                // forest ("地面から脚を生やすと全部埋もれる", 2026-07-17). Only
-                // points with no target below drop a pillar to the lowest level,
-                // where the floor plate (top sunk 5 mm into the lowest geometry)
-                // catches them.
+                // forest ("地面から脚を生やすと全部埋もれる", 2026-07-17). Points
+                // with no target below get NO strut ("床に落ちているサポートの柱
+                // いらない") — the slicer's own supports handle the bottom layer.
                 asm.SupportTriStart = tri.Count;
                 if (supportPts != null && supportPts.Count > 0 && pos.Count > 0)
                 {
-                    float minY = float.PositiveInfinity;
-                    foreach (var p in pos) if (p.y < minY) minY = p.y;
-
                     // XZ spatial hash over the strut target candidates
                     float cell = Mathf.Max(0.05f, stlSupportSearchRadius);
                     var grid = new Dictionary<long, List<int>>();
@@ -725,7 +727,6 @@ namespace TSDF
                     var strutLine = new List<Vector3[]> { null };
                     var strutCol = new List<Vector3> { Vector3.one };
                     float minDrop = stlSupportRadius * 3f;
-                    int floorPillars = 0;
                     foreach (var (p, chain) in supportPts)
                     {
                         // nearest other-chain point inside the 45° downward cone
@@ -750,23 +751,13 @@ namespace TSDF
                                 }
                             }
 
-                        if (!found)
-                        {
-                            // nothing below inside the cone: bottom-layer point →
-                            // pillar to the floor (skip if already at the bottom)
-                            if (p.y - minY < minDrop) continue;
-                            best = new Vector3(p.x, minY, p.z);
-                            floorPillars++;
-                        }
+                        if (!found) continue; // bottom layer: no floor pillar
                         strutLine[0] = new[] { p, best };
                         CurveTubeBuilder.AppendCurveTubes(strutLine, strutCol, 1f, stlSupportRadius,
                             stlCurveSides, 0f, Vector3.zero, 0f, sp, sn, sc, si,
                             tipTaper: 1f, exportSpace: false);
                         asm.SupportCount++;
                     }
-                    if (floorPillars > 0)
-                        Debug.Log($"[TSDFPrintExporter] supports: {asm.SupportCount} struts, " +
-                                  $"{floorPillars} of them floor pillars (bottom layer).", this);
                     if (si.Count > 0)
                     {
                         int vOff = pos.Count, iBase = tri.Count;
@@ -1047,10 +1038,9 @@ namespace TSDF
                     if (pts.Count < 2) continue;
                     line[0] = pts.ToArray();
                     col[0] = segs[idxs[0]].color;
-                    // Constant radius: a tapered tail would print below the wire floor.
                     tubeCount += CurveTubeBuilder.AppendCurveTubes(line, col, 1f, printRadius,
                         stlCurveSides, webCurveTolerance, Vector3.zero, 0f, tp, tn, tc, ti,
-                        tipTaper: 1f, exportSpace: false);
+                        tipTaper: Mathf.Clamp01(tubeTailTaper), exportSpace: false);
 
                     // support-strut anchor points (endpoints + interior samples
                     // every stlSupportSpacing of arc length; 0 = endpoints only)
