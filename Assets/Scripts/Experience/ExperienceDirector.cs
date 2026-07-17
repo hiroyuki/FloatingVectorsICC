@@ -63,6 +63,13 @@ namespace Experience
         public TSDFPrintExporter printExporter; // capture/export settings source
         public CameraHealthMonitor healthMonitor; // fault source (auto-resolved)
 
+        [Tooltip("Live CUDA fusion source (RTMPose). When an enabled instance exists " +
+                 "it IS the live skeleton pipeline: fused bodies drive the merger " +
+                 "during live phases, banzai detection reads it directly during " +
+                 "playback, and the k4abt LiveSkeletonFeed stays dormant. " +
+                 "Auto-resolves when empty; absent = k4abt live pipeline.")]
+        public LiveFusedBodySource liveFusedSource;
+
         [Header("Debug")]
         [Tooltip("Force the Fault state (full-screen red alert) regardless of the " +
                  "health monitor.")]
@@ -121,10 +128,16 @@ namespace Experience
 
         // visitor playback (Watch/BanzaiWait/Exporting/QrShow)
         private bool _visitorPlaybackActive;
-        private bool _savedIgnoreRecorded;
+        private bool _takeHasBodies = true;
         private int _savedRenderDelay;
         private bool _savedLoop;
         private int _playbackLoops;
+
+        // body-source snapshot (EnterMode) — restored on Exit
+        private bool _savedIgnoreRecorded;
+        private bool _savedUseExternal;
+        private bool _savedLfbsSubmit;
+        private bool _savedLfbsLiveOnly;
 
         // per-run state
         private VisitorBodyMetrics _metrics = VisitorBodyMetrics.Default;
@@ -160,7 +173,11 @@ namespace Experience
             if (poseHistory == null) poseHistory = FindFirstObjectByType<BonePoseHistory>();
             if (printExporter == null) printExporter = FindFirstObjectByType<TSDFPrintExporter>();
             if (healthMonitor == null) healthMonitor = FindFirstObjectByType<CameraHealthMonitor>();
+            if (liveFusedSource == null) liveFusedSource = FindFirstObjectByType<LiveFusedBodySource>();
         }
+
+        /// <summary>The live CUDA fusion pipeline is present and running.</summary>
+        private bool LfbsActive => liveFusedSource != null && liveFusedSource.isActiveAndEnabled;
 
         private bool HasLiveRenderers()
         {
@@ -195,19 +212,86 @@ namespace Experience
             _fsm.Tick(Time.deltaTime, in inputs, config.timings);
             UpdateBanzaiDetection();
             UpdateCrowdNotice();
+
+            // Fused source died mid-session (CUDA fault, component disabled):
+            // bring up the k4abt fallback feed so calibration/banzai/presence
+            // keep a live-skeleton provider. On recovery, retire the fallback
+            // again — two live pipelines would fight for the GPU — and reassert
+            // the current state's body-source mode (the recovered component
+            // re-enabled with its own serialized flags).
+            if (_liveFeed == null && !LfbsActive)
+            {
+                Debug.LogWarning($"[{nameof(ExperienceDirector)}] live fused source inactive — " +
+                                 "spawning the k4abt LiveSkeletonFeed fallback.", this);
+                SpawnLiveFeed();
+            }
+            else if (_liveFeed != null && LfbsActive)
+            {
+                Debug.Log($"[{nameof(ExperienceDirector)}] live fused source recovered — " +
+                          "retiring the k4abt fallback feed.", this);
+                Destroy(_liveFeed.gameObject);
+                _liveFeed = null;
+                ReapplyBodySourceForState(_fsm.State);
+            }
         }
 
-        // During visitor playback the merged-BT presence path is fed by the
-        // recorded GHOST — presence must come from live-only signals: GPU
-        // occupancy plus the live skeleton feed.
+        private void ReapplyBodySourceForState(ExperienceState s)
+        {
+            switch (s)
+            {
+                case ExperienceState.Attract:
+                    ApplyBodySource(BodySource.AttractGhost);
+                    break;
+                case ExperienceState.Calibrate:
+                case ExperienceState.Explore:
+                case ExperienceState.Processing:
+                    ApplyBodySource(BodySource.Live);
+                    break;
+                case ExperienceState.Watch:
+                case ExperienceState.BanzaiWait:
+                case ExperienceState.Exporting:
+                case ExperienceState.QrShow:
+                    ApplyBodySource(BodySource.VisitorPlayback, _takeHasBodies);
+                    break;
+                    // Fault: leave the transport as the preceding state set it —
+                    // the alert owns the screen, recovery goes through Attract.
+            }
+        }
+
+        private void SpawnLiveFeed()
+        {
+            _liveFeed = new GameObject("_ExperienceLiveFeed").AddComponent<LiveSkeletonFeed>();
+            _liveFeed.transform.SetParent(transform, false);
+            _liveFeed.workerHost = merger != null ? merger.workerHost : null;
+            _liveFeed.merger = merger;
+            _liveFeed.sensorManager = sensorManager;
+            _liveFeed.recorder = sensorRecorder;
+            _liveFeed.trackingVolume = boundingVolume;
+        }
+
+        // While recorded bodies drive the merge (visitor playback; attract with
+        // recorded-ghost bodies) the merged-BT presence path sees the GHOST —
+        // presence must come from live-only signals: GPU occupancy, the fused
+        // live skeleton, or the k4abt live feed.
         private bool ComputePresent()
         {
             if (_presence == null) return false;
             var s = _fsm.State;
-            bool playbackState = s == ExperienceState.Watch || s == ExperienceState.BanzaiWait
+            bool playbackState =
+                s == ExperienceState.Watch || s == ExperienceState.BanzaiWait
                 || s == ExperienceState.Exporting || s == ExperienceState.QrShow;
-            if (!playbackState) return _presence.IsPresent;
-            return _presence.OccupancyActive || (_liveFeed != null && _liveFeed.HasRecentPerson);
+            // The merged-BT presence path only lies when RECORDED bodies own the
+            // merge. In the no-bodies fallback the merger re-runs k4abt on the
+            // playback — the "ghost" it sees IS the visitor's own take, and
+            // excluding it would end the show whenever occupancy under-fires
+            // (the overstay risk is bounded: loops → capture → QR timeout).
+            bool ghostDrivesMerge =
+                (playbackState && _takeHasBodies)
+                || (s == ExperienceState.Attract && config.attractUseRecordedBodies && _attract != null);
+            if (!ghostDrivesMerge) return _presence.IsPresent;
+            return _presence.OccupancyActive
+                || (LfbsActive && liveFusedSource.HasRecentFused)
+                || (_liveFeed != null && _liveFeed.HasRecentPerson);
         }
 
         // ------------------------------------------------ enter / exit ----
@@ -274,13 +358,26 @@ namespace Experience
             _presence.yBandMin = config.yBandMin;
             _presence.yBandMax = config.yBandMax;
             _presence.occupancyThreshold = config.occupancyThreshold;
-            _liveFeed = new GameObject("_ExperienceLiveFeed").AddComponent<LiveSkeletonFeed>();
-            _liveFeed.transform.SetParent(transform, false);
-            _liveFeed.workerHost = merger != null ? merger.workerHost : null;
-            _liveFeed.merger = merger;
-            _liveFeed.sensorManager = sensorManager;
-            _liveFeed.recorder = sensorRecorder;
-            _liveFeed.trackingVolume = boundingVolume;
+            // k4abt live-skeleton feed: only when no live CUDA fusion runs — with
+            // LiveFusedBodySource active, pose detection reads the fused skeleton
+            // and spawning k4abt workers would just fight it for the GPU. Update()
+            // watches for a mid-session fused-source death and spawns the feed
+            // then, so the k4abt fallback branches always have a provider.
+            if (!LfbsActive) SpawnLiveFeed();
+            else Debug.Log($"[{nameof(ExperienceDirector)}] live fused source active — " +
+                           "k4abt LiveSkeletonFeed dormant unless the fusion stops.", this);
+
+            // body-source snapshot (restored on Exit)
+            if (merger != null)
+            {
+                _savedIgnoreRecorded = merger.ignoreRecordedBodies;
+                _savedUseExternal = merger.useExternalBodies;
+            }
+            if (liveFusedSource != null)
+            {
+                _savedLfbsSubmit = liveFusedSource.submitToMerger;
+                _savedLfbsLiveOnly = liveFusedSource.liveFramesOnly;
+            }
 
             _starHold = new PoseHoldDetector(config.starHoldSeconds, config.poseHoldDropoutSeconds);
             _banzaiHold = new PoseHoldDetector(config.banzaiHoldSeconds, config.poseHoldDropoutSeconds);
@@ -347,6 +444,22 @@ namespace Experience
             AbortVisitorRecording();
             StopVisitorPlayback();
             RestoreHistorySamples(); // in case a capture was mid-flight
+
+            // body-source restore (mirror of the EnterMode snapshot). The
+            // useExternalBodies write comes LAST — SetSubmitToMerger may touch
+            // the flag, and Dev mode must come back bit-identical even when the
+            // pre-session combination was unusual (e.g. submit off, flag on).
+            if (liveFusedSource != null)
+            {
+                liveFusedSource.SetSubmitToMerger(_savedLfbsSubmit);
+                liveFusedSource.liveFramesOnly = _savedLfbsLiveOnly;
+            }
+            if (merger != null)
+            {
+                merger.ignoreRecordedBodies = _savedIgnoreRecorded;
+                merger.muteWorkerIngest = false;
+                merger.useExternalBodies = _savedUseExternal;
+            }
 
             if (_fsm != null) { _fsm.Changed -= OnStateChanged; _fsm = null; }
 
@@ -433,6 +546,7 @@ namespace Experience
             _debugBanzaiPulse = false;
             _exportDone = _exportFailed = false;
             _playbackLoops = 0;
+            _takeHasBodies = true;
             _qrUrl = null;
             _crowdShowing = false;
             _starHold?.Reset();
@@ -470,12 +584,15 @@ namespace Experience
             // running as the only source.
             if (from == ExperienceState.Attract && to == ExperienceState.Calibrate)
             {
+                ApplyBodySource(BodySource.Live);
                 if (HasLiveRenderers())
                 {
                     _attract?.Stop();
                     _attractOwnsPlayback = false;
                     sensorManager?.SetLiveSuppressedAsSource(false);
-                    if (merger != null) merger.RestartWorkers();
+                    // k4abt pipeline only: restart the workers across the clock
+                    // jump. With the fused source there are no workers to restart.
+                    if (merger != null && !LfbsActive) merger.RestartWorkers();
                 }
                 else
                 {
@@ -509,6 +626,7 @@ namespace Experience
                 case ExperienceState.Attract:
                     StopVisitorPlayback();
                     _ui.ClearAll();
+                    ApplyBodySource(BodySource.AttractGhost);
                     StartAttractPlayback();
                     break;
                 case ExperienceState.Calibrate:
@@ -551,6 +669,77 @@ namespace Experience
             }
             if (state != ExperienceState.Fault) _ui.ClearAlert();
             ShowStateMessage(state);
+        }
+
+        // ---------------- body-source switching ----------------
+        // Three skeleton contexts, one switchboard. The LIVE pipeline is either
+        // LiveFusedBodySource (CUDA RTMPose fusion → merger via external bodies)
+        // or the k4abt workers; recorded bodies_main serves the attract ghost
+        // and the visitor playback.
+        private enum BodySource { Live, AttractGhost, VisitorPlayback }
+
+        private void ApplyBodySource(BodySource mode, bool takeHasBodies = true)
+        {
+            bool lfbs = LfbsActive;
+            bool attractGhostBodies = mode == BodySource.AttractGhost
+                                      && config.attractUseRecordedBodies && _attract != null;
+            switch (mode)
+            {
+                case BodySource.AttractGhost when attractGhostBodies:
+                    if (lfbs)
+                    {
+                        // keep fusing LIVE camera frames only: HasRecentFused then
+                        // means "someone stepped onto the stage", and the ghost
+                        // recording can't leak into the fusion via the dev tap.
+                        liveFusedSource.SetSubmitToMerger(false);
+                        liveFusedSource.liveFramesOnly = true;
+                    }
+                    if (merger != null)
+                    {
+                        merger.ignoreRecordedBodies = false; // takes' (v11s) bodies drive the ghost
+                        // live k4abt results must not join the ghost's merge; the
+                        // LiveSkeletonFeed still ingests worker events for presence.
+                        merger.muteWorkerIngest = true;
+                    }
+                    break;
+
+                case BodySource.Live:
+                case BodySource.AttractGhost: // legacy attract = live-source rules
+                    if (lfbs)
+                    {
+                        liveFusedSource.SetSubmitToMerger(true);
+                        liveFusedSource.liveFramesOnly = false;
+                    }
+                    if (merger != null)
+                    {
+                        merger.ignoreRecordedBodies = _savedIgnoreRecorded;
+                        merger.muteWorkerIngest = false;
+                    }
+                    break;
+
+                case BodySource.VisitorPlayback:
+                    if (lfbs)
+                    {
+                        liveFusedSource.SetSubmitToMerger(false); // v11s bodies own the merge
+                        liveFusedSource.liveFramesOnly = true;    // fuse the visitor, not the replay
+                    }
+                    if (merger != null)
+                    {
+                        if (takeHasBodies)
+                        {
+                            merger.ignoreRecordedBodies = false;
+                            merger.muteWorkerIngest = true; // workers (if any) belong to LiveSkeletonFeed
+                        }
+                        else
+                        {
+                            // no bodies_main at all: the merger's re-run-k4abt-on-
+                            // playback path is the only skeleton source — leave it on.
+                            merger.ignoreRecordedBodies = _savedIgnoreRecorded;
+                            merger.muteWorkerIngest = false;
+                        }
+                    }
+                    break;
+            }
         }
 
         // Attract ghost: start only when the recorder is idle (a dev playback
@@ -628,7 +817,7 @@ namespace Experience
                 }
 
                 bool star = false;
-                if (_liveFeed != null && _liveFeed.TryGetBestSkeleton(out var joints, out var valid))
+                if (TryGetLiveSkeleton(out var joints, out var valid))
                 {
                     star = PoseClassifiers.IsStarPose(joints, valid,
                         config.starArmStraightnessMin, config.starArmLevelFactor,
@@ -858,32 +1047,19 @@ namespace Experience
             sensorRecorder.Load();
 
             // Skeleton source for the playback. Normal path: the take carries
-            // bodies_main (fused, or the k4abt fallback recorded during Explore)
-            // → merger consumes it and the workers go to LiveSkeletonFeed for
-            // banzai detection. Edge: NO track has bodies (BT never locked on
-            // during Explore) → muting would kill the only remaining skeleton
-            // source, the merger's re-run-k4abt-on-playback path. Leave that
-            // path in charge instead; banzai detection is unavailable then, but
-            // the loop fallback still finishes the show.
-            bool takeHasBodies = false;
+            // bodies_main (v11s-converted, or the k4abt fallback) → merger
+            // consumes it; the live visitor is tracked by the fused source (or
+            // the k4abt LiveSkeletonFeed) for banzai detection. Edge: NO track
+            // has bodies (conversion failed AND nothing recorded) → the merger's
+            // re-run-k4abt-on-playback path stays the only skeleton source.
+            _takeHasBodies = false;
             foreach (var (serial, _) in PointCloudRecording.EnumerateDevices(takeRoot))
-                if (sensorRecorder.HasRecordedBodies(serial)) { takeHasBodies = true; break; }
-            if (merger != null)
-            {
-                _savedIgnoreRecorded = merger.ignoreRecordedBodies;
-                if (takeHasBodies)
-                {
-                    merger.ignoreRecordedBodies = false; // consume the recorded bodies_main
-                    merger.muteWorkerIngest = true;      // workers belong to LiveSkeletonFeed
-                }
-                else
-                {
-                    Debug.LogWarning($"[{nameof(ExperienceDirector)}] take has no recorded bodies — " +
-                                     "keeping live-k4abt-on-playback as the skeleton source " +
-                                     "(banzai detection unavailable; loop fallback will capture).", this);
-                    merger.muteWorkerIngest = false;
-                }
-            }
+                if (sensorRecorder.HasRecordedBodies(serial)) { _takeHasBodies = true; break; }
+            if (!_takeHasBodies)
+                Debug.LogWarning($"[{nameof(ExperienceDirector)}] take has no recorded bodies — " +
+                                 "keeping live-k4abt-on-playback as the skeleton source " +
+                                 "(loop fallback will capture).", this);
+            ApplyBodySource(BodySource.VisitorPlayback, _takeHasBodies);
 
             if (!sensorRecorder.IsPlaying) sensorRecorder.TogglePlay();
             sensorRecorder.OnPlaybackLooped += HandleVisitorPlaybackLooped;
@@ -893,6 +1069,8 @@ namespace Experience
 
         private void HandleVisitorPlaybackLooped() => _playbackLoops++;
 
+        // Transport teardown only — the body source is (re)applied by whichever
+        // context follows (Attract side effects, or the ExitMode restore).
         private void StopVisitorPlayback()
         {
             if (!_visitorPlaybackActive) return;
@@ -904,11 +1082,6 @@ namespace Experience
                 sensorRecorder.playbackRenderDelayFrames = _savedRenderDelay;
                 sensorRecorder.loop = _savedLoop;
             }
-            if (merger != null)
-            {
-                merger.ignoreRecordedBodies = _savedIgnoreRecorded;
-                merger.muteWorkerIngest = false;
-            }
         }
 
         // ------------------------------------------------ banzai / capture ----
@@ -916,6 +1089,30 @@ namespace Experience
         /// <summary>Debug hook (RunCommand): trigger the banzai capture as if the
         /// pose was detected. Only honored in BanzaiWait.</summary>
         public void DebugTriggerBanzai() => _debugBanzaiPulse = true;
+
+        // Live skeleton during LIVE phases (Calibrate): the merged output IS the
+        // live person there — source-agnostic (fused-submitted or k4abt).
+        private bool TryGetLiveSkeleton(out Vector3[] joints, out bool[] valid)
+        {
+            if (merger != null && merger.TryGetPrimarySkeleton(out joints, out valid)) return true;
+            if (_liveFeed != null && _liveFeed.TryGetBestSkeleton(out joints, out valid)) return true;
+            joints = null;
+            valid = null;
+            return false;
+        }
+
+        // Live skeleton during PLAYBACK states (BanzaiWait): the merge carries
+        // the recorded ghost, so read the live pipelines directly — the fused
+        // source (submission gated off but still fusing live frames), else the
+        // k4abt LiveSkeletonFeed.
+        private bool TryGetPlaybackLiveSkeleton(out Vector3[] joints, out bool[] valid)
+        {
+            if (LfbsActive && liveFusedSource.TryGetLatestFusedWorld(out joints, out valid)) return true;
+            if (_liveFeed != null && _liveFeed.TryGetBestSkeleton(out joints, out valid)) return true;
+            joints = null;
+            valid = null;
+            return false;
+        }
 
         private void UpdateBanzaiDetection()
         {
@@ -926,7 +1123,7 @@ namespace Experience
             _debugBanzaiPulse = false;
 
             bool banzaiNow = false;
-            if (_liveFeed != null && _liveFeed.TryGetBestSkeleton(out var joints, out var valid))
+            if (TryGetPlaybackLiveSkeleton(out var joints, out var valid))
                 banzaiNow = PoseClassifiers.IsBanzai(joints, valid, _metrics,
                     config.banzaiMarginMeters, config.banzaiMarginArmFraction);
             if (_banzaiHold.Update(banzaiNow, Time.realtimeSinceStartup)) trigger = true;

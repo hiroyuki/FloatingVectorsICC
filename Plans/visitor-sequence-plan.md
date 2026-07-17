@@ -38,6 +38,24 @@
 | 変換共通部 | `FusedSnapshotEncoder`（export/live/converter の 3 者で共用） |
 | UI | `VisitorMessageUI`（ShowPoseGuide / ShowProgress 追加）+ `StickFigureTexture` |
 
+## ライブパイプライン（Phase F, 2026-07-18）
+
+ライブ骨格は **LiveFusedBodySource（RTMPose CUDA 融合、実測 30Hz）** が一次。
+director が enabled な instance を自動検出し、コンテキストごとに切り替える
+（`ApplyBodySource`）:
+
+| コンテキスト | merger のソース | LFBS |
+|---|---|---|
+| Live（Calibrate/Explore） | 融合 bodies（useExternalBodies） | submit ON |
+| AttractGhost | テイクの v11s bodies（ignoreRecordedBodies=false + mute） | submit OFF・liveFramesOnly（入場検知用にライブだけ融合） |
+| VisitorPlayback | テイクの v11s bodies | submit OFF・liveFramesOnly（ばんざい検知用） |
+
+- ポーズ検知: ライブ phase = `SkeletonMerger.TryGetPrimarySkeleton`（ソース非依存）、
+  再生中 = `LiveFusedBodySource.TryGetLatestFusedWorld` 直読み
+- LFBS が無い/無効なら従来の k4abt 経路（LiveSkeletonFeed）に自動フォールバック
+- Explore 収録は external mode だと bodies_main を書かないが、v11s 変換は
+  streams から生成するので問題ない
+
 ## 排他制御の要点
 
 - **k4abt worker のフレーム所有権**: merger は「再生中 && そのテイクに serial がある」

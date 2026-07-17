@@ -55,6 +55,21 @@ namespace BodyTracking.Eval.Rtmpose
                  "machines without cameras). Live renderer frames are always consumed.")]
         public bool usePlaybackFrames = true;
 
+        [Tooltip("Feed the fused skeleton into the merger (useExternalBodies mode). " +
+                 "The experience director turns this OFF during visitor playback: the " +
+                 "recorded v11s bodies_main drives the sculpture then, while this " +
+                 "component keeps fusing the LIVE visitor for banzai detection " +
+                 "(read via TryGetLatestFusedWorld). Toggle at runtime through " +
+                 "SetSubmitToMerger so the merger's useExternalBodies flag follows.")]
+        public bool submitToMerger = true;
+
+        [Tooltip("Ignore the recorder's playback frames/tap and fuse ONLY live camera " +
+                 "frames. The experience director sets this during visitor playback so " +
+                 "the fusion tracks the visitor standing on stage, not the recording " +
+                 "being replayed. (Dev machines without cameras then fuse nothing — " +
+                 "banzai degrades to the loop fallback.)")]
+        public bool liveFramesOnly = false;
+
         [Tooltip("Folder with yolox-m/ and rtmpose-m/ ONNX models, relative to the " +
                  "project root.")]
         public string modelsDir = "eval/models";
@@ -102,6 +117,66 @@ namespace BodyTracking.Eval.Rtmpose
         /// <summary>Bench probe access to the live fusion adapter (stage timings,
         /// fresh/held counters). Null when no session is running.</summary>
         public FusedRtmposeAdapter CurrentAdapter => _session?.Fused;
+
+        // ---- latest fused skeleton (pose detection during visitor playback) ----
+
+        const float kFusedFreshSeconds = 0.5f;
+        private readonly BodySnapshot[] _latestDecode = { new BodySnapshot(), new BodySnapshot() };
+        private readonly Vector3[] _latestFusedWorld = new Vector3[K4ABTConsts.K4ABT_JOINT_COUNT];
+        private readonly bool[] _latestFusedValid = new bool[K4ABTConsts.K4ABT_JOINT_COUNT];
+        private float _latestFusedAt = -1f;
+
+        /// <summary>A fused skeleton arrived within the freshness window.</summary>
+        public bool HasRecentFused =>
+            _latestFusedAt >= 0f && Time.realtimeSinceStartup - _latestFusedAt <= kFusedFreshSeconds;
+
+        /// <summary>
+        /// Latest fused skeleton in Unity WORLD space (K4ABT joint order; valid =
+        /// confidence != NONE). Updated on the main-thread drain regardless of
+        /// <see cref="submitToMerger"/>, so pose detection keeps working while
+        /// the merger plays recorded bodies. The arrays are internal buffers
+        /// overwritten per result — read immediately. False when stale.
+        /// </summary>
+        public bool TryGetLatestFusedWorld(out Vector3[] jointsWorld, out bool[] jointValid)
+        {
+            if (!HasRecentFused)
+            {
+                jointsWorld = null;
+                jointValid = null;
+                return false;
+            }
+            jointsWorld = _latestFusedWorld;
+            jointValid = _latestFusedValid;
+            return true;
+        }
+
+        /// <summary>Runtime toggle for <see cref="submitToMerger"/> that keeps the
+        /// merger's useExternalBodies flag in sync. Pausing FORCES external-body
+        /// mode off regardless of who set it — this component is the only
+        /// external-body feeder, so a lingering true (stale scene serialization,
+        /// pre-enabled merger) would leave the merger deaf to the recorded
+        /// bodies_main the caller is switching to. Resuming re-acquires the mode.</summary>
+        public void SetSubmitToMerger(bool value)
+        {
+            // No early-out on an unchanged field: the merger flag may still be
+            // out of sync (serialized/stale) and callers rely on this method to
+            // reconcile it.
+            submitToMerger = value;
+            if (merger == null || _session == null) return;
+            if (value)
+            {
+                if (!merger.useExternalBodies)
+                {
+                    merger.useExternalBodies = true;
+                    _mergerFlagOwned = true;
+                }
+            }
+            else if (merger.useExternalBodies)
+            {
+                merger.useExternalBodies = false;
+                _mergerFlagOwned = true; // we own the mode's lifecycle from here on
+            }
+        }
 
         // ---- per-serial frame queue (main thread writes, worker consumes) ----
         // A small ring absorbs delivery bursts: playback catch-up (the recorder's
@@ -245,7 +320,7 @@ namespace BodyTracking.Eval.Rtmpose
                 return;
             }
 
-            if (merger != null && !merger.useExternalBodies)
+            if (submitToMerger && merger != null && !merger.useExternalBodies)
             {
                 merger.useExternalBodies = true;
                 _mergerFlagOwned = true;
@@ -309,7 +384,9 @@ namespace BodyTracking.Eval.Rtmpose
 
             // late-joining renderers (live cameras open asynchronously)
             SubscribeSources();
-            bool playing = _recorder != null && _recorder.IsPlaying;
+            // liveFramesOnly: the playback tap and playback pacing stay off — the
+            // recording being replayed is the SCULPTURE, not the person to fuse.
+            bool playing = !liveFramesOnly && _recorder != null && _recorder.IsPlaying;
             s.PlaybackActive = playing;
             if (playing)
             {
@@ -318,8 +395,9 @@ namespace BodyTracking.Eval.Rtmpose
             }
             else s.TapRoot = null;
 
-            // drain fused results into the merger (main thread — merger touches
-            // Unity transforms)
+            // drain fused results (main thread — merger touches Unity transforms).
+            // The latest-fused snapshot updates on EVERY drain so pose detection
+            // works even while merger submission is gated off (visitor playback).
             while (true)
             {
                 FusedResult res;
@@ -328,7 +406,8 @@ namespace BodyTracking.Eval.Rtmpose
                     if (s.Results.Count == 0) break;
                     res = s.Results.Dequeue();
                 }
-                if (merger == null) continue;
+                UpdateLatestFused(s, res);
+                if (merger == null || !submitToMerger) continue;
                 foreach (var kv in res.BytesBySerial)
                 {
                     Slot slot;
@@ -368,6 +447,10 @@ namespace BodyTracking.Eval.Rtmpose
 
         private void HandlePlaybackLooped()
         {
+            // Live-only fusion runs on the monotonic live clock — a playback loop
+            // wrap doesn't touch it, so keep the adapter (a rebuild would drop
+            // the visitor's tracking continuity mid-BanzaiWait).
+            if (liveFramesOnly) return;
             var s = _session;
             if (s == null) return;
             s.ResetPending = true;
@@ -378,7 +461,10 @@ namespace BodyTracking.Eval.Rtmpose
             => Ingest(r.deviceSerial, r.CameraParam, r.transform, frame);
 
         private void OnPlaybackFrame(string serial, ObCameraParam? camParam, Transform tr, RawFrameData frame)
-            => Ingest(serial, camParam, tr, frame);
+        {
+            if (liveFramesOnly) return;
+            Ingest(serial, camParam, tr, frame);
+        }
 
         private void Ingest(string serial, ObCameraParam? camParam, Transform tr, in RawFrameData f)
         {
@@ -800,6 +886,35 @@ namespace BodyTracking.Eval.Rtmpose
         // (world -> camera color -> camera depth, k4abt id mapping + derived fills).
         private static void BuildSnapshot(Session s, EvalSkeleton p, CamXform x)
             => FusedSnapshotEncoder.Build(s.Snap, p, x.G, x.D2C);
+
+        // Main-thread: decode one reference camera's fused bodies back into Unity
+        // world space for TryGetLatestFusedWorld. Every serial carries the SAME
+        // fused skeleton (in its own depth frame), so the first usable one wins.
+        private void UpdateLatestFused(Session s, FusedResult res)
+        {
+            foreach (var kv in res.BytesBySerial)
+            {
+                Slot slot;
+                lock (s.SlotLock) s.Slots.TryGetValue(kv.Key, out slot);
+                if (slot == null || slot.SourceTransform == null || !slot.CamParam.HasValue) continue;
+                int n = RecordedBodySerializer.Decode(kv.Value, res.ByteCount, _latestDecode);
+                if (n < 1) continue;
+
+                var e = slot.CamParam.Value.Transform;
+                Matrix4x4 d2c = e.Rot != null && e.Rot.Length >= 9 && e.Trans != null && e.Trans.Length >= 3
+                    ? e.ToMatrixMm() : Matrix4x4.identity;
+                var joints = _latestDecode[0].Joints;
+                for (int i = 0; i < K4ABTConsts.K4ABT_JOINT_COUNT; i++)
+                {
+                    _latestFusedWorld[i] = MultiCam.SkeletonWorldTransform.ToWorld(
+                        joints[i].Position, d2c, slot.SourceTransform);
+                    _latestFusedValid[i] = joints[i].ConfidenceLevel
+                        != k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_NONE;
+                }
+                _latestFusedAt = Time.realtimeSinceStartup;
+                return;
+            }
+        }
 
         // ---------------- calibration ----------------
 
