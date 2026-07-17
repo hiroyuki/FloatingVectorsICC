@@ -264,6 +264,19 @@ namespace PointCloud
             }
         }
 
+        /// <summary>Highest per-device depth playback cursor — a stable frame
+        /// index for the current (paused) playback moment. Exporters stamp it
+        /// into file names so a print can be traced back to its take frame.</summary>
+        public int CurrentPlaybackFrame
+        {
+            get
+            {
+                int m = 0;
+                foreach (var kv in _tracks) m = Mathf.Max(m, kv.Value.PlaybackCursor);
+                return m;
+            }
+        }
+
         /// <summary>Duration in seconds of the longest per-device track.</summary>
         public float RecordedDuration
         {
