@@ -731,8 +731,8 @@ namespace TSDF
                 // the root wireframe, to the anchor graph. Without either target
                 // they would be floating spikes, so they are skipped.
                 bool wireframe = !stlIncludeBody && stlRootWireframe;
-                var supportPts = stlCurveSupportPillars ? new List<(Vector3 p, int chain)>() : null;
-                var supportCands = stlCurveSupportPillars ? new List<(Vector3 p, int chain)>() : null;
+                var supportPts = stlCurveSupportPillars ? new List<(Vector3 p, int chain, float r)>() : null;
+                var supportCands = stlCurveSupportPillars ? new List<(Vector3 p, int chain, float r)>() : null;
                 var chainLows = stlFloorPillarBand > 1e-4f ? new List<Vector3>() : null;
                 BuildCurveAndBridgeTubes(tp, tn, tc, ti, out asm.TubeCount, out asm.BridgeCount,
                                          includeBridges: stlIncludeBody || wireframe,
@@ -785,10 +785,10 @@ namespace TSDF
                     var strutCol = new List<Vector3> { Vector3.one };
                     float minDrop = stlSupportRadius * 3f;
                     int floorFallbacks = 0;
-                    foreach (var (p, chain) in supportPts)
+                    foreach (var (p, chain, pr) in supportPts)
                     {
                         // nearest other-chain point inside the 45° downward cone
-                        Vector3 best = default; float bestSq = float.MaxValue; bool found = false;
+                        Vector3 best = default; float bestSq = float.MaxValue, bestR = 0f; bool found = false;
                         int cx = Mathf.FloorToInt(p.x / cell), cz = Mathf.FloorToInt(p.z / cell);
                         for (int gx = cx - 1; gx <= cx + 1; gx++)
                             for (int gz = cz - 1; gz <= cz + 1; gz++)
@@ -796,7 +796,7 @@ namespace TSDF
                                 if (!grid.TryGetValue(((long)gx << 32) ^ (uint)gz, out var list)) continue;
                                 foreach (int ci in list)
                                 {
-                                    var (q, qChain) = supportCands[ci];
+                                    var (q, qChain, qr) = supportCands[ci];
                                     if (qChain == chain) continue;
                                     float dy = p.y - q.y;
                                     if (dy < minDrop) continue;                  // must be below
@@ -805,7 +805,7 @@ namespace TSDF
                                     if (horizSq > dy * dy) continue;             // outside 45° cone
                                     if (horizSq > stlSupportSearchRadius * stlSupportSearchRadius) continue;
                                     float dSq = horizSq + dy * dy;
-                                    if (dSq < bestSq) { bestSq = dSq; best = q; found = true; }
+                                    if (dSq < bestSq) { bestSq = dSq; best = q; bestR = qr; found = true; }
                                 }
                             }
 
@@ -816,13 +816,16 @@ namespace TSDF
                             // pillar to the plate or the print fails there
                             if (p.y - floorMinY < minDrop) continue; // already at the plate
                             best = new Vector3(p.x, floorMinY, p.z);
+                            bestR = pr;
                             floorFallbacks++;
                         }
-                        // hourglass join: wide waist, flares buried in both lines
-                        AppendFlaredStrut(p, best,
-                            printRadius * 0.85f,
-                            found ? printRadius * 0.85f : stlSupportRadius * 1.5f,
-                            Mathf.Max(stlSupportRadius, printRadius * 0.55f),
+                        // hourglass join sized to the LOCAL line radii at both
+                        // ends — the strut reads as an adhesion between the
+                        // lines, not a foreign fixture ("太さ全然そろってない")
+                        float rA = Mathf.Max(0.002f, pr * 1.1f);
+                        float rB = Mathf.Max(0.002f, bestR * 1.1f);
+                        AppendFlaredStrut(p, best, rA, rB,
+                            Mathf.Max(0.0015f, Mathf.Min(rA, rB) * 0.75f),
                             strutLine, strutCol, sp, sn, sc, si);
                         asm.SupportCount++;
                     }
@@ -1102,8 +1105,8 @@ namespace TSDF
                                               out int tubeCount, out int bridgeCount,
                                               bool includeBridges, bool rootWireframe,
                                               out int wireCount, out int wireTriStartLocal,
-                                              List<(Vector3 p, int chain)> supportPts = null,
-                                              List<(Vector3 p, int chain)> supportCandidates = null,
+                                              List<(Vector3 p, int chain, float r)> supportPts = null,
+                                              List<(Vector3 p, int chain, float r)> supportCandidates = null,
                                               List<Vector3> chainLows = null)
         {
             tubeCount = 0; bridgeCount = 0; wireCount = 0; wireTriStartLocal = -1;
@@ -1184,11 +1187,18 @@ namespace TSDF
                     // the chain id so a curve never "supports" itself)
                     if (supportPts != null)
                     {
+                        // local line radius at point i (same linear taper the
+                        // tube itself uses) — struts must match it or they dwarf
+                        // the thin tail sections they grab
+                        float taper01 = Mathf.Clamp01(tubeTailTaper);
+                        float RAt(int i) => printRadius * Mathf.Lerp(taper01, 1f,
+                            cp.Count > 1 ? (float)i / (cp.Count - 1) : 1f);
+
                         // an endpoint is an island only when the chain DESCENDS
                         // into it — upward-pointing ends rest on their own tube
-                        if (cp[0].y < cp[1].y) supportPts.Add((cp[0], chainId));
+                        if (cp[0].y < cp[1].y) supportPts.Add((cp[0], chainId, RAt(0)));
                         if (cp[cp.Count - 1].y < cp[cp.Count - 2].y)
-                            supportPts.Add((cp[cp.Count - 1], chainId));
+                            supportPts.Add((cp[cp.Count - 1], chainId, RAt(cp.Count - 1)));
                         // local Y-minima with real PROMINENCE: FDM islands start
                         // at minima, but a jitter dip self-bridges — only valleys
                         // hanging >= 3 cm below their surroundings (within 12 cm
@@ -1212,7 +1222,7 @@ namespace TSDF
                             if (rise < promDepth) continue;
                             if (arcCum[i] - lastKeptArc < promArc) continue; // dedupe close valleys
                             lastKeptArc = arcCum[i];
-                            supportPts.Add((cp[i], chainId));
+                            supportPts.Add((cp[i], chainId, RAt(i)));
                         }
                         if (stlSupportSpacing > 1e-4f)
                         {
@@ -1220,12 +1230,12 @@ namespace TSDF
                             for (int i = 1; i < cp.Count - 1; i++)
                             {
                                 since += (cp[i] - cp[i - 1]).magnitude;
-                                if (since >= stlSupportSpacing) { supportPts.Add((cp[i], chainId)); since = 0f; }
+                                if (since >= stlSupportSpacing) { supportPts.Add((cp[i], chainId, RAt(i))); since = 0f; }
                             }
                         }
                         if (supportCandidates != null)
                             for (int i = 0; i < cp.Count; i++)
-                                supportCandidates.Add((cp[i], chainId));
+                                supportCandidates.Add((cp[i], chainId, RAt(i)));
                     }
                 }
 
@@ -1464,8 +1474,8 @@ namespace TSDF
                 var probes = count > 1 ? new[] { start, start + count - 1 } : new[] { start };
                 foreach (int pi in probes)
                 {
-                    var (p, _) = pts[pi];
-                    Vector3 best = default; float bestSq = float.MaxValue;
+                    var (p, pRad) = pts[pi];
+                    Vector3 best = default; float bestSq = float.MaxValue, bestR = 0f;
                     int cx = C(p.x), cy = C(p.y), cz = C(p.z);
                     int foundAt = -1;
                     for (int R = 0; R <= maxR; R++)
@@ -1484,7 +1494,7 @@ namespace TSDF
                                         float dSq = (pts[qi].p - p).sqrMagnitude;
                                         if (dSq < bestSq)
                                         {
-                                            bestSq = dSq; best = pts[qi].p;
+                                            bestSq = dSq; best = pts[qi].p; bestR = pts[qi].r;
                                             if (foundAt < 0) foundAt = R;
                                         }
                                     }
@@ -1493,10 +1503,13 @@ namespace TSDF
                     if (bestSq == float.MaxValue) continue;
 
                     if (wireTriStartLocal < 0) wireTriStartLocal = ti.Count;
-                    // hourglass join, wide waist — same smooth language as the
-                    // white struts, in the black armature span
-                    AppendFlaredStrut(p, best, printRadius * 0.85f, printRadius * 0.85f,
-                        printRadius * 0.55f, line, col, tp, tn, tc, ti);
+                    // hourglass join sized to the LOCAL line radii — an
+                    // adhesion, not a fixture; black armature span
+                    float rA = Mathf.Max(0.002f, pRad * 1.1f);
+                    float rB = Mathf.Max(0.002f, bestR * 1.1f);
+                    AppendFlaredStrut(p, best, rA, rB,
+                        Mathf.Max(0.0015f, Mathf.Min(rA, rB) * 0.75f),
+                        line, col, tp, tn, tc, ti);
                     links++; made++;
                 }
                 if (made == 0) unresolved++;
