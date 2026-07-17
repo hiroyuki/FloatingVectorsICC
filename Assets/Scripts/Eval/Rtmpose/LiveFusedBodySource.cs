@@ -158,13 +158,18 @@ namespace BodyTracking.Eval.Rtmpose
         /// bodies_main the caller is switching to. Resuming re-acquires the mode.</summary>
         public void SetSubmitToMerger(bool value)
         {
-            if (submitToMerger == value) return;
+            // No early-out on an unchanged field: the merger flag may still be
+            // out of sync (serialized/stale) and callers rely on this method to
+            // reconcile it.
             submitToMerger = value;
             if (merger == null || _session == null) return;
             if (value)
             {
-                merger.useExternalBodies = true;
-                _mergerFlagOwned = true;
+                if (!merger.useExternalBodies)
+                {
+                    merger.useExternalBodies = true;
+                    _mergerFlagOwned = true;
+                }
             }
             else if (merger.useExternalBodies)
             {
