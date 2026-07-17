@@ -52,6 +52,86 @@ namespace Experience
                  "(e.g. D:\\FloatingVectorsICC\\RecordingBase). Empty = attract is text-only.")]
         public string attractRecordingRoot = "";
 
+        [Header("Visitor take (Explore recording)")]
+        [Tooltip("Root folder visitor takes are recorded under (each take gets a " +
+                 "timestamped subfolder). Keep on a fast disk; separate from the " +
+                 "attract root so the ghost never picks up visitor takes.")]
+        public string visitorRecordingRoot = "";
+
+        [Tooltip("Dev: pre-recorded take used when timings.skipExplore is on (no " +
+                 "cameras needed). Point at a full RCSV take root.")]
+        public string devCannedTakeRoot =
+            @"D:\Dropbox\projects\ICC\Recordings\RecordingBase\2026-07-14_15-50-24";
+
+        [Range(0, 16)]
+        [Tooltip("SensorRecorder.playbackRenderDelayFrames during visitor playback — " +
+                 "delays the rendered point cloud to line up with the fused skeleton " +
+                 "(~130ms fusion latency ≈ 4 frames).")]
+        public int playbackRenderDelayFrames = 4;
+
+        [Header("Pose detection")]
+        [Min(0f)] public float starHoldSeconds = 0.5f;
+        [Range(0.5f, 1f)]
+        [Tooltip("Min (wrist-shoulder)/(arm path) ratio for a straight arm.")]
+        public float starArmStraightnessMin = 0.85f;
+        [Range(0.05f, 1f)]
+        [Tooltip("Max |wrist.y − shoulder.y| as a fraction of arm length (arms level).")]
+        public float starArmLevelFactor = 0.35f;
+        [Range(0.1f, 1f)]
+        [Tooltip("Min wrist displacement along the shoulder axis as a fraction of arm " +
+                 "length (rejects arms-forward).")]
+        public float starArmLateralFactor = 0.6f;
+        [Range(0.5f, 3f)]
+        [Tooltip("Min ankle separation as a multiple of shoulder width (legs spread).")]
+        public float starAnkleSpreadFactor = 1.3f;
+        [Min(0f)] public float starAnkleSpreadMinMeters = 0.35f;
+        [Min(0f)] public float banzaiHoldSeconds = 0.4f;
+        [Min(0f)]
+        [Tooltip("Absolute floor on the wrists-above-head margin (m).")]
+        public float banzaiMarginMeters = 0.05f;
+        [Range(0f, 0.5f)]
+        [Tooltip("Wrists-above-head margin as a fraction of the measured arm length " +
+                 "(personal adaptation from the calibration pose).")]
+        public float banzaiMarginArmFraction = 0.15f;
+        [Min(0f)]
+        [Tooltip("Pose-hold dropout forgiveness (s) — BT confidence flickers.")]
+        public float poseHoldDropoutSeconds = 0.2f;
+
+        [Header("v11s conversion (Processing state)")]
+        [Tooltip("Folder with yolox-m/ and rtmpose-m/ ONNX models, project-root relative.")]
+        public string conversionModelsDir = "eval/models";
+        [Tooltip("Bone-length profile JSON for the fusion (NOT the visitor metrics). " +
+                 "Empty = fusion runs without bone-length priors.")]
+        public string conversionBodyProfilePath = "eval/body_profile.json";
+        [Tooltip("ONNX Runtime execution provider; falls back downward automatically " +
+                 "(Cuda→DirectML→Cpu).")]
+        public BodyTracking.Eval.Rtmpose.OrtProvider conversionProvider =
+            BodyTracking.Eval.Rtmpose.OrtProvider.Cuda;
+        [Range(0f, 1f)] public float conversionConfThreshold = 0.3f;
+        [Tooltip("Run the catch-up smoothing post-pass (the \"s\" in v11s).")]
+        public bool runCatchupSmooth = true;
+
+        [Header("Playback / capture")]
+        [Min(0f)]
+        [Tooltip("Wait after the 3-loop-fallback random seek before capturing, so " +
+                 "trails/pose history regrow past the seek seam (s).")]
+        public float postSeekSettleSeconds = 1.5f;
+
+        [Header("Audio (optional placeholders — null = silent)")]
+        public AudioClip startSe;
+        public AudioClip countdownTickSe;
+        public AudioClip recordEndSe;
+        public AudioClip poseMatchedSe;
+        public AudioClip banzaiSe;
+        public AudioClip qrSe;
+
+        [Header("Pose guide artwork")]
+        [Tooltip("Star-pose guide image. Empty = programmatic stick figure " +
+                 "(StickFigureTexture.DrawStarPose).")]
+        public Texture2D poseGuideTexture;
+        [Tooltip("Banzai guide image. Empty = programmatic stick figure.")]
+        public Texture2D banzaiGuideTexture;
+
         [Header("Publishing")]
         [Tooltip("Use the dry-run publisher (fake URLs, no network). Off = real LFKS " +
                  "upload via the pinned StreamingAssets/lfks/upload.ps1.")]
@@ -90,5 +170,14 @@ namespace Experience
                  "an IUrlPresenter swap).")]
         public string qrCaption = "";
         [TextArea] public string crowdText = "じゅうたんのうえは　ひとりだけ　にしてね";
+
+        [Header("Visitor texts — new sequence (hiragana)")]
+        [TextArea] public string calibrateText = "この　ポーズを　とってね";
+        [TextArea] public string calibrateMatchedText = "はかれたよ！";
+        [TextArea] public string exploreText = "おもしろい　うごきを　さがしてみよう";
+        [TextArea] public string processingText = "きろくを　じゅんびしているよ　まってね";
+        [TextArea] public string watchText = "";
+        [TextArea] public string banzaiText = "じぶんの　すきな　ところで　ばんざいの　ポーズを　してね";
+        [TextArea] public string qrScanText = "いりぐちの　にじげんコードを　スキャンしてね";
     }
 }
