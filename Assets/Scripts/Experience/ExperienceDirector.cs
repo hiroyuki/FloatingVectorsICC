@@ -128,6 +128,7 @@ namespace Experience
 
         // visitor playback (Watch/BanzaiWait/Exporting/QrShow)
         private bool _visitorPlaybackActive;
+        private bool _takeHasBodies = true;
         private int _savedRenderDelay;
         private bool _savedLoop;
         private int _playbackLoops;
@@ -213,12 +214,46 @@ namespace Experience
 
             // Fused source died mid-session (CUDA fault, component disabled):
             // bring up the k4abt fallback feed so calibration/banzai/presence
-            // keep a live-skeleton provider.
+            // keep a live-skeleton provider. On recovery, retire the fallback
+            // again — two live pipelines would fight for the GPU — and reassert
+            // the current state's body-source mode (the recovered component
+            // re-enabled with its own serialized flags).
             if (_liveFeed == null && !LfbsActive)
             {
                 Debug.LogWarning($"[{nameof(ExperienceDirector)}] live fused source inactive — " +
                                  "spawning the k4abt LiveSkeletonFeed fallback.", this);
                 SpawnLiveFeed();
+            }
+            else if (_liveFeed != null && LfbsActive)
+            {
+                Debug.Log($"[{nameof(ExperienceDirector)}] live fused source recovered — " +
+                          "retiring the k4abt fallback feed.", this);
+                Destroy(_liveFeed.gameObject);
+                _liveFeed = null;
+                ReapplyBodySourceForState(_fsm.State);
+            }
+        }
+
+        private void ReapplyBodySourceForState(ExperienceState s)
+        {
+            switch (s)
+            {
+                case ExperienceState.Attract:
+                    ApplyBodySource(BodySource.AttractGhost);
+                    break;
+                case ExperienceState.Calibrate:
+                case ExperienceState.Explore:
+                case ExperienceState.Processing:
+                    ApplyBodySource(BodySource.Live);
+                    break;
+                case ExperienceState.Watch:
+                case ExperienceState.BanzaiWait:
+                case ExperienceState.Exporting:
+                case ExperienceState.QrShow:
+                    ApplyBodySource(BodySource.VisitorPlayback, _takeHasBodies);
+                    break;
+                    // Fault: leave the transport as the preceding state set it —
+                    // the alert owns the screen, recovery goes through Attract.
             }
         }
 
@@ -1000,14 +1035,14 @@ namespace Experience
             // the k4abt LiveSkeletonFeed) for banzai detection. Edge: NO track
             // has bodies (conversion failed AND nothing recorded) → the merger's
             // re-run-k4abt-on-playback path stays the only skeleton source.
-            bool takeHasBodies = false;
+            _takeHasBodies = false;
             foreach (var (serial, _) in PointCloudRecording.EnumerateDevices(takeRoot))
-                if (sensorRecorder.HasRecordedBodies(serial)) { takeHasBodies = true; break; }
-            if (!takeHasBodies)
+                if (sensorRecorder.HasRecordedBodies(serial)) { _takeHasBodies = true; break; }
+            if (!_takeHasBodies)
                 Debug.LogWarning($"[{nameof(ExperienceDirector)}] take has no recorded bodies — " +
                                  "keeping live-k4abt-on-playback as the skeleton source " +
                                  "(loop fallback will capture).", this);
-            ApplyBodySource(BodySource.VisitorPlayback, takeHasBodies);
+            ApplyBodySource(BodySource.VisitorPlayback, _takeHasBodies);
 
             if (!sensorRecorder.IsPlaying) sensorRecorder.TogglePlay();
             sensorRecorder.OnPlaybackLooped += HandleVisitorPlaybackLooped;
