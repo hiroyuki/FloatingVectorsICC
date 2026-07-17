@@ -42,7 +42,7 @@ public sealed class LfksUploadPublisher : ISculptureResultPublisher
 
 ### 4. アセット取り込み手順（実装時に実施・検証）
 
-1. `curl -o Assets/StreamingAssets/lfks/upload.ps1 https://lfks-staging.circuit-lab.workers.dev/upload.ps1`（一度だけ）
+1. `curl -o Assets/StreamingAssets/lfks/upload.ps1 https://ntticc.lfks.app/upload.ps1`（一度だけ。2026-07 に本番ドメイン ntticc.lfks.app 版へ更新済み）
 2. 取得物を**目視レビュー**（外部送信先が LFKS ドメインのみであること、危険な操作が無いこと）
 3. SHA-256 を計算し config 既定値に記載
 4. token を `<persistentDataPath>/lfks-token.txt` に書く（guide から。リポジトリ外）

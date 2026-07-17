@@ -51,7 +51,7 @@ MonoBehaviour:
   dryRunPublish: 0
   dryRunDelaySeconds: 1
   qrUrlKind: 2
-  uploadScriptSha256: 2f9e84376551e547198576a65562d1829796cba36d99daf7fd6aac84fafcce96
+  uploadScriptSha256: 46d660b6ae081b648fdbcead21bfeb44419df78410c3e89cb55302c65dfac687
   lfksRemoteDirectory: sculptures
   publishTimeoutSeconds: 60
   attractText: "\u3042\u305D\u3073\u306B\u3000\u304D\u3066\u306D\uFF01"

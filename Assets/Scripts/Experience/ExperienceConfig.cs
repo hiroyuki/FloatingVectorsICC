@@ -62,7 +62,7 @@ namespace Experience
         [Tooltip("SHA-256 (hex) of StreamingAssets/lfks/upload.ps1 — the publisher " +
                  "refuses to run a script whose bytes changed. Not a secret.")]
         public string uploadScriptSha256 =
-            "2f9e84376551e547198576a65562d1829796cba36d99daf7fd6aac84fafcce96";
+            "46d660b6ae081b648fdbcead21bfeb44419df78410c3e89cb55302c65dfac687";
 
         [Tooltip("Remote subfolder in the LFKS directory the sculptures land in.")]
         public string lfksRemoteDirectory = "sculptures";
