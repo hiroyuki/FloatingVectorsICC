@@ -159,6 +159,12 @@ namespace Calibration.Tests
             Tick();
             _in.ProcessingFailed = false; // one-frame pulse
             Assert.AreEqual(ExperienceState.Processing, _sm.State);
+            // Nobody present after the failure — Attract must be reached by the
+            // notice TIMER (the fail latch suppresses LeftEarly), and staying
+            // absent keeps the machine parked there for the assert.
+            _in.Present = false;
+            Tick(0.5f);
+            Assert.AreEqual(ExperienceState.Processing, _sm.State); // notice still showing
             for (int i = 0; i < 12; i++) Tick(0.5f); // > 5s notice
             Assert.AreEqual(ExperienceState.Attract, _sm.State);
         }
@@ -245,6 +251,7 @@ namespace Calibration.Tests
             Tick();
             _in.ExportFailed = false;
             Assert.AreEqual(ExperienceState.Exporting, _sm.State);
+            _in.Present = false; // keeps the post-notice Attract parked for the assert
             for (int i = 0; i < 12; i++) Tick(0.5f);
             Assert.AreEqual(ExperienceState.Attract, _sm.State);
         }
