@@ -93,7 +93,7 @@ namespace TSDF
 
         [Range(1f, 2f)]
         [Tooltip("Bead strut radius as a multiple of the thicker contact radius.")]
-        public float stlContactBeadScale = 1.3f;
+        public float stlContactBeadScale = 1.15f;
 
         [Header("Crop (test prints)")]
         [Tooltip("Export only the chains inside the crop box (chains are split " +
@@ -764,6 +764,9 @@ namespace TSDF
                 asm.SupportTriStart = tri.Count;
                 if (supportPts != null && supportPts.Count > 0 && pos.Count > 0)
                 {
+                    float floorMinY = float.PositiveInfinity;
+                    foreach (var p in pos) if (p.y < floorMinY) floorMinY = p.y;
+
                     // XZ spatial hash over the strut target candidates
                     float cell = Mathf.Max(0.05f, stlSupportSearchRadius);
                     var grid = new Dictionary<long, List<int>>();
@@ -781,6 +784,7 @@ namespace TSDF
                     var strutLine = new List<Vector3[]> { null };
                     var strutCol = new List<Vector3> { Vector3.one };
                     float minDrop = stlSupportRadius * 3f;
+                    int floorFallbacks = 0;
                     foreach (var (p, chain) in supportPts)
                     {
                         // nearest other-chain point inside the 45° downward cone
@@ -805,11 +809,21 @@ namespace TSDF
                                 }
                             }
 
-                        if (!found) continue; // bottom layer: no floor pillar
-                        strutLine[0] = new[] { p, best };
-                        CurveTubeBuilder.AppendCurveTubes(strutLine, strutCol, 1f, stlSupportRadius,
-                            stlCurveSides, 0f, Vector3.zero, 0f, sp, sn, sc, si,
-                            tipTaper: 1f, exportSpace: false);
+                        if (!found)
+                        {
+                            // printability fallback: a minimum with NOTHING below
+                            // in the cone is a mid-air island — it must drop a
+                            // pillar to the plate or the print fails there
+                            if (p.y - floorMinY < minDrop) continue; // already at the plate
+                            best = new Vector3(p.x, floorMinY, p.z);
+                            floorFallbacks++;
+                        }
+                        // hourglass join: wide waist, flares buried in both lines
+                        AppendFlaredStrut(p, best,
+                            printRadius * 0.85f,
+                            found ? printRadius * 0.85f : stlSupportRadius * 1.5f,
+                            Mathf.Max(stlSupportRadius, printRadius * 0.55f),
+                            strutLine, strutCol, sp, sn, sc, si);
                         asm.SupportCount++;
                     }
                     if (si.Count > 0)
@@ -818,6 +832,8 @@ namespace TSDF
                         pos.AddRange(sp);
                         for (int i = 0; i < si.Count; i++) tri.Add(si[i] + vOff);
                         OrientOutward(pos, tri, iBase, tri.Count - iBase);
+                        Debug.Log($"[TSDFPrintExporter] self-support: {asm.SupportCount} struts, " +
+                                  $"{floorFallbacks} of them floor pillars (no target below).", this);
                     }
                 }
 
@@ -1168,8 +1184,36 @@ namespace TSDF
                     // the chain id so a curve never "supports" itself)
                     if (supportPts != null)
                     {
-                        supportPts.Add((cp[0], chainId));
-                        supportPts.Add((cp[cp.Count - 1], chainId));
+                        // an endpoint is an island only when the chain DESCENDS
+                        // into it — upward-pointing ends rest on their own tube
+                        if (cp[0].y < cp[1].y) supportPts.Add((cp[0], chainId));
+                        if (cp[cp.Count - 1].y < cp[cp.Count - 2].y)
+                            supportPts.Add((cp[cp.Count - 1], chainId));
+                        // local Y-minima with real PROMINENCE: FDM islands start
+                        // at minima, but a jitter dip self-bridges — only valleys
+                        // hanging >= 3 cm below their surroundings (within 12 cm
+                        // of arc) need an anchor, or the strut count explodes on
+                        // wiggly 32-sample chains
+                        const float promArc = 0.12f, promDepth = 0.03f;
+                        float[] arcCum = new float[cp.Count];
+                        for (int i = 1; i < cp.Count; i++)
+                            arcCum[i] = arcCum[i - 1] + (cp[i] - cp[i - 1]).magnitude;
+                        float lastKeptArc = float.NegativeInfinity;
+                        for (int i = 1; i < cp.Count - 1; i++)
+                        {
+                            if (!(cp[i].y < cp[i - 1].y && cp[i].y <= cp[i + 1].y)) continue;
+                            float rise = float.PositiveInfinity;
+                            float maxL = float.NegativeInfinity, maxR = float.NegativeInfinity;
+                            for (int j = i - 1; j >= 0 && arcCum[i] - arcCum[j] <= promArc; j--)
+                                maxL = Mathf.Max(maxL, cp[j].y);
+                            for (int j = i + 1; j < cp.Count && arcCum[j] - arcCum[i] <= promArc; j++)
+                                maxR = Mathf.Max(maxR, cp[j].y);
+                            rise = Mathf.Min(maxL, maxR) - cp[i].y;
+                            if (rise < promDepth) continue;
+                            if (arcCum[i] - lastKeptArc < promArc) continue; // dedupe close valleys
+                            lastKeptArc = arcCum[i];
+                            supportPts.Add((cp[i], chainId));
+                        }
                         if (stlSupportSpacing > 1e-4f)
                         {
                             float since = 0f;
@@ -1196,15 +1240,22 @@ namespace TSDF
                     if (pts.Count < 2) continue;
                     Vector3 colour = segs[idxs[0]].color;
                     if (!cropEnabled) { EmitChain(pts, colour); continue; }
-                    // crop: each maximal in-box run becomes its own tube
+                    // crop: each maximal in-box run becomes its own tube; drop
+                    // stubs under 5 cm — chopped fragments read as debris
+                    void EmitRun()
+                    {
+                        float arc = 0f;
+                        for (int i = 1; i < run.Count; i++) arc += (run[i] - run[i - 1]).magnitude;
+                        if (arc >= 0.05f) EmitChain(run, colour);
+                        run.Clear();
+                    }
                     run.Clear();
                     foreach (var q in pts)
                     {
                         if (cropB.Contains(q)) { run.Add(q); continue; }
-                        EmitChain(run, colour);
-                        run.Clear();
+                        EmitRun();
                     }
-                    EmitChain(run, colour);
+                    EmitRun();
                 }
                 tubeCount = tubesOut;
 
@@ -1239,6 +1290,37 @@ namespace TSDF
                                          ref wireTriStartLocal);
             }
             finally { segBuf.Release(); }
+        }
+
+        /// <summary>Hourglass strut: a thin waist flaring smoothly (parabolic)
+        /// out to rA/rB at the ends, which are extended half a radius INTO the
+        /// tubes they join — the join reads as a smooth membrane growing out of
+        /// the lines, not a stick jammed between them ("つなぎ目はもっと滑らかに
+        /// つながっていていい", 2026-07-17).</summary>
+        private void AppendFlaredStrut(Vector3 a, Vector3 b, float rA, float rB, float waist,
+                                       List<Vector3[]> line, List<Vector3> col,
+                                       List<Vector3> tp, List<Vector3> tn, List<Vector3> tc, List<int> ti)
+        {
+            Vector3 ab = b - a;
+            float d = ab.magnitude;
+            if (d < 1e-5f) return;
+            Vector3 dir = ab / d;
+            Vector3 ea = a - dir * (rA * 0.5f), eb = b + dir * (rB * 0.5f);
+            const int N = 9;
+            var strutPts = new Vector3[N];
+            var radii = new float[N];
+            for (int i = 0; i < N; i++)
+            {
+                float t = i / (float)(N - 1);
+                float s = 2f * t - 1f;
+                strutPts[i] = Vector3.Lerp(ea, eb, t);
+                radii[i] = waist + (Mathf.Lerp(rA, rB, t) - waist) * s * s;
+            }
+            line[0] = strutPts;
+            col[0] = Vector3.one;
+            CurveTubeBuilder.AppendCurveTubes(line, col, 1f, waist, stlCurveSides, 0f,
+                Vector3.zero, 0f, tp, tn, tc, ti, tipTaper: 1f, exportSpace: false,
+                ringRadii: radii);
         }
 
         /// <summary>Weld beads: ONE short fat strut at the closest approach of
@@ -1298,13 +1380,12 @@ namespace TSDF
             {
                 var (dSq, a, b, r) = kvp.Value;
                 float d = Mathf.Sqrt(dSq);
-                if (d < r * 0.5f) continue; // deep overlap welds itself
-                Vector3 dir = (b - a) / d;
-                line[0] = new[] { a - dir * (r * 0.5f), b + dir * (r * 0.5f) };
-                col[0] = Vector3.one;
-                CurveTubeBuilder.AppendCurveTubes(line, col, 1f, r * stlContactBeadScale,
-                    stlCurveSides, 0f, Vector3.zero, 0f, tp, tn, tc, ti,
-                    tipTaper: 1f, exportSpace: false);
+                // weld ONLY true grazes: solid overlaps (centrelines closer than
+                // 75% of the touch distance) bond fine on their own, and beading
+                // every contact reads as lumps all over the artwork
+                if (d < r * 1.5f) continue;
+                // smooth hourglass web between the two lines, wide waist
+                AppendFlaredStrut(a, b, r, r, r * 0.6f, line, col, tp, tn, tc, ti);
                 beads++;
             }
             if (beads > 0)
@@ -1412,10 +1493,10 @@ namespace TSDF
                     if (bestSq == float.MaxValue) continue;
 
                     if (wireTriStartLocal < 0) wireTriStartLocal = ti.Count;
-                    line[0] = new[] { p, best };
-                    col[0] = Vector3.one;
-                    CurveTubeBuilder.AppendCurveTubes(line, col, 1f, stlSupportRadius, stlCurveSides,
-                        0f, Vector3.zero, 0f, tp, tn, tc, ti, tipTaper: 1f, exportSpace: false);
+                    // hourglass join, wide waist — same smooth language as the
+                    // white struts, in the black armature span
+                    AppendFlaredStrut(p, best, printRadius * 0.85f, printRadius * 0.85f,
+                        printRadius * 0.55f, line, col, tp, tn, tc, ti);
                     links++; made++;
                 }
                 if (made == 0) unresolved++;

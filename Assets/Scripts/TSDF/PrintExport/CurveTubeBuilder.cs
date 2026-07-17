@@ -33,25 +33,33 @@ namespace TSDF
         // parallel-transport frame — one profile vertex always points up, so a
         // 4-sided tube prints as a self-supporting diamond (45° roofs) in FDM.
         // Near-vertical segments reuse the previous ring's frame.
+        // ringRadii: explicit per-point radius for lines[0] (flared struts etc.).
+        // Overrides tipTaper/raindrop; caller must supply distinct points (the
+        // dedup keeps radii aligned; simplification is skipped when present).
         public static int AppendCurveTubes(List<Vector3[]> lines, List<Vector3> lineCols, float brightness,
                                            float radius, int sides, float tolerance, Vector3 center, float minY,
                                            List<Vector3> pos, List<Vector3> nrm, List<Vector3> col,
                                            List<int> idx, float tipTaper = 1f, bool exportSpace = true,
-                                           bool raindrop = false, bool alignUp = false)
+                                           bool raindrop = false, bool alignUp = false,
+                                           float[] ringRadii = null)
         {
             int tubes = 0;
             var p = new List<Vector3>(256);
+            var pr = new List<float>(256);
             for (int li = 0; li < lines.Count; li++)
             {
                 // To export space; drop near-duplicate points (a paused pose makes
                 // the oldest history frames identical -> zero-length segments).
-                p.Clear();
-                foreach (var w in lines[li])
+                float[] radii = ringRadii != null && li == 0 ? ringRadii : null;
+                p.Clear(); pr.Clear();
+                for (int wi = 0; wi < lines[li].Length; wi++)
                 {
+                    var w = lines[li][wi];
                     var e = exportSpace ? new Vector3(-(w.x - center.x), w.y - minY, w.z - center.z) : w;
-                    if (p.Count == 0 || (e - p[p.Count - 1]).sqrMagnitude > 1e-10f) p.Add(e);
+                    if (p.Count == 0 || (e - p[p.Count - 1]).sqrMagnitude > 1e-10f)
+                    { p.Add(e); if (radii != null) pr.Add(radii[wi]); }
                 }
-                if (tolerance > 0f && p.Count > 2) MeshOps.SimplifyPolyline(p, tolerance);
+                if (radii == null && tolerance > 0f && p.Count > 2) MeshOps.SimplifyPolyline(p, tolerance);
                 int n = p.Count;
                 if (n < 2) continue;
                 tubes++;
@@ -94,7 +102,9 @@ namespace TSDF
                     ruEnd = ru; rvEnd = rv;
                     float r;
                     bool drop = raindrop && len > 1e-6f;
-                    if (drop)
+                    if (pr.Count == n)
+                        r = pr[i];
+                    else if (drop)
                     {
                         // smooth quadratic swell: thin chopstick tail for most of
                         // the length, blending tangent-continuously into the
