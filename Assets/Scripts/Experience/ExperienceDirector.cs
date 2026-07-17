@@ -1,18 +1,34 @@
-// The show's single owner (Phase 5, Plans/phase5-director-plan.md): drives the
-// ExperienceStateMachine, owns every runtime object the experience spawns
-// (visitor UI, presence detector, spheres, snapshot miniatures), snapshots the
-// dev-mode values it touches on Enter and restores them all on Exit — Dev mode
-// must come back bit-identical.
+// The show's single owner: drives the pose-driven ExperienceStateMachine
+// (Calibrate → Explore → Processing → Watch → BanzaiWait → Exporting →
+// QrShow), owns every runtime object the experience spawns (visitor UI,
+// presence detector, live skeleton feed), snapshots the dev-mode values it
+// touches on Enter and restores them all on Exit — Dev mode must come back
+// bit-identical.
 //
-// Enter order: snapshot -> world rebase on -> sensing area -> spawn UI/presence
-// -> FSM starts at Attract. Exit runs the exact reverse (cancel any publish
-// task first and OBSERVE it — no fire-and-forget).
+// Sequence responsibilities per state:
+//   Calibrate  — star-pose guide + window countdown; on a held star pose the
+//                visitor's body metrics are measured (banzai personal
+//                adaptation); window expiry proceeds with defaults.
+//   Explore    — records ~exploreSeconds of raw sensor data via SensorRecorder
+//                (bodies_main written by the merger's recording path), last
+//                countdownSeconds shown as digits.
+//   Processing — FusedTakeConverter (v11s) on a worker thread; progress bar;
+//                timeout/failure falls back to the recorded k4abt bodies so
+//                the visitor is never dead-ended.
+//   Watch      — visitor playback starts: merger consumes recorded bodies
+//                (ignoreRecordedBodies=false, muteWorkerIngest=true), live is
+//                suppressed as sculpture source, LiveSkeletonFeed re-purposes
+//                the k4abt workers to track the LIVE visitor.
+//   BanzaiWait — looping playback; a held banzai (or the loop fallback with a
+//                random seek) captures the sculpture at that playback moment.
+//   Exporting  — glb/usdz export + publish while playback keeps looping.
+//   QrShow     — QR + scan prompt; playback still looping behind it.
 //
-// Capture protocol per prompt (parent-plan contract): countdown -> set
-// historySamples=15 -> wait for PointCloudMotionCurves.BuildVersion to advance
-// by 2 (a full rebuild with the new window) with a 2 s timeout (curves may
-// legitimately have nothing to build) -> TSDFSnapshotBuilder.Capture (sync,
-// non-destructive) -> restore historySamples -> CaptureDone.
+// Capture protocol (carried over): set historySamples=15 -> wait for
+// PointCloudMotionCurves.BuildVersion +2 (2 s timeout) -> TSDFSnapshotBuilder
+// .Capture (sync, non-destructive) -> restore historySamples. Playback is NOT
+// paused for the capture — a stalled playback would stop BuildVersion from
+// advancing and the 15-sample window would never take effect.
 
 using System;
 using System.Collections;
@@ -20,6 +36,7 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using BodyTracking;
+using BodyTracking.Eval.Rtmpose;
 using Experience.Publishing;
 using PointCloud;
 using TSDF;
@@ -61,6 +78,11 @@ namespace Experience
 
         public ExperienceState CurrentState => _fsm?.State ?? ExperienceState.Attract;
         public bool IsActive => _active;
+        /// <summary>Session body metrics (defaults until the star pose measured them).</summary>
+        public VisitorBodyMetrics CurrentMetrics => _metrics;
+        /// <summary>True once the star pose actually measured the visitor (false =
+        /// running on VisitorBodyMetrics.Default).</summary>
+        public bool MetricsMeasured => _metricsMeasured;
 
         private bool _active;
         private ExperienceStateMachine _fsm;
@@ -68,10 +90,10 @@ namespace Experience
         // spawned per mode session
         private VisitorMessageUI _ui;
         private PresenceDetector _presence;
+        private LiveSkeletonFeed _liveFeed;
         private ExperienceSpaceBuilder _space;
-        private readonly DwellSphere[] _spheres = new DwellSphere[3];
-        private readonly GameObject[] _miniatures = new GameObject[3];
-        private Material _miniatureMat;
+        private AudioSource _audio;
+        private Texture2D _starGuideGenerated, _banzaiGuideGenerated;
 
         // dev-value snapshot (restored on Exit)
         private int _savedHistorySamples;
@@ -87,19 +109,38 @@ namespace Experience
         private readonly System.Collections.Generic.Dictionary<string, bool> _savedLiveSuppress =
             new System.Collections.Generic.Dictionary<string, bool>();
 
-        // attract playback (Phase 6)
+        // attract playback
         private AttractPlaybackController _attract;
         private bool _attractOwnsPlayback;
         private bool _devFallbackLogged;
 
+        // visitor recording (Explore)
+        private bool _visitorRecordingActive;
+        private string _savedRecFolderPath;
+        private bool _savedRecAutoTimestamp;
+
+        // visitor playback (Watch/BanzaiWait/Exporting/QrShow)
+        private bool _visitorPlaybackActive;
+        private bool _savedIgnoreRecorded;
+        private int _savedRenderDelay;
+        private bool _savedLoop;
+        private int _playbackLoops;
+
         // per-run state
-        private readonly TSDFSnapshot[] _snapshots = new TSDFSnapshot[3];
-        private int _captureIndex;
+        private VisitorBodyMetrics _metrics = VisitorBodyMetrics.Default;
+        private bool _metricsMeasured;
+        private PoseHoldDetector _starHold, _banzaiHold;
+        private bool _calibrationDone;
+        private bool _recordingDone;
+        private bool _processingDone, _processingFailed;
+        private string _takeRoot;
+        private FusedTakeConverter _converter;
+        private TSDFSnapshot _snapshot;
         private bool _captureDone;
-        private Coroutine _captureRoutine;
-        private int _selectedIndex = -1;
+        private bool _debugBanzaiPulse;
         private bool _exportDone, _exportFailed;
-        private Coroutine _exportRoutine;
+        private Coroutine _calibrateRoutine, _exploreRoutine, _processingRoutine,
+                          _captureRoutine, _exportRoutine;
         private CancellationTokenSource _cts;
         private Task<PublishResult> _publishTask;
         private string _qrUrl;
@@ -140,15 +181,33 @@ namespace Experience
 
             var inputs = new ExperienceInputs
             {
-                Present = _presence != null && _presence.IsPresent,
+                Present = ComputePresent(),
                 Fault = debugForceFault || (healthMonitor != null && !healthMonitor.IsHealthy),
+                CalibrationDone = _calibrationDone,
+                RecordingDone = _recordingDone,
+                ProcessingDone = _processingDone,
+                ProcessingFailed = _processingFailed,
+                PlaybackLoops = _playbackLoops,
                 CaptureDone = _captureDone,
-                SelectedIndex = _selectedIndex,
                 ExportDone = _exportDone,
                 ExportFailed = _exportFailed,
             };
             _fsm.Tick(Time.deltaTime, in inputs, config.timings);
+            UpdateBanzaiDetection();
             UpdateCrowdNotice();
+        }
+
+        // During visitor playback the merged-BT presence path is fed by the
+        // recorded GHOST — presence must come from live-only signals: GPU
+        // occupancy plus the live skeleton feed.
+        private bool ComputePresent()
+        {
+            if (_presence == null) return false;
+            var s = _fsm.State;
+            bool playbackState = s == ExperienceState.Watch || s == ExperienceState.BanzaiWait
+                || s == ExperienceState.Exporting || s == ExperienceState.QrShow;
+            if (!playbackState) return _presence.IsPresent;
+            return _presence.OccupancyActive || (_liveFeed != null && _liveFeed.HasRecentPerson);
         }
 
         // ------------------------------------------------ enter / exit ----
@@ -204,6 +263,8 @@ namespace Experience
             // 4) spawned objects.
             _ui = new GameObject("_ExperienceUI").AddComponent<VisitorMessageUI>();
             _ui.transform.SetParent(transform, false);
+            _audio = _ui.gameObject.AddComponent<AudioSource>();
+            _audio.playOnAwake = false;
             _presence = new GameObject("_ExperiencePresence").AddComponent<PresenceDetector>();
             _presence.transform.SetParent(transform, false);
             _presence.merger = merger;
@@ -213,11 +274,20 @@ namespace Experience
             _presence.yBandMin = config.yBandMin;
             _presence.yBandMax = config.yBandMax;
             _presence.occupancyThreshold = config.occupancyThreshold;
-            SpawnSpheres();
+            _liveFeed = new GameObject("_ExperienceLiveFeed").AddComponent<LiveSkeletonFeed>();
+            _liveFeed.transform.SetParent(transform, false);
+            _liveFeed.workerHost = merger != null ? merger.workerHost : null;
+            _liveFeed.merger = merger;
+            _liveFeed.sensorManager = sensorManager;
+            _liveFeed.recorder = sensorRecorder;
+            _liveFeed.trackingVolume = boundingVolume;
 
-            // 4b) attract coexistence (Phase 6): keep the live rig through
-            // playback loads, hide the raw clouds (the TSDF mesh is the star),
-            // pause cumulative snapshots, spawn the attract controller.
+            _starHold = new PoseHoldDetector(config.starHoldSeconds, config.poseHoldDropoutSeconds);
+            _banzaiHold = new PoseHoldDetector(config.banzaiHoldSeconds, config.poseHoldDropoutSeconds);
+
+            // 4b) attract coexistence: keep the live rig through playback loads,
+            // hide the raw clouds (the TSDF mesh is the star), pause cumulative
+            // snapshots, spawn the attract controller.
             if (sensorRecorder != null)
             {
                 _savedKeepLive = sensorRecorder.keepLiveRenderersOnLoad;
@@ -266,22 +336,27 @@ namespace Experience
         {
             _active = false;
 
-            if (_captureRoutine != null) { StopCoroutine(_captureRoutine); _captureRoutine = null; }
-            if (_exportRoutine != null) { StopCoroutine(_exportRoutine); _exportRoutine = null; }
+            StopRoutine(ref _calibrateRoutine);
+            StopRoutine(ref _exploreRoutine);
+            StopRoutine(ref _processingRoutine);
+            StopRoutine(ref _captureRoutine);
+            StopRoutine(ref _exportRoutine);
             CancelPublish();
+            _converter?.Abort();
+            _converter = null;
+            AbortVisitorRecording();
+            StopVisitorPlayback();
             RestoreHistorySamples(); // in case a capture was mid-flight
 
             if (_fsm != null) { _fsm.Changed -= OnStateChanged; _fsm = null; }
 
-            for (int i = 0; i < 3; i++)
-            {
-                if (_miniatures[i] != null) { Destroy(_miniatures[i]); _miniatures[i] = null; }
-                if (_spheres[i] != null) { Destroy(_spheres[i].gameObject); _spheres[i] = null; }
-                _snapshots[i] = null;
-            }
-            if (_miniatureMat != null) { Destroy(_miniatureMat); _miniatureMat = null; }
             if (_ui != null) { _ui.ClearEverything(); Destroy(_ui.gameObject); _ui = null; }
+            _audio = null; // lived on the UI object
             if (_presence != null) { Destroy(_presence.gameObject); _presence = null; }
+            if (_liveFeed != null) { Destroy(_liveFeed.gameObject); _liveFeed = null; }
+            if (_starGuideGenerated != null) { Destroy(_starGuideGenerated); _starGuideGenerated = null; }
+            if (_banzaiGuideGenerated != null) { Destroy(_banzaiGuideGenerated); _banzaiGuideGenerated = null; }
+            _snapshot = null;
 
             // attract coexistence teardown (before space/rebase restore)
             if (_attract != null)
@@ -340,26 +415,50 @@ namespace Experience
             Debug.Log($"[{nameof(ExperienceDirector)}] experience mode OFF (dev values restored).", this);
         }
 
+        private void StopRoutine(ref Coroutine routine)
+        {
+            if (routine != null) { StopCoroutine(routine); routine = null; }
+        }
+
         private void ResetRunState()
         {
-            _captureIndex = 0;
+            _metrics = VisitorBodyMetrics.Default;
+            _metricsMeasured = false;
+            _calibrationDone = false;
+            _recordingDone = false;
+            _processingDone = _processingFailed = false;
+            _takeRoot = null;
+            _snapshot = null;
             _captureDone = false;
-            _selectedIndex = -1;
+            _debugBanzaiPulse = false;
             _exportDone = _exportFailed = false;
+            _playbackLoops = 0;
             _qrUrl = null;
             _crowdShowing = false;
-            for (int i = 0; i < 3; i++) _snapshots[i] = null;
+            _starHold?.Reset();
+            _banzaiHold?.Reset();
         }
 
         // ------------------------------------------------ state side effects ----
 
         private void OnStateChanged(ExperienceState from, ExperienceState to)
         {
-            // Leaving a prompt mid-capture (visitor walked away / fault).
-            if (_captureRoutine != null && !IsPrompt(to))
+            // Routine / device cleanup when a state is left by any path
+            // (advance, walked away, fault).
+            if (from == ExperienceState.Calibrate) StopRoutine(ref _calibrateRoutine);
+            if (from == ExperienceState.Explore)
             {
-                StopCoroutine(_captureRoutine);
-                _captureRoutine = null;
+                StopRoutine(ref _exploreRoutine);
+                if (to != ExperienceState.Processing) AbortVisitorRecording();
+            }
+            if (from == ExperienceState.Processing && _processingRoutine != null)
+            {
+                StopRoutine(ref _processingRoutine);
+                _converter?.Abort();
+            }
+            if (from == ExperienceState.BanzaiWait && _captureRoutine != null)
+            {
+                StopRoutine(ref _captureRoutine);
                 RestoreHistorySamples();
             }
             if (from == ExperienceState.Exporting && to == ExperienceState.Attract)
@@ -368,8 +467,8 @@ namespace Experience
             // Attract → visitor handoff: the ghost stops, live becomes the
             // sculpture source, k4abt workers restart (clock jump guard). Only
             // when a live rig exists — the dev/Mac fallback keeps the playback
-            // running as the only source (Phase 5 E2E behaviour).
-            if (from == ExperienceState.Attract && to == ExperienceState.Welcome)
+            // running as the only source.
+            if (from == ExperienceState.Attract && to == ExperienceState.Calibrate)
             {
                 if (HasLiveRenderers())
                 {
@@ -399,39 +498,51 @@ namespace Experience
             ApplyStateSideEffects(to);
         }
 
-        private static bool IsPrompt(ExperienceState s) =>
-            s == ExperienceState.PromptAnimal || s == ExperienceState.PromptMantis ||
-            s == ExperienceState.PromptFree;
-
-        // ONE-SHOT state-entry side effects (coroutines, spawning). Message
-        // repaint lives in ShowStateMessage so the crowd notice can restore the
-        // text WITHOUT re-entering the state (a re-entered prompt would start a
-        // second capture routine and clobber _captureIndex).
+        // ONE-SHOT state-entry side effects (coroutines, transport switching).
+        // Message repaint lives in ShowStateMessage so the crowd notice can
+        // restore the text WITHOUT re-entering the state.
         private void ApplyStateSideEffects(ExperienceState state)
         {
+            var t = config.timings;
             switch (state)
             {
                 case ExperienceState.Attract:
+                    StopVisitorPlayback();
                     _ui.ClearAll();
-                    SetSpheresActive(false);
-                    SetMiniaturesActive(false);
                     StartAttractPlayback();
                     break;
-                case ExperienceState.PromptAnimal:
-                    StartPrompt(0, config.promptAnimalText);
+                case ExperienceState.Calibrate:
+                    PlaySe(config.startSe);
+                    if (!t.skipCalibrate)
+                        _calibrateRoutine = StartCoroutine(CalibrateRoutine());
                     break;
-                case ExperienceState.PromptMantis:
-                    StartPrompt(1, Pick(config.promptMantisVariants));
+                case ExperienceState.Explore:
+                    if (t.skipExplore)
+                    {
+                        _takeRoot = config.devCannedTakeRoot; // pre-recorded dev take
+                    }
+                    else
+                    {
+                        StartVisitorRecording();
+                        _exploreRoutine = StartCoroutine(ExploreRoutine());
+                    }
                     break;
-                case ExperienceState.PromptFree:
-                    StartPrompt(2, Pick(config.promptFreeVariants));
+                case ExperienceState.Processing:
+                    if (!t.skipProcessing)
+                        _processingRoutine = StartCoroutine(ProcessingRoutine());
                     break;
-                case ExperienceState.Select:
-                    ShowSelection();
+                case ExperienceState.Watch:
+                    StartVisitorPlayback(_takeRoot);
+                    break;
+                case ExperienceState.BanzaiWait:
+                    _banzaiHold.Reset();
+                    _debugBanzaiPulse = false;
                     break;
                 case ExperienceState.Exporting:
-                    SetSpheresActive(false);
                     _exportRoutine = StartCoroutine(ExportAndPublish());
+                    break;
+                case ExperienceState.QrShow:
+                    PlaySe(config.qrSe);
                     break;
                 case ExperienceState.Fault:
                     string fault = healthMonitor != null ? healthMonitor.FaultAlertText : "";
@@ -462,15 +573,18 @@ namespace Experience
             switch (state)
             {
                 case ExperienceState.Attract: _ui.ShowMessage(config.attractText); break;
-                case ExperienceState.Welcome: _ui.ShowMessage(config.welcomeText); break;
-                case ExperienceState.FreePlay: _ui.ShowMessage(config.freePlayText); break;
-                case ExperienceState.Ready: _ui.ShowMessage(config.readyText); break;
-                case ExperienceState.PromptAnimal:
-                case ExperienceState.PromptMantis:
-                case ExperienceState.PromptFree:
-                    _ui.ShowMessage(_currentPromptText);
+                case ExperienceState.Calibrate:
+                    if (_calibrationDone) _ui.ShowMessage(config.calibrateMatchedText);
+                    else _ui.ShowPoseGuide(StarGuide(), config.calibrateText);
                     break;
-                case ExperienceState.Select: _ui.ShowMessage(config.selectText); break;
+                case ExperienceState.Explore: _ui.ShowMessage(config.exploreText); break;
+                case ExperienceState.Processing:
+                    _ui.ShowProgress(_converter?.Progress ?? 0f, config.processingText);
+                    break;
+                case ExperienceState.Watch: _ui.ShowMessage(config.watchText); break;
+                case ExperienceState.BanzaiWait:
+                    _ui.ShowPoseGuide(BanzaiGuide(), config.banzaiText);
+                    break;
                 case ExperienceState.Exporting:
                     _ui.ShowMessage(_exportFailed ? config.exportFailedText : config.exportingText);
                     break;
@@ -479,38 +593,324 @@ namespace Experience
             }
         }
 
-        private static string Pick(string[] variants) =>
-            variants == null || variants.Length == 0
-                ? "" : variants[UnityEngine.Random.Range(0, variants.Length)];
+        private Texture2D StarGuide() =>
+            config.poseGuideTexture != null
+                ? config.poseGuideTexture
+                : _starGuideGenerated ??= StickFigureTexture.DrawStarPose();
 
-        // ------------------------------------------------ capture ----
+        private Texture2D BanzaiGuide() =>
+            config.banzaiGuideTexture != null
+                ? config.banzaiGuideTexture
+                : _banzaiGuideGenerated ??= StickFigureTexture.DrawBanzaiPose();
 
-        private string _currentPromptText = "";
-
-        private void StartPrompt(int captureIndex, string text)
+        private void PlaySe(AudioClip clip)
         {
-            _captureIndex = captureIndex;
-            _captureDone = false; // per-prompt reset (double defense with the FSM latch)
-            _currentPromptText = text;
-            _captureRoutine = StartCoroutine(PromptCaptureRoutine());
+            if (clip != null && _audio != null) _audio.PlayOneShot(clip);
         }
 
-        private IEnumerator PromptCaptureRoutine()
+        // ------------------------------------------------ Calibrate ----
+
+        private IEnumerator CalibrateRoutine()
         {
             var t = config.timings;
-            float captureAt = Mathf.Max(0f, t.promptSeconds - 0.5f);
-            float countdownFrom = Mathf.Max(0f, captureAt - config.countdownSeconds);
-
-            while (_fsm.TimeInState < countdownFrom) yield return null;
             int shown = -1;
-            while (_fsm.TimeInState < captureAt)
+            // metric accumulation while the star pose is held
+            float armSum = 0f, spanSum = 0f, shoulderSum = 0f, heightSum = 0f;
+            int sampleCount = 0;
+
+            while (_active && _fsm.State == ExperienceState.Calibrate)
             {
-                int remain = Mathf.Max(1, Mathf.CeilToInt(captureAt - _fsm.TimeInState));
-                if (remain != shown) { _ui.ShowCountdown(remain); shown = remain; }
+                int remain = Mathf.CeilToInt(t.calibrateSeconds - _fsm.TimeInState);
+                if (remain > 0 && remain != shown)
+                {
+                    _ui.ShowCountdown(remain);
+                    shown = remain;
+                }
+
+                bool star = false;
+                if (_liveFeed != null && _liveFeed.TryGetBestSkeleton(out var joints, out var valid))
+                {
+                    star = PoseClassifiers.IsStarPose(joints, valid,
+                        config.starArmStraightnessMin, config.starArmLevelFactor,
+                        config.starArmLateralFactor, config.starAnkleSpreadFactor,
+                        config.starAnkleSpreadMinMeters);
+                    if (star && PoseClassifiers.TryMeasureMetrics(joints, valid, out var m))
+                    {
+                        armSum += m.ArmLengthMeters;
+                        spanSum += m.ArmSpanMeters;
+                        shoulderSum += m.ShoulderWidthMeters;
+                        heightSum += m.StandingHeightMeters;
+                        sampleCount++;
+                    }
+                }
+
+                if (_starHold.Update(star, Time.realtimeSinceStartup) && sampleCount > 0)
+                {
+                    _metrics = new VisitorBodyMetrics
+                    {
+                        ArmLengthMeters = armSum / sampleCount,
+                        ArmSpanMeters = spanSum / sampleCount,
+                        ShoulderWidthMeters = shoulderSum / sampleCount,
+                        StandingHeightMeters = heightSum / sampleCount,
+                    };
+                    _metricsMeasured = true;
+                    _calibrationDone = true;
+                    PlaySe(config.poseMatchedSe);
+                    _ui.ShowMessage(config.calibrateMatchedText);
+                    Debug.Log($"[{nameof(ExperienceDirector)}] star pose matched: arm " +
+                              $"{_metrics.ArmLengthMeters:0.00}m span {_metrics.ArmSpanMeters:0.00}m " +
+                              $"height {_metrics.StandingHeightMeters:0.00}m ({sampleCount} samples).", this);
+                    break;
+                }
+                yield return null;
+            }
+            _calibrateRoutine = null;
+        }
+
+        // ------------------------------------------------ Explore (recording) ----
+
+        private void StartVisitorRecording()
+        {
+            if (sensorRecorder == null) return;
+            _savedRecFolderPath = sensorRecorder.folderPath;
+            _savedRecAutoTimestamp = sensorRecorder.autoTimestampFolder;
+            if (!string.IsNullOrEmpty(config.visitorRecordingRoot))
+                sensorRecorder.folderPath = config.visitorRecordingRoot;
+            sensorRecorder.autoTimestampFolder = true;
+            sensorRecorder.StartRecording();
+            _visitorRecordingActive = sensorRecorder.CurrentState == SensorRecorder.State.Recording;
+            if (!_visitorRecordingActive)
+            {
+                Debug.LogError($"[{nameof(ExperienceDirector)}] Explore recording failed to start " +
+                               "(no live renderers?) — the take will be empty.", this);
+                RestoreRecorderFolderConfig();
+            }
+        }
+
+        private IEnumerator ExploreRoutine()
+        {
+            var t = config.timings;
+            float countdownFrom = Mathf.Max(0f, t.exploreSeconds - config.countdownSeconds);
+            int shown = -1;
+
+            while (_active && _fsm.State == ExperienceState.Explore
+                   && _fsm.TimeInState < t.exploreSeconds)
+            {
+                if (_fsm.TimeInState >= countdownFrom)
+                {
+                    int remain = Mathf.Max(1, Mathf.CeilToInt(t.exploreSeconds - _fsm.TimeInState));
+                    if (remain != shown)
+                    {
+                        _ui.ShowCountdown(remain);
+                        PlaySe(config.countdownTickSe);
+                        shown = remain;
+                    }
+                }
+                yield return null;
+            }
+            if (!_active || _fsm.State != ExperienceState.Explore) yield break; // exit cleanup aborts
+
+            if (_visitorRecordingActive && sensorRecorder != null)
+            {
+                sensorRecorder.StopRecording();
+                _takeRoot = sensorRecorder.LastRecordingRoot;
+                _visitorRecordingActive = false;
+                RestoreRecorderFolderConfig();
+            }
+            PlaySe(config.recordEndSe);
+            _recordingDone = true;
+            _exploreRoutine = null;
+        }
+
+        /// <summary>Visitor walked away / fault mid-recording: stop and DISCARD
+        /// (the take stays on disk but is not used).</summary>
+        private void AbortVisitorRecording()
+        {
+            if (!_visitorRecordingActive) return;
+            _visitorRecordingActive = false;
+            if (sensorRecorder != null
+                && sensorRecorder.CurrentState == SensorRecorder.State.Recording)
+                sensorRecorder.StopRecording();
+            RestoreRecorderFolderConfig();
+        }
+
+        private void RestoreRecorderFolderConfig()
+        {
+            if (sensorRecorder == null) return;
+            sensorRecorder.folderPath = _savedRecFolderPath;
+            sensorRecorder.autoTimestampFolder = _savedRecAutoTimestamp;
+        }
+
+        // ------------------------------------------------ Processing (v11s) ----
+
+        private IEnumerator ProcessingRoutine()
+        {
+            if (string.IsNullOrEmpty(_takeRoot) || !Directory.Exists(_takeRoot))
+            {
+                Debug.LogError($"[{nameof(ExperienceDirector)}] no take to process ('{_takeRoot}').", this);
+                _processingFailed = true;
+                _ui.ShowMessage(config.exportFailedText);
+                _processingRoutine = null;
+                yield break;
+            }
+
+            _converter = new FusedTakeConverter();
+            bool started = _converter.Start(_takeRoot, new FusedTakeConverter.Options
+            {
+                ModelsDir = config.conversionModelsDir,
+                BodyProfilePath = config.conversionBodyProfilePath,
+                Provider = config.conversionProvider,
+                ConfThreshold = config.conversionConfThreshold,
+                RunCatchupSmooth = config.runCatchupSmooth,
+            });
+            if (!started)
+            {
+                Debug.LogWarning($"[{nameof(ExperienceDirector)}] v11s conversion could not start " +
+                                 $"({_converter.Error}) — falling back to recorded k4abt bodies.", this);
+                _processingDone = true;
+                _processingRoutine = null;
+                yield break;
+            }
+
+            float deadline = Time.realtimeSinceStartup + config.timings.processingTimeoutSeconds;
+            bool timeoutLogged = false;
+            while (_converter.Status == FusedTakeConverter.ConvertStatus.Running)
+            {
+                if (!timeoutLogged && Time.realtimeSinceStartup > deadline)
+                {
+                    Debug.LogWarning($"[{nameof(ExperienceDirector)}] v11s conversion exceeded " +
+                                     $"{config.timings.processingTimeoutSeconds:0}s — aborting, " +
+                                     "falling back to recorded k4abt bodies.", this);
+                    _converter.Abort();
+                    timeoutLogged = true;
+                }
+                _ui.ShowProgress(_converter.Progress, config.processingText);
                 yield return null;
             }
 
+            if (_converter.Status == FusedTakeConverter.ConvertStatus.Done)
+            {
+                _ui.ShowProgress(1f, config.processingText);
+            }
+            else
+            {
+                Debug.LogWarning($"[{nameof(ExperienceDirector)}] v11s conversion ended " +
+                                 $"{_converter.Status} ({_converter.Error}) — playing back with " +
+                                 "the recorded k4abt bodies.", this);
+            }
+            // Either way the take is playable (fused bodies_main, or the
+            // untouched k4abt original) — never dead-end the visitor.
+            _processingDone = true;
+            _processingRoutine = null;
+        }
+
+        // ------------------------------------------------ visitor playback ----
+
+        private void StartVisitorPlayback(string takeRoot)
+        {
+            if (sensorRecorder == null) return;
+            if (string.IsNullOrEmpty(takeRoot) || !Directory.Exists(takeRoot))
+            {
+                Debug.LogError($"[{nameof(ExperienceDirector)}] no playable take ('{takeRoot}') — " +
+                               "the show will return to Attract when the visitor leaves.", this);
+                return;
+            }
+
+            // The visitor take replaces whatever is playing (attract ghost in the
+            // dev fallback; nothing on the live rig path).
+            if (_attract != null) { _attract.Stop(); _attract.RotationEnabled = false; }
+            _attractOwnsPlayback = false;
+            if (sensorRecorder.IsPlaying) sensorRecorder.StopAndUnload();
+
+            if (merger != null)
+            {
+                _savedIgnoreRecorded = merger.ignoreRecordedBodies;
+                merger.ignoreRecordedBodies = false; // consume the fused bodies_main
+                merger.muteWorkerIngest = true;      // workers now belong to LiveSkeletonFeed
+            }
+            _savedRenderDelay = sensorRecorder.playbackRenderDelayFrames;
+            sensorRecorder.playbackRenderDelayFrames = config.playbackRenderDelayFrames;
+            _savedLoop = sensorRecorder.loop;
+            sensorRecorder.loop = true;
+            if (HasLiveRenderers()) sensorManager?.SetLiveSuppressedAsSource(true);
+
+            sensorRecorder.playbackFolderPath = takeRoot;
+            sensorRecorder.Load();
+            if (!sensorRecorder.IsPlaying) sensorRecorder.TogglePlay();
+            sensorRecorder.OnPlaybackLooped += HandleVisitorPlaybackLooped;
+            _playbackLoops = 0;
+            _visitorPlaybackActive = true;
+        }
+
+        private void HandleVisitorPlaybackLooped() => _playbackLoops++;
+
+        private void StopVisitorPlayback()
+        {
+            if (!_visitorPlaybackActive) return;
+            _visitorPlaybackActive = false;
+            if (sensorRecorder != null)
+            {
+                sensorRecorder.OnPlaybackLooped -= HandleVisitorPlaybackLooped;
+                sensorRecorder.StopAndUnload();
+                sensorRecorder.playbackRenderDelayFrames = _savedRenderDelay;
+                sensorRecorder.loop = _savedLoop;
+            }
+            if (merger != null)
+            {
+                merger.ignoreRecordedBodies = _savedIgnoreRecorded;
+                merger.muteWorkerIngest = false;
+            }
+        }
+
+        // ------------------------------------------------ banzai / capture ----
+
+        /// <summary>Debug hook (RunCommand): trigger the banzai capture as if the
+        /// pose was detected. Only honored in BanzaiWait.</summary>
+        public void DebugTriggerBanzai() => _debugBanzaiPulse = true;
+
+        private void UpdateBanzaiDetection()
+        {
+            if (_fsm.State != ExperienceState.BanzaiWait) return;
+            if (_captureRoutine != null || _captureDone) return;
+
+            bool trigger = _debugBanzaiPulse;
+            _debugBanzaiPulse = false;
+
+            bool banzaiNow = false;
+            if (_liveFeed != null && _liveFeed.TryGetBestSkeleton(out var joints, out var valid))
+                banzaiNow = PoseClassifiers.IsBanzai(joints, valid, _metrics,
+                    config.banzaiMarginMeters, config.banzaiMarginArmFraction);
+            if (_banzaiHold.Update(banzaiNow, Time.realtimeSinceStartup)) trigger = true;
+
+            if (trigger)
+            {
+                PlaySe(config.banzaiSe);
+                _captureRoutine = StartCoroutine(CaptureAtPlayheadRoutine(seekRandom: false));
+            }
+            else if (_playbackLoops >= 1 + config.timings.banzaiFallbackLoops)
+            {
+                Debug.Log($"[{nameof(ExperienceDirector)}] no banzai after " +
+                          $"{config.timings.banzaiFallbackLoops} loops — capturing at a random point.", this);
+                _captureRoutine = StartCoroutine(CaptureAtPlayheadRoutine(seekRandom: true));
+            }
+        }
+
+        private IEnumerator CaptureAtPlayheadRoutine(bool seekRandom)
+        {
+            if (seekRandom && sensorRecorder != null && sensorRecorder.IsPlaying)
+            {
+                double duration = sensorRecorder.PlaybackDurationSeconds;
+                float target = duration > 3.0
+                    ? UnityEngine.Random.Range(1f, (float)duration - 2f)
+                    : (float)(duration * 0.5);
+                sensorRecorder.SeekToPlayheadSeconds(target);
+                sensorRecorder.ResumePlayback(); // seek auto-pauses
+                float settleEnd = Time.realtimeSinceStartup + config.postSeekSettleSeconds;
+                while (Time.realtimeSinceStartup < settleEnd) yield return null;
+            }
+
             // Freeze the 15-frame trail window and wait for a full curve rebuild.
+            // Playback keeps running — it FEEDS the rebuild.
             int saved = poseHistory != null ? poseHistory.historySamples : 0;
             if (poseHistory != null) poseHistory.historySamples = 15;
             if (motionCurves != null)
@@ -528,10 +928,10 @@ namespace Experience
             var snap = TSDFSnapshotBuilder.Capture(tsdfVolume, motionCurves, CaptureOptions(), out string err);
             if (poseHistory != null) poseHistory.historySamples = saved;
             if (snap == null)
-                Debug.LogWarning($"[{nameof(ExperienceDirector)}] capture {_captureIndex} failed: {err} " +
-                                 "— continuing without it.", this);
+                Debug.LogWarning($"[{nameof(ExperienceDirector)}] capture failed: {err} — " +
+                                 "Exporting will show the apology.", this);
             else
-                _snapshots[_captureIndex] = snap;
+                _snapshot = snap;
 
             _captureDone = true;
             _captureRoutine = null;
@@ -570,106 +970,12 @@ namespace Experience
             };
         }
 
-        // ------------------------------------------------ selection ----
-
-        private void SpawnSpheres()
-        {
-            for (int i = 0; i < 3 && i < config.sphereXOffsets.Length; i++)
-            {
-                var go = new GameObject($"_DwellSphere_{i}");
-                go.transform.SetParent(transform, false);
-                go.transform.position = new Vector3(
-                    config.sphereXOffsets[i],
-                    config.floorY + config.sphereHeight,
-                    config.sphereZ);
-                var sphere = go.AddComponent<DwellSphere>();
-                sphere.presence = _presence;
-                sphere.radius = config.sphereRadius;
-                sphere.dwellSeconds = config.sphereDwellSeconds;
-                int index = i;
-                sphere.OnSelected += _ => OnSphereSelected(index);
-                go.SetActive(false);
-                _spheres[i] = sphere;
-            }
-        }
-
-        private void OnSphereSelected(int index)
-        {
-            if (_snapshots[index] == null) return; // empty slot never counts
-            _selectedIndex = index;
-        }
-
-        private void ShowSelection()
-        {
-            _selectedIndex = -1;
-            if (_miniatureMat == null)
-            {
-                var shader = Resources.Load<Shader>("SnapshotVertexColor");
-                if (shader != null)
-                    _miniatureMat = new Material(shader)
-                    { name = "Snapshot miniature (auto)", hideFlags = HideFlags.DontSave };
-            }
-            for (int i = 0; i < 3; i++)
-            {
-                bool has = _snapshots[i] != null && _spheres[i] != null;
-                if (_spheres[i] != null)
-                {
-                    _spheres[i].gameObject.SetActive(has);
-                    if (has) _spheres[i].ResetSphere();
-                }
-                if (!has) continue;
-                BuildMiniature(i);
-            }
-        }
-
-        private void BuildMiniature(int i)
-        {
-            if (_miniatures[i] != null) Destroy(_miniatures[i]);
-            TSDFSnapshotBuilder.BuildDisplayMeshes(_snapshots[i], out var surface, out var tubes);
-
-            var root = new GameObject($"_Miniature_{i}");
-            root.transform.SetParent(transform, false);
-            float s = config.displayMiniatureScale;
-            root.transform.localScale = Vector3.one * s;
-            // Centre the world-space mesh on the sphere, floating above it.
-            Vector3 centre = surface.bounds.center;
-            Vector3 anchor = _spheres[i].transform.position + Vector3.up * (config.sphereRadius + 0.35f);
-            root.transform.position = anchor - centre * s;
-
-            AddMeshChild(root.transform, surface, "surface");
-            if (tubes != null) AddMeshChild(root.transform, tubes, "tubes");
-            _miniatures[i] = root;
-        }
-
-        private void AddMeshChild(Transform parent, Mesh mesh, string name)
-        {
-            var go = new GameObject(name);
-            go.transform.SetParent(parent, false);
-            go.AddComponent<MeshFilter>().sharedMesh = mesh;
-            var mr = go.AddComponent<MeshRenderer>();
-            mr.sharedMaterial = _miniatureMat;
-            mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-        }
-
-        private void SetSpheresActive(bool active)
-        {
-            foreach (var s in _spheres)
-                if (s != null) s.gameObject.SetActive(active && s.gameObject.activeSelf);
-            if (!active) SetMiniaturesActive(false);
-        }
-
-        private void SetMiniaturesActive(bool active)
-        {
-            foreach (var m in _miniatures)
-                if (m != null) m.SetActive(active);
-        }
-
         // ------------------------------------------------ export / publish ----
 
         private IEnumerator ExportAndPublish()
         {
             _exportDone = _exportFailed = false;
-            var snap = _selectedIndex >= 0 ? _snapshots[_selectedIndex] : null;
+            var snap = _snapshot;
             if (snap == null) { _exportFailed = true; ShowExportFailed(); yield break; }
 
             string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
@@ -679,8 +985,8 @@ namespace Experience
             string usdzPath = Path.Combine(dir, $"exp_{stamp}.usdz");
             string usdPython = printExporter != null ? printExporter.usdPythonPath : "";
 
-            // Synchronous local write (accepted for Phase 5 — atomic tmp+rename,
-            // at most one export blocks a mode exit; revisit Task.Run in Phase 7).
+            // Synchronous local write (atomic tmp+rename; playback keeps looping
+            // visually — one hitch frame during the write is accepted).
             if (!TSDFSnapshotBuilder.ExportFiles(snap, glbPath, usdzPath, usdPython,
                                                  out _, out string err))
             {
@@ -763,7 +1069,8 @@ namespace Experience
         private void ShowQr()
         {
             var tex = new QrUrlPresenter().Present(_qrUrl);
-            string caption = string.IsNullOrEmpty(config.qrCaption) ? "" : config.qrCaption;
+            string caption = !string.IsNullOrEmpty(config.qrScanText) ? config.qrScanText
+                           : (config.qrCaption ?? "");
             if (tex != null) _ui.ShowQr(tex, caption);
             else _ui.ShowMessage(_qrUrl ?? "");
         }
@@ -772,8 +1079,9 @@ namespace Experience
         {
             if (_fsm == null || _ui == null) return;
             var s = _fsm.State;
-            bool eligible = s != ExperienceState.Attract && s != ExperienceState.Fault &&
-                            s != ExperienceState.QrShow && s != ExperienceState.Exporting;
+            // Only during the live-interaction stages — playback states read
+            // presence from occupancy where crowd counting is meaningless.
+            bool eligible = s == ExperienceState.Calibrate || s == ExperienceState.Explore;
             bool crowd = eligible && _presence != null && _presence.CrowdActive;
             if (crowd && !_crowdShowing)
             {

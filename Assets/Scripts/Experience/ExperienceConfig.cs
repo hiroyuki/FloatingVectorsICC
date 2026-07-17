@@ -36,17 +36,6 @@ namespace Experience
         public float yBandMax = 100f;
         [Min(1)] public int occupancyThreshold = 1500;
 
-        [Header("Selection spheres (rebased frame, x offsets on the +X axis)")]
-        public float[] sphereXOffsets = { -1f, 0f, 1f };
-        [Tooltip("Sphere centre height above the floor (m).")]
-        public float sphereHeight = 1.2f;
-        [Tooltip("Sphere row Z in the rebased frame (m, + = toward camera 3).")]
-        public float sphereZ = 0.9f;
-        [Min(0.05f)] public float sphereRadius = 0.25f; // user-tuned live 2026-07-10
-        [Min(0.1f)] public float sphereDwellSeconds = 1f;
-        [Tooltip("Miniature sculpture scale above each sphere.")]
-        [Range(0.05f, 1f)] public float displayMiniatureScale = 0.25f;
-
         [Header("Attract playback")]
         [Tooltip("Folder containing recorded take folders for the attract-mode ghost " +
                  "(e.g. D:\\FloatingVectorsICC\\RecordingBase). Empty = attract is text-only.")]
@@ -153,15 +142,6 @@ namespace Experience
 
         [Header("Visitor texts (hiragana)")]
         [TextArea] public string attractText = "あそびに　きてね！";
-        [TextArea] public string welcomeText = "ようこそ！　からだを　うごかしてみてね";
-        [TextArea] public string freePlayText = "すきに　うごいてみよう！";
-        [TextArea] public string readyText = "これから　3かい　しゃしんを　とるよ！";
-        [TextArea] public string promptAnimalText = "すきな　どうぶつの　まねを　してみて！";
-        [TextArea] public string[] promptMantisVariants =
-            { "カマキリの　ポーズ！", "つよそうな　ポーズを　してみて！" };
-        [TextArea] public string[] promptFreeVariants =
-            { "すきな　ポーズで　きめて！", "さいごは　じゆうに　うごいてみて！" };
-        [TextArea] public string selectText = "すきな　かたちを　えらんで　てを　いれてね";
         [TextArea] public string exportingText = "いま　じゅんびしているよ　まってね";
         [TextArea] public string exportFailedText = "うまくいかなかったみたい　ごめんね";
         [TextArea]

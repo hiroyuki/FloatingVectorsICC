@@ -921,6 +921,30 @@ namespace PointCloud
               / 1_000_000_000.0;
 
         /// <summary>
+        /// Length of the loaded recording in seconds (longest track's last depth
+        /// frame relative to the playback start). Valid while Playing (the start
+        /// origin is established by StartPlayback); 0 otherwise. Used by the
+        /// experience flow to pick a random capture point.
+        /// </summary>
+        public double PlaybackDurationSeconds
+        {
+            get
+            {
+                if (CurrentState != State.Playing || _tracks == null || _tracks.Count == 0) return 0.0;
+                ulong end = 0;
+                foreach (var kv in _tracks)
+                {
+                    var frames = kv.Value.DepthFrames;
+                    if (frames == null || frames.Count == 0) continue;
+                    ulong ts = TimestampNsAt(frames, frames.Count - 1);
+                    if (ts > end) end = ts;
+                }
+                return end > _playbackTrackStartNs
+                    ? (end - _playbackTrackStartNs) / 1_000_000_000.0 : 0.0;
+            }
+        }
+
+        /// <summary>
         /// Playhead position (seconds from the recording start) that a recorded
         /// absolute timestamp corresponds to. Lets consumers of async results
         /// (e.g. live k4abt worker output during playback) compare a result's
