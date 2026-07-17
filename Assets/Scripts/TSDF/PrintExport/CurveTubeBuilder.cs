@@ -23,10 +23,12 @@ namespace TSDF
         // raindrop: shape the radius ALONG the tube like a falling raindrop —
         // motion visualization, so the ROUND head sits at the NEWEST end
         // (index n-1, where the bridge anchors) and the chopstick tail thins
-        // into the past. Head = spherical profile over the last headR of arc
-        // length (headR = min(radius, 40% of the chain length)); tail = linear
-        // taper from headR down to headR*tipTaper at the oldest point. The
-        // cross-section stays circular. Overrides the plain tipTaper ramp.
+        // into the past. The head is a TRUE hemisphere lathed past the last
+        // point (radius headR = min(radius, 40% of chain length)) — built
+        // geometrically, so sparse centreline sampling can never stretch it.
+        // The body swells quadratically from headR*tipTaper at the tail to
+        // headR at the head, meeting the hemisphere tangent-continuously.
+        // Cross-section stays circular. Overrides the plain tipTaper ramp.
         public static int AppendCurveTubes(List<Vector3[]> lines, List<Vector3> lineCols, float brightness,
                                            float radius, int sides, float tolerance, Vector3 center, float minY,
                                            List<Vector3> pos, List<Vector3> nrm, List<Vector3> col,
@@ -76,13 +78,14 @@ namespace TSDF
                     prevT = t;
                     Vector3 v = Vector3.Cross(t, u);
                     float r;
-                    if (raindrop && len > 1e-6f)
+                    bool drop = raindrop && len > 1e-6f;
+                    if (drop)
                     {
-                        float s = len - cum[i]; // arc distance back from the head
-                        r = s < headR
-                            ? Mathf.Sqrt(Mathf.Max(1e-8f, s * (2f * headR - s)))       // spherical head
-                            : Mathf.Lerp(headR, tailR,                                  // chopstick tail
-                                         (s - headR) / Mathf.Max(len - headR, 1e-6f));
+                        // smooth quadratic swell: thin chopstick tail for most of
+                        // the length, blending tangent-continuously into the
+                        // hemisphere head cap appended after the loop
+                        float u01 = cum[i] / len; // 0 = tail, 1 = head
+                        r = tailR + (headR - tailR) * u01 * u01;
                     }
                     else
                         r = radius * Mathf.Lerp(Mathf.Clamp01(tipTaper), 1f, n > 1 ? (float)i / (n - 1) : 1f);
@@ -97,8 +100,34 @@ namespace TSDF
                 }
                 Vector3 endT = prevT;
 
+                // Raindrop head: a TRUE hemisphere lathed past the newest point —
+                // built from headR alone, so centreline sampling can never
+                // stretch it into a spike. Rings continue the tube's index grid.
+                int rings = n;
+                bool headCap = raindrop && len > 1e-6f;
+                if (headCap)
+                {
+                    Vector3 vEnd = Vector3.Cross(endT, u);
+                    const int capRings = 5;
+                    for (int j = 1; j <= capRings; j++)
+                    {
+                        float a = 0.5f * Mathf.PI * j / (capRings + 1);
+                        Vector3 cc = p[n - 1] + endT * (headR * Mathf.Sin(a));
+                        float cr = headR * Mathf.Cos(a);
+                        for (int k = 0; k < sides; k++)
+                        {
+                            float ang = 2f * Mathf.PI * k / sides;
+                            Vector3 rd = Mathf.Cos(ang) * u + Mathf.Sin(ang) * vEnd;
+                            pos.Add(cc + rd * cr);
+                            nrm.Add((rd * Mathf.Cos(a) + endT * Mathf.Sin(a)).normalized);
+                            col.Add(c);
+                        }
+                    }
+                    rings = n + capRings;
+                }
+
                 // Side quads: ring k -> k+1 x segment i -> i+1, CCW-outward.
-                for (int i = 0; i < n - 1; i++)
+                for (int i = 0; i < rings - 1; i++)
                     for (int k = 0; k < sides; k++)
                     {
                         int k1 = (k + 1) % sides;
@@ -118,9 +147,10 @@ namespace TSDF
                 { idx.Add(capBase + sides); idx.Add(capBase + (k + 1) % sides); idx.Add(capBase + k); }
 
                 capBase = pos.Count;
-                int lastRing = ringBase + (n - 1) * sides;
+                int lastRing = ringBase + (rings - 1) * sides;
+                Vector3 pole = headCap ? p[n - 1] + endT * headR : p[n - 1];
                 for (int k = 0; k < sides; k++) { pos.Add(pos[lastRing + k]); nrm.Add(endT); col.Add(c); }
-                pos.Add(p[n - 1]); nrm.Add(endT); col.Add(c);
+                pos.Add(pole); nrm.Add(endT); col.Add(c);
                 for (int k = 0; k < sides; k++)
                 { idx.Add(capBase + sides); idx.Add(capBase + k); idx.Add(capBase + (k + 1) % sides); }
             }
