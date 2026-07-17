@@ -64,6 +64,21 @@ namespace BodyTracking
             false;
 #endif
 
+        /// <summary>Platform-gated read of <see cref="ignoreRecordedBodies"/> for external
+        /// coordinators (LiveSkeletonFeed) that must mirror this merger's worker-ownership
+        /// decision exactly — on non-Windows platforms the flag is inert and reads false.</summary>
+        public bool IgnoreRecordedBodiesActive => IgnoreRecordedActive;
+
+        /// <summary>While true, k4abt worker output is dropped at ingest (merge slots stay
+        /// untouched and nothing is persisted to a recording). The experience director sets
+        /// this during visitor-playback states, where the recorded bodies_main drives the
+        /// sculpture and the workers are re-purposed by LiveSkeletonFeed to track the LIVE
+        /// visitor for pose detection: their live-clock results must never fight the
+        /// recorded-clock merge. (The playhead-ahead guard below already drops live-clock
+        /// results in practice; this flag makes the contract explicit and airtight.)
+        /// Runtime-only by design — never serialized, so a crash can't strand it true.</summary>
+        [System.NonSerialized] public bool muteWorkerIngest;
+
         [Tooltip("External body source mode (e.g. LiveFusedBodySource running the RTMPose " +
                  "fusion). While true, skeletons arrive exclusively through " +
                  "SubmitExternalBodies: k4abt workers are never spawned and recorded " +
@@ -1042,6 +1057,11 @@ namespace BodyTracking
             // deliver — their k4abt output must not fight the external fused bodies
             // in the same slots (DispatchRawFrame already stops feeding them).
             if (useExternalBodies) return;
+
+            // Visitor-playback mute: LiveSkeletonFeed owns the workers (live visitor
+            // pose detection) while recorded bodies_main owns the merge. See the
+            // muteWorkerIngest doc comment.
+            if (muteWorkerIngest) return;
 
             if (!_latestBySerial.TryGetValue(serial, out var slot)) return;
 

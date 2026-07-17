@@ -44,6 +44,14 @@ namespace Experience
         [Tooltip("Black backdrop opacity behind the red alert text.")]
         public float alertBackdropAlpha = 0.75f;
 
+        [Min(64f)]
+        [Tooltip("Pose-guide figure size (reference pixels), shown above center.")]
+        public float poseGuideSizePixels = 420f;
+
+        [Min(64f)]
+        [Tooltip("Progress bar width (reference pixels).")]
+        public float progressBarWidth = 800f;
+
         private sealed class DisplayUi
         {
             public Canvas canvas;
@@ -51,6 +59,12 @@ namespace Experience
             public GameObject qrGroup;
             public RawImage qrImage;
             public Text qrCaption;
+            public GameObject poseGroup;
+            public RawImage poseImage;
+            public Text poseLabel;
+            public GameObject progressGroup;
+            public Text progressCaption;
+            public RectTransform progressFill;
             public GameObject alertGroup;
             public Text alertText;
         }
@@ -100,7 +114,8 @@ namespace Experience
 
         // ---------------- public API ----------------
 
-        /// <summary>Centered white message on every visitor display.</summary>
+        /// <summary>Centered white message on every visitor display. Replaces the
+        /// whole non-alert screen (pose guide / progress / QR go down with it).</summary>
         public void ShowMessage(string text)
         {
             EnsureBuilt();
@@ -110,6 +125,8 @@ namespace Experience
                 ui.message.text = text ?? "";
                 ui.message.gameObject.SetActive(true);
                 ui.qrGroup.SetActive(false);
+                ui.poseGroup.SetActive(false);
+                ui.progressGroup.SetActive(false);
             }
         }
 
@@ -126,6 +143,43 @@ namespace Experience
             }
         }
 
+        /// <summary>
+        /// Pose-guide figure (above center) + instruction text (below). The
+        /// message/countdown slot stays free, so ShowCountdown can overlay the
+        /// remaining seconds while the guide is up (Calibrate state).
+        /// </summary>
+        public void ShowPoseGuide(Texture2D guide, string text)
+        {
+            EnsureBuilt();
+            foreach (var ui in _uis)
+            {
+                ui.poseImage.texture = guide;
+                ui.poseLabel.text = text ?? "";
+                ui.poseGroup.SetActive(true);
+                ui.qrGroup.SetActive(false);
+                ui.progressGroup.SetActive(false);
+                // Drop any previous state's message; ShowCountdown re-activates
+                // the slot when digits need to overlay the guide.
+                ui.message.gameObject.SetActive(false);
+            }
+        }
+
+        /// <summary>Caption + horizontal progress bar (Processing state).</summary>
+        public void ShowProgress(float value01, string caption)
+        {
+            EnsureBuilt();
+            float v = Mathf.Clamp01(value01);
+            foreach (var ui in _uis)
+            {
+                ui.progressCaption.text = caption ?? "";
+                ui.progressFill.sizeDelta = new Vector2(progressBarWidth * v, 0f);
+                ui.progressGroup.SetActive(true);
+                ui.qrGroup.SetActive(false);
+                ui.poseGroup.SetActive(false);
+                ui.message.gameObject.SetActive(false);
+            }
+        }
+
         /// <summary>QR + caption, centered. Hidden behind the alert if one is up.</summary>
         public void ShowQr(Texture2D qr, string caption)
         {
@@ -136,6 +190,8 @@ namespace Experience
                 ui.qrCaption.text = caption ?? "";
                 ui.qrGroup.SetActive(true);
                 ui.message.gameObject.SetActive(false);
+                ui.poseGroup.SetActive(false);
+                ui.progressGroup.SetActive(false);
             }
         }
 
@@ -174,6 +230,8 @@ namespace Experience
             {
                 if (ui.message != null) ui.message.gameObject.SetActive(false);
                 if (ui.qrGroup != null) ui.qrGroup.SetActive(false);
+                if (ui.poseGroup != null) ui.poseGroup.SetActive(false);
+                if (ui.progressGroup != null) ui.progressGroup.SetActive(false);
             }
         }
 
@@ -305,6 +363,65 @@ namespace Experience
             ui.qrCaption.resizeTextMaxSize = captionFontSize;
             ui.qrCaption.resizeTextMinSize = 12;
             ui.qrGroup.SetActive(false);
+
+            // -- pose-guide group: figure above center, instruction below.
+            //    The message/countdown slot stays independent so the big digits
+            //    can overlay the guide during Calibrate. --
+            ui.poseGroup = new GameObject("PoseGroup", typeof(RectTransform));
+            ui.poseGroup.transform.SetParent(root.transform, false);
+            Stretch(ui.poseGroup.GetComponent<RectTransform>());
+
+            var poseGo = new GameObject("PoseImage", typeof(RectTransform));
+            poseGo.transform.SetParent(ui.poseGroup.transform, false);
+            var poseRect = poseGo.GetComponent<RectTransform>();
+            poseRect.sizeDelta = new Vector2(poseGuideSizePixels, poseGuideSizePixels);
+            poseRect.anchoredPosition = new Vector2(0f, 130f);
+            ui.poseImage = poseGo.AddComponent<RawImage>();
+            ui.poseImage.color = Color.white;
+            ui.poseImage.raycastTarget = false;
+
+            ui.poseLabel = MakeText(ui.poseGroup.transform, "PoseLabel", messageFontSize, Color.white,
+                                    new Vector2(1700f, 200f));
+            ui.poseLabel.rectTransform.anchoredPosition =
+                new Vector2(0f, 130f - poseGuideSizePixels * 0.5f - 120f);
+            ui.poseGroup.SetActive(false);
+
+            // -- progress group: caption + horizontal bar --
+            ui.progressGroup = new GameObject("ProgressGroup", typeof(RectTransform));
+            ui.progressGroup.transform.SetParent(root.transform, false);
+            Stretch(ui.progressGroup.GetComponent<RectTransform>());
+
+            ui.progressCaption = MakeText(ui.progressGroup.transform, "ProgressCaption",
+                                          messageFontSize, Color.white, new Vector2(1700f, 200f));
+            ui.progressCaption.rectTransform.anchoredPosition = new Vector2(0f, 90f);
+
+            var barBackGo = new GameObject("BarBackground", typeof(RectTransform));
+            barBackGo.transform.SetParent(ui.progressGroup.transform, false);
+            var barBackRect = barBackGo.GetComponent<RectTransform>();
+            barBackRect.sizeDelta = new Vector2(progressBarWidth, 40f);
+            barBackRect.anchoredPosition = new Vector2(0f, -60f);
+            var barBack = barBackGo.AddComponent<Image>();
+            barBack.color = new Color(1f, 1f, 1f, 0.15f);
+            barBack.raycastTarget = false;
+
+            var fillGo = new GameObject("BarFill", typeof(RectTransform));
+            fillGo.transform.SetParent(barBackGo.transform, false);
+            ui.progressFill = fillGo.GetComponent<RectTransform>();
+            // anchored to the left edge, height follows the bar, width set by ShowProgress
+            ui.progressFill.anchorMin = new Vector2(0f, 0f);
+            ui.progressFill.anchorMax = new Vector2(0f, 1f);
+            ui.progressFill.pivot = new Vector2(0f, 0.5f);
+            ui.progressFill.anchoredPosition = Vector2.zero;
+            ui.progressFill.sizeDelta = new Vector2(0f, 0f);
+            var fill = fillGo.AddComponent<Image>();
+            fill.color = Color.white;
+            fill.raycastTarget = false;
+            ui.progressGroup.SetActive(false);
+
+            // Countdown digits must draw OVER the pose guide (Calibrate overlays
+            // both) — push the message slot above the content groups; the alert
+            // group is created after and stays topmost.
+            ui.message.transform.SetAsLastSibling();
 
             // -- alert group: backdrop + red text, LAST sibling = on top --
             ui.alertGroup = new GameObject("AlertGroup", typeof(RectTransform));
