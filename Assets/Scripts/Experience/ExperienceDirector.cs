@@ -848,12 +848,6 @@ namespace Experience
             _attractOwnsPlayback = false;
             if (sensorRecorder.IsPlaying) sensorRecorder.StopAndUnload();
 
-            if (merger != null)
-            {
-                _savedIgnoreRecorded = merger.ignoreRecordedBodies;
-                merger.ignoreRecordedBodies = false; // consume the fused bodies_main
-                merger.muteWorkerIngest = true;      // workers now belong to LiveSkeletonFeed
-            }
             _savedRenderDelay = sensorRecorder.playbackRenderDelayFrames;
             sensorRecorder.playbackRenderDelayFrames = config.playbackRenderDelayFrames;
             _savedLoop = sensorRecorder.loop;
@@ -862,6 +856,35 @@ namespace Experience
 
             sensorRecorder.playbackFolderPath = takeRoot;
             sensorRecorder.Load();
+
+            // Skeleton source for the playback. Normal path: the take carries
+            // bodies_main (fused, or the k4abt fallback recorded during Explore)
+            // → merger consumes it and the workers go to LiveSkeletonFeed for
+            // banzai detection. Edge: NO track has bodies (BT never locked on
+            // during Explore) → muting would kill the only remaining skeleton
+            // source, the merger's re-run-k4abt-on-playback path. Leave that
+            // path in charge instead; banzai detection is unavailable then, but
+            // the loop fallback still finishes the show.
+            bool takeHasBodies = false;
+            foreach (var (serial, _) in PointCloudRecording.EnumerateDevices(takeRoot))
+                if (sensorRecorder.HasRecordedBodies(serial)) { takeHasBodies = true; break; }
+            if (merger != null)
+            {
+                _savedIgnoreRecorded = merger.ignoreRecordedBodies;
+                if (takeHasBodies)
+                {
+                    merger.ignoreRecordedBodies = false; // consume the recorded bodies_main
+                    merger.muteWorkerIngest = true;      // workers belong to LiveSkeletonFeed
+                }
+                else
+                {
+                    Debug.LogWarning($"[{nameof(ExperienceDirector)}] take has no recorded bodies — " +
+                                     "keeping live-k4abt-on-playback as the skeleton source " +
+                                     "(banzai detection unavailable; loop fallback will capture).", this);
+                    merger.muteWorkerIngest = false;
+                }
+            }
+
             if (!sensorRecorder.IsPlaying) sensorRecorder.TogglePlay();
             sensorRecorder.OnPlaybackLooped += HandleVisitorPlaybackLooped;
             _playbackLoops = 0;
