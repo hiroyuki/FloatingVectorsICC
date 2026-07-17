@@ -73,10 +73,11 @@ namespace TSDF
                  "print minimum: taper * printRadius must stay above the wire floor.")]
         public float tubeTailTaper = 1f;
 
-        [Tooltip("Droplet cross-section for the curve tubes: circle below, 90° " +
-                 "point on top, always facing world up — self-supporting in FDM " +
-                 "and reads as falling drops. Off = plain circular tubes.")]
-        public bool tubeTeardrop = true;
+        [Tooltip("Raindrop silhouette along each tube: spherical head at the " +
+                 "NEWEST end (motion direction), chopstick tail thinning into " +
+                 "the past (tail tip = Tube Tail Taper * head radius). Off = " +
+                 "plain linear taper.")]
+        public bool tubeRaindrop = true;
 
         [Range(1f, 3f)]
         [Tooltip("Bridge body-side radius multiplier — a fillet root where the tube " +
@@ -1111,7 +1112,7 @@ namespace TSDF
                     tubeCount += CurveTubeBuilder.AppendCurveTubes(line, col, 1f, printRadius,
                         stlCurveSides, webCurveTolerance, Vector3.zero, 0f, tp, tn, tc, ti,
                         tipTaper: Mathf.Clamp01(tubeTailTaper), exportSpace: false,
-                        teardrop: tubeTeardrop);
+                        raindrop: tubeRaindrop);
 
                     if (chainLows != null)
                     {
