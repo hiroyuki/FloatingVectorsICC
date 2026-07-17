@@ -151,8 +151,11 @@ namespace BodyTracking.Eval.Rtmpose
         }
 
         /// <summary>Runtime toggle for <see cref="submitToMerger"/> that keeps the
-        /// merger's useExternalBodies flag in sync (acquired/released with the
-        /// same ownership rules as enable/disable).</summary>
+        /// merger's useExternalBodies flag in sync. Pausing FORCES external-body
+        /// mode off regardless of who set it — this component is the only
+        /// external-body feeder, so a lingering true (stale scene serialization,
+        /// pre-enabled merger) would leave the merger deaf to the recorded
+        /// bodies_main the caller is switching to. Resuming re-acquires the mode.</summary>
         public void SetSubmitToMerger(bool value)
         {
             if (submitToMerger == value) return;
@@ -160,16 +163,13 @@ namespace BodyTracking.Eval.Rtmpose
             if (merger == null || _session == null) return;
             if (value)
             {
-                if (!merger.useExternalBodies)
-                {
-                    merger.useExternalBodies = true;
-                    _mergerFlagOwned = true;
-                }
+                merger.useExternalBodies = true;
+                _mergerFlagOwned = true;
             }
-            else if (_mergerFlagOwned)
+            else if (merger.useExternalBodies)
             {
                 merger.useExternalBodies = false;
-                _mergerFlagOwned = false;
+                _mergerFlagOwned = true; // we own the mode's lifecycle from here on
             }
         }
 
