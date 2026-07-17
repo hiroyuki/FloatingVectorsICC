@@ -448,8 +448,50 @@ namespace BodyTracking
             return false;
         }
 
+        // Full-joint snapshot of the PRIMARY merged person, world space. Filled
+        // alongside RecordPersonSample for _persons[0] only (single-person
+        // installation) so pose classification (star/banzai) can read every
+        // joint regardless of the body SOURCE (k4abt workers, recorded
+        // bodies_main, or external fused bodies) without k4a types leaking out.
+        private readonly Vector3[] _primaryJointsWorld = new Vector3[K4ABTConsts.K4ABT_JOINT_COUNT];
+        private readonly bool[] _primaryJointValid = new bool[K4ABTConsts.K4ABT_JOINT_COUNT];
+
+        /// <summary>
+        /// World-space joints of the primary merged person this frame (K4ABT
+        /// order; valid = confidence != NONE). The arrays are internal reusable
+        /// buffers overwritten every merge pass — read immediately, copy to
+        /// retain. False when nobody is tracked.
+        /// </summary>
+        public bool TryGetPrimarySkeleton(out Vector3[] jointsWorld, out bool[] jointValid)
+        {
+            if (_persons.Count > 0)
+            {
+                jointsWorld = _primaryJointsWorld;
+                jointValid = _primaryJointValid;
+                return true;
+            }
+            jointsWorld = null;
+            jointValid = null;
+            return false;
+        }
+
         private void RecordPersonSample(uint id, in k4abt_skeleton_t skel)
         {
+            // Primary person (first recorded this pass): stash the full skeleton
+            // for TryGetPrimarySkeleton. _mergedSkel positions are synthetic
+            // k4a-mm — K4AmmToUnity recovers the world position (see the
+            // coordinate contract above).
+            if (_persons.Count == 0)
+            {
+                for (int i = 0; i < K4ABTConsts.K4ABT_JOINT_COUNT; i++)
+                {
+                    var jt = skel.Joints[i];
+                    _primaryJointsWorld[i] = BodyTrackingShared.K4AmmToUnity(jt.Position);
+                    _primaryJointValid[i] = jt.ConfidenceLevel
+                        != k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_NONE;
+                }
+            }
+
             // k4abt's HAND joints are frequently NONE even while the WRIST is
             // MEDIUM (measured on the 12-50-09 take: hands NONE the whole time).
             // For touch purposes the wrist is ~8 cm from the palm — well inside

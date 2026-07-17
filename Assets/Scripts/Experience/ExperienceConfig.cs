@@ -41,6 +41,11 @@ namespace Experience
                  "(e.g. D:\\FloatingVectorsICC\\RecordingBase). Empty = attract is text-only.")]
         public string attractRecordingRoot = "";
 
+        [Tooltip("Attract ghost uses the takes' recorded bodies_main (pre-convert the " +
+                 "attract takes to v11s for production quality — no k4abt re-analysis). " +
+                 "Off = legacy behavior (live k4abt re-runs on the played-back depth).")]
+        public bool attractUseRecordedBodies = true;
+
         [Header("Visitor take (Explore recording)")]
         [Tooltip("Root folder visitor takes are recorded under (each take gets a " +
                  "timestamped subfolder). Keep on a fast disk; separate from the " +
