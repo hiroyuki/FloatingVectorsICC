@@ -14,19 +14,29 @@
   - USDZ 用 python（`~/.venvs/usd`）
   - **LFKS 本番 token** → `<persistentDataPath>/lfks-token.txt`（期限 2026-10-31、サーバー ntticc.lfks.app）
 
+## カメラの「順番」は 4 種類ある（混同注意）
+
+| 順番 | 決まり方 | 何に効くか | どこで設定 |
+|---|---|---|---|
+| **① USB 列挙順（index）** | `QueryDevices()` の順。**シリアル指定不可**、USB ポートで変わる | **sync Primary（index 0）** と IR スタガー（160µs×index） | 設定不可 → **配線側を合わせる**（下記手順 2-3） |
+| **② camera-id（cameras.yaml）** | キャリブ UI の assign モードで手動 | キャリブの world origin（cam0）と id 表示 | F1 → **I** → 矢印 + **O** |
+| **③ rigSerialOrder** | ExperienceConfig に手入力 | **world rebase の +X 軸 = cam1→cam2 の向き**（QR や体験の向きに直結） | `ExperienceConfig.rigSerialOrder`（**現物は開発機のシリアルのまま — 必ず現地の 4 シリアルに差し替え**） |
+| **④ expectedSerials** | 手入力（順不同） | カメラ死活監視（Fault） | `CameraHealthMonitor.expectedSerials` |
+
 ## 1. ハードウェア設置
 
 1. カメラ 4 台をステージ四隅に設置（中心向き、高さ ~1m 目安 — 前回リグは床がキャリブ座標 y≈-0.9）
-2. **sync 配線**: cam0 が Primary。デイジーチェーンなら cam0 の VSYNC OUT → 次カメラ IN の順に数珠つなぎ（`SensorManager.syncTopology` を配線方式に合わせる。Hub Pro でも cam0=Primary）
-3. USB3 を PC へ — 可能なら**カメラごとに別の USB コントローラ**（ハブ共有は帯域切れの元）
+2. USB3 を PC へ — 可能なら**カメラごとに別の USB コントローラ**（ハブ共有は帯域切れの元）
+3. **sync ケーブルはまだ確定配線しない**（Primary が USB 列挙順で決まるため、手順 2 で index 0 のカメラを確認してから、そのカメラを起点に VSYNC OUT → 次の IN と数珠つなぎ。`SensorManager.syncTopology` を配線方式に合わせる。Hub Pro でも「index 0 = Primary」は同じ）
 4. **三脚・機材を capture volume（約 3.2×3.2m）の外へ**
 
 ## 2. PC 初回接続（カメラ認識）
 
 1. **初回のみ**: 管理者 PowerShell で `D:\OrbbecSDK_K4A_Wrapper_...\scripts\obsensor_metadata_win10.ps1` を実行（UVC メタデータ登録。実行済み PC なら不要）
-2. Unity で Play（live モード: `SensorManager.playbackOnly` OFF）→ 4 台のシリアルが列挙されるか確認、**シリアルを控える**
-3. `CameraHealthMonitor.expectedSerials` に 4 シリアルを設定
-4. **カメラ設定の確認**:
+2. Unity で Play（live モード: `SensorManager.playbackOnly` OFF）→ 4 台のシリアルが列挙されるか確認、**index↔シリアル対応を控える**（ヒエラルキーの GO 名 `PointCloud[i] ... (シリアル)`、または verboseLogging のログ）
+3. **index 0 のカメラを sync チェーンの起点にして配線**（①の表参照）。配線後に Play し直し、GetSyncConfig で Primary/Secondary の反映を確認
+4. `CameraHealthMonitor.expectedSerials` に 4 シリアルを設定（④）
+5. **カメラ設定の確認**:
    - IR 干渉スタガーは既定で有効（`SensorManager.applySyncConfig=ON`, `trigger2ImageDelayStepUs=160` → index×160µs）。**実機で GetSyncConfig の反映を確認**し、中空のチリチリ幽霊点が出ないこと
    - **COLOR の露出/シャッターを上げる**（アプリ内制御は無いので OrbbecViewer で各カメラに設定）— 色ブレ = 追跡の catch-up jump の根本原因
 
@@ -35,11 +45,11 @@
 Game 内 UI（`CalibrationRuntimeUI`）で実施。Editor 派なら `Window > Calibration > Multi-Camera Extrinsic` でも同じパイプライン。
 
 1. **F1** でキャリブモード ON（BT/TSDF は自動サスペンド）
-2. **I** で camera-id 割当モード → 矢印キーで **並び順 = rigSerialOrder を決める**（cam0→cam1 の向きが **+X 軸**になる。QR/選択の向きに直結するのでここで確定）→ **O** で origin(cam0) 指定 → Esc
+2. **I** で camera-id 割当モード（②）→ 矢印キーで並び順を決め、**O** で origin(cam0) 指定 → Esc。**この並びをそのまま ③ rigSerialOrder にも使う**と一貫する（rigSerialOrder の cam1→cam2 の向きが **+X 軸** = 体験の向きに直結）
 3. ChArUco ボードを全カメラから見える位置で構え、**C** で capture（全カメラ同時 + skew ゲート）。**位置・向きを変えて複数回**
 4. **S** で solve → `calibration/extrinsics.yaml` 保存（R=リセット、D=ダンプ、H=UI 隠す、F1 で通常表示へ復帰）
 5. **検証**: 人が立って 4 台の点群が 1 体に重なること
-6. `ExperienceConfig.rigSerialOrder` を確定した並びに更新（director が SensorManager/SensorRecorder に push する）
+6. **③ `ExperienceConfig.rigSerialOrder` を現地の 4 シリアル・確定した並びに差し替え**（既定値は開発機のシリアル! director が SensorManager/SensorRecorder に push する）
 
 ## 4. 床高（rebase）
 
