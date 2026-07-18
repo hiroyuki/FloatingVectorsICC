@@ -98,6 +98,22 @@ namespace TSDF
                  "as a sparse artwork inside a dense, printable cloud.")]
         public float stlBlackLineRatio = 0.5f;
 
+        [Tooltip("MC fillet webs: every GRAZING line pair gets a small local " +
+                 "smin-blended Marching Cubes membrane hugging both bars — " +
+                 "smooth adhesion without touching the crisp tube mesh. " +
+                 "Solid intersections are left alone (they weld themselves).")]
+        public bool stlContactWebs = false;
+
+        [Range(0.001f, 0.004f)]
+        [Tooltip("Web patch voxel size (m). Smaller = smoother membrane, " +
+                 "slower export.")]
+        public float stlWebVoxel = 0.002f;
+
+        [Range(0.004f, 0.03f)]
+        [Tooltip("Web smin blend radius k (m). Larger = fatter, farther-" +
+                 "reaching fillet membranes.")]
+        public float stlWebBlend = 0.012f;
+
         [Range(1f, 2f)]
         [Tooltip("Bead strut radius as a multiple of the thicker contact radius.")]
         public float stlContactBeadScale = 1.15f;
@@ -687,7 +703,7 @@ namespace TSDF
         {
             public readonly List<Vector3> Pos = new List<Vector3>();
             public readonly List<int> Tri = new List<int>();
-            public int CurveTriStart, TubeBlackTriStart, WireTriStart, SupportTriStart, FloorPillarTriStart, FloorTriStart;
+            public int CurveTriStart, TubeBlackTriStart, WireTriStart, PatchTriStart, SupportTriStart, FloorPillarTriStart, FloorTriStart;
             public int BodyTris, TubeCount, BridgeCount, WireCount, SupportCount, FloorTris;
             public double BodyVol;
             public Vector2 FloorAt;
@@ -741,11 +757,14 @@ namespace TSDF
                 var supportPts = stlCurveSupportPillars ? new List<(Vector3 p, int chain, float r, Vector3 tan)>() : null;
                 var supportCands = stlCurveSupportPillars ? new List<(Vector3 p, int chain, float r, Vector3 tan)>() : null;
                 var chainLows = stlFloorPillarBand > 1e-4f ? new List<Vector3>() : null;
+                var webPts = stlContactWebs ? new List<(Vector3 p, float r, Vector3 tan)>() : null;
+                var webRanges = stlContactWebs ? new List<(int start, int count)>() : null;
                 BuildCurveAndBridgeTubes(tp, tn, tc, ti, out asm.TubeCount, out asm.BridgeCount,
                                          includeBridges: stlIncludeBody || wireframe,
                                          rootWireframe: wireframe, out asm.WireCount,
                                          out int wireTriStartLocal, out int tubeBlackTriStartLocal,
-                                         supportPts, supportCands, chainLows);
+                                         supportPts, supportCands, chainLows,
+                                         webPts, webRanges);
                 if (ti.Count > 0)
                 {
                     int vOff = pos.Count, iBase = tri.Count;
@@ -762,6 +781,27 @@ namespace TSDF
                     Debug.LogWarning("[TSDFPrintExporter] STL: no curve tubes emitted " +
                                      "(no curves component / seeds all culled?) — exporting " +
                                      "the body only.", this);
+                }
+
+                // MC fillet webs at grazing pairs — appended AFTER the tube
+                // block's OrientOutward (patches are open membranes, wound by
+                // SDF gradient; a signed-volume pass would be meaningless).
+                asm.PatchTriStart = tri.Count;
+                if (webPts != null && webPts.Count > 0)
+                {
+                    var wp = new List<Vector3>(); var wn = new List<Vector3>();
+                    var wc = new List<Vector3>(); var wi = new List<int>();
+                    int webs = ContactWebBuilder.AppendWebs(webPts, webRanges,
+                        stlWebVoxel, stlWebBlend, 20000, wp, wn, wc, wi, out int skippedPairs);
+                    if (wi.Count > 0)
+                    {
+                        int vOff = pos.Count;
+                        pos.AddRange(wp);
+                        for (int i = 0; i < wi.Count; i++) tri.Add(wi[i] + vOff);
+                    }
+                    Debug.Log($"[TSDFPrintExporter] contact webs: {webs} membranes, " +
+                              $"{wi.Count / 3} tris" +
+                              (skippedPairs > 0 ? $", {skippedPairs} pairs over the cap" : "") + ".", this);
                 }
 
                 // Self-made supports: from each support point, a SHORT strut to
@@ -892,6 +932,7 @@ namespace TSDF
             if (!stlIncludeCurveTubes)
             {
                 asm.TubeBlackTriStart = tri.Count; asm.WireTriStart = tri.Count;
+                asm.PatchTriStart = tri.Count;
                 asm.SupportTriStart = tri.Count; asm.FloorPillarTriStart = tri.Count;
             }
             asm.FloorTriStart = tri.Count;
@@ -1023,7 +1064,8 @@ namespace TSDF
             Add(0, asm.CurveTriStart, 0);                          // body
             Add(asm.CurveTriStart, asm.TubeBlackTriStart, 1);      // white lines
             Add(asm.TubeBlackTriStart, asm.WireTriStart, 0);       // black lines (+ bridges)
-            Add(asm.WireTriStart, asm.SupportTriStart, 0);         // wireframe + isolation links
+            Add(asm.WireTriStart, asm.PatchTriStart, 0);           // wireframe + isolation links
+            Add(asm.PatchTriStart, asm.SupportTriStart, 1);        // MC contact webs
             Add(asm.SupportTriStart, asm.FloorPillarTriStart, 1);  // curve-to-curve struts
             Add(asm.FloorPillarTriStart, asm.Tri.Count, 0);        // floor pillars + plate
             return spans;
@@ -1117,7 +1159,9 @@ namespace TSDF
                                               out int tubeBlackTriStartLocal,
                                               List<(Vector3 p, int chain, float r, Vector3 tan)> supportPts = null,
                                               List<(Vector3 p, int chain, float r, Vector3 tan)> supportCandidates = null,
-                                              List<Vector3> chainLows = null)
+                                              List<Vector3> chainLows = null,
+                                              List<(Vector3 p, float r, Vector3 tan)> outContactPts = null,
+                                              List<(int start, int count)> outContactRanges = null)
         {
             tubeCount = 0; bridgeCount = 0; wireCount = 0; wireTriStartLocal = -1; tubeBlackTriStartLocal = -1;
             if (curves == null) return;
@@ -1158,9 +1202,9 @@ namespace TSDF
                 var line = new List<Vector3[]> { null };
                 var col = new List<Vector3> { Vector3.one };
                 var pts = new List<Vector3>(64);
-                bool wantLinkData = stlLinkIsolatedChains || stlContactBeads;
-                var linkPts = wantLinkData ? new List<(Vector3 p, float r, Vector3 tan)>() : null;
-                var linkRanges = wantLinkData ? new List<(int start, int count)>() : null;
+                bool wantLinkData = stlLinkIsolatedChains || stlContactBeads || outContactPts != null;
+                var linkPts = outContactPts ?? (wantLinkData ? new List<(Vector3 p, float r, Vector3 tan)>() : null);
+                var linkRanges = outContactRanges ?? (wantLinkData ? new List<(int start, int count)>() : null);
                 int emittedChains = 0, tubesOut = 0;
 
                 // one emitted tube — a whole chain, or one in-crop run of it

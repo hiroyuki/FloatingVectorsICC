@@ -887,6 +887,38 @@ namespace PointCloud
             return (ts > _playbackTrackStartNs ? ts - _playbackTrackStartNs : 0UL) / 1_000_000_000.0;
         }
 
+        [Header("Seek point")]
+        [Tooltip("Pending seek target: playback auto-pauses when the depth " +
+                 "cursor reaches this frame (the _fNNNNN in print-export file " +
+                 "names). -1 = none. Set by Seek To Frame.")]
+        public int seekPauseFrame = -1;
+
+        [Tooltip("Seconds replayed BEFORE the seek target so the motion trails " +
+                 "re-accumulate to their true length at the target frame.")]
+        public float seekPrerollSeconds = 75f;
+
+        /// <summary>
+        /// Seek point with trail preroll: jump to seekPrerollSeconds before
+        /// <paramref name="frame"/>, resume playback, and auto-pause exactly at
+        /// the frame — reproducing the sculpture state a print export's _fNNNNN
+        /// name refers to, decay-free. Starts a playback session if needed.
+        /// </summary>
+        [ContextMenu("Seek To Frame (seekPauseFrame)")]
+        public void SeekToFrameContext() => SeekToFrame(seekPauseFrame);
+
+        public void SeekToFrame(int frame)
+        {
+            if (frame < 0) { SetStatus("SeekToFrame: no target frame set."); return; }
+            if (CurrentState != State.Playing) TogglePlay();
+            if (CurrentState != State.Playing) { SetStatus("SeekToFrame: playback could not start."); return; }
+            if (!IsPaused) PausePlayback();
+            int preFrames = Mathf.RoundToInt(Mathf.Max(0f, seekPrerollSeconds) * 30f);
+            SeekAllTracksTo(Mathf.Max(0, frame - preFrames));
+            seekPauseFrame = frame;
+            ResumePlayback();
+            SetStatus($"Seeking to frame {frame} (preroll {seekPrerollSeconds:0}s)…");
+        }
+
         /// <summary>
         /// Seek every track to <paramref name="targetCursor"/> (clamped to each
         /// track's [0, Count-1]) and re-emit the frame so the rest of the
@@ -2229,6 +2261,19 @@ namespace PointCloud
                 }
                 AdvanceBodyCursor(track, playheadNs);
                 ApplyBoundingBoxFilter(track);
+            }
+
+            // Seek point: auto-pause the moment the depth cursor reaches the
+            // requested frame (the _fNNNNN index stamped into print exports).
+            // Armed by SeekToFrame, which replays the preroll first so motion
+            // trails re-accumulate to their true length at the target.
+            if (seekPauseFrame >= 0 && CurrentPlaybackFrame >= seekPauseFrame)
+            {
+                int hit = CurrentPlaybackFrame;
+                seekPauseFrame = -1;
+                PausePlayback();
+                SetStatus($"Seek point reached — paused at frame {hit}.");
+                Debug.Log($"[SensorRecorder] seek point reached: frame {hit}.");
             }
 
             if (!anyRemaining)
