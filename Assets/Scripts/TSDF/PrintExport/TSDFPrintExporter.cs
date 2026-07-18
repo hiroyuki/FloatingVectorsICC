@@ -98,21 +98,21 @@ namespace TSDF
                  "as a sparse artwork inside a dense, printable cloud.")]
         public float stlBlackLineRatio = 0.5f;
 
-        [Tooltip("MC fillet webs: every GRAZING line pair gets a small local " +
+        [Tooltip("MC contact fillets: every GRAZING line pair gets a small local " +
                  "smin-blended Marching Cubes membrane hugging both bars — " +
                  "smooth adhesion without touching the crisp tube mesh. " +
                  "Solid intersections are left alone (they weld themselves).")]
-        public bool stlContactWebs = false;
+        public bool stlContactFillets = false;
 
         [Range(0.001f, 0.004f)]
-        [Tooltip("Web patch voxel size (m). Smaller = smoother membrane, " +
+        [Tooltip("Fillet patch voxel size (m). Smaller = smoother membrane, " +
                  "slower export.")]
-        public float stlWebVoxel = 0.002f;
+        public float stlFilletVoxel = 0.002f;
 
         [Range(0.004f, 0.03f)]
-        [Tooltip("Web smin blend radius k (m). Larger = fatter, farther-" +
+        [Tooltip("Fillet smin blend radius k (m). Larger = fatter, farther-" +
                  "reaching fillet membranes.")]
-        public float stlWebBlend = 0.012f;
+        public float stlFilletBlend = 0.012f;
 
         [Range(1f, 2f)]
         [Tooltip("Bead strut radius as a multiple of the thicker contact radius.")]
@@ -757,8 +757,8 @@ namespace TSDF
                 var supportPts = stlCurveSupportPillars ? new List<(Vector3 p, int chain, float r, Vector3 tan)>() : null;
                 var supportCands = stlCurveSupportPillars ? new List<(Vector3 p, int chain, float r, Vector3 tan)>() : null;
                 var chainLows = stlFloorPillarBand > 1e-4f ? new List<Vector3>() : null;
-                var webPts = stlContactWebs ? new List<(Vector3 p, float r, Vector3 tan)>() : null;
-                var webRanges = stlContactWebs ? new List<(int start, int count)>() : null;
+                var webPts = stlContactFillets ? new List<(Vector3 p, float r, Vector3 tan)>() : null;
+                var webRanges = stlContactFillets ? new List<(int start, int count)>() : null;
                 BuildCurveAndBridgeTubes(tp, tn, tc, ti, out asm.TubeCount, out asm.BridgeCount,
                                          includeBridges: stlIncludeBody || wireframe,
                                          rootWireframe: wireframe, out asm.WireCount,
@@ -783,7 +783,7 @@ namespace TSDF
                                      "the body only.", this);
                 }
 
-                // MC fillet webs at grazing pairs — appended AFTER the tube
+                // MC contact fillets at grazing pairs — appended AFTER the tube
                 // block's OrientOutward (patches are open membranes, wound by
                 // SDF gradient; a signed-volume pass would be meaningless).
                 asm.PatchTriStart = tri.Count;
@@ -792,14 +792,14 @@ namespace TSDF
                     var wp = new List<Vector3>(); var wn = new List<Vector3>();
                     var wc = new List<Vector3>(); var wi = new List<int>();
                     int webs = ContactWebBuilder.AppendWebs(webPts, webRanges,
-                        stlWebVoxel, stlWebBlend, 20000, wp, wn, wc, wi, out int skippedPairs);
+                        stlFilletVoxel, stlFilletBlend, 20000, wp, wn, wc, wi, out int skippedPairs);
                     if (wi.Count > 0)
                     {
                         int vOff = pos.Count;
                         pos.AddRange(wp);
                         for (int i = 0; i < wi.Count; i++) tri.Add(wi[i] + vOff);
                     }
-                    Debug.Log($"[TSDFPrintExporter] contact webs: {webs} membranes, " +
+                    Debug.Log($"[TSDFPrintExporter] contact fillets: {webs} membranes, " +
                               $"{wi.Count / 3} tris" +
                               (skippedPairs > 0 ? $", {skippedPairs} pairs over the cap" : "") + ".", this);
                 }
@@ -1065,7 +1065,7 @@ namespace TSDF
             Add(asm.CurveTriStart, asm.TubeBlackTriStart, 1);      // white lines
             Add(asm.TubeBlackTriStart, asm.WireTriStart, 0);       // black lines (+ bridges)
             Add(asm.WireTriStart, asm.PatchTriStart, 0);           // wireframe + isolation links
-            Add(asm.PatchTriStart, asm.SupportTriStart, 1);        // MC contact webs
+            Add(asm.PatchTriStart, asm.SupportTriStart, 1);        // MC contact fillets
             Add(asm.SupportTriStart, asm.FloorPillarTriStart, 1);  // curve-to-curve struts
             Add(asm.FloorPillarTriStart, asm.Tri.Count, 0);        // floor pillars + plate
             return spans;
