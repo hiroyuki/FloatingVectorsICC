@@ -147,3 +147,6 @@ lfks-upload-guide.md
 /Packages/com.github.asus4.onnxruntime/Plugins/**/*.dylib
 /Packages/com.github.asus4.onnxruntime/Plugins/**/*.so
 /Packages/com.github.asus4.onnxruntime/Plugins/iOS~/
+
+# Python bytecode caches (eval/tools scripts)
+__pycache__/
