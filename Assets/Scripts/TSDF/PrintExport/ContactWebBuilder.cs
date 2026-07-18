@@ -43,8 +43,10 @@ namespace TSDF
                 return false;
             }
             string text = File.ReadAllText(path);
-            int at = text.IndexOf("triTable", System.StringComparison.Ordinal);
-            if (at < 0) { Debug.LogError("[ContactWebBuilder] triTable not found in hlsl."); return false; }
+            // find the DECLARATION ("triTable[256]"), not the header comment's
+            // mention of the name (which sits before edgeTable's hex values)
+            int at = text.IndexOf("triTable[256]", System.StringComparison.Ordinal);
+            if (at < 0) { Debug.LogError("[ContactWebBuilder] triTable[256] not found in hlsl."); return false; }
             var nums = new List<int>(4096);
             bool neg = false; int cur = 0; bool inNum = false;
             for (int i = text.IndexOf('{', at) + 1; i < text.Length; i++)

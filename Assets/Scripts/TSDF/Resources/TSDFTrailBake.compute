@@ -46,6 +46,7 @@ struct Seg
 StructuredBuffer<Seg> _Segs;
 int _SegOffset;              // first segment index processed by this dispatch
 int _SegCount;               // number of segments in this batch
+float _SminK;                // smooth-min blend radius (m); 0 = plain min-union
 
 // Sub-box parameters for BakeTrailBox (voxel-index space).
 int3 _VoxMin;                // box lower corner (voxel index)
@@ -69,11 +70,22 @@ float DistPointSeg(float3 p, float3 a, float3 b, out float h)
     return length(p - a - ab * h);
 }
 
-// Nearest capsule to p across the current segment batch. Returns true if any
-// capsule is within reach; outSdf/outCol hold that capsule's signed distance/colour.
+// Polynomial smooth-min (Quilez): blends surfaces within k of each other into
+// a fillet instead of a hard union crease. k = 0 degenerates to plain min.
+float SminBlend(float a, float b)
+{
+    if (_SminK <= 0.0) return min(a, b);
+    float h = saturate(0.5 + 0.5 * (b - a) / _SminK);
+    return lerp(b, a, h) - _SminK * h * (1.0 - h);
+}
+
+// Nearest capsule to p across the current segment batch (smin-accumulated when
+// _SminK > 0). Returns true if any capsule is within reach; outSdf/outCol hold
+// the blended signed distance and the nearest capsule's colour.
 bool NearestCapsule(float3 p, out float outSdf, out float3 outCol)
 {
     float bestSdf = _Tau;
+    float nearest = _Tau;
     float3 bestCol = float3(0, 0, 0);
     bool hit = false;
     for (int s = 0; s < _SegCount; s++)
@@ -83,28 +95,32 @@ bool NearestCapsule(float3 p, out float outSdf, out float3 outCol)
         float3 mid = (seg.a + seg.b) * 0.5;
         float halfLen = length(seg.b - seg.a) * 0.5;
         float maxR = max(seg.ra, seg.rb);
-        if (length(p - mid) > halfLen + maxR + _Tau) continue;
+        if (length(p - mid) > halfLen + maxR + _Tau + _SminK) continue;
 
         float h;
         float d = DistPointSeg(p, seg.a, seg.b, h) - lerp(seg.ra, seg.rb, h);
-        if (d < bestSdf) { bestSdf = d; bestCol = seg.color; hit = true; }
+        bestSdf = SminBlend(bestSdf, d);
+        if (d < nearest) { nearest = d; bestCol = seg.color; }
+        if (d < _Tau) hit = true;
     }
     outSdf = bestSdf;
     outCol = bestCol;
     return hit;
 }
 
-// min-union the nearest capsule at global voxel index gLin into the volume.
+// Union the blended capsule field at global voxel index gLin into the volume —
+// smin against the EXISTING content too, so cross-batch neighbours fillet.
 void StampVoxel(uint gLin, float3 p)
 {
     float sdf; float3 col;
     if (!NearestCapsule(p, sdf, col)) return;   // no capsule in range — leave as is
 
-    sdf = clamp(sdf, -_Tau, _Tau);
     float2 cur = _VoxelsOut[gLin];
-    if (cur.y <= 0.0 || sdf < cur.x)
+    float merged = cur.y > 0.0 ? SminBlend(cur.x, sdf) : sdf;
+    merged = clamp(merged, -_Tau, _Tau);
+    if (cur.y <= 0.0 || merged < cur.x)
     {
-        _VoxelsOut[gLin] = float2(sdf, 1.0);
+        _VoxelsOut[gLin] = float2(merged, 1.0);
         _ColorsOut[gLin] = float4(col, 1.0);
         uint dx = (uint)_Dim.x, dy = (uint)_Dim.y;
         int3 vc = int3((int)(gLin % dx), (int)((gLin / dx) % dy), (int)(gLin / (dx * dy)));

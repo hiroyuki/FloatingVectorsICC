@@ -98,6 +98,13 @@ namespace TSDF
                  "as a sparse artwork inside a dense, printable cloud.")]
         public float stlBlackLineRatio = 0.5f;
 
+        [Tooltip("Drop chain triangles whose centroid lies clearly INSIDE " +
+                 "another line (deeper than its inradius - 0.8 mm) — the buried " +
+                 "faces of overlapping bars are pure waste ('重なり部分の無駄な" +
+                 "頂点'). The union's outer surface is untouched; the open rims " +
+                 "left behind are hidden inside solid material.")]
+        public bool stlCullInteriorFaces = true;
+
         [Tooltip("MC contact fillets: every GRAZING line pair gets a small local " +
                  "smin-blended Marching Cubes membrane hugging both bars — " +
                  "smooth adhesion without touching the crisp tube mesh. " +
@@ -113,6 +120,13 @@ namespace TSDF
         [Tooltip("Fillet smin blend radius k (m). Larger = fatter, farther-" +
                  "reaching fillet membranes.")]
         public float stlFilletBlend = 0.012f;
+
+        [Range(0f, 0.05f)]
+        [Tooltip("GLOBAL smin for Fuse curves (voxel path, 方法1): capsules are " +
+                 "smooth-min blended into the volume, so every near contact " +
+                 "fillets — at the cost of voxel-resolution rounding on all " +
+                 "edges (the melted look). 0 = classic hard min-union.")]
+        public float fuseSminK = 0.015f;
 
         [Range(1f, 2f)]
         [Tooltip("Bead strut radius as a multiple of the thicker contact radius.")]
@@ -480,11 +494,13 @@ namespace TSDF
                 volume.CopyFrontToWrite();
                 // Shared full-grid batched bake (3-7 — was a copy of TrailBaker.BakeCore's loop).
                 TrailBakeOps.BakeSegments(_bakeShader, _bakeKernel, volume,
-                                          segBuf, st.emitted, bakeBatchSize);
+                                          segBuf, st.emitted, bakeBatchSize,
+                                          sminK: fuseSminK);
                 volume.Publish();
                 _snapVersion = volume.PublishVersion; // our own bump
 
-                _status = $"fused {st.emitted} curve segs (bridges skipped: {st.bridgesSkipped}, dropped: {st.dropped})";
+                _status = $"fused {st.emitted} curve segs (smin k={fuseSminK:0.###}, " +
+                          $"bridges skipped: {st.bridgesSkipped}, dropped: {st.dropped})";
                 Debug.Log("[TSDFPrintExporter] " + _status, this);
             }
             finally { segBuf.Release(); }
@@ -1202,22 +1218,26 @@ namespace TSDF
                 var line = new List<Vector3[]> { null };
                 var col = new List<Vector3> { Vector3.one };
                 var pts = new List<Vector3>(64);
-                bool wantLinkData = stlLinkIsolatedChains || stlContactBeads || outContactPts != null;
+                bool wantLinkData = stlLinkIsolatedChains || stlContactBeads || outContactPts != null
+                                    || stlCullInteriorFaces;
                 var linkPts = outContactPts ?? (wantLinkData ? new List<(Vector3 p, float r, Vector3 tan)>() : null);
                 var linkRanges = outContactRanges ?? (wantLinkData ? new List<(int start, int count)>() : null);
                 int emittedChains = 0, tubesOut = 0;
+                var chainTriRanges = stlCullInteriorFaces ? new List<(int startTri, int triCount)>() : null;
 
                 // one emitted tube — a whole chain, or one in-crop run of it
                 void EmitChain(List<Vector3> cp, Vector3 colour)
                 {
                     if (cp.Count < 2) return;
                     int chainId = emittedChains++;
+                    int triBefore = ti.Count;
                     line[0] = cp.ToArray();
                     col[0] = colour;
                     tubesOut += CurveTubeBuilder.AppendCurveTubes(line, col, 1f, printRadius,
                         stlCurveSides, webCurveTolerance, Vector3.zero, 0f, tp, tn, tc, ti,
                         tipTaper: Mathf.Clamp01(tubeTailTaper), exportSpace: false,
                         raindrop: tubeRaindrop, alignUp: tubeAlignUp);
+                    chainTriRanges?.Add((triBefore / 3, (ti.Count - triBefore) / 3));
 
                     if (chainLows != null)
                     {
@@ -1336,6 +1356,15 @@ namespace TSDF
                 foreach (var kv in chains) if (BlackSeed(kv.Key)) EmitWhole(kv.Key, kv.Value);
                 tubeCount = tubesOut;
 
+                if (stlCullInteriorFaces && linkPts != null && linkRanges != null && linkRanges.Count > 1)
+                {
+                    int beforeCull = ti.Count / 3;
+                    CullInteriorChainTris(linkPts, linkRanges, chainTriRanges, tp, ti,
+                                          ref tubeBlackTriStartLocal);
+                    Debug.Log($"[TSDFPrintExporter] interior cull: {beforeCull - ti.Count / 3} of " +
+                              $"{beforeCull} chain tris removed (buried in other lines).", this);
+                }
+
                 if (stlContactBeads)
                     AppendContactBeads(linkPts, linkRanges, line, col, tp, tn, tc, ti);
 
@@ -1408,6 +1437,122 @@ namespace TSDF
             CurveTubeBuilder.AppendCurveTubes(line, col, 1f, radii[0], 8, 0f,
                 Vector3.zero, 0f, tp, tn, tc, ti, tipTaper: 1f, exportSpace: false,
                 ringRadii: radii);
+        }
+
+        /// <summary>Interior-face culling: removes every chain triangle whose
+        /// centroid lies clearly INSIDE another chain's bar — the buried faces
+        /// of overlapping lines are pure vertex waste. Inside test: distance to
+        /// a neighbouring chain's centreline segment &lt; that bar's INRADIUS
+        /// (square section: 0.707 × ring radius) minus 0.8 mm, so a bar's own
+        /// surface (exactly at its inradius) and mere touches survive.
+        /// Parallelised over triangles; compacts the index list in place and
+        /// shifts the black-lines span boundary by the triangles removed before
+        /// it.</summary>
+        private static void CullInteriorChainTris(List<(Vector3 p, float r, Vector3 tan)> pts,
+                                                  List<(int start, int count)> ranges,
+                                                  List<(int startTri, int triCount)> triRanges,
+                                                  List<Vector3> tp, List<int> ti,
+                                                  ref int blackBoundary)
+        {
+            int n = pts.Count;
+            var chainOf = new int[n];
+            var idxInChain = new int[n];
+            for (int c = 0; c < ranges.Count; c++)
+                for (int i = 0; i < ranges[c].count; i++)
+                { chainOf[ranges[c].start + i] = c; idxInChain[ranges[c].start + i] = i; }
+
+            // triangle -> owning chain, so a tube can NEVER cull its own faces
+            // (cap fans sit near the axis and would count as "inside" themselves)
+            var triChain = new int[ti.Count / 3];
+            for (int c = 0; c < triRanges.Count; c++)
+                for (int t = 0; t < triRanges[c].triCount; t++)
+                    triChain[triRanges[c].startTri + t] = c;
+
+            float cell = 0.03f;
+            var grid = new Dictionary<long, List<int>>(n / 2 + 1);
+            long Key(int kx, int ky, int kz) => (kx * 73856093L) ^ (ky * 19349663L) ^ (kz * 83492791L);
+            int C(float v) => Mathf.FloorToInt(v / cell);
+            for (int i = 0; i < n; i++)
+            {
+                long k = Key(C(pts[i].p.x), C(pts[i].p.y), C(pts[i].p.z));
+                if (!grid.TryGetValue(k, out var l)) grid[k] = l = new List<int>(8);
+                l.Add(i);
+            }
+
+            const float kInradius = 0.70710678f, kMargin = 0.0008f;
+            int triCount = ti.Count / 3;
+            var drop = new bool[triCount];
+            System.Threading.Tasks.Parallel.For(0, triCount, t =>
+            {
+                Vector3 cen = (tp[ti[t * 3]] + tp[ti[t * 3 + 1]] + tp[ti[t * 3 + 2]]) / 3f;
+                int cx = C(cen.x), cy = C(cen.y), cz = C(cen.z);
+                for (int gx = cx - 1; gx <= cx + 1; gx++)
+                    for (int gy = cy - 1; gy <= cy + 1; gy++)
+                        for (int gz = cz - 1; gz <= cz + 1; gz++)
+                        {
+                            if (!grid.TryGetValue(Key(gx, gy, gz), out var l)) continue;
+                            foreach (int qi in l)
+                            {
+                                // test against the segment STARTING at qi
+                                var (a, ra, _) = pts[qi];
+                                int ci = chainOf[qi];
+                                if (ci == triChain[t]) continue; // never self-cull
+                                if (idxInChain[qi] + 1 >= ranges[ci].count) continue;
+                                var (b, rb, _) = pts[qi + 1];
+                                Vector3 ab = b - a;
+                                float len2 = ab.sqrMagnitude;
+                                float h = len2 > 1e-12f
+                                    ? Mathf.Clamp01(Vector3.Dot(cen - a, ab) / len2) : 0f;
+                                float inr = Mathf.Lerp(ra, rb, h) * kInradius - kMargin;
+                                if (inr <= 0f) continue;
+                                if ((cen - (a + ab * h)).sqrMagnitude < inr * inr)
+                                { drop[t] = true; return; }
+                            }
+                        }
+            });
+
+            // Fragment cleanup: culling can leave orphaned scraps — a lone cap
+            // fan poking past the neighbour that swallowed its tube, sliver
+            // runs, etc. Union-find surviving triangles by shared vertex
+            // (vertices are shared only within a tube) and drop components
+            // smaller than 8 triangles.
+            var parent = new int[triCount];
+            for (int t = 0; t < triCount; t++) parent[t] = t;
+            int Find(int x) { while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
+            void Union(int a, int b) { a = Find(a); b = Find(b); if (a != b) parent[a] = b; }
+            var vertOwner = new Dictionary<int, int>(triCount);
+            for (int t = 0; t < triCount; t++)
+            {
+                if (drop[t]) continue;
+                for (int e = 0; e < 3; e++)
+                {
+                    int v = ti[t * 3 + e];
+                    if (vertOwner.TryGetValue(v, out int prev)) Union(t, prev);
+                    else vertOwner[v] = t;
+                }
+            }
+            var compSize = new Dictionary<int, int>(1024);
+            for (int t = 0; t < triCount; t++)
+            {
+                if (drop[t]) continue;
+                int root = Find(t);
+                compSize.TryGetValue(root, out int s);
+                compSize[root] = s + 1;
+            }
+            for (int t = 0; t < triCount; t++)
+                if (!drop[t] && compSize[Find(t)] < 8) drop[t] = true;
+
+            int blackTri = blackBoundary >= 0 ? blackBoundary / 3 : -1;
+            int w = 0, keptBeforeBlack = 0;
+            for (int t = 0; t < triCount; t++)
+            {
+                if (drop[t]) continue;
+                if (blackTri >= 0 && t < blackTri) keptBeforeBlack++;
+                ti[w * 3] = ti[t * 3]; ti[w * 3 + 1] = ti[t * 3 + 1]; ti[w * 3 + 2] = ti[t * 3 + 2];
+                w++;
+            }
+            ti.RemoveRange(w * 3, ti.Count - w * 3);
+            if (blackTri >= 0) blackBoundary = keptBeforeBlack * 3;
         }
 
         /// <summary>Weld beads: ONE short fat strut at the closest approach of

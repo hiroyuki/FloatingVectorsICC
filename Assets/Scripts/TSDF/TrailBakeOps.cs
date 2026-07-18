@@ -34,11 +34,13 @@ namespace TSDF
         /// drops the sculpture — the marks ride the same Publish/swap).
         /// </summary>
         public static void BindBakeTargets(ComputeShader shader, int kernel,
-                                           TSDFVolume volume, ComputeBuffer segs)
+                                           TSDFVolume volume, ComputeBuffer segs,
+                                           float sminK = 0f)
         {
             var dim = volume.Dim;
             shader.SetInts("_Dim", dim.x, dim.y, dim.z);
             shader.SetFloat("_Tau", volume.Tau);
+            shader.SetFloat("_SminK", sminK); // 0 = plain min-union
             shader.SetMatrix("_WorldFromVoxel", volume.WorldFromVoxel);
             shader.SetBuffer(kernel, "_Segs", segs);
             shader.SetBuffer(kernel, "_VoxelsOut", volume.WriteBuffer);
@@ -53,9 +55,10 @@ namespace TSDF
         /// idempotent, so batching is safe). Returns the number of dispatches issued.
         /// </summary>
         public static int BakeSegments(ComputeShader shader, int kernel, TSDFVolume volume,
-                                       ComputeBuffer segs, int segCount, int batchSize)
+                                       ComputeBuffer segs, int segCount, int batchSize,
+                                       float sminK = 0f)
         {
-            BindBakeTargets(shader, kernel, volume, segs);
+            BindBakeTargets(shader, kernel, volume, segs, sminK);
             var dim = volume.Dim;
             int total = dim.x * dim.y * dim.z;
             int batches = 0;
