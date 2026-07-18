@@ -89,7 +89,7 @@ namespace TSDF
         [Tooltip("Weld bead at the closest approach of every touching chain " +
                  "pair: a short fat strut buried in the joint, so graze contacts " +
                  "print as a real bond instead of a knife-edge seam. White span.")]
-        public bool stlContactBeads = true;
+        public bool stlContactBeads = false;
 
         [Range(0f, 1f)]
         [Tooltip("Fraction of curve tubes printed in the BODY (black) colour, " +
@@ -103,7 +103,7 @@ namespace TSDF
                  "faces of overlapping bars are pure waste ('重なり部分の無駄な" +
                  "頂点'). The union's outer surface is untouched; the open rims " +
                  "left behind are hidden inside solid material.")]
-        public bool stlCullInteriorFaces = true;
+        public bool stlCullInteriorFaces = false;
 
         [Tooltip("MC contact fillets: every GRAZING line pair gets a small local " +
                  "smin-blended Marching Cubes membrane hugging both bars — " +
@@ -126,7 +126,7 @@ namespace TSDF
                  "smooth-min blended into the volume, so every near contact " +
                  "fillets — at the cost of voxel-resolution rounding on all " +
                  "edges (the melted look). 0 = classic hard min-union.")]
-        public float fuseSminK = 0.015f;
+        public float fuseSminK = 0f;
 
         [Range(1f, 2f)]
         [Tooltip("Bead strut radius as a multiple of the thicker contact radius.")]
@@ -1365,6 +1365,11 @@ namespace TSDF
                               $"{beforeCull} chain tris removed (buried in other lines).", this);
                 }
 
+                // KNOWN LIMITATION: beads need the full point cloud, so they
+                // append after the black-line pass and land in the BLACK span,
+                // not the white one their tooltip claims. The feature is
+                // rejected/default-off; fix the span boundary if it ever
+                // returns (codex round-1 NON_BLOCKING).
                 if (stlContactBeads)
                     AppendContactBeads(linkPts, linkRanges, line, col, tp, tn, tc, ti);
 

@@ -14,11 +14,17 @@ import manifold3d as m3d
 
 
 def read_binary_stl(path):
+    import os
+    size = os.path.getsize(path)
     with open(path, "rb") as f:
         f.seek(80)
-        n = np.frombuffer(f.read(4), dtype=np.uint32)[0]
+        n = int(np.frombuffer(f.read(4), dtype=np.uint32)[0])
+        expect = 84 + n * 50
+        if size < expect:
+            raise ValueError(f"corrupt STL: header claims {n} tris "
+                             f"({expect} bytes) but file is {size} bytes")
         rec = np.dtype([("n", "<3f4"), ("v", "<9f4"), ("attr", "<u2")])
-        data = np.frombuffer(f.read(int(n) * 50), dtype=rec, count=int(n))
+        data = np.frombuffer(f.read(n * 50), dtype=rec, count=n)
     tris = data["v"].reshape(-1, 3, 3).astype(np.float64)
     return tris
 
@@ -75,6 +81,7 @@ def main():
     print(f"{len(comp_ids)} shells (own union-find)  ({time.time()-t0:.1f}s)")
 
     parts = []
+    rejected = 0
     order = np.argsort(tri_comp, kind="stable")
     bounds = np.searchsorted(tri_comp[order], np.arange(len(comp_ids)))
     bounds = np.append(bounds, len(order))
@@ -86,6 +93,15 @@ def main():
             tri_verts=remap.reshape(-1, 3).astype(np.uint32)))
         if part.status() == m3d.Error.NoError:
             parts.append(part)
+        else:
+            rejected += 1
+    if rejected:
+        # a rejected shell VANISHES from the union — that is data loss, not a
+        # cosmetic issue (open shells from e.g. interior-culled exports land
+        # here). Fail loudly; feed this tool watertight tube soups only.
+        print(f"ERROR: {rejected} of {len(comp_ids)} shells are not manifold "
+              f"(open/self-broken) and would be silently dropped. Aborting.")
+        sys.exit(2)
     print(f"built {len(parts)} manifold shells  ({time.time()-t0:.1f}s)")
 
     union = m3d.Manifold.batch_boolean(parts, m3d.OpType.Add)

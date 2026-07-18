@@ -911,6 +911,13 @@ namespace PointCloud
             if (frame < 0) { SetStatus("SeekToFrame: no target frame set."); return; }
             if (CurrentState != State.Playing) TogglePlay();
             if (CurrentState != State.Playing) { SetStatus("SeekToFrame: playback could not start."); return; }
+            // clamp to the longest track: an out-of-range target could never
+            // satisfy the pause condition and playback would wrap/stop instead
+            int maxCount = 0;
+            foreach (var kv in _tracks)
+                maxCount = Mathf.Max(maxCount, kv.Value.DepthFrames != null ? kv.Value.DepthFrames.Count : 0);
+            if (maxCount == 0) { SetStatus("SeekToFrame: no depth frames loaded."); return; }
+            frame = Mathf.Min(frame, maxCount - 1);
             if (!IsPaused) PausePlayback();
             int preFrames = Mathf.RoundToInt(Mathf.Max(0f, seekPrerollSeconds) * 30f);
             SeekAllTracksTo(Mathf.Max(0, frame - preFrames));
@@ -2213,8 +2220,19 @@ namespace PointCloud
                 if (track.DepthFrames.Count == 0) continue;
 
                 int cursorBeforeAdvance = track.PlaybackCursor;
+                // Pending seek point: CLAMP the timestamp-driven advance at the
+                // target frame BEFORE anything is emitted — overshot frames
+                // would already be baked into the trail/history subscribers and
+                // no later correction can un-emit them (codex round 2).
+                ulong tickPlayheadNs = playheadNs;
+                if (seekPauseFrame >= 0)
+                {
+                    int cap = Mathf.Min(seekPauseFrame, track.DepthFrames.Count - 1);
+                    ulong capTs = TimestampNsAt(track.DepthFrames, cap);
+                    if (tickPlayheadNs > capTs) tickPlayheadNs = capTs;
+                }
                 int cursor = AdvanceCursorTo(track.DepthFrames,
-                                             Mathf.Max(track.PlaybackCursor, 0), playheadNs);
+                                             Mathf.Max(track.PlaybackCursor, 0), tickPlayheadNs);
 
                 // Playback drop diagnostic: when one Update consumes multiple
                 // frames the operator never sees the intermediate ones — that's
@@ -2259,24 +2277,54 @@ namespace PointCloud
                     }
                     EmitFrameAt(track, cursor, applyRenderDelay: true); // natural playback only
                 }
-                AdvanceBodyCursor(track, playheadNs);
+                AdvanceBodyCursor(track, tickPlayheadNs);
                 ApplyBoundingBoxFilter(track);
             }
 
             // Seek point: auto-pause the moment the depth cursor reaches the
             // requested frame (the _fNNNNN index stamped into print exports).
             // Armed by SeekToFrame, which replays the preroll first so motion
-            // trails re-accumulate to their true length at the target.
-            if (seekPauseFrame >= 0 && CurrentPlaybackFrame >= seekPauseFrame)
+            // trails re-accumulate to their true length at the target. The
+            // advance above is clamped at the target, so no overshot frame is
+            // ever emitted — the paused state matches the file-name index.
+            // pause only when EVERY non-empty track has reached its per-track
+            // clamped target — CurrentPlaybackFrame is the MAX cursor and would
+            // fire while a lagging camera is still short of the seek point
+            // (codex round 4)
+            bool seekReached = seekPauseFrame >= 0;
+            if (seekReached)
+                foreach (var kv in _tracks)
+                {
+                    var frames = kv.Value.DepthFrames;
+                    if (frames == null || frames.Count == 0) continue;
+                    if (kv.Value.PlaybackCursor < Mathf.Min(seekPauseFrame, frames.Count - 1))
+                    { seekReached = false; break; }
+                }
+            if (seekReached)
             {
-                int hit = CurrentPlaybackFrame;
+                int target = seekPauseFrame;
                 seekPauseFrame = -1;
+                // the master clock still sits at the overshot wall position —
+                // sync it to the clamped target playhead, or Resume would jump
+                // straight past the seek point (codex round 3)
+                ulong targetTs = 0;
+                foreach (var kv in _tracks)
+                {
+                    var frames = kv.Value.DepthFrames;
+                    if (frames == null || frames.Count == 0) continue;
+                    ulong ts = TimestampNsAt(frames, Mathf.Min(target, frames.Count - 1));
+                    if (ts > targetTs) targetTs = ts;
+                }
+                if (targetTs > 0) SyncWallClockTo(targetTs);
                 PausePlayback();
-                SetStatus($"Seek point reached — paused at frame {hit}.");
-                Debug.Log($"[SensorRecorder] seek point reached: frame {hit}.");
+                SetStatus($"Seek point reached — paused at frame {CurrentPlaybackFrame}.");
+                Debug.Log($"[SensorRecorder] seek point reached: frame {CurrentPlaybackFrame}.");
             }
 
-            if (!anyRemaining)
+            // IsPaused guard: a seek point can land on (or clamp at) the LAST
+            // frame — the wrap/stop end handling below would immediately
+            // destroy the freshly paused state (codex round 2).
+            if (!anyRemaining && !IsPaused)
             {
                 if (loop)
                 {
