@@ -29,7 +29,7 @@ namespace Calibration.Tests
                 qrShowSeconds = 30f,
             };
             _in = new ExperienceInputs { Present = true };
-            _sm.ResetTo(ExperienceState.Attract);
+            _sm.ResetTo(ExperienceState.Idle);
         }
 
         private void Tick(float dt = 0.1f) => _sm.Tick(dt, in _in, _t);
@@ -71,17 +71,17 @@ namespace Calibration.Tests
 
             _in.Present = false; // walked off after scanning
             Tick();
-            Assert.AreEqual(ExperienceState.Attract, _sm.State);
+            Assert.AreEqual(ExperienceState.Idle, _sm.State);
         }
 
-        // ---- Attract ----
+        // ---- Idle ----
 
         [Test]
-        public void Attract_WaitsForPresence()
+        public void Idle_WaitsForPresence()
         {
             _in.Present = false;
             Tick();
-            Assert.AreEqual(ExperienceState.Attract, _sm.State);
+            Assert.AreEqual(ExperienceState.Idle, _sm.State);
             _in.Present = true;
             Tick();
             Assert.AreEqual(ExperienceState.Calibrate, _sm.State);
@@ -100,12 +100,12 @@ namespace Calibration.Tests
         [Test]
         public void Calibrate_StaleDoneFlagFromPreviousRun_DoesNotSkip()
         {
-            // CalibrationDone pulses while still in Attract (stale director
+            // CalibrationDone pulses while still in Idle (stale director
             // flag) — must not fast-forward the Calibrate that follows.
             _in.Present = false;
             _in.CalibrationDone = true;
             Tick();
-            Assert.AreEqual(ExperienceState.Attract, _sm.State);
+            Assert.AreEqual(ExperienceState.Idle, _sm.State);
             _in.CalibrationDone = false;
             _in.Present = true;
             Tick(); // → Calibrate
@@ -116,7 +116,7 @@ namespace Calibration.Tests
         // ---- FreeMove ----
 
         [Test]
-        public void FreeMove_TimerAdvances_And_LeaveReturnsToAttract()
+        public void FreeMove_TimerAdvances_And_LeaveReturnsToIdle()
         {
             Tick();
             _in.CalibrationDone = true; Tick(); _in.CalibrationDone = false;
@@ -125,7 +125,7 @@ namespace Calibration.Tests
             Assert.AreEqual(ExperienceState.FreeMove, _sm.State); // 5s < 20s
             _in.Present = false;
             Tick();
-            Assert.AreEqual(ExperienceState.Attract, _sm.State);
+            Assert.AreEqual(ExperienceState.Idle, _sm.State);
 
             _in.Present = true;
             Tick(); // → Calibrate
@@ -177,30 +177,30 @@ namespace Calibration.Tests
         }
 
         [Test]
-        public void Processing_FailPulse_ShowsNoticeThenAttract()
+        public void Processing_FailPulse_ShowsNoticeThenIdle()
         {
             ReachProcessing();
             _in.ProcessingFailed = true;
             Tick();
             _in.ProcessingFailed = false; // one-frame pulse
             Assert.AreEqual(ExperienceState.Processing, _sm.State);
-            // Nobody present after the failure — Attract must be reached by the
+            // Nobody present after the failure — Idle must be reached by the
             // notice TIMER (the fail latch suppresses LeftEarly), and staying
             // absent keeps the machine parked there for the assert.
             _in.Present = false;
             Tick(0.5f);
             Assert.AreEqual(ExperienceState.Processing, _sm.State); // notice still showing
             for (int i = 0; i < 12; i++) Tick(0.5f); // > 5s notice
-            Assert.AreEqual(ExperienceState.Attract, _sm.State);
+            Assert.AreEqual(ExperienceState.Idle, _sm.State);
         }
 
         [Test]
-        public void Processing_LeaveEarly_ReturnsToAttract()
+        public void Processing_LeaveEarly_ReturnsToIdle()
         {
             ReachProcessing();
             _in.Present = false;
             Tick();
-            Assert.AreEqual(ExperienceState.Attract, _sm.State);
+            Assert.AreEqual(ExperienceState.Idle, _sm.State);
         }
 
         // ---- ResultShow ----
@@ -233,41 +233,41 @@ namespace Calibration.Tests
         }
 
         [Test]
-        public void ResultShow_FailPulse_NoticeThenAttract()
+        public void ResultShow_FailPulse_NoticeThenIdle()
         {
             ReachResultShow();
             _in.ExportFailed = true;
             Tick();
             _in.ExportFailed = false;
             Assert.AreEqual(ExperienceState.ResultShow, _sm.State);
-            _in.Present = false; // keeps the post-notice Attract parked for the assert
+            _in.Present = false; // keeps the post-notice Idle parked for the assert
             for (int i = 0; i < 12; i++) Tick(0.5f);
-            Assert.AreEqual(ExperienceState.Attract, _sm.State);
+            Assert.AreEqual(ExperienceState.Idle, _sm.State);
         }
 
         [Test]
-        public void ResultShow_SkipQr_GoesStraightToAttract()
+        public void ResultShow_SkipQr_GoesStraightToIdle()
         {
             _t.skipQr = true;
             ReachResultShow();
             _in.ExportDone = true;
-            _in.Present = false; // park the Attract that follows
+            _in.Present = false; // park the Idle that follows
             for (int i = 0; i < 10; i++) Tick(1f);
-            Assert.AreEqual(ExperienceState.Attract, _sm.State);
+            Assert.AreEqual(ExperienceState.Idle, _sm.State);
         }
 
         // ---- QrShow ----
 
         [Test]
-        public void QrShow_TimesOutToAttract()
+        public void QrShow_TimesOutToIdle()
         {
             ReachResultShow();
             _in.ExportDone = true;
             TickUntil(ExperienceState.QrShow, dt: 1f);
-            // Present stays true — Attract must be reached by the TIMER.
-            // TickUntil stops the moment Attract appears (before Attract could
+            // Present stays true — Idle must be reached by the TIMER.
+            // TickUntil stops the moment Idle appears (before Idle could
             // advance again on the next tick).
-            TickUntil(ExperienceState.Attract, dt: 1f, maxTicks: 40);
+            TickUntil(ExperienceState.Idle, dt: 1f, maxTicks: 40);
         }
 
         // ---- fault ----
@@ -282,7 +282,7 @@ namespace Calibration.Tests
             _in.Fault = false;
             _in.Present = false;
             Tick();
-            Assert.AreEqual(ExperienceState.Attract, _sm.State);
+            Assert.AreEqual(ExperienceState.Idle, _sm.State);
         }
 
         // ---- skips ----
@@ -290,7 +290,7 @@ namespace Calibration.Tests
         [Test]
         public void Skips_ReachProcessingThroughEveryState()
         {
-            _t.skipAttract = true;
+            _t.skipIdle = true;
             _t.skipCalibrate = true;
             _t.skipFreeMove = true;
             _t.skipShoot = true;

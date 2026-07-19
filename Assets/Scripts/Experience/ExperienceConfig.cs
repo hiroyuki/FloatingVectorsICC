@@ -36,20 +36,9 @@ namespace Experience
         public float yBandMax = 100f;
         [Min(1)] public int occupancyThreshold = 1500;
 
-        [Header("Attract playback")]
-        [Tooltip("Folder containing recorded take folders for the attract-mode ghost " +
-                 "(e.g. D:\\FloatingVectorsICC\\RecordingBase). Empty = attract is text-only.")]
-        public string attractRecordingRoot = "";
-
-        [Tooltip("Attract ghost uses the takes' recorded bodies_main (pre-convert the " +
-                 "attract takes to v11s for production quality — no k4abt re-analysis). " +
-                 "Off = legacy behavior (live k4abt re-runs on the played-back depth).")]
-        public bool attractUseRecordedBodies = true;
-
         [Header("Visitor take (Shoot recording)")]
         [Tooltip("Root folder visitor takes are recorded under (each take gets a " +
-                 "timestamped subfolder). Keep on a fast disk; separate from the " +
-                 "attract root so the ghost never picks up visitor takes.")]
+                 "timestamped subfolder). Keep on a fast disk.")]
         public string visitorRecordingRoot = "";
 
         [Range(0.5f, 2f)]
@@ -153,7 +142,6 @@ namespace Experience
         public float publishTimeoutSeconds = 60f;
 
         [Header("Visitor texts (hiragana)")]
-        [TextArea] public string attractText = "あそびに　きてね！";
         [TextArea] public string exportFailedText = "うまくいかなかったみたい　ごめんね";
         [TextArea]
         [Tooltip("Optional caption under the QR. Empty = QR only (the in-Unity QR is " +

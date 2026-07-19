@@ -1,5 +1,6 @@
 // The show's single owner: drives the one-second-take ExperienceStateMachine
-// (Calibrate → FreeMove → Shoot → Processing → ResultShow → QrShow), owns
+// (Idle → Calibrate → FreeMove → Shoot → Processing → ResultShow → QrShow —
+// Idle shows nothing but the floor grid while unattended), owns
 // every runtime object the experience spawns (visitor UI, presence detector,
 // live skeleton feed), snapshots the dev-mode values it touches on Enter and
 // restores them all on Exit — Dev mode must come back bit-identical.
@@ -29,7 +30,7 @@
 // the ring always holds MaxK frames, so this works while stopped) ->
 // TSDFSnapshotBuilder.Capture (sync, non-destructive). The window stays
 // applied through ResultShow/QrShow so the screen keeps showing exactly what
-// was exported; it is restored on the next Attract.
+// was exported; it is restored on the next Idle.
 
 using System;
 using System.Collections;
@@ -85,7 +86,7 @@ namespace Experience
             set { if (value && !_active) EnterMode(); else if (!value && _active) ExitMode(); }
         }
 
-        public ExperienceState CurrentState => _fsm?.State ?? ExperienceState.Attract;
+        public ExperienceState CurrentState => _fsm?.State ?? ExperienceState.Idle;
         public bool IsActive => _active;
         /// <summary>Session body metrics (defaults until the star pose measured them).</summary>
         public VisitorBodyMetrics CurrentMetrics => _metrics;
@@ -112,17 +113,16 @@ namespace Experience
         private string[] _savedMgrOrder, _savedRecOrder;
         private bool _savedKeepLive;
         private string _savedPlaybackFolder;
+        private bool _savedWasPlaying;
+        private bool _savedWasPaused;
+        private bool _savedWasLoaded;
+        private bool _savedLiveFrozen;
         private bool _savedCumulativeNoErase;
         private PointCloudCumulative _cumulative;
         private readonly System.Collections.Generic.Dictionary<string, bool> _savedLiveVisible =
             new System.Collections.Generic.Dictionary<string, bool>();
         private readonly System.Collections.Generic.Dictionary<string, bool> _savedLiveSuppress =
             new System.Collections.Generic.Dictionary<string, bool>();
-
-        // attract playback
-        private AttractPlaybackController _attract;
-        private bool _attractOwnsPlayback;
-        private bool _devFallbackLogged;
 
         // visitor recording (Shoot)
         private bool _visitorRecordingActive;
@@ -239,9 +239,7 @@ namespace Experience
         {
             switch (s)
             {
-                case ExperienceState.Attract:
-                    ApplyBodySource(BodySource.AttractGhost);
-                    break;
+                case ExperienceState.Idle:
                 case ExperienceState.Calibrate:
                 case ExperienceState.FreeMove:
                 case ExperienceState.Shoot:
@@ -257,7 +255,7 @@ namespace Experience
                     ApplyBodySource(BodySource.VisitorPlayback, _takeHasBodies);
                     break;
                     // Fault: leave the transport as the preceding state set it —
-                    // the alert owns the screen, recovery goes through Attract.
+                    // the alert owns the screen, recovery goes through Idle.
             }
         }
 
@@ -272,21 +270,18 @@ namespace Experience
             _liveFeed.trackingVolume = boundingVolume;
         }
 
-        // While recorded bodies drive the merge (the visitor take from the
-        // Processing play-through onward; attract with recorded-ghost bodies)
-        // the merged-BT presence path sees the GHOST — presence must come from
-        // live-only signals: GPU occupancy, the fused live skeleton, or the
-        // k4abt live feed. In the no-bodies fallback the merger re-runs k4abt
-        // on the playback — that "ghost" IS the visitor's own take, so the
-        // merged path stays valid there (overstay risk is bounded by the QR
-        // timeout).
+        // While the visitor take's recorded bodies drive the merge (Processing
+        // play-through onward) the merged-BT presence path sees the GHOST —
+        // presence must come from live-only signals: GPU occupancy, the fused
+        // live skeleton, or the k4abt live feed. In the no-bodies fallback the
+        // merger re-runs k4abt on the playback — that "ghost" IS the visitor's
+        // own take, so the merged path stays valid there (overstay risk is
+        // bounded by the QR timeout). Idle has no ghost at all: the normal
+        // presence blend fires the moment someone steps in.
         private bool ComputePresent()
         {
             if (_presence == null) return false;
-            var s = _fsm.State;
-            bool ghostDrivesMerge =
-                (_visitorPlaybackActive && _takeHasBodies)
-                || (s == ExperienceState.Attract && config.attractUseRecordedBodies && _attract != null);
+            bool ghostDrivesMerge = _visitorPlaybackActive && _takeHasBodies;
             if (!ghostDrivesMerge) return _presence.IsPresent;
             return _presence.OccupancyActive
                 || (LfbsActive && liveFusedSource.HasRecentFused)
@@ -383,13 +378,21 @@ namespace Experience
 
             _starHold = new PoseHoldDetector(config.starHoldSeconds, config.poseHoldDropoutSeconds);
 
-            // 4b) attract coexistence: keep the live rig through playback loads,
+            // 4b) playback coexistence: keep the live rig through playback loads,
             // hide the raw clouds (the TSDF mesh is the star), pause cumulative
-            // snapshots, spawn the attract controller.
+            // snapshots.
             if (sensorRecorder != null)
             {
                 _savedKeepLive = sensorRecorder.keepLiveRenderersOnLoad;
                 _savedPlaybackFolder = sensorRecorder.playbackFolderPath;
+                _savedWasPlaying = sensorRecorder.IsPlaying;             // Idle stops it; Exit resumes it
+                _savedWasPaused = sensorRecorder.IsPaused;               // resume paused, not advancing
+                _savedWasLoaded = sensorRecorder.RecordedFrameCount > 0; // loaded-but-stopped: Exit reloads
+                // A live freeze (Space) must not carry into the show — every
+                // renderer would keep holdLiveFrame and the whole experience
+                // (sculpture, BT, curves) would stay frozen. Exit re-freezes.
+                _savedLiveFrozen = !sensorRecorder.IsPlaying && sensorRecorder.IsPaused;
+                if (_savedLiveFrozen) sensorRecorder.ResumeFrames();
                 sensorRecorder.keepLiveRenderersOnLoad = true;
             }
             _savedLiveVisible.Clear();
@@ -411,22 +414,13 @@ namespace Experience
                 _savedCumulativeNoErase = _cumulative.noErase;
                 _cumulative.noErase = false;
             }
-            if (!string.IsNullOrEmpty(config.attractRecordingRoot) && sensorRecorder != null)
-            {
-                _attract = gameObject.AddComponent<AttractPlaybackController>();
-                _attract.sensorRecorder = sensorRecorder;
-                _attract.attractRootPath = config.attractRecordingRoot;
-            }
-            _attractOwnsPlayback = false;
-            _devFallbackLogged = false;
-
             // 5) run.
             ResetRunState();
             _fsm = new ExperienceStateMachine();
             _fsm.Changed += OnStateChanged;
-            _fsm.ResetTo(ExperienceState.Attract);
+            _fsm.ResetTo(ExperienceState.Idle);
             _active = true;
-            ApplyStateSideEffects(ExperienceState.Attract);
+            ApplyStateSideEffects(ExperienceState.Idle);
             Debug.Log($"[{nameof(ExperienceDirector)}] experience mode ON.", this);
         }
 
@@ -473,18 +467,28 @@ namespace Experience
             if (_starGuideGenerated != null) { Destroy(_starGuideGenerated); _starGuideGenerated = null; }
             _snapshot = null;
 
-            // attract coexistence teardown (before space/rebase restore)
-            if (_attract != null)
-            {
-                if (_attractOwnsPlayback) _attract.Stop();
-                Destroy(_attract);
-                _attract = null;
-                _attractOwnsPlayback = false;
-            }
             if (sensorRecorder != null)
             {
                 sensorRecorder.keepLiveRenderersOnLoad = _savedKeepLive;
                 sensorRecorder.playbackFolderPath = _savedPlaybackFolder;
+                // A dev playback session existed when the mode was entered
+                // (Idle unloaded it) — bring it back in the same transport
+                // state: reload when it was merely loaded, resume when it was
+                // playing, re-pause when it was paused. The playhead restarts
+                // from the beginning. An empty playbackFolderPath is fine —
+                // Load() resolves the recorder's default root itself.
+                if ((_savedWasPlaying || _savedWasLoaded) && !sensorRecorder.IsPlaying)
+                {
+                    sensorRecorder.Load();
+                    if (_savedWasPlaying)
+                    {
+                        sensorRecorder.TogglePlay();
+                        if (_savedWasPaused) sensorRecorder.PausePlayback();
+                    }
+                }
+                // Reapply the live freeze the operator had before the show.
+                if (_savedLiveFrozen && !sensorRecorder.IsPlaying && !sensorRecorder.IsPaused)
+                    sensorRecorder.HoldFrames();
             }
             if (sensorManager != null)
             {
@@ -579,41 +583,18 @@ namespace Experience
                 _converter?.Abort();
                 RestoreHistorySamples(); // the capture may have been mid-flight
             }
-            if (from == ExperienceState.ResultShow && to == ExperienceState.Attract)
+            if (from == ExperienceState.ResultShow && to == ExperienceState.Idle)
                 CancelPublish(); // fail path or skip; success path already completed
 
-            // Attract → visitor handoff: the ghost stops, live becomes the
-            // sculpture source, k4abt workers restart (clock jump guard). Only
-            // when a live rig exists — the dev/Mac fallback keeps the playback
-            // running as the only source.
-            if (from == ExperienceState.Attract && to == ExperienceState.Calibrate)
+            // Idle → visitor handoff (k4abt pipeline only): restart the workers
+            // across the clock jump left by the previous run's playback. The
+            // fused source has no workers to restart.
+            if (from == ExperienceState.Idle && to == ExperienceState.Calibrate)
             {
-                ApplyBodySource(BodySource.Live);
-                if (HasLiveRenderers())
-                {
-                    _attract?.Stop();
-                    _attractOwnsPlayback = false;
-                    sensorManager?.SetLiveSuppressedAsSource(false);
-                    // k4abt pipeline only: restart the workers across the clock
-                    // jump. With the fused source there are no workers to restart.
-                    if (merger != null && !LfbsActive) merger.RestartWorkers();
-                }
-                else
-                {
-                    // Dev/Mac fallback: the ghost stays the only sculpture source
-                    // — keep it playing but freeze take rotation until the next
-                    // Attract (a mid-experience switch would yank the source).
-                    if (_attract != null) _attract.RotationEnabled = false;
-                    if (!_devFallbackLogged)
-                    {
-                        Debug.Log($"[{nameof(ExperienceDirector)}] no live rig — attract playback keeps " +
-                                  "running through the experience (dev fallback).", this);
-                        _devFallbackLogged = true;
-                    }
-                }
+                if (merger != null && !LfbsActive && HasLiveRenderers()) merger.RestartWorkers();
             }
 
-            if (to == ExperienceState.Attract || from == ExperienceState.QrShow)
+            if (to == ExperienceState.Idle || from == ExperienceState.QrShow)
                 ResetRunState();
 
             ApplyStateSideEffects(to);
@@ -627,12 +608,23 @@ namespace Experience
             var t = config.timings;
             switch (state)
             {
-                case ExperienceState.Attract:
+                case ExperienceState.Idle:
+                    // Unattended: nothing on the screens but the scene itself —
+                    // the floor grid (ExperienceSpaceBuilder) and, as someone
+                    // steps in, their live sculpture.
                     StopVisitorPlayback();
+                    // A playback session that predates Experience mode (dev
+                    // session running, or loaded-and-stopped with its _Playback_*
+                    // objects still showing the last frame) must not keep
+                    // painting the stage — Idle owns it now. playbackFolderPath
+                    // is restored on Exit.
+                    if (sensorRecorder != null
+                        && (sensorRecorder.IsPlaying || sensorRecorder.RecordedFrameCount > 0))
+                        sensorRecorder.StopAndUnload();
                     RestoreHistorySamples(); // drop the one-second window of the previous run
                     _ui.ClearAll();
-                    ApplyBodySource(BodySource.AttractGhost);
-                    StartAttractPlayback();
+                    ApplyBodySource(BodySource.Live);
+                    if (HasLiveRenderers()) sensorManager?.SetLiveSuppressedAsSource(false);
                     break;
                 case ExperienceState.Calibrate:
                     PlaySe(config.startSe);
@@ -670,39 +662,18 @@ namespace Experience
         }
 
         // ---------------- body-source switching ----------------
-        // Three skeleton contexts, one switchboard. The LIVE pipeline is either
+        // Two skeleton contexts, one switchboard. The LIVE pipeline is either
         // LiveFusedBodySource (CUDA RTMPose fusion → merger via external bodies)
-        // or the k4abt workers; recorded bodies_main serves the attract ghost
-        // and the visitor take from the Processing play-through onward.
-        private enum BodySource { Live, AttractGhost, VisitorPlayback }
+        // or the k4abt workers; recorded bodies_main serves the visitor take
+        // from the Processing play-through onward.
+        private enum BodySource { Live, VisitorPlayback }
 
         private void ApplyBodySource(BodySource mode, bool takeHasBodies = true)
         {
             bool lfbs = LfbsActive;
-            bool attractGhostBodies = mode == BodySource.AttractGhost
-                                      && config.attractUseRecordedBodies && _attract != null;
             switch (mode)
             {
-                case BodySource.AttractGhost when attractGhostBodies:
-                    if (lfbs)
-                    {
-                        // keep fusing LIVE camera frames only: HasRecentFused then
-                        // means "someone stepped onto the stage", and the ghost
-                        // recording can't leak into the fusion via the dev tap.
-                        liveFusedSource.SetSubmitToMerger(false);
-                        liveFusedSource.liveFramesOnly = true;
-                    }
-                    if (merger != null)
-                    {
-                        merger.ignoreRecordedBodies = false; // takes' (v11s) bodies drive the ghost
-                        // live k4abt results must not join the ghost's merge; the
-                        // LiveSkeletonFeed still ingests worker events for presence.
-                        merger.muteWorkerIngest = true;
-                    }
-                    break;
-
                 case BodySource.Live:
-                case BodySource.AttractGhost: // legacy attract = live-source rules
                     if (lfbs)
                     {
                         liveFusedSource.SetSubmitToMerger(true);
@@ -740,26 +711,13 @@ namespace Experience
             }
         }
 
-        // Attract ghost: start only when the recorder is idle (a dev playback
-        // session already running is left untouched) or when the attract
-        // controller already owns the playback (loop re-roll case).
-        private void StartAttractPlayback()
-        {
-            if (_attract == null || sensorRecorder == null) return;
-            _attract.RotationEnabled = true;
-            if (sensorRecorder.IsPlaying && !_attractOwnsPlayback) return;
-            if (HasLiveRenderers()) sensorManager?.SetLiveSuppressedAsSource(true);
-            _attract.PlayRandomTake();
-            _attractOwnsPlayback = _attract.IsRunning;
-        }
-
         // Idempotent message repaint for the current state (also used when the
         // crowd notice clears).
         private void ShowStateMessage(ExperienceState state)
         {
             switch (state)
             {
-                case ExperienceState.Attract: _ui.ShowMessage(config.attractText); break;
+                case ExperienceState.Idle: _ui.ClearAll(); break; // floor grid only
                 case ExperienceState.Calibrate:
                     if (_calibrationDone) _ui.ShowMessage(config.calibrateMatchedText);
                     else _ui.ShowPoseGuide(StarGuide(), config.calibrateText);
@@ -1126,7 +1084,7 @@ namespace Experience
             _snapshot = snap;
             _ui.ShowProgress(1f, config.processingText);
             // historySamples intentionally stays at the one-second window: the
-            // frozen curves on screen ARE the exported shape. Restored on Attract.
+            // frozen curves on screen ARE the exported shape. Restored on Idle.
             _processingDone = true;
             _processingRoutine = null;
         }
@@ -1145,10 +1103,7 @@ namespace Experience
                 return;
             }
 
-            // The visitor take replaces whatever is playing (attract ghost in the
-            // dev fallback; nothing on the live rig path).
-            if (_attract != null) { _attract.Stop(); _attract.RotationEnabled = false; }
-            _attractOwnsPlayback = false;
+            // The visitor take replaces any playback a dev session left running.
             if (sensorRecorder.IsPlaying) sensorRecorder.StopAndUnload();
 
             _savedRenderDelay = sensorRecorder.playbackRenderDelayFrames;
@@ -1178,7 +1133,7 @@ namespace Experience
         }
 
         // Transport teardown only — the body source is (re)applied by whichever
-        // context follows (Attract side effects, or the ExitMode restore).
+        // context follows (Idle side effects, or the ExitMode restore).
         private void StopVisitorPlayback()
         {
             if (!_visitorPlaybackActive) return;
