@@ -72,6 +72,7 @@ namespace BodyTracking.Eval.Rtmpose
             // cuDNN/CUDA DLLs surface at InferenceSession creation). On a partial
             // failure the surviving session is disposed too, so a mixed-EP pair can
             // never exist.
+            CudaDllPreload.EnsureLoaded(); // pin cu13 DLLs before ORT resolves by name
             byte[] yoloxBytes = File.ReadAllBytes(yoloxPath);
             byte[] rtmposeBytes = File.ReadAllBytes(rtmposePath);
             foreach (OrtProvider p in FallbackChain(requested))
