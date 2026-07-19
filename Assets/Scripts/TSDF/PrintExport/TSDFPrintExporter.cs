@@ -80,6 +80,11 @@ namespace TSDF
                  "trail reads as a long square pyramid — the chosen look).")]
         public bool tubeRaindrop = false;
 
+        [Tooltip("Bridges from each tube tip to its bone anchor. Off = tubes " +
+                 "end free at the (trimmed) tip — chosen when the body mesh is " +
+                 "present and the black connector stubs read as noise.")]
+        public bool stlIncludeBridges = true;
+
         [Range(0f, 0.15f)]
         [Tooltip("Trim this much arc length (m) off each tube's NEWEST end. " +
                  "With the body mesh included, raw tips pierce outward through " +
@@ -254,6 +259,10 @@ namespace TSDF
         [Tooltip("Body + floor plate colour in the 3MF export. Bambu Studio's " +
                  "Standard-3MF colour parsing maps it to the closest filament.")]
         public Color threeMfBodyColor = Color.black;
+
+        [Tooltip("Colour of the HUMAN body mesh — its own material, separate " +
+                 "from the black armature (floor/pillars/links).")]
+        public Color threeMfHumanColor = new Color(0.15f, 0.35f, 1f);
 
         [Tooltip("Curve tubes + bridges + wireframe colour in the 3MF export.")]
         public Color threeMfCurveColor = Color.white;
@@ -784,7 +793,7 @@ namespace TSDF
                 var webPts = stlContactFillets ? new List<(Vector3 p, float r, Vector3 tan)>() : null;
                 var webRanges = stlContactFillets ? new List<(int start, int count)>() : null;
                 BuildCurveAndBridgeTubes(tp, tn, tc, ti, out asm.TubeCount, out asm.BridgeCount,
-                                         includeBridges: stlIncludeBody || wireframe,
+                                         includeBridges: stlIncludeBridges && (stlIncludeBody || wireframe),
                                          rootWireframe: wireframe, out asm.WireCount,
                                          out int wireTriStartLocal, out int tubeBlackTriStartLocal,
                                          supportPts, supportCands, chainLows,
@@ -1056,7 +1065,7 @@ namespace TSDF
             {
                 Directory.CreateDirectory(dir);
                 ThreeMfWriter.Write(path3mf, asm.Pos, asm.Tri, spans,
-                    new[] { ("Body", threeMfBodyColor), ("Curves", threeMfCurveColor) },
+                    new[] { ("Body", threeMfBodyColor), ("Curves", threeMfCurveColor), ("Human", threeMfHumanColor) },
                     asm.Center, scale);
                 long bytes = new FileInfo(path3mf).Length;
                 string wireNote = asm.WireCount > 0 ? $" + {asm.WireCount} wires" : "";
@@ -1085,7 +1094,7 @@ namespace TSDF
                 int start = fromTriIdx / 3, count = (toTriIdx - fromTriIdx) / 3;
                 if (count > 0) spans.Add(new ThreeMfWriter.Span { StartTri = start, TriCount = count, Material = mat });
             }
-            Add(0, asm.CurveTriStart, 0);                          // body
+            Add(0, asm.CurveTriStart, 2);                          // human body (own colour)
             Add(asm.CurveTriStart, asm.TubeBlackTriStart, 1);      // white lines
             Add(asm.TubeBlackTriStart, asm.WireTriStart, 0);       // black lines (+ bridges)
             Add(asm.WireTriStart, asm.PatchTriStart, 0);           // wireframe + isolation links
@@ -1117,7 +1126,7 @@ namespace TSDF
             {
                 Directory.CreateDirectory(dir);
                 ObjMaterialWriter.Write(pathObj, asm.Pos, asm.Tri, spans,
-                    new[] { ("Body", threeMfBodyColor), ("Curves", threeMfCurveColor) },
+                    new[] { ("Body", threeMfBodyColor), ("Curves", threeMfCurveColor), ("Human", threeMfHumanColor) },
                     asm.Center, scale);
                 long bytes = new FileInfo(pathObj).Length;
                 string wireNote = asm.WireCount > 0 ? $" + {asm.WireCount} wires" : "";
