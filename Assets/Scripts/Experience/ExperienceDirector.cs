@@ -116,6 +116,7 @@ namespace Experience
         private bool _savedWasPlaying;
         private bool _savedWasPaused;
         private bool _savedWasLoaded;
+        private bool _savedLiveFrozen;
         private bool _savedCumulativeNoErase;
         private PointCloudCumulative _cumulative;
         private readonly System.Collections.Generic.Dictionary<string, bool> _savedLiveVisible =
@@ -387,6 +388,11 @@ namespace Experience
                 _savedWasPlaying = sensorRecorder.IsPlaying;             // Idle stops it; Exit resumes it
                 _savedWasPaused = sensorRecorder.IsPaused;               // resume paused, not advancing
                 _savedWasLoaded = sensorRecorder.RecordedFrameCount > 0; // loaded-but-stopped: Exit reloads
+                // A live freeze (Space) must not carry into the show — every
+                // renderer would keep holdLiveFrame and the whole experience
+                // (sculpture, BT, curves) would stay frozen. Exit re-freezes.
+                _savedLiveFrozen = !sensorRecorder.IsPlaying && sensorRecorder.IsPaused;
+                if (_savedLiveFrozen) sensorRecorder.ResumeFrames();
                 sensorRecorder.keepLiveRenderersOnLoad = true;
             }
             _savedLiveVisible.Clear();
@@ -480,6 +486,9 @@ namespace Experience
                         if (_savedWasPaused) sensorRecorder.PausePlayback();
                     }
                 }
+                // Reapply the live freeze the operator had before the show.
+                if (_savedLiveFrozen && !sensorRecorder.IsPlaying && !sensorRecorder.IsPaused)
+                    sensorRecorder.HoldFrames();
             }
             if (sensorManager != null)
             {
