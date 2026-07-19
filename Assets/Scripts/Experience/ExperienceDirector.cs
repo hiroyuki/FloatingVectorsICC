@@ -146,6 +146,7 @@ namespace Experience
         private VisitorBodyMetrics _metrics = VisitorBodyMetrics.Default;
         private bool _metricsMeasured;
         private BodyProfile _visitorProfile;
+        private BodyProfile _defaultProfile; // the fusion's profile before any visitor calibration
         private bool _profileSamplingActive;
         private PoseHoldDetector _starHold;
         private bool _calibrationDone;
@@ -375,6 +376,9 @@ namespace Experience
             {
                 _savedLfbsSubmit = liveFusedSource.submitToMerger;
                 _savedLfbsLiveOnly = liveFusedSource.liveFramesOnly;
+                // the session default (json-loaded or null) — restored between
+                // visitors so one visitor's bones never shape the next
+                _defaultProfile = liveFusedSource.CurrentBodyProfile;
             }
 
             _starHold = new PoseHoldDetector(config.starHoldSeconds, config.poseHoldDropoutSeconds);
@@ -450,6 +454,8 @@ namespace Experience
             {
                 liveFusedSource.SetSubmitToMerger(_savedLfbsSubmit);
                 liveFusedSource.liveFramesOnly = _savedLfbsLiveOnly;
+                if (_visitorProfile != null)
+                    liveFusedSource.ApplyBodyProfile(_defaultProfile);
             }
             if (merger != null)
             {
@@ -531,6 +537,11 @@ namespace Experience
 
         private void ResetRunState()
         {
+            // Undo the previous visitor's fusion calibration BEFORE clearing the
+            // reference — the live fusion must start every run on the session
+            // default (or its absence), never on the last visitor's bones.
+            if (_visitorProfile != null && liveFusedSource != null)
+                liveFusedSource.ApplyBodyProfile(_defaultProfile);
             _metrics = VisitorBodyMetrics.Default;
             _metricsMeasured = false;
             _visitorProfile = null;

@@ -205,13 +205,20 @@ namespace BodyTracking.Eval.Rtmpose
             return true;
         }
 
-        /// <summary>Swap the fusion's bone-length profile (per-visitor calibration).
-        /// Reference assignment is atomic; the worker picks it up on its next
-        /// fuse, and RebuildAdapter carries it across playback-loop rebuilds.</summary>
+        /// <summary>The fusion's current bone-length profile (the default loaded
+        /// from bodyProfilePath, or a per-visitor calibration). Null = fusion
+        /// runs without bone-length priors.</summary>
+        public BodyProfile CurrentBodyProfile => _session?.Fused?.Profile;
+
+        /// <summary>Swap the fusion's bone-length profile (per-visitor calibration,
+        /// or restoring the session default between visitors — null is a valid
+        /// value meaning "no priors"). Reference assignment is atomic; the worker
+        /// picks it up on its next fuse, and RebuildAdapter carries it across
+        /// playback-loop rebuilds.</summary>
         public void ApplyBodyProfile(BodyProfile profile)
         {
             var s = _session;
-            if (s?.Fused != null && profile != null) s.Fused.Profile = profile;
+            if (s?.Fused != null) s.Fused.Profile = profile;
         }
 
         // Worker thread (per-camera inference callback).
