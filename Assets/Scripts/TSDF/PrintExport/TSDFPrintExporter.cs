@@ -262,7 +262,7 @@ namespace TSDF
 
         [Tooltip("Colour of the HUMAN body mesh — its own material, separate " +
                  "from the black armature (floor/pillars/links).")]
-        public Color threeMfHumanColor = new Color(0.15f, 0.35f, 1f);
+        public Color threeMfHumanColor = new Color(0.4f, 0.62f, 1f);
 
         [Tooltip("Curve tubes + bridges + wireframe colour in the 3MF export.")]
         public Color threeMfCurveColor = Color.white;

@@ -267,7 +267,7 @@ MonoBehaviour:
   cumulative: {fileID: 18533122}
   folderPath: D:\FloatingVectorsICC\RecordingBase
   folderPathMacOverride: /Volumes/horristicSSD2T/Dropbox/projects/ICC/Recordings/Rec2_jump
-  playbackFolderPath: F:\RecordingBaseV11s\2026-07-14_15-09-52
+  playbackFolderPath: F:\RecordingBase\2026-07-14_14-58-58
   playbackFolderPathMacOverride: /Volumes/horristicSSD2T/Dropbox/projects/ICC/Recordings/rec2_turn
   applyWorldRebase: 1
   rigSerialOrder:
@@ -2595,6 +2595,8 @@ MonoBehaviour:
   printRadius: 0.006
   tubeTailTaper: 0.2
   tubeRaindrop: 1
+  stlIncludeBridges: 1
+  tubeHeadTrim: 0
   tubeAlignUp: 1
   stlContactBeads: 1
   stlBlackLineRatio: 0.5
@@ -2625,6 +2627,7 @@ MonoBehaviour:
   stlFloorPillarBand: 0.05
   stlFloorPillarRadius: 0.012
   threeMfBodyColor: {r: 0, g: 0, b: 0, a: 1}
+  threeMfHumanColor: {r: 0.4, g: 0.62, b: 1, a: 1}
   threeMfCurveColor: {r: 1, g: 1, b: 1, a: 1}
   stlRootWireframe: 1
   stlWireframeNeighbors: 2

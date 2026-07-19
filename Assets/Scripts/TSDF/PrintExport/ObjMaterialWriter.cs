@@ -41,9 +41,24 @@ namespace TSDF
                     w.Write(color.g.ToString("0.###", inv));
                     w.Write(' ');
                     w.Write(color.b.ToString("0.###", inv));
-                    w.Write("\nKa 0 0 0\nKs 0 0 0\nd 1\nillum 1\n\n");
+                    // mild specular so curvature reads in viewers (flat Ks 0
+                    // made the smoothed body look like unshaded flat colour)
+                    w.Write("\nKa 0 0 0\nKs 0.25 0.25 0.25\nNs 32\nd 1\nillum 2\n\n");
                 }
             }
+
+            // Smooth vertex normals (area-weighted face-normal accumulation).
+            // Snapshot/tube normals are dropped upstream and viewers left to
+            // guess produced flat, unshaded bodies — write vn explicitly.
+            var nrm = new Vector3[pos.Count];
+            for (int t = 0; t + 2 < tri.Count; t += 3)
+            {
+                Vector3 a = pos[tri[t]], b = pos[tri[t + 1]], c = pos[tri[t + 2]];
+                Vector3 fn = Vector3.Cross(b - a, c - a); // length = 2*area (weighting)
+                nrm[tri[t]] += fn; nrm[tri[t + 1]] += fn; nrm[tri[t + 2]] += fn;
+            }
+            for (int i = 0; i < nrm.Length; i++)
+                nrm[i] = nrm[i].sqrMagnitude > 1e-20f ? nrm[i].normalized : Vector3.up;
 
             using (var w = new StreamWriter(path, false, new System.Text.UTF8Encoding(false), 1 << 16))
             {
@@ -61,6 +76,16 @@ namespace TSDF
                     w.Write(v.z.ToString("0.###", inv));
                     w.Write('\n');
                 }
+                for (int i = 0; i < nrm.Length; i++)
+                {
+                    w.Write("vn ");
+                    w.Write(nrm[i].x.ToString("0.###", inv));
+                    w.Write(' ');
+                    w.Write(nrm[i].y.ToString("0.###", inv));
+                    w.Write(' ');
+                    w.Write(nrm[i].z.ToString("0.###", inv));
+                    w.Write('\n');
+                }
                 foreach (var span in spans)
                 {
                     w.Write("usemtl ");
@@ -69,12 +94,15 @@ namespace TSDF
                     for (int t = span.StartTri; t < span.StartTri + span.TriCount; t++)
                     {
                         int b = t * 3;
+                        string i0 = (tri[b] + 1).ToString(inv);
+                        string i1 = (tri[b + 1] + 1).ToString(inv);
+                        string i2 = (tri[b + 2] + 1).ToString(inv);
                         w.Write("f ");
-                        w.Write((tri[b] + 1).ToString(inv));
+                        w.Write(i0); w.Write("//"); w.Write(i0);
                         w.Write(' ');
-                        w.Write((tri[b + 1] + 1).ToString(inv));
+                        w.Write(i1); w.Write("//"); w.Write(i1);
                         w.Write(' ');
-                        w.Write((tri[b + 2] + 1).ToString(inv));
+                        w.Write(i2); w.Write("//"); w.Write(i2);
                         w.Write('\n');
                     }
                 }
