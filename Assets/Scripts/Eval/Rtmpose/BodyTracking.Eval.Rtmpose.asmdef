@@ -1,0 +1,21 @@
+{
+    "name": "BodyTracking.Eval.Rtmpose",
+    "rootNamespace": "BodyTracking.Eval.Rtmpose",
+    "references": [
+        "BodyTracking.Eval",
+        "BodyTracking",
+        "PointCloud",
+        "Orbbec",
+        "com.github.asus4.onnxruntime",
+        "com.github.asus4.onnxruntime.unity"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": true,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

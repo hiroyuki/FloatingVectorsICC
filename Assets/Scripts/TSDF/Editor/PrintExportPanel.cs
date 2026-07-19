@@ -84,10 +84,13 @@ namespace TSDF.EditorTools
                 new GUIContent("Print Seed Stride", "間引き：何本置きに1本エクスポートするか。40 → 20000本中約500本。"),
                 pe.printSeedStride, 1, 400);
             float radius = EditorGUILayout.Slider(
-                new GUIContent("Print Radius (m)", "カーブチューブの半径。直径 3 voxel 以上でないと MC がガタガタになる。"),
+                new GUIContent("Print Radius (m)", "カーブチューブの半径。STL チューブ直接同梱なら解像度制約なし。" +
+                    "Fuse curves（voxel 融合）を使う場合のみ直径 3 voxel 以上必要。"),
                 pe.printRadius, 0.002f, 0.05f);
-            if (voxel > 1e-6f)
+            if (voxel > 1e-6f && !pe.stlIncludeCurveTubes)
             {
+                // The 3-voxel MC floor only applies to the voxel-fuse path — the
+                // direct STL tubes never touch the volume.
                 float diaVox = radius * 2f / voxel;
                 EditorGUILayout.HelpBox(
                     $"直径 {radius * 2000f:0.0} mm ≈ {diaVox:0.0} voxel (voxelSize {voxel * 1000f:0.0} mm)" +
@@ -122,6 +125,61 @@ namespace TSDF.EditorTools
                 new GUIContent("Smooth Iterations", "書き出し時の Taubin 平滑化（縮まない）。0=OFF。" +
                     "MC の階段状ガタつきを除去する。表示中の TSDF mesh には影響しない。"),
                 pe.smoothIterations, 0, 30);
+            bool stlBody = EditorGUILayout.ToggleLeft(
+                new GUIContent("STL: Include Body (体のメッシュを同梱)",
+                    "OFF = チューブのみの STL（審美バリアント）。体シェルと、体に接続する" +
+                    "ブリッジ（接続先が無くなるため）を出力しない。床プレートは独立フラグのままで、" +
+                    "体 OFF 時はチューブの接地帯を中心にする。"),
+                pe.stlIncludeBody);
+            bool stlTubes = EditorGUILayout.ToggleLeft(
+                new GUIContent("STL: Include Curve Tubes (フル解像度のチューブで同梱)",
+                    "カーブ＋体への接続ブリッジを 1 回の CSEmitSegs（Fuse curves と同一のシード集合）" +
+                    "から閉じたチューブメッシュとして再構成し、STL に直接同梱する。voxel 化を" +
+                    "通らないので解像度が落ちず、Fuse curves は不要（すると二重になる）。" +
+                    "重なったシェルはスライサーが union する。" +
+                    "OFF = 旧方式（Fuse curves で voxel に焼いた分だけが STL に入る）。"),
+                pe.stlIncludeCurveTubes);
+            int stlSides = EditorGUILayout.IntSlider(
+                new GUIContent("STL Curve Sides", "STL チューブ断面の角数。2mm ワイヤ相当なら 6 で丸く見える。"),
+                pe.stlCurveSides, 3, 12);
+            bool wire = EditorGUILayout.ToggleLeft(
+                new GUIContent("STL: Root Wireframe (体OFF時、根本同士をワイヤ接続)",
+                    "体を出さないとき、カーブの体側アンカー点同士を細いワイヤで接続する。" +
+                    "最小全域木で必ず1つの連結部品にし（粉末プリントは非連結パーツが脱落する）、" +
+                    "さらに近傍N本を追加。アンカーはダンサー表面の点なので、" +
+                    "薄っすら身体のワイヤーフレームに見える。ブリッジはカーブ→ワイヤ網の接続として残る。"),
+                pe.stlRootWireframe);
+            int wireN = EditorGUILayout.IntSlider(
+                new GUIContent("Wireframe Neighbors", "全域木に加えて各アンカーから近い順に何本ワイヤを張るか。" +
+                    "0=木のみ（最疎）、2でメッシュらしい密度。"),
+                pe.stlWireframeNeighbors, 0, 4);
+            float wireMax = EditorGUILayout.Slider(
+                new GUIContent("Wireframe Max Edge (m)", "近傍ワイヤの最長（これ以上は張らない — " +
+                    "手→腰のような体を横切る弦を防ぐ）。全域木の辺は連結優先でこの制限を受けない。"),
+                pe.stlWireframeMaxEdge, 0.05f, 0.5f);
+            bool supports = EditorGUILayout.ToggleLeft(
+                new GUIContent("STL: Curve Support Pillars (カーブ支持柱)",
+                    "各カーブの始点・終点（＋Support Spacing 間隔の中間点）から床まで垂直の細柱を" +
+                    "落とす。ワイヤの絡みの中のスライサーサポートは除去不能なので、造形として" +
+                    "支持を組み込む（FDM/A2L 用）。柱の先端は床プレートに 5mm 食い込んで union される。"),
+                pe.stlCurveSupportPillars);
+            float supSpacing = EditorGUILayout.Slider(
+                new GUIContent("Support Spacing (m)", "カーブに沿った中間支持柱の間隔（弧長）。0=始点・終点のみ。"),
+                pe.stlSupportSpacing, 0f, 1f);
+            float supRadius = EditorGUILayout.Slider(
+                new GUIContent("Support Radius (m)", "支持柱の半径。Print Radius と同じなら作品の一部に、" +
+                    "細くすると糸で吊っているように見える。"),
+                pe.stlSupportRadius, 0.001f, 0.02f);
+            // 床プレートは常に同梱（無いと自立しない — 2026-07-17 のルール）。トグルは無い。
+            float stlFloorSz = EditorGUILayout.Slider(
+                new GUIContent("STL Floor Size (m)", "床プレートの一辺（実寸 m の正方形、常に同梱 — " +
+                    "無いと自立しない）。中心はダンサー（接地帯の重心）。" +
+                    "プリント寸法は他と同じく Target Height Mm のスケールに従う。"),
+                pe.stlFloorSize, 0.5f, 3f);
+            float stlFloorTh = EditorGUILayout.Slider(
+                new GUIContent("STL Floor Thickness (m)", "床プレートの厚み（実寸 m）。" +
+                    "0.02m は 1/8 スケール出力でおよそ 2.5mm。"),
+                pe.stlFloorThickness, 0.005f, 0.1f);
 
             EditorGUILayout.Space(4);
             EditorGUILayout.LabelField("Web export (GLB + USDZ)", EditorStyles.miniBoldLabel);
@@ -163,6 +221,17 @@ namespace TSDF.EditorTools
                 pe.keepLargestOnly = keepLargest;
                 pe.targetHeightMm = heightMm;
                 pe.smoothIterations = smooth;
+                pe.stlIncludeBody = stlBody;
+                pe.stlIncludeCurveTubes = stlTubes;
+                pe.stlCurveSides = stlSides;
+                pe.stlRootWireframe = wire;
+                pe.stlWireframeNeighbors = wireN;
+                pe.stlWireframeMaxEdge = wireMax;
+                pe.stlCurveSupportPillars = supports;
+                pe.stlSupportSpacing = supSpacing;
+                pe.stlSupportRadius = supRadius;
+                pe.stlFloorSize = stlFloorSz;
+                pe.stlFloorThickness = stlFloorTh;
                 pe.webIncludeCurves = webCurves;
                 pe.webCurveStride = webStride;
                 pe.webCurveSides = webSides;
@@ -184,7 +253,8 @@ namespace TSDF.EditorTools
                 using (new EditorGUI.DisabledScope(!ready || pe.curves == null))
                 {
                     if (GUILayout.Button(new GUIContent("Fuse curves",
-                            "カーブをチューブ化して表示中の TSDF に融合（何度押しても累積しない）"),
+                            "カーブをチューブ化して表示中の TSDF に融合（何度押しても累積しない）。" +
+                            "STL: Include Curve Tubes が ON のときは表示確認用 — STL には不要（二重になる）"),
                             GUILayout.Height(26)))
                         pe.FuseCurves();
                 }
@@ -194,7 +264,9 @@ namespace TSDF.EditorTools
                             "穴塞ぎ＋未接続チェック"), GUILayout.Height(26)))
                         pe.CloseHoles();
                     if (GUILayout.Button(new GUIContent("Export STL",
-                            "~/Documents/FloatingVectorsPrints/ に書き出し"), GUILayout.Height(26)))
+                            "~/Documents/FloatingVectorsPrints/ に書き出し。" +
+                            "カーブは表示解像度のチューブ＋ブリッジとして自動同梱（Fuse 不要）"),
+                            GUILayout.Height(26)))
                         pe.ExportStl();
                 }
                 using (new EditorGUI.DisabledScope(!ready || !pe.HasSnapshot))
@@ -207,14 +279,37 @@ namespace TSDF.EditorTools
 
             using (new EditorGUI.DisabledScope(!ready))
             {
-                if (GUILayout.Button(new GUIContent("Fuse → Close → Export STL (ワンクリック)",
-                        "3Dプリント一連: カーブ融合 → 穴塞ぎ → STL 書き出しを連続実行。" +
-                        "やり直しは Restore で融合前に戻せる。"), GUILayout.Height(30)))
+                // With direct STL tubes the voxel fuse must be skipped (the tubes
+                // would land twice: once meshed, once voxelised).
+                bool direct = pe.stlIncludeCurveTubes;
+                if (GUILayout.Button(new GUIContent(
+                        direct ? "Close → Export STL (ワンクリック)"
+                               : "Fuse → Close → Export STL (ワンクリック)",
+                        direct ? "3Dプリント一連: 穴塞ぎ → STL 書き出し（カーブはチューブとして自動同梱）。" +
+                                 "やり直しは Restore で穴塞ぎ前に戻せる。"
+                               : "3Dプリント一連: カーブ融合 → 穴塞ぎ → STL 書き出しを連続実行。" +
+                                 "やり直しは Restore で融合前に戻せる。"), GUILayout.Height(30)))
                 {
-                    if (pe.curves != null) pe.FuseCurves();
+                    if (!direct && pe.curves != null) pe.FuseCurves();
                     pe.CloseHoles();
                     pe.ExportStl();
                 }
+            }
+
+            using (new EditorGUI.DisabledScope(!ready))
+            {
+                if (GUILayout.Button(new GUIContent("Export OBJ (2マテリアル — プレビュー用)",
+                        "STL と同一ジオメトリを Body/Curves の 2 マテリアル付き OBJ+MTL で書き出す。" +
+                        "MeshLab や Blender で色分けをプレビューでき、Bambu Studio の色付き OBJ " +
+                        "インポートでも読める。色の確認はこれで、本番スライスは 3MF で。"),
+                        GUILayout.Height(26)))
+                    pe.ExportObj();
+                if (GUILayout.Button(new GUIContent("Export 3MF (2色 — Bambu AMS 用)",
+                        "STL と同一ジオメトリを、体+床=Body Color / カーブ+ワイヤ=Curve Color の" +
+                        "面カラー付き Standard 3MF で書き出す。Bambu Studio が読み込み時に" +
+                        "色→フィラメントのマッピングダイアログを出す。穴塞ぎは先に実行しておくこと。"),
+                        GUILayout.Height(26)))
+                    pe.Export3mf();
             }
 
             using (new EditorGUI.DisabledScope(!ready))

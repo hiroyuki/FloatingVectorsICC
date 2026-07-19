@@ -64,6 +64,28 @@ namespace BodyTracking
             false;
 #endif
 
+        /// <summary>Platform-gated read of <see cref="ignoreRecordedBodies"/> for external
+        /// coordinators (LiveSkeletonFeed) that must mirror this merger's worker-ownership
+        /// decision exactly — on non-Windows platforms the flag is inert and reads false.</summary>
+        public bool IgnoreRecordedBodiesActive => IgnoreRecordedActive;
+
+        /// <summary>While true, k4abt worker output is dropped at ingest (merge slots stay
+        /// untouched and nothing is persisted to a recording). The experience director sets
+        /// this during visitor-playback states, where the recorded bodies_main drives the
+        /// sculpture and the workers are re-purposed by LiveSkeletonFeed to track the LIVE
+        /// visitor for pose detection: their live-clock results must never fight the
+        /// recorded-clock merge. (The playhead-ahead guard below already drops live-clock
+        /// results in practice; this flag makes the contract explicit and airtight.)
+        /// Runtime-only by design — never serialized, so a crash can't strand it true.</summary>
+        [System.NonSerialized] public bool muteWorkerIngest;
+
+        [Tooltip("External body source mode (e.g. LiveFusedBodySource running the RTMPose " +
+                 "fusion). While true, skeletons arrive exclusively through " +
+                 "SubmitExternalBodies: k4abt workers are never spawned and recorded " +
+                 "bodies_main is ignored. LiveFusedBodySource sets/clears this on its own " +
+                 "enable/disable.")]
+        public bool useExternalBodies = false;
+
         [Range(0f, 30f)]
         [Tooltip("Cap on how many frames per second are sent to each k4abt worker (0 = every frame). " +
                  "BT inference is the dominant GPU cost with multiple workers; lowering this trades " +
@@ -210,6 +232,26 @@ namespace BodyTracking
                  "detections too — that's the right setting for a single-camera scene.")]
         [Min(1)]
         public int requireMinWorkerCount = 1;
+
+        [Header("Tracking volume gate")]
+        [Tooltip("Discard whole bodies whose pelvis lies outside the tracking volume before " +
+                 "clustering. This installation is single-person and everything outside the " +
+                 "capture volume must be dropped — without this gate a bystander standing " +
+                 "meters outside the box is tracked, rendered, and counted (crowd alert / " +
+                 "presence). Per-worker debug skeletons (showPerWorkerSkeletons) stay ungated " +
+                 "so raw camera output remains inspectable.")]
+        public bool enableVolumeGate = true;
+
+        [Tooltip("OBB defining the tracking volume (same unit-cube convention as the point-" +
+                 "cloud filter). Auto-found at OnEnable when left null — the scene has one " +
+                 "shared sensing volume. Independent of the volume's filterMode: that switch " +
+                 "governs point culling, this gate has its own toggle above.")]
+        public BoundingVolume trackingVolume;
+
+        [Tooltip("Outward slack (meters) added to every box face for the gate test only. " +
+                 "Keeps a visitor straddling the boundary from flickering in and out; the " +
+                 "bystander this gate exists for stood ~3 m outside, far beyond any margin.")]
+        [Min(0f)] public float volumeGateMarginMeters = 0.25f;
 
         [Header("Debug")]
         [Tooltip("Also render each worker's raw skeleton (pre-merge) in a hue derived " +
@@ -406,8 +448,50 @@ namespace BodyTracking
             return false;
         }
 
+        // Full-joint snapshot of the PRIMARY merged person, world space. Filled
+        // alongside RecordPersonSample for _persons[0] only (single-person
+        // installation) so pose classification (star/banzai) can read every
+        // joint regardless of the body SOURCE (k4abt workers, recorded
+        // bodies_main, or external fused bodies) without k4a types leaking out.
+        private readonly Vector3[] _primaryJointsWorld = new Vector3[K4ABTConsts.K4ABT_JOINT_COUNT];
+        private readonly bool[] _primaryJointValid = new bool[K4ABTConsts.K4ABT_JOINT_COUNT];
+
+        /// <summary>
+        /// World-space joints of the primary merged person this frame (K4ABT
+        /// order; valid = confidence != NONE). The arrays are internal reusable
+        /// buffers overwritten every merge pass — read immediately, copy to
+        /// retain. False when nobody is tracked.
+        /// </summary>
+        public bool TryGetPrimarySkeleton(out Vector3[] jointsWorld, out bool[] jointValid)
+        {
+            if (_persons.Count > 0)
+            {
+                jointsWorld = _primaryJointsWorld;
+                jointValid = _primaryJointValid;
+                return true;
+            }
+            jointsWorld = null;
+            jointValid = null;
+            return false;
+        }
+
         private void RecordPersonSample(uint id, in k4abt_skeleton_t skel)
         {
+            // Primary person (first recorded this pass): stash the full skeleton
+            // for TryGetPrimarySkeleton. _mergedSkel positions are synthetic
+            // k4a-mm — K4AmmToUnity recovers the world position (see the
+            // coordinate contract above).
+            if (_persons.Count == 0)
+            {
+                for (int i = 0; i < K4ABTConsts.K4ABT_JOINT_COUNT; i++)
+                {
+                    var jt = skel.Joints[i];
+                    _primaryJointsWorld[i] = BodyTrackingShared.K4AmmToUnity(jt.Position);
+                    _primaryJointValid[i] = jt.ConfidenceLevel
+                        != k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_NONE;
+                }
+            }
+
             // k4abt's HAND joints are frequently NONE even while the WRIST is
             // MEDIUM (measured on the 12-50-09 take: hands NONE the whole time).
             // For touch purposes the wrist is ~8 cm from the palm — well inside
@@ -448,6 +532,7 @@ namespace BodyTracking
         // Diagnostic counters.
         private int _diagSnapshotsRecv;
         private int _diagDroppedStaleSnapshots;
+        private int _diagDroppedOutsideVolume;
         private int _diagFreshIterations; // CollectCandidates: slot non-empty AND not stale (= candidate built)
         private int _diagClustersFormed;
         private int _diagPersonsOutput;
@@ -469,6 +554,7 @@ namespace BodyTracking
             if (!ResolveDependencies()) { _disabledByGuard = true; enabled = false; return; }
 
             if (_pool == null) _pool = new BodyVisualPool(transform);
+            if (trackingVolume == null) trackingVolume = FindFirstObjectByType<BoundingVolume>();
             if (workerHost != null && !_hostSubscribed)
             {
                 workerHost.OnSkeletonsReady += OnWorkerSkeletons;
@@ -517,13 +603,31 @@ namespace BodyTracking
         private void OnPlaybackBodies(string serial, ulong tsNs, byte[] bytes, int byteCount,
                                       Transform sourceTransform, ObCameraParam? cameraParam)
         {
+            // Forcing live k4abt on playback: drop the recorded bodies_main entirely so stale /
+            // mismatched recorded skeletons don't fill the slot and fight the worker output.
+            // External-source mode likewise owns the slots exclusively.
+            if (IgnoreRecordedActive || useExternalBodies) return;
+            IngestBodies(serial, tsNs, bytes, byteCount, sourceTransform, cameraParam);
+        }
+
+        /// <summary>External body-source entry (LiveFusedBodySource): same per-serial
+        /// slot path as recorded bodies_main, accepted only while
+        /// <see cref="useExternalBodies"/> is on so a stray feeder can never fight
+        /// the worker/recorded sources.</summary>
+        public void SubmitExternalBodies(string serial, ulong tsNs, byte[] bytes, int byteCount,
+                                         Transform sourceTransform, ObCameraParam? cameraParam)
+        {
+            if (!useExternalBodies) return;
+            IngestBodies(serial, tsNs, bytes, byteCount, sourceTransform, cameraParam);
+        }
+
+        private void IngestBodies(string serial, ulong tsNs, byte[] bytes, int byteCount,
+                                  Transform sourceTransform, ObCameraParam? cameraParam)
+        {
             // Data ingestion is independent of showBones now — that toggle only controls whether the
             // skeleton is DRAWN (bones + joints), so consumers like BonePoseHistory keep getting poses
             // while the skeleton is hidden.
             if (string.IsNullOrEmpty(serial)) return;
-            // Forcing live k4abt on playback: drop the recorded bodies_main entirely so stale /
-            // mismatched recorded skeletons don't fill the slot and fight the worker output.
-            if (IgnoreRecordedActive) return;
             if (!_latestBySerial.TryGetValue(serial, out var slot))
             {
                 slot = new WorkerLatest { Serial = serial, SourceTransform = sourceTransform };
@@ -867,6 +971,10 @@ namespace BodyTracking
             // skeleton is DRAWN (bones + joints), so consumers like BonePoseHistory keep getting poses
             // while the skeleton is hidden.
 
+            // External-source mode: skeletons arrive through SubmitExternalBodies;
+            // never spawn or feed k4abt workers.
+            if (useExternalBodies) return;
+
             // Recorded BT short-circuit: when the recorder is in Playing state AND
             // has a bodies_main track for this serial, skeletons flow in through
             // OnPlaybackBodies instead. Skip the k4abt spawn / enqueue path so
@@ -986,6 +1094,17 @@ namespace BodyTracking
             // Data ingestion is independent of showBones now — that toggle only controls whether the
             // skeleton is DRAWN (bones + joints), so consumers like BonePoseHistory keep getting poses
             // while the skeleton is hidden.
+
+            // External-source mode: workers spawned BEFORE the mode flipped may still
+            // deliver — their k4abt output must not fight the external fused bodies
+            // in the same slots (DispatchRawFrame already stops feeding them).
+            if (useExternalBodies) return;
+
+            // Visitor-playback mute: LiveSkeletonFeed owns the workers (live visitor
+            // pose detection) while recorded bodies_main owns the merge. See the
+            // muteWorkerIngest doc comment.
+            if (muteWorkerIngest) return;
+
             if (!_latestBySerial.TryGetValue(serial, out var slot)) return;
 
             // Loop-seam / backward-seek guard (live-k4abt-on-playback): BT inference lags
@@ -1053,6 +1172,7 @@ namespace BodyTracking
             Debug.Log(
                 $"[SkeletonMerger] workers={boundWorkers} " +
                 $"snapshots/s={_diagSnapshotsRecv} dropped_stale/s={_diagDroppedStaleSnapshots} " +
+                $"dropped_outside/s={_diagDroppedOutsideVolume} " +
                 $"fresh_iter/s={_diagFreshIterations} max_age_ms={_diagMaxObservedAgeMs:F0} " +
                 $"clusters/s={_diagClustersFormed} persons/s={_diagPersonsOutput} " +
                 $"continuity_carry_over/s={_diagContinuityCarryOver} " +
@@ -1060,6 +1180,7 @@ namespace BodyTracking
                 this);
             _diagSnapshotsRecv = 0;
             _diagDroppedStaleSnapshots = 0;
+            _diagDroppedOutsideVolume = 0;
             _diagFreshIterations = 0;
             _diagMaxObservedAgeMs = 0f;
             _diagClustersFormed = 0;
@@ -1110,6 +1231,16 @@ namespace BodyTracking
                         slot.DepthToColorMm,
                         slot.SourceTransform);
 
+                    // Volume gate: a body whose pelvis is outside the (margin-
+                    // expanded) tracking volume never becomes a candidate, so it
+                    // can't seed a cluster, be absorbed into one, spawn a
+                    // BodyVisual, or count toward Persons / the crowd alert.
+                    if (!PassesVolumeGate(pelvisWorld))
+                    {
+                        _diagDroppedOutsideVolume++;
+                        continue;
+                    }
+
                     var c = AcquireCandidate();
                     c.Slot = slot;
                     c.BodyIndex = i;
@@ -1119,6 +1250,36 @@ namespace BodyTracking
                 }
             }
         }
+
+        // True when the world position may enter the merge (gate off / no volume /
+        // inside the margin-expanded OBB). Same normalized-box math as
+        // PresenceDetector.IsInsideSensingVolume, minus the presence-specific XZ
+        // inset and world-Y band; the margin expands OUTWARD instead so a visitor
+        // straddling the boundary doesn't flicker in and out of tracking.
+        private bool PassesVolumeGate(Vector3 world)
+        {
+            if (!enableVolumeGate) return true;
+            if (trackingVolume == null)
+            {
+                if (!_volumeGateWarned)
+                {
+                    Debug.LogWarning(
+                        $"[{nameof(SkeletonMerger)}] enableVolumeGate is on but no " +
+                        "BoundingVolume was found in the scene; the gate is inert.", this);
+                    _volumeGateWarned = true;
+                }
+                return true;
+            }
+            var t = trackingVolume.transform;
+            Vector3 b = t.InverseTransformPoint(world);
+            Vector3 s = t.lossyScale;
+            float mx = 0.5f + (s.x != 0f ? volumeGateMarginMeters / Mathf.Abs(s.x) : 0f);
+            float my = 0.5f + (s.y != 0f ? volumeGateMarginMeters / Mathf.Abs(s.y) : 0f);
+            float mz = 0.5f + (s.z != 0f ? volumeGateMarginMeters / Mathf.Abs(s.z) : 0f);
+            return Mathf.Abs(b.x) <= mx && Mathf.Abs(b.y) <= my && Mathf.Abs(b.z) <= mz;
+        }
+
+        private bool _volumeGateWarned;
 
         private void BuildClusters()
         {

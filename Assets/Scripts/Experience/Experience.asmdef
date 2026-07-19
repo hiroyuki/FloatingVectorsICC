@@ -7,6 +7,8 @@
         "Calibration",
         "PointCloud",
         "BodyTracking",
+        "BodyTracking.Eval",
+        "BodyTracking.Eval.Rtmpose",
         "TSDF",
         "UnityEngine.UI"
     ],

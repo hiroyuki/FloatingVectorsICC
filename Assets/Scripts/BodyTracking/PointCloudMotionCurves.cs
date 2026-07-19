@@ -35,21 +35,23 @@ namespace BodyTracking
         // ---- Shared.IPanelTunable (one-stop Control Panel) ----
         // Look knobs so the curves can be dialled in at runtime, not just the Inspector.
         public string TuningLabel => "Motion lines";
-        public int TunableCount => 7;
+        public int TunableCount => 8;
         public string TunableName(int i) =>
             i == 0 ? "Brightness" :
             i == 1 ? "Ribbon Width (m)" :
             i == 2 ? "Round shading" :
             i == 3 ? "Rim Boost" :
             i == 4 ? "Lag Comp (s)" :
-            i == 5 ? "Tail Alpha" : "Tail Fade Length";
+            i == 5 ? "Tail Alpha" :
+            i == 6 ? "Tail Fade Length" : "Smooth Subdiv";
         public float TunableValue(int i) =>
             i == 0 ? brightness :
             i == 1 ? ribbonWidth :
             i == 2 ? round :
             i == 3 ? rimBoost :
             i == 4 ? lagCompSeconds :
-            i == 5 ? tailAlpha : tailFadePow;
+            i == 5 ? tailAlpha :
+            i == 6 ? tailFadePow : smoothSubdiv;
         public void SetTunableValue(int i, float value)
         {
             switch (i)
@@ -60,18 +62,22 @@ namespace BodyTracking
                 case 3: rimBoost = Mathf.Clamp(value, 0f, 2f); break;
                 case 4: lagCompSeconds = Mathf.Clamp(value, 0f, 0.2f); break;
                 case 5: tailAlpha = Mathf.Clamp01(value); break;
-                default: tailFadePow = Mathf.Clamp(value, 0.5f, 6f); break;
+                case 6: tailFadePow = Mathf.Clamp(value, 0.5f, 6f); break;
+                // smoothSubdiv is in BuildParamsHash, so the pause auto-hold
+                // notices the change and rebuilds even while playback is paused.
+                default: smoothSubdiv = Mathf.Clamp(Mathf.RoundToInt(value), 1, 8); break;
             }
         }
-        public float TunableMin(int i) => i == 6 ? 0.5f : 0f;
+        public float TunableMin(int i) => i == 6 ? 0.5f : i == 7 ? 1f : 0f;
         public float TunableMax(int i) =>
             i == 0 ? 3f :
             i == 1 ? 0.05f :
             i == 2 ? 1f :
             i == 3 ? 2f :
             i == 4 ? 0.2f :
-            i == 5 ? 1f : 6f;
-        public bool TunableIsInt(int i) => false;
+            i == 5 ? 1f :
+            i == 6 ? 6f : 8f;
+        public bool TunableIsInt(int i) => i == 7;
 
         [Tooltip("Bone pose history source. Auto-resolves the first BonePoseHistory at OnEnable.")]
         public BonePoseHistory history;

@@ -48,8 +48,16 @@ namespace Shared.EditorTools
                 if (mb is IAccumulationController ac) _accums.Add(ac);
                 if (mb is IPanelTunable tn) _tunables.Add(tn);
             }
+            // FindObjectsSortMode.None gives a nondeterministic order that changes
+            // every Play — sort ALL sections so rows never jump around.
+            _transports.Sort((a, b) => string.CompareOrdinal(GoName(a), GoName(b)));
             _views.Sort((a, b) => string.CompareOrdinal(a.ViewLabel, b.ViewLabel));
             _accums.Sort((a, b) => string.CompareOrdinal(DisplayName(a), DisplayName(b)));
+            _tunables.Sort((a, b) =>
+            {
+                int c = string.CompareOrdinal(a.TuningLabel, b.TuningLabel);
+                return c != 0 ? c : string.CompareOrdinal(GoName(a), GoName(b));
+            });
 
             _scroll = EditorGUILayout.BeginScrollView(_scroll);
 
@@ -319,6 +327,12 @@ namespace Shared.EditorTools
         {
             var comp = c as Component;
             return comp != null ? comp.GetType().Name + "  (" + comp.gameObject.name + ")" : c.ToString();
+        }
+
+        private static string GoName(object o)
+        {
+            var comp = o as Component;
+            return comp != null ? comp.gameObject.name : (o != null ? o.ToString() : string.Empty);
         }
 
         private static void DrawSelectButton(Component comp)

@@ -1,18 +1,29 @@
-// Pure-C# state machine for the visitor experience (Phase 5,
-// Plans/phase5-director-plan.md). No scene access — the ExperienceDirector
-// feeds an ExperienceInputs snapshot every Tick and reacts to Changed. Pure so
-// every transition rule is EditMode-testable (ExperienceStateMachineTests).
+// Pure-C# state machine for the visitor experience — the pose-driven
+// sequence: Calibrate (star pose + body measurement) → Explore (10s take
+// recording) → Processing (v11s conversion) → Watch (first playback loop) →
+// BanzaiWait (looping playback until the banzai pose / loop fallback) →
+// Exporting → QrShow. No scene access — the ExperienceDirector feeds an
+// ExperienceInputs snapshot every Tick and reacts to Changed. Pure so every
+// transition rule is EditMode-testable (ExperienceStateMachineTests).
 //
-// Latching contracts (Codex review):
-//   - CaptureDone is latched internally and CLEARED on every Prompt-state
-//     enter: a stale director flag can never fast-forward a later prompt.
-//   - ExportFailed is latched: a one-frame pulse starts the fail-notice timer;
-//     the machine stays in Exporting until exportFailNoticeSeconds then falls
-//     back to Attract (the director shows the apology meanwhile).
+// Latching contracts (carried over from the previous machine's Codex review):
+//   - Per-state completion flags (CalibrationDone, RecordingDone,
+//     ProcessingDone, CaptureDone) are latched INSIDE their owning state only
+//     and cleared on that state's enter — a stale director flag can never
+//     fast-forward a later visitor's run.
+//   - ProcessingFailed / ExportFailed are latched: a one-frame pulse starts
+//     the fail-notice timer; the machine holds the state until
+//     exportFailNoticeSeconds then falls back to Attract (the director shows
+//     the apology meanwhile).
 //
 // Skip flags mean "enter the state, then advance immediately on the first
 // Tick" — the state is still entered so side effects and the E2E transition
-// path stay exercised (user request: dev-mode stage skipping).
+// path stay exercised (dev-mode stage skipping).
+//
+// Duration ownership: Explore's 10s (and its 3s end countdown) and
+// Processing's timeout/fallback are DIRECTOR-owned (they end in RecordingDone
+// / ProcessingDone) because they wrap real device work; Calibrate's 10s
+// window and QrShow's dwell are machine-owned timers.
 
 using System;
 using UnityEngine;
@@ -21,21 +32,25 @@ namespace Experience
 {
     public enum ExperienceState
     {
-        Attract, Welcome, FreePlay, Ready,
-        PromptAnimal, PromptMantis, PromptFree,
-        Select, Exporting, QrShow, Fault
+        Attract, Calibrate, Explore, Processing, Watch, BanzaiWait,
+        Exporting, QrShow, Fault
     }
 
     /// <summary>Per-tick inputs from the director (already debounced where
-    /// applicable — Present comes from PresenceDetector's hysteresis).</summary>
+    /// applicable — Present comes from PresenceDetector's hysteresis, or the
+    /// occupancy+live-feed blend during playback states).</summary>
     public struct ExperienceInputs
     {
         public bool Present;
         public bool Fault;
-        public bool CaptureDone;   // current prompt's capture finished
-        public int SelectedIndex;  // -1 = none
+        public bool CalibrationDone;   // star pose held + metrics stored
+        public bool RecordingDone;     // director stopped the Explore recording
+        public bool ProcessingDone;    // conversion finished OR fallback decided
+        public bool ProcessingFailed;  // unrecoverable (no take) — may be a pulse
+        public int PlaybackLoops;      // completed loops since Watch entry
+        public bool CaptureDone;       // banzai / fallback capture finished
         public bool ExportDone;
-        public bool ExportFailed;  // may be a one-frame pulse
+        public bool ExportFailed;      // may be a one-frame pulse
     }
 
     /// <summary>Timing + dev-skip knobs (plain POCO, filled from
@@ -43,21 +58,31 @@ namespace Experience
     [Serializable]
     public class ExperienceTimings
     {
-        [Min(0f)] public float welcomeSeconds = 6f;
-        [Min(0f)] public float freePlaySeconds = 20f;
-        [Min(0f)] public float readySeconds = 5f;
-        [Min(1f)] public float promptSeconds = 12f;
-        [Min(0f)] public float selectTimeoutSeconds = 90f; // 0 = wait forever
+        [Min(0f)]
+        [Tooltip("Star-pose window. Expiry advances with DEFAULT body metrics.")]
+        public float calibrateSeconds = 10f;
+        [Min(1f)]
+        [Tooltip("Explore recording length (director-owned; last countdownSeconds " +
+                 "show digits).")]
+        public float exploreSeconds = 10f;
+        [Min(5f)]
+        [Tooltip("Director-enforced conversion ceiling; expiry falls back to the " +
+                 "recorded k4abt bodies and pulses ProcessingDone.")]
+        public float processingTimeoutSeconds = 90f;
+        [Range(1, 10)]
+        [Tooltip("Banzai window loops after the Watch loop; expiry captures at a " +
+                 "random playback point.")]
+        public int banzaiFallbackLoops = 3;
         [Min(0f)] public float exportFailNoticeSeconds = 5f;
         [Min(0f)] public float qrShowSeconds = 30f;
 
         [Header("Dev stage skipping (enter, then advance immediately)")]
         public bool skipAttract;
-        public bool skipWelcome;
-        public bool skipFreePlay;
-        public bool skipReady;
-        public bool skipQr;      // Exporting success goes straight to Attract
-        [Range(1, 3)] public int captureCount = 3;
+        public bool skipCalibrate;   // default body metrics
+        public bool skipExplore;     // director substitutes devCannedTakeRoot
+        public bool skipProcessing;  // keep recorded k4abt bodies, play instantly
+        public bool skipQr;          // Exporting success goes straight to Attract
+
         [Min(0.01f)]
         [Tooltip("Dev time multiplier applied to Tick dt (2 = twice as fast).")]
         public float timeMultiplier = 1f;
@@ -70,6 +95,11 @@ namespace Experience
 
         public event Action<ExperienceState, ExperienceState> Changed;
 
+        private bool _calibLatched;
+        private bool _recordingLatched;
+        private bool _processingLatched;
+        private bool _processingFailLatched;
+        private float _processingFailElapsed;
         private bool _captureLatched;
         private bool _exportFailLatched;
         private float _exportFailElapsed;
@@ -90,43 +120,49 @@ namespace Experience
                     break;
 
                 case ExperienceState.Attract:
-                    if (t.skipAttract || inputs.Present) Go(ExperienceState.Welcome);
+                    if (t.skipAttract || inputs.Present) Go(ExperienceState.Calibrate);
                     break;
 
-                case ExperienceState.Welcome:
+                case ExperienceState.Calibrate:
                     if (LeftEarly(inputs)) break;
-                    if (t.skipWelcome || TimeInState >= t.welcomeSeconds) Go(ExperienceState.FreePlay);
+                    if (inputs.CalibrationDone) _calibLatched = true;
+                    // Window expiry advances too — the director keeps default
+                    // metrics; the show must never stall on a shy visitor.
+                    if (t.skipCalibrate || _calibLatched || TimeInState >= t.calibrateSeconds)
+                        Go(ExperienceState.Explore);
                     break;
 
-                case ExperienceState.FreePlay:
+                case ExperienceState.Explore:
                     if (LeftEarly(inputs)) break;
-                    if (t.skipFreePlay || TimeInState >= t.freePlaySeconds) Go(ExperienceState.Ready);
+                    if (inputs.RecordingDone) _recordingLatched = true;
+                    if (t.skipExplore || _recordingLatched) Go(ExperienceState.Processing);
                     break;
 
-                case ExperienceState.Ready:
+                case ExperienceState.Processing:
+                    if (inputs.ProcessingFailed) _processingFailLatched = true;
+                    if (_processingFailLatched)
+                    {
+                        _processingFailElapsed += dt;
+                        if (_processingFailElapsed >= t.exportFailNoticeSeconds)
+                            Go(ExperienceState.Attract);
+                        break;
+                    }
                     if (LeftEarly(inputs)) break;
-                    if (t.skipReady || TimeInState >= t.readySeconds) Go(ExperienceState.PromptAnimal);
+                    if (inputs.ProcessingDone) _processingLatched = true;
+                    if (t.skipProcessing || _processingLatched) Go(ExperienceState.Watch);
                     break;
 
-                case ExperienceState.PromptAnimal:
-                    TickPrompt(inputs, t, t.captureCount >= 2 ? ExperienceState.PromptMantis
-                                                              : ExperienceState.Select);
-                    break;
-
-                case ExperienceState.PromptMantis:
-                    TickPrompt(inputs, t, t.captureCount >= 3 ? ExperienceState.PromptFree
-                                                              : ExperienceState.Select);
-                    break;
-
-                case ExperienceState.PromptFree:
-                    TickPrompt(inputs, t, ExperienceState.Select);
-                    break;
-
-                case ExperienceState.Select:
+                case ExperienceState.Watch:
                     if (LeftEarly(inputs)) break;
-                    if (inputs.SelectedIndex >= 0) { Go(ExperienceState.Exporting); break; }
-                    if (t.selectTimeoutSeconds > 0f && TimeInState >= t.selectTimeoutSeconds)
-                        Go(ExperienceState.Attract);
+                    if (inputs.PlaybackLoops >= 1) Go(ExperienceState.BanzaiWait);
+                    break;
+
+                case ExperienceState.BanzaiWait:
+                    if (LeftEarly(inputs)) break;
+                    // The banzai trigger AND the loop fallback both end in the
+                    // director's capture routine → CaptureDone.
+                    if (inputs.CaptureDone) _captureLatched = true;
+                    if (_captureLatched) Go(ExperienceState.Exporting);
                     break;
 
                 case ExperienceState.Exporting:
@@ -157,13 +193,6 @@ namespace Experience
             }
         }
 
-        private void TickPrompt(in ExperienceInputs inputs, ExperienceTimings t, ExperienceState next)
-        {
-            if (!inputs.Present) { Go(ExperienceState.Attract); return; }
-            if (inputs.CaptureDone) _captureLatched = true;
-            if (TimeInState >= t.promptSeconds && _captureLatched) Go(next);
-        }
-
         /// <summary>Director-side override (mode exit, debug jumps).</summary>
         public void ForceTransition(ExperienceState to, string reason)
         {
@@ -176,6 +205,11 @@ namespace Experience
         {
             State = state;
             TimeInState = 0f;
+            _calibLatched = false;
+            _recordingLatched = false;
+            _processingLatched = false;
+            _processingFailLatched = false;
+            _processingFailElapsed = 0f;
             _captureLatched = false;
             _exportFailLatched = false;
             _exportFailElapsed = 0f;
@@ -186,12 +220,23 @@ namespace Experience
             var from = State;
             State = to;
             TimeInState = 0f;
+            // Clear each state's OWN latches on entry — stale director flags
+            // must never fast-forward the next visitor's run.
             switch (to)
             {
-                case ExperienceState.PromptAnimal:
-                case ExperienceState.PromptMantis:
-                case ExperienceState.PromptFree:
-                    _captureLatched = false; // each prompt needs ITS OWN capture
+                case ExperienceState.Calibrate:
+                    _calibLatched = false;
+                    break;
+                case ExperienceState.Explore:
+                    _recordingLatched = false;
+                    break;
+                case ExperienceState.Processing:
+                    _processingLatched = false;
+                    _processingFailLatched = false;
+                    _processingFailElapsed = 0f;
+                    break;
+                case ExperienceState.BanzaiWait:
+                    _captureLatched = false;
                     break;
                 case ExperienceState.Exporting:
                     _exportFailLatched = false;

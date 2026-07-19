@@ -1,7 +1,7 @@
-// EditMode tests for the experience-flow state machine (Phase 5,
-// Plans/phase5-director-plan.md): full happy path, per-prompt capture
-// latching, one-frame ExportFailed pulses, leave/fault interruptions, skip
-// flags, captureCount variants, timeMultiplier.
+// EditMode tests for the pose-driven experience state machine: full happy
+// path, per-state latch clearing, calibrate-timeout default path, processing
+// fail/timeout-fallback, loop-count transitions, one-frame failure pulses,
+// leave/fault interruptions, skip flags, timeMultiplier.
 
 using Experience;
 using NUnit.Framework;
@@ -20,206 +20,348 @@ namespace Calibration.Tests
             _sm = new ExperienceStateMachine();
             _t = new ExperienceTimings
             {
-                welcomeSeconds = 2f,
-                freePlaySeconds = 3f,
-                readySeconds = 1f,
-                promptSeconds = 4f,
-                selectTimeoutSeconds = 10f,
-                exportFailNoticeSeconds = 2f,
-                qrShowSeconds = 5f,
-                captureCount = 3,
-                timeMultiplier = 1f,
+                calibrateSeconds = 10f,
+                exploreSeconds = 10f,
+                processingTimeoutSeconds = 90f,
+                banzaiFallbackLoops = 3,
+                exportFailNoticeSeconds = 5f,
+                qrShowSeconds = 30f,
             };
-            _in = new ExperienceInputs { Present = true, SelectedIndex = -1 };
+            _in = new ExperienceInputs { Present = true };
+            _sm.ResetTo(ExperienceState.Attract);
         }
 
-        private void Step(float seconds, int steps = 1)
+        private void Tick(float dt = 0.1f) => _sm.Tick(dt, in _in, _t);
+
+        private void TickUntil(ExperienceState expected, float dt = 0.5f, int maxTicks = 200)
         {
-            float dt = seconds / steps;
-            for (int i = 0; i < steps; i++) _sm.Tick(dt, in _in, _t);
+            for (int i = 0; i < maxTicks && _sm.State != expected; i++) Tick(dt);
+            Assert.AreEqual(expected, _sm.State);
         }
 
-        private void RunPromptWithCapture()
+        // ---- happy path ----
+
+        [Test]
+        public void HappyPath_FullSequence()
         {
-            // capture completes mid-prompt (one-frame pulse is enough: latched)
-            Step(1f);
+            Tick(); // Present → Calibrate
+            Assert.AreEqual(ExperienceState.Calibrate, _sm.State);
+
+            _in.CalibrationDone = true;
+            Tick();
+            Assert.AreEqual(ExperienceState.Explore, _sm.State);
+            _in.CalibrationDone = false;
+
+            _in.RecordingDone = true;
+            Tick();
+            Assert.AreEqual(ExperienceState.Processing, _sm.State);
+            _in.RecordingDone = false;
+
+            _in.ProcessingDone = true;
+            Tick();
+            Assert.AreEqual(ExperienceState.Watch, _sm.State);
+            _in.ProcessingDone = false;
+
+            _in.PlaybackLoops = 1;
+            Tick();
+            Assert.AreEqual(ExperienceState.BanzaiWait, _sm.State);
+
             _in.CaptureDone = true;
-            Step(0.01f);
+            Tick();
+            Assert.AreEqual(ExperienceState.Exporting, _sm.State);
             _in.CaptureDone = false;
-            Step(5f); // past promptSeconds
-        }
 
-        [Test]
-        public void HappyPath_FullLoop()
-        {
-            Assert.AreEqual(ExperienceState.Attract, _sm.State);
-            Step(0.1f);
-            Assert.AreEqual(ExperienceState.Welcome, _sm.State, "present -> welcome");
-            Step(2.5f);
-            Assert.AreEqual(ExperienceState.FreePlay, _sm.State);
-            Step(3.5f);
-            Assert.AreEqual(ExperienceState.Ready, _sm.State);
-            Step(1.5f);
-            Assert.AreEqual(ExperienceState.PromptAnimal, _sm.State);
-            RunPromptWithCapture();
-            Assert.AreEqual(ExperienceState.PromptMantis, _sm.State);
-            RunPromptWithCapture();
-            Assert.AreEqual(ExperienceState.PromptFree, _sm.State);
-            RunPromptWithCapture();
-            Assert.AreEqual(ExperienceState.Select, _sm.State);
-            _in.SelectedIndex = 1;
-            Step(0.1f);
-            Assert.AreEqual(ExperienceState.Exporting, _sm.State);
-            _in.SelectedIndex = -1;
             _in.ExportDone = true;
-            Step(0.1f);
+            Tick();
             Assert.AreEqual(ExperienceState.QrShow, _sm.State);
-            _in.ExportDone = false;
-            Step(6f);
-            Assert.AreEqual(ExperienceState.Attract, _sm.State, "qr timer -> attract");
+
+            TickUntil(ExperienceState.Attract, dt: 5f); // qrShowSeconds timeout
         }
 
-        [Test]
-        public void Prompt_RequiresItsOwnCapture()
-        {
-            _t.captureCount = 2;
-            Step(0.1f); Step(2.5f); Step(3.5f); Step(1.5f); // -> PromptAnimal
-            Assert.AreEqual(ExperienceState.PromptAnimal, _sm.State);
-            // Director "forgets" to lower CaptureDone: latch must still reset.
-            _in.CaptureDone = true;
-            Step(5f);
-            Assert.AreEqual(ExperienceState.PromptMantis, _sm.State);
-            _in.CaptureDone = false; // pulse ended before the second prompt saw it? No —
-            // it stayed true through the transition tick; the latch cleared on enter,
-            // and CaptureDone was still true on the NEXT tick, so it re-latches. Drop
-            // it BEFORE any Mantis tick to prove Mantis needs its own capture:
-            Step(5f);
-            Assert.AreEqual(ExperienceState.PromptMantis, _sm.State,
-                "prompt must not advance on the previous prompt's completion");
-            _in.CaptureDone = true;
-            Step(0.01f);
-            _in.CaptureDone = false;
-            Step(5f);
-            Assert.AreEqual(ExperienceState.Select, _sm.State);
-        }
+        // ---- Attract ----
 
         [Test]
-        public void ExportFailed_OneFramePulse_LatchesAndFallsBackToAttract()
+        public void Attract_WaitsForPresence()
         {
-            _sm.ResetTo(ExperienceState.Exporting);
-            _in.ExportFailed = true;
-            Step(0.01f); // one frame
-            _in.ExportFailed = false;
-            Assert.AreEqual(ExperienceState.Exporting, _sm.State, "stays during the notice");
-            Step(1f);
-            Assert.AreEqual(ExperienceState.Exporting, _sm.State);
-            Step(1.5f);
-            Assert.AreEqual(ExperienceState.Attract, _sm.State, "notice elapsed -> attract");
-        }
-
-        [Test]
-        public void Exporting_IgnoresPresenceLoss()
-        {
-            _sm.ResetTo(ExperienceState.Exporting);
             _in.Present = false;
-            Step(30f, steps: 10);
-            Assert.AreEqual(ExperienceState.Exporting, _sm.State);
-            _in.ExportDone = true;
-            Step(0.1f);
-            Assert.AreEqual(ExperienceState.QrShow, _sm.State);
-        }
-
-        [Test]
-        public void LeavingEarly_ReturnsToAttract_FromEveryEligibleState()
-        {
-            var leaveStates = new[]
-            {
-                ExperienceState.Welcome, ExperienceState.FreePlay, ExperienceState.Ready,
-                ExperienceState.PromptAnimal, ExperienceState.PromptMantis,
-                ExperienceState.PromptFree, ExperienceState.Select, ExperienceState.QrShow,
-            };
-            foreach (var s in leaveStates)
-            {
-                _sm.ResetTo(s);
-                _in.Present = false;
-                Step(0.1f);
-                Assert.AreEqual(ExperienceState.Attract, _sm.State, $"leave from {s}");
-                _in.Present = true;
-            }
-        }
-
-        [Test]
-        public void Fault_PreemptsAndRecovers()
-        {
-            Step(0.1f); // -> Welcome
-            _in.Fault = true;
-            Step(0.01f);
-            Assert.AreEqual(ExperienceState.Fault, _sm.State);
-            Step(60f);
-            Assert.AreEqual(ExperienceState.Fault, _sm.State, "stays while fault holds");
-            _in.Fault = false;
-            Step(0.01f);
+            Tick();
             Assert.AreEqual(ExperienceState.Attract, _sm.State);
-        }
-
-        [Test]
-        public void SkipFlags_EnterThenAdvanceImmediately()
-        {
-            _t.skipAttract = true;
-            _t.skipWelcome = true;
-            _t.skipFreePlay = true;
-            _t.skipReady = true;
-            var visited = new System.Collections.Generic.List<ExperienceState>();
-            _sm.Changed += (_, to) => visited.Add(to);
-            // skipAttract must advance even with nobody there (one tick)...
-            _in.Present = false;
-            Step(0.01f);
-            Assert.AreEqual(ExperienceState.Welcome, _sm.State, "skipAttract ignores Present");
-            // ...but the leave rule still owns the later states, so presence
-            // returns for the rest of the skip chain.
             _in.Present = true;
-            Step(0.05f, steps: 5);
-            CollectionAssert.AreEqual(
-                new[] { ExperienceState.Welcome, ExperienceState.FreePlay,
-                        ExperienceState.Ready, ExperienceState.PromptAnimal },
-                visited.GetRange(0, 4),
-                "every skipped state is still entered, in order");
+            Tick();
+            Assert.AreEqual(ExperienceState.Calibrate, _sm.State);
+        }
+
+        // ---- Calibrate ----
+
+        [Test]
+        public void Calibrate_TimeoutAdvancesWithoutDone()
+        {
+            Tick(); // → Calibrate
+            for (int i = 0; i < 25; i++) Tick(0.5f); // 12.5s > 10s
+            Assert.AreEqual(ExperienceState.Explore, _sm.State);
         }
 
         [Test]
-        public void CaptureCount_One_SkipsSecondAndThirdPrompt()
+        public void Calibrate_StaleDoneFlagFromPreviousRun_DoesNotSkip()
         {
-            _t.captureCount = 1;
-            _sm.ResetTo(ExperienceState.PromptAnimal);
-            RunPromptWithCapture();
-            Assert.AreEqual(ExperienceState.Select, _sm.State);
+            // CalibrationDone pulses while still in Attract (stale director
+            // flag) — must not fast-forward the Calibrate that follows.
+            _in.Present = false;
+            _in.CalibrationDone = true;
+            Tick();
+            Assert.AreEqual(ExperienceState.Attract, _sm.State);
+            _in.CalibrationDone = false;
+            _in.Present = true;
+            Tick(); // → Calibrate
+            Tick();
+            Assert.AreEqual(ExperienceState.Calibrate, _sm.State);
         }
 
         [Test]
-        public void SelectTimeout_FallsBackToAttract()
+        public void Calibrate_DonePulse_IsLatched()
         {
-            _sm.ResetTo(ExperienceState.Select);
-            Step(11f, steps: 4);
+            Tick(); // → Calibrate
+            _in.CalibrationDone = true;
+            Tick();
+            Assert.AreEqual(ExperienceState.Explore, _sm.State);
+        }
+
+        // ---- Explore ----
+
+        [Test]
+        public void Explore_AdvancesOnlyOnRecordingDone()
+        {
+            Tick();
+            _in.CalibrationDone = true; Tick(); _in.CalibrationDone = false;
+            Assert.AreEqual(ExperienceState.Explore, _sm.State);
+            for (int i = 0; i < 100; i++) Tick(1f); // no machine-side timeout
+            Assert.AreEqual(ExperienceState.Explore, _sm.State);
+            _in.RecordingDone = true;
+            Tick();
+            Assert.AreEqual(ExperienceState.Processing, _sm.State);
+        }
+
+        // ---- Processing ----
+
+        private void ReachProcessing()
+        {
+            Tick();
+            _in.CalibrationDone = true; Tick(); _in.CalibrationDone = false;
+            _in.RecordingDone = true; Tick(); _in.RecordingDone = false;
+            Assert.AreEqual(ExperienceState.Processing, _sm.State);
+        }
+
+        [Test]
+        public void Processing_FailPulse_ShowsNoticeThenAttract()
+        {
+            ReachProcessing();
+            _in.ProcessingFailed = true;
+            Tick();
+            _in.ProcessingFailed = false; // one-frame pulse
+            Assert.AreEqual(ExperienceState.Processing, _sm.State);
+            // Nobody present after the failure — Attract must be reached by the
+            // notice TIMER (the fail latch suppresses LeftEarly), and staying
+            // absent keeps the machine parked there for the assert.
+            _in.Present = false;
+            Tick(0.5f);
+            Assert.AreEqual(ExperienceState.Processing, _sm.State); // notice still showing
+            for (int i = 0; i < 12; i++) Tick(0.5f); // > 5s notice
             Assert.AreEqual(ExperienceState.Attract, _sm.State);
         }
 
         [Test]
-        public void SkipQr_ExportSuccessGoesStraightToAttract()
+        public void Processing_LeaveEarly_ReturnsToAttract()
+        {
+            ReachProcessing();
+            _in.Present = false;
+            Tick();
+            Assert.AreEqual(ExperienceState.Attract, _sm.State);
+        }
+
+        [Test]
+        public void Processing_DonePulse_AdvancesToWatch()
+        {
+            ReachProcessing();
+            _in.ProcessingDone = true;
+            Tick();
+            Assert.AreEqual(ExperienceState.Watch, _sm.State);
+        }
+
+        // ---- Watch / BanzaiWait ----
+
+        private void ReachWatch()
+        {
+            ReachProcessing();
+            _in.ProcessingDone = true; Tick(); _in.ProcessingDone = false;
+            Assert.AreEqual(ExperienceState.Watch, _sm.State);
+        }
+
+        [Test]
+        public void Watch_AdvancesAfterFirstLoop()
+        {
+            ReachWatch();
+            for (int i = 0; i < 20; i++) Tick(1f);
+            Assert.AreEqual(ExperienceState.Watch, _sm.State); // loops still 0
+            _in.PlaybackLoops = 1;
+            Tick();
+            Assert.AreEqual(ExperienceState.BanzaiWait, _sm.State);
+        }
+
+        [Test]
+        public void BanzaiWait_StaleCaptureFlag_ClearedOnEntry()
+        {
+            ReachWatch();
+            // capture flag pulses during Watch (stale) — BanzaiWait must clear it
+            _in.CaptureDone = true;
+            _in.PlaybackLoops = 1;
+            Tick(); // → BanzaiWait (latch cleared on entry)
+            Assert.AreEqual(ExperienceState.BanzaiWait, _sm.State);
+            _in.CaptureDone = false;
+            Tick();
+            Assert.AreEqual(ExperienceState.BanzaiWait, _sm.State);
+            _in.CaptureDone = true;
+            Tick();
+            Assert.AreEqual(ExperienceState.Exporting, _sm.State);
+        }
+
+        // ---- Exporting ----
+
+        private void ReachExporting()
+        {
+            ReachWatch();
+            _in.PlaybackLoops = 1; Tick();
+            _in.CaptureDone = true; Tick(); _in.CaptureDone = false;
+            Assert.AreEqual(ExperienceState.Exporting, _sm.State);
+        }
+
+        [Test]
+        public void Exporting_NoEarlyLeave()
+        {
+            ReachExporting();
+            _in.Present = false;
+            for (int i = 0; i < 10; i++) Tick(1f);
+            Assert.AreEqual(ExperienceState.Exporting, _sm.State);
+        }
+
+        [Test]
+        public void Exporting_FailPulse_NoticeThenAttract()
+        {
+            ReachExporting();
+            _in.ExportFailed = true;
+            Tick();
+            _in.ExportFailed = false;
+            Assert.AreEqual(ExperienceState.Exporting, _sm.State);
+            _in.Present = false; // keeps the post-notice Attract parked for the assert
+            for (int i = 0; i < 12; i++) Tick(0.5f);
+            Assert.AreEqual(ExperienceState.Attract, _sm.State);
+        }
+
+        [Test]
+        public void Exporting_SkipQr_GoesStraightToAttract()
         {
             _t.skipQr = true;
-            _sm.ResetTo(ExperienceState.Exporting);
+            ReachExporting();
             _in.ExportDone = true;
-            Step(0.1f);
+            Tick();
+            Assert.AreEqual(ExperienceState.Attract, _sm.State);
+        }
+
+        // ---- QrShow ----
+
+        [Test]
+        public void QrShow_LeaveEndsShow()
+        {
+            ReachExporting();
+            _in.ExportDone = true; Tick();
+            Assert.AreEqual(ExperienceState.QrShow, _sm.State);
+            _in.Present = false;
+            Tick();
+            Assert.AreEqual(ExperienceState.Attract, _sm.State);
+        }
+
+        // ---- leave-early coverage ----
+
+        [Test]
+        public void LeaveEarly_Calibrate_And_Explore()
+        {
+            Tick(); // → Calibrate
+            _in.Present = false;
+            Tick();
+            Assert.AreEqual(ExperienceState.Attract, _sm.State);
+
+            _in.Present = true;
+            Tick(); // → Calibrate
+            _in.CalibrationDone = true; Tick(); _in.CalibrationDone = false;
+            Assert.AreEqual(ExperienceState.Explore, _sm.State);
+            _in.Present = false;
+            Tick();
             Assert.AreEqual(ExperienceState.Attract, _sm.State);
         }
 
         [Test]
-        public void TimeMultiplier_ScalesTimers()
+        public void LeaveEarly_Watch_And_BanzaiWait()
+        {
+            ReachWatch();
+            _in.Present = false;
+            Tick();
+            Assert.AreEqual(ExperienceState.Attract, _sm.State);
+
+            _in.Present = true;
+            ReachWatch();
+            _in.PlaybackLoops = 1; Tick();
+            Assert.AreEqual(ExperienceState.BanzaiWait, _sm.State);
+            _in.Present = false;
+            Tick();
+            Assert.AreEqual(ExperienceState.Attract, _sm.State);
+        }
+
+        // ---- fault ----
+
+        [Test]
+        public void Fault_PreemptsAnyState_AndRecovers()
+        {
+            ReachWatch();
+            _in.Fault = true;
+            Tick();
+            Assert.AreEqual(ExperienceState.Fault, _sm.State);
+            _in.Fault = false;
+            Tick();
+            Assert.AreEqual(ExperienceState.Attract, _sm.State);
+        }
+
+        // ---- skips ----
+
+        [Test]
+        public void Skips_ReachWatchThroughEveryState()
+        {
+            _t.skipAttract = true;
+            _t.skipCalibrate = true;
+            _t.skipExplore = true;
+            _t.skipProcessing = true;
+
+            var visited = new System.Collections.Generic.List<ExperienceState>();
+            _sm.Changed += (from, to) => visited.Add(to);
+
+            for (int i = 0; i < 6; i++) Tick();
+            Assert.AreEqual(ExperienceState.Watch, _sm.State);
+            CollectionAssert.AreEqual(
+                new[]
+                {
+                    ExperienceState.Calibrate, ExperienceState.Explore,
+                    ExperienceState.Processing, ExperienceState.Watch,
+                },
+                visited);
+        }
+
+        // ---- time multiplier ----
+
+        [Test]
+        public void TimeMultiplier_ScalesCalibrateTimeout()
         {
             _t.timeMultiplier = 10f;
-            _sm.ResetTo(ExperienceState.Welcome);
-            Step(0.25f); // 0.25 * 10 = 2.5 scaled > welcomeSeconds(2)
-            Assert.AreEqual(ExperienceState.FreePlay, _sm.State);
+            Tick(); // → Calibrate
+            for (int i = 0; i < 3; i++) Tick(0.5f); // 1.5s * 10 = 15s > 10s
+            Assert.AreEqual(ExperienceState.Explore, _sm.State);
         }
     }
 }

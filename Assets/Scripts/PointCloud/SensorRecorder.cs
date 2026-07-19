@@ -24,7 +24,7 @@ using UnityEngine.Rendering;
 namespace PointCloud
 {
     [DisallowMultipleComponent]
-    public class SensorRecorder : MonoBehaviour, Shared.IRecorderTransport
+    public class SensorRecorder : MonoBehaviour, Shared.IRecorderTransport, Shared.IPanelTunable
     {
         public enum State { Idle, Recording, Playing }
 
@@ -106,6 +106,35 @@ namespace PointCloud
                  "Off = legacy behavior (playback frees the live pipelines).")]
         public bool keepLiveRenderersOnLoad = false;
 
+        [Tooltip("Playback: fire OnPlaybackRawFrame for EVERY frame the playhead crossed " +
+                 "this Update, not only the newest one (mesh upload stays newest-only). " +
+                 "Live-sim consumers (LiveFusedBodySource) need every frame so fusion " +
+                 "quality is not bound to the editor frame rate; the k4abt worker path " +
+                 "leaves this off — workers only want the freshest frame.")]
+        public bool deliverAllPlaybackFrames = false;
+
+        [Tooltip("Playback: render the point cloud from this many frames BEHIND the " +
+                 "playhead (events/fusion still get the newest frame). Aligns the " +
+                 "displayed cloud with the live-fused skeleton, whose output lags " +
+                 "~100-130ms (burst close + median-lag filter + inference). ~4 at " +
+                 "30fps. 0 = off. Note: recorded-bodies playback matches bodies to " +
+                 "the playhead, so leave this 0 when viewing recorded bodies. Only " +
+                 "applies to natural playback — manual seek/step always renders the " +
+                 "exact cursor frame.")]
+        [Range(0, 15)]
+        public int playbackRenderDelayFrames = 0;
+
+        // ---- Shared.IPanelTunable (one-stop Control Panel) ----
+        public string TuningLabel => "Playback";
+        public int TunableCount => 1;
+        public string TunableName(int i) => "Render delay (frames)";
+        public float TunableValue(int i) => playbackRenderDelayFrames;
+        public void SetTunableValue(int i, float value)
+            => playbackRenderDelayFrames = Mathf.Clamp(Mathf.RoundToInt(value), 0, 15);
+        public float TunableMin(int i) => 0f;
+        public float TunableMax(int i) => 15f;
+        public bool TunableIsInt(int i) => true;
+
         [Tooltip("Dataset name written into dataset.yaml. Defaults to the recording folder name.")]
         public string datasetName = "";
 
@@ -143,6 +172,14 @@ namespace PointCloud
 
         [Header("Playback")]
         public bool loop = true;
+
+        [Tooltip("Mask the depth pixels where a rival camera's IR projector appears. Facing " +
+                 "ToF pairs saturate each other's sensor there and the flare returns FALSE " +
+                 "mid-air depth (flickering speckle on the pair's sightline). Gated per frame " +
+                 "on IR brightness at the projector pixel, so a body occluding the projector " +
+                 "is never masked out. Applied to the raw depth before every consumer " +
+                 "(mesh, TSDF, BT, event subscribers).")]
+        public bool maskRivalProjectors = true;
 
         [Tooltip("Where to register playback meshes for visibility toggling. " +
                  "Auto-found via FindFirstObjectByType if left null.")]
@@ -233,6 +270,19 @@ namespace PointCloud
                 int n = 0;
                 foreach (var kv in _tracks) n += kv.Value.DepthFrames.Count;
                 return n;
+            }
+        }
+
+        /// <summary>Highest per-device depth playback cursor — a stable frame
+        /// index for the current (paused) playback moment. Exporters stamp it
+        /// into file names so a print can be traced back to its take frame.</summary>
+        public int CurrentPlaybackFrame
+        {
+            get
+            {
+                int m = 0;
+                foreach (var kv in _tracks) m = Mathf.Max(m, kv.Value.PlaybackCursor);
+                return m;
             }
         }
 
@@ -485,6 +535,11 @@ namespace PointCloud
         private double _pauseWallStart;
         private ulong _lastPlayheadNs;   // most recent playhead (for readout / time-seek)
 
+        /// <summary>Absolute playhead in recorded-timestamp nanoseconds. Consumers
+        /// that stream the RCSV files themselves (LiveFusedBodySource's playback
+        /// tap) pace their own cursors off this.</summary>
+        public ulong CurrentPlayheadNs => _lastPlayheadNs;
+
         [Header("Diagnostics")]
         [Tooltip("Log per-second playback fire counts per serial (FirePlaybackEvent rate). " +
                  "Useful to compare against K4abtWorkerHost enqueued/s when investigating " +
@@ -561,6 +616,14 @@ namespace PointCloud
             if (CurrentState == State.Recording) StopRecording();
             else StartRecording();
         }
+
+        /// <summary>
+        /// Root folder of the most recent recording (the timestamped take folder when
+        /// autoTimestampFolder is on). Set by StartRecording and left intact by
+        /// StopRecording, so a caller that drives Rec programmatically (experience
+        /// flow) can find the take it just captured. Null before the first Rec.
+        /// </summary>
+        public string LastRecordingRoot => _recordRoot;
 
         [ContextMenu("Toggle Play")]
         public void TogglePlay()
@@ -818,6 +881,45 @@ namespace PointCloud
             return (ts > _playbackTrackStartNs ? ts - _playbackTrackStartNs : 0UL) / 1_000_000_000.0;
         }
 
+        [Header("Seek point")]
+        [Tooltip("Pending seek target: playback auto-pauses when the depth " +
+                 "cursor reaches this frame (the _fNNNNN in print-export file " +
+                 "names). -1 = none. Set by Seek To Frame.")]
+        public int seekPauseFrame = -1;
+
+        [Tooltip("Seconds replayed BEFORE the seek target so the motion trails " +
+                 "re-accumulate to their true length at the target frame.")]
+        public float seekPrerollSeconds = 75f;
+
+        /// <summary>
+        /// Seek point with trail preroll: jump to seekPrerollSeconds before
+        /// <paramref name="frame"/>, resume playback, and auto-pause exactly at
+        /// the frame — reproducing the sculpture state a print export's _fNNNNN
+        /// name refers to, decay-free. Starts a playback session if needed.
+        /// </summary>
+        [ContextMenu("Seek To Frame (seekPauseFrame)")]
+        public void SeekToFrameContext() => SeekToFrame(seekPauseFrame);
+
+        public void SeekToFrame(int frame)
+        {
+            if (frame < 0) { SetStatus("SeekToFrame: no target frame set."); return; }
+            if (CurrentState != State.Playing) TogglePlay();
+            if (CurrentState != State.Playing) { SetStatus("SeekToFrame: playback could not start."); return; }
+            // clamp to the longest track: an out-of-range target could never
+            // satisfy the pause condition and playback would wrap/stop instead
+            int maxCount = 0;
+            foreach (var kv in _tracks)
+                maxCount = Mathf.Max(maxCount, kv.Value.DepthFrames != null ? kv.Value.DepthFrames.Count : 0);
+            if (maxCount == 0) { SetStatus("SeekToFrame: no depth frames loaded."); return; }
+            frame = Mathf.Min(frame, maxCount - 1);
+            if (!IsPaused) PausePlayback();
+            int preFrames = Mathf.RoundToInt(Mathf.Max(0f, seekPrerollSeconds) * 30f);
+            SeekAllTracksTo(Mathf.Max(0, frame - preFrames));
+            seekPauseFrame = frame;
+            ResumePlayback();
+            SetStatus($"Seeking to frame {frame} (preroll {seekPrerollSeconds:0}s)…");
+        }
+
         /// <summary>
         /// Seek every track to <paramref name="targetCursor"/> (clamped to each
         /// track's [0, Count-1]) and re-emit the frame so the rest of the
@@ -863,6 +965,30 @@ namespace PointCloud
             CurrentState != State.Playing ? 0.0
             : (_lastPlayheadNs > _playbackTrackStartNs ? _lastPlayheadNs - _playbackTrackStartNs : 0UL)
               / 1_000_000_000.0;
+
+        /// <summary>
+        /// Length of the loaded recording in seconds (longest track's last depth
+        /// frame relative to the playback start). Valid while Playing (the start
+        /// origin is established by StartPlayback); 0 otherwise. Used by the
+        /// experience flow to pick a random capture point.
+        /// </summary>
+        public double PlaybackDurationSeconds
+        {
+            get
+            {
+                if (CurrentState != State.Playing || _tracks == null || _tracks.Count == 0) return 0.0;
+                ulong end = 0;
+                foreach (var kv in _tracks)
+                {
+                    var frames = kv.Value.DepthFrames;
+                    if (frames == null || frames.Count == 0) continue;
+                    ulong ts = TimestampNsAt(frames, frames.Count - 1);
+                    if (ts > end) end = ts;
+                }
+                return end > _playbackTrackStartNs
+                    ? (end - _playbackTrackStartNs) / 1_000_000_000.0 : 0.0;
+            }
+        }
 
         /// <summary>
         /// Playhead position (seconds from the recording start) that a recorded
@@ -996,7 +1122,10 @@ namespace PointCloud
         // natural-playback advance and SetCursorAndEmit's frame stepping (3-1 dedup),
         // so the two paths are identical by construction — not by the parallel
         // maintenance the old "visually identical" comment had to promise.
-        private void EmitFrameAt(DeviceTrack track, int cursor)
+        // applyRenderDelay: only natural playback delays the rendered cloud —
+        // manual seek/step must show EXACTLY the cursor frame (frame inspection
+        // relies on cursor == shown geometry).
+        private void EmitFrameAt(DeviceTrack track, int cursor, bool applyRenderDelay = false)
         {
             track.PlaybackCursor = cursor;
             var depthFrame = track.DepthFrames[cursor];
@@ -1014,9 +1143,56 @@ namespace PointCloud
                 int irIdx = Mathf.Min(cursor, track.IRFrames.Count - 1);
                 irFrame = track.IRFrames[irIdx];
             }
-            ReconstructAndUpload(track, depthFrame, colorFrame);
-            FirePlaybackEvent(track, depthFrame, colorFrame, irFrame);
+            // Rival-projector mask: zero the flare disc in the raw depth BEFORE any
+            // consumer (mesh reconstruction, TSDF, BT, event subscribers) sees it.
+            if (maskRivalProjectors && depthFrame?.Bytes != null)
+                ProjectorMask.Apply(track.Serial, depthFrame.Bytes, depthFrame.ByteCount,
+                    track.DepthWidth, track.DepthHeight,
+                    irFrame?.Bytes, irFrame?.ByteCount ?? 0, track.IRWidth, track.IRHeight);
+
+            int delay = applyRenderDelay ? Mathf.Max(0, playbackRenderDelayFrames) : 0;
+            if (delay == 0)
+            {
+                ReconstructAndUpload(track, depthFrame, colorFrame);
+                FirePlaybackEvent(track, depthFrame, colorFrame, irFrame);
+            }
+            else
+            {
+                // event first (subscribers copy synchronously), THEN re-index for the
+                // delayed render frame — the streams reuse one scratch buffer per
+                // track, so the second indexer call invalidates depthFrame's bytes
+                FirePlaybackEvent(track, depthFrame, colorFrame, irFrame);
+                int rIdx = Mathf.Max(0, cursor - delay);
+                var dDelayed = track.DepthFrames[rIdx];
+                PointCloudRecording.Frame cDelayed = track.ColorFrames.Count > 0
+                    ? track.ColorFrames[Mathf.Min(rIdx, track.ColorFrames.Count - 1)] : null;
+                PointCloudRecording.Frame iDelayed = track.IRFrames.Count > 0
+                    ? track.IRFrames[Mathf.Min(rIdx, track.IRFrames.Count - 1)] : null;
+                if (maskRivalProjectors && dDelayed?.Bytes != null)
+                    ProjectorMask.Apply(track.Serial, dDelayed.Bytes, dDelayed.ByteCount,
+                        track.DepthWidth, track.DepthHeight,
+                        iDelayed?.Bytes, iDelayed?.ByteCount ?? 0, track.IRWidth, track.IRHeight);
+                ReconstructAndUpload(track, dDelayed, cDelayed);
+            }
             FeedCumulative(track);
+        }
+
+        // deliver-all support: fire ONLY the playback event for a crossed
+        // intermediate frame — no cursor move, no mesh reconstruction, no
+        // cumulative feed. Same masking as EmitFrameAt so every consumer sees
+        // the same depth bytes regardless of which path delivered the frame.
+        private void FirePlaybackEventOnlyAt(DeviceTrack track, int cursor)
+        {
+            var depthFrame = track.DepthFrames[cursor];
+            PointCloudRecording.Frame colorFrame = track.ColorFrames.Count > 0
+                ? track.ColorFrames[Mathf.Min(cursor, track.ColorFrames.Count - 1)] : null;
+            PointCloudRecording.Frame irFrame = track.IRFrames.Count > 0
+                ? track.IRFrames[Mathf.Min(cursor, track.IRFrames.Count - 1)] : null;
+            if (maskRivalProjectors && depthFrame?.Bytes != null)
+                ProjectorMask.Apply(track.Serial, depthFrame.Bytes, depthFrame.ByteCount,
+                    track.DepthWidth, track.DepthHeight,
+                    irFrame?.Bytes, irFrame?.ByteCount ?? 0, track.IRWidth, track.IRHeight);
+            FirePlaybackEvent(track, depthFrame, colorFrame, irFrame);
         }
 
         private void SetCursorAndEmit(DeviceTrack track, int cursor)
@@ -1516,6 +1692,24 @@ namespace PointCloud
                     Debug.LogWarning($"[{nameof(SensorRecorder)}] live manager extrinsics fallback failed: {liveEx.Message}", this);
                 }
             }
+
+            // Register the rig with the projector mask: every camera that has both
+            // intrinsics and a world extrinsic can compute where the OTHER cameras'
+            // IR projectors land in its depth image.
+            var rig = new List<ProjectorMask.CameraPose>();
+            foreach (var kv in _tracks)
+            {
+                var tr = kv.Value;
+                if (!tr.CameraParam.HasValue || !tr.GlobalTrColorCamera.HasValue) continue;
+                rig.Add(new ProjectorMask.CameraPose
+                {
+                    Serial = kv.Key,
+                    Param = tr.CameraParam.Value,
+                    World = tr.GlobalTrColorCamera.Value,
+                });
+            }
+            ProjectorMask.Configure(rig);
+
             return withGlobal;
         }
 
@@ -1534,7 +1728,9 @@ namespace PointCloud
 
         // --- Recording ---
 
-        private void StartRecording()
+        // Public since the experience flow drives Rec programmatically (Explore
+        // state records the visitor's take); Inspector buttons keep using ToggleRecord.
+        public void StartRecording()
         {
             if (CurrentState == State.Playing) StopPlayback();
             UnfreezeLiveIfFrozen();
@@ -1607,7 +1803,7 @@ namespace PointCloud
             SetStatus($"Recording ({_subscribed.Count} device(s)) → {_recordRoot}");
         }
 
-        private void StopRecording()
+        public void StopRecording()
         {
             UnsubscribeAll();
             CurrentState = State.Idle;
@@ -2032,8 +2228,19 @@ namespace PointCloud
                 if (track.DepthFrames.Count == 0) continue;
 
                 int cursorBeforeAdvance = track.PlaybackCursor;
+                // Pending seek point: CLAMP the timestamp-driven advance at the
+                // target frame BEFORE anything is emitted — overshot frames
+                // would already be baked into the trail/history subscribers and
+                // no later correction can un-emit them (codex round 2).
+                ulong tickPlayheadNs = playheadNs;
+                if (seekPauseFrame >= 0)
+                {
+                    int cap = Mathf.Min(seekPauseFrame, track.DepthFrames.Count - 1);
+                    ulong capTs = TimestampNsAt(track.DepthFrames, cap);
+                    if (tickPlayheadNs > capTs) tickPlayheadNs = capTs;
+                }
                 int cursor = AdvanceCursorTo(track.DepthFrames,
-                                             Mathf.Max(track.PlaybackCursor, 0), playheadNs);
+                                             Mathf.Max(track.PlaybackCursor, 0), tickPlayheadNs);
 
                 // Playback drop diagnostic: when one Update consumes multiple
                 // frames the operator never sees the intermediate ones — that's
@@ -2058,12 +2265,74 @@ namespace PointCloud
                 // Only emit on real cursor advances so a paused playhead doesn't
                 // re-reconstruct / re-snapshot the same frame every Update tick.
                 if (cursor != track.PlaybackCursor)
-                    EmitFrameAt(track, cursor);
-                AdvanceBodyCursor(track, playheadNs);
+                {
+                    // deliver-all: the crossed intermediates exist only as the raw
+                    // event (no mesh upload) — consumers copy synchronously, the
+                    // frame streams reuse one scratch buffer per track.
+                    // The catch-up is CAPPED: each delivered frame costs main-thread
+                    // time (disk read + subscriber copy), so an unbounded catch-up
+                    // snowballs after any hitch (slower tick -> more crossed frames
+                    // -> slower tick) and pins the editor at ~2fps. Beyond the cap
+                    // the OLDEST crossed frames are skipped, keeping the delivered
+                    // run contiguous with the rendered frame.
+                    if (deliverAllPlaybackFrames && cursorBeforeAdvance >= 0)
+                    {
+                        const int MaxCatchUpPerTick = 8;
+                        int first = cursorBeforeAdvance + 1;
+                        if (cursor - first > MaxCatchUpPerTick) first = cursor - MaxCatchUpPerTick;
+                        for (int i = first; i < cursor; i++)
+                            FirePlaybackEventOnlyAt(track, i);
+                    }
+                    EmitFrameAt(track, cursor, applyRenderDelay: true); // natural playback only
+                }
+                AdvanceBodyCursor(track, tickPlayheadNs);
                 ApplyBoundingBoxFilter(track);
             }
 
-            if (!anyRemaining)
+            // Seek point: auto-pause the moment the depth cursor reaches the
+            // requested frame (the _fNNNNN index stamped into print exports).
+            // Armed by SeekToFrame, which replays the preroll first so motion
+            // trails re-accumulate to their true length at the target. The
+            // advance above is clamped at the target, so no overshot frame is
+            // ever emitted — the paused state matches the file-name index.
+            // pause only when EVERY non-empty track has reached its per-track
+            // clamped target — CurrentPlaybackFrame is the MAX cursor and would
+            // fire while a lagging camera is still short of the seek point
+            // (codex round 4)
+            bool seekReached = seekPauseFrame >= 0;
+            if (seekReached)
+                foreach (var kv in _tracks)
+                {
+                    var frames = kv.Value.DepthFrames;
+                    if (frames == null || frames.Count == 0) continue;
+                    if (kv.Value.PlaybackCursor < Mathf.Min(seekPauseFrame, frames.Count - 1))
+                    { seekReached = false; break; }
+                }
+            if (seekReached)
+            {
+                int target = seekPauseFrame;
+                seekPauseFrame = -1;
+                // the master clock still sits at the overshot wall position —
+                // sync it to the clamped target playhead, or Resume would jump
+                // straight past the seek point (codex round 3)
+                ulong targetTs = 0;
+                foreach (var kv in _tracks)
+                {
+                    var frames = kv.Value.DepthFrames;
+                    if (frames == null || frames.Count == 0) continue;
+                    ulong ts = TimestampNsAt(frames, Mathf.Min(target, frames.Count - 1));
+                    if (ts > targetTs) targetTs = ts;
+                }
+                if (targetTs > 0) SyncWallClockTo(targetTs);
+                PausePlayback();
+                SetStatus($"Seek point reached — paused at frame {CurrentPlaybackFrame}.");
+                Debug.Log($"[SensorRecorder] seek point reached: frame {CurrentPlaybackFrame}.");
+            }
+
+            // IsPaused guard: a seek point can land on (or clamp at) the LAST
+            // frame — the wrap/stop end handling below would immediately
+            // destroy the freshly paused state (codex round 2).
+            if (!anyRemaining && !IsPaused)
             {
                 if (loop)
                 {
