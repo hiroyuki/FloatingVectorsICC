@@ -80,6 +80,14 @@ namespace TSDF
                  "trail reads as a long square pyramid — the chosen look).")]
         public bool tubeRaindrop = false;
 
+        [Range(0f, 0.15f)]
+        [Tooltip("Trim this much arc length (m) off each tube's NEWEST end. " +
+                 "With the body mesh included, raw tips pierce outward through " +
+                 "the skin ('新しい側の先っぽが突き出る'); trimming ends the tube " +
+                 "short of the surface and the bridge (re-anchored to the " +
+                 "trimmed tip) carries the attachment into the body. 0 = off.")]
+        public float tubeHeadTrim = 0f;
+
         [Tooltip("Align the cross-section to WORLD UP instead of the twisting " +
                  "parallel-transport frame: with 4 sides one vertex always points " +
                  "up, so horizontal runs print as self-supporting 45° diamond " +
@@ -1319,12 +1327,36 @@ namespace TSDF
 
                 var cropB = new Bounds(cropCenter, cropSize);
                 var run = new List<Vector3>(64);
+                var trimmedTips = tubeHeadTrim > 1e-4f ? new Dictionary<uint, Vector3>() : null;
                 void EmitWhole(uint seed, List<int> idxs)
                 {
                     pts.Clear();
                     pts.Add(segs[idxs[0]].a);
                     foreach (int i in idxs) pts.Add(segs[i].b);
                     if (pts.Count < 2) return;
+
+                    // head trim: cut arc length off the NEWEST end so the tip
+                    // ends short of the body surface instead of piercing it;
+                    // the bridge is re-anchored to the trimmed tip below
+                    if (trimmedTips != null)
+                    {
+                        float remain = tubeHeadTrim;
+                        int last = pts.Count - 1;
+                        while (last > 0 && remain > 0f)
+                        {
+                            float seg = (pts[last] - pts[last - 1]).magnitude;
+                            if (seg > remain)
+                            {
+                                pts[last] += (pts[last - 1] - pts[last]) * (remain / seg);
+                                break;
+                            }
+                            remain -= seg;
+                            pts.RemoveAt(last);
+                            last--;
+                        }
+                        if (pts.Count < 2) return; // chain shorter than the trim
+                        trimmedTips[seed] = pts[pts.Count - 1];
+                    }
                     Vector3 colour = segs[idxs[0]].color;
                     if (!cropEnabled) { EmitChain(pts, colour); return; }
                     // crop: each maximal in-box run becomes its own tube; drop
@@ -1378,8 +1410,14 @@ namespace TSDF
                     var anchors = new List<Vector3>(bridges.Count);
                     foreach (int i in bridges)
                     {
-                        if ((segs[i].b - segs[i].a).sqrMagnitude < 1e-10f) continue;
-                        line[0] = new[] { segs[i].a, segs[i].b };
+                        // head trim moved this seed's tube tip — re-anchor the
+                        // bridge there so it spans trimmed-tip -> bone with no gap
+                        Vector3 bridgeA = segs[i].a;
+                        uint bseed = (uint)segs[i].pad >> 1;
+                        if (trimmedTips != null && trimmedTips.TryGetValue(bseed, out var tip))
+                            bridgeA = tip;
+                        if ((segs[i].b - bridgeA).sqrMagnitude < 1e-10f) continue;
+                        line[0] = new[] { bridgeA, segs[i].b };
                         col[0] = segs[i].color;
                         float rb = Mathf.Max(segs[i].rb, 1e-4f);
                         CurveTubeBuilder.AppendCurveTubes(line, col, 1f, rb, stlCurveSides,
