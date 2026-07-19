@@ -47,13 +47,24 @@ namespace TSDF
                 }
             }
 
-            // Smooth vertex normals (area-weighted face-normal accumulation).
-            // Snapshot/tube normals are dropped upstream and viewers left to
-            // guess produced flat, unshaded bodies — write vn explicitly.
+            // Unity is LEFT-handed; OBJ viewers read right-handed — mirror X so
+            // the model isn't a mirror image (left/right hands swapped), and
+            // swap winding below to keep outward orientation.
+            var mpos = new Vector3[pos.Count];
+            for (int i = 0; i < pos.Count; i++)
+            {
+                Vector3 p = pos[i];
+                mpos[i] = new Vector3(-(p.x - center.x), p.y - center.y, p.z - center.z) * scale;
+            }
+
+            // Smooth vertex normals (area-weighted face-normal accumulation over
+            // the MIRRORED, winding-swapped mesh). Snapshot/tube normals are
+            // dropped upstream and viewers left to guess produced flat,
+            // unshaded bodies — write vn explicitly.
             var nrm = new Vector3[pos.Count];
             for (int t = 0; t + 2 < tri.Count; t += 3)
             {
-                Vector3 a = pos[tri[t]], b = pos[tri[t + 1]], c = pos[tri[t + 2]];
+                Vector3 a = mpos[tri[t]], b = mpos[tri[t + 2]], c = mpos[tri[t + 1]];
                 Vector3 fn = Vector3.Cross(b - a, c - a); // length = 2*area (weighting)
                 nrm[tri[t]] += fn; nrm[tri[t + 1]] += fn; nrm[tri[t + 2]] += fn;
             }
@@ -65,9 +76,9 @@ namespace TSDF
                 w.Write("# FloatingVectorsICC print export\nmtllib ");
                 w.Write(mtlName);
                 w.Write('\n');
-                for (int i = 0; i < pos.Count; i++)
+                for (int i = 0; i < mpos.Length; i++)
                 {
-                    Vector3 v = (pos[i] - center) * scale;
+                    Vector3 v = mpos[i];
                     w.Write("v ");
                     w.Write(v.x.ToString("0.###", inv));
                     w.Write(' ');
@@ -94,9 +105,11 @@ namespace TSDF
                     for (int t = span.StartTri; t < span.StartTri + span.TriCount; t++)
                     {
                         int b = t * 3;
+                        // winding swapped (i2 before i1): the X mirror above
+                        // inverts orientation, this restores outward
                         string i0 = (tri[b] + 1).ToString(inv);
-                        string i1 = (tri[b + 1] + 1).ToString(inv);
-                        string i2 = (tri[b + 2] + 1).ToString(inv);
+                        string i1 = (tri[b + 2] + 1).ToString(inv);
+                        string i2 = (tri[b + 1] + 1).ToString(inv);
                         w.Write("f ");
                         w.Write(i0); w.Write("//"); w.Write(i0);
                         w.Write(' ');

@@ -104,6 +104,23 @@ def main():
     print(f"MeshFix: {len(hv)}v/{len(hfr)}f -> {len(rv)}v/{len(rf)}f watertight "
           f"({time.time()-t0:.1f}s)")
 
+    if dst.lower().endswith(".stl"):
+        from stl_union import write_binary_stl
+        base3 = len(v)
+        allv = np.vstack([v, rv]) if len(rv) else v
+        chunks = []
+        for m in order:
+            if m == "Human":
+                chunks.append(np.asarray(rf, dtype=np.int64) + base3)
+            else:
+                chunks.append(np.asarray(spans[m], dtype=np.int64))
+        allf = np.vstack(chunks)
+        write_binary_stl(dst, allv.astype(np.float32), allf.astype(np.uint32))
+        import os
+        print(f"wrote {dst} ({os.path.getsize(dst)/1048576:.1f} MB, {len(allf)} tris)"
+              f"  ({time.time()-t0:.1f}s total)")
+        return
+
     if dst.lower().endswith(".3mf"):
         base3 = len(v)
         allv = np.vstack([v, rv]) if len(rv) else v
