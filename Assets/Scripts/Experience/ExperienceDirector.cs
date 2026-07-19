@@ -114,6 +114,7 @@ namespace Experience
         private bool _savedKeepLive;
         private string _savedPlaybackFolder;
         private bool _savedWasPlaying;
+        private bool _savedWasLoaded;
         private bool _savedCumulativeNoErase;
         private PointCloudCumulative _cumulative;
         private readonly System.Collections.Generic.Dictionary<string, bool> _savedLiveVisible =
@@ -382,7 +383,8 @@ namespace Experience
             {
                 _savedKeepLive = sensorRecorder.keepLiveRenderersOnLoad;
                 _savedPlaybackFolder = sensorRecorder.playbackFolderPath;
-                _savedWasPlaying = sensorRecorder.IsPlaying; // Idle stops it; Exit resumes it
+                _savedWasPlaying = sensorRecorder.IsPlaying;             // Idle stops it; Exit resumes it
+                _savedWasLoaded = sensorRecorder.RecordedFrameCount > 0; // loaded-but-stopped: Exit reloads
                 sensorRecorder.keepLiveRenderersOnLoad = true;
             }
             _savedLiveVisible.Clear();
@@ -461,14 +463,16 @@ namespace Experience
             {
                 sensorRecorder.keepLiveRenderersOnLoad = _savedKeepLive;
                 sensorRecorder.playbackFolderPath = _savedPlaybackFolder;
-                // A dev playback session was running when the mode was entered
-                // (Idle stopped it) — bring it back. The playhead restarts from
-                // the beginning; "same session playing" is the restore contract.
-                if (_savedWasPlaying && !sensorRecorder.IsPlaying
+                // A dev playback session existed when the mode was entered
+                // (Idle unloaded it) — bring it back: reload when it was merely
+                // loaded, and resume when it was playing. The playhead restarts
+                // from the beginning; "same session in the same transport
+                // state" is the restore contract.
+                if ((_savedWasPlaying || _savedWasLoaded) && !sensorRecorder.IsPlaying
                     && !string.IsNullOrEmpty(_savedPlaybackFolder))
                 {
                     sensorRecorder.Load();
-                    sensorRecorder.TogglePlay();
+                    if (_savedWasPlaying) sensorRecorder.TogglePlay();
                 }
             }
             if (sensorManager != null)
