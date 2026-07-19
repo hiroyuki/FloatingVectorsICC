@@ -583,6 +583,11 @@ namespace Experience
                     // the floor grid (ExperienceSpaceBuilder) and, as someone
                     // steps in, their live sculpture.
                     StopVisitorPlayback();
+                    // A playback session that predates Experience mode (dev
+                    // session left running) must not keep painting the stage —
+                    // Idle owns it now. playbackFolderPath is restored on Exit.
+                    if (sensorRecorder != null && sensorRecorder.IsPlaying)
+                        sensorRecorder.StopAndUnload();
                     RestoreHistorySamples(); // drop the one-second window of the previous run
                     _ui.ClearAll();
                     ApplyBodySource(BodySource.Live);
