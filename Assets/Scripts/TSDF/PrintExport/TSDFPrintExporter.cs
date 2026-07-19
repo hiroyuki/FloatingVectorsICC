@@ -80,6 +80,12 @@ namespace TSDF
                  "trail reads as a long square pyramid — the chosen look).")]
         public bool tubeRaindrop = false;
 
+        [Tooltip("Run Close Holes automatically before capturing the body for " +
+                 "an export, then restore the pre-close volume. The raw MC body " +
+                 "carries phantom tau-band shells + open crop rims whose faces " +
+                 "read as inverted normals in viewers ('法線が逆', 2026-07-19).")]
+        public bool stlAutoCloseHoles = true;
+
         [Tooltip("Bridges from each tube tip to its bone anchor. Off = tubes " +
                  "end free at the (trimmed) tip — chosen when the body mesh is " +
                  "present and the black connector stubs read as noise.")]
@@ -753,11 +759,18 @@ namespace TSDF
             // stlIncludeBody=false skips the whole capture — tubes-only variant.
             if (stlIncludeBody)
             {
+                // Close holes first: the raw MC body carries phantom tau-band
+                // shells and open crop rims that read as inverted normals.
+                // CloseHoles snapshots the pre-close volume; we restore it after
+                // the capture so the live display stays untouched.
+                bool closed = false;
+                if (stlAutoCloseHoles) { CloseHoles(); closed = true; }
                 var opt = WebCaptureOptions();
                 opt.meshTargetTris = 0;     // print wants full resolution
                 opt.includeCurves = false;  // STL curves come from the CSEmitSegs readback below,
                                             // NOT the drawn ribbon buffer — see BuildCurveAndBridgeTubes
                 var snap = TSDFSnapshotBuilder.Capture(volume, null, opt, out string err);
+                if (closed) RestoreSnapshot();
                 if (snap == null) { Fail(err); return null; }
                 pos.AddRange(snap.pos);
                 tri.Capacity = snap.tri.Length;
