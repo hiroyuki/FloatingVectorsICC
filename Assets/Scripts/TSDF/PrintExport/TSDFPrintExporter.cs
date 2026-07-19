@@ -781,6 +781,13 @@ namespace TSDF
                     tri.Add(i0); tri.Add(i1); tri.Add(i2);
                 }
                 if (tri.Count == 0) { Fail("no non-degenerate triangles after weld"); return null; }
+                // Mesh-level cap for holes the volume pass cannot reach — the
+                // crown of the head is a blind spot of all four cameras (no
+                // observations at all), so no voxel closing radius spans it.
+                int capped = FillBoundaryLoops(pos, tri);
+                if (capped > 0)
+                    Debug.Log($"[TSDFPrintExporter] body: capped {capped} open boundary loop(s) " +
+                              "(camera blind spots — crown etc.).", this);
                 asm.BodyVol = OrientOutward(pos, tri, 0, tri.Count);
             }
             asm.BodyTris = tri.Count / 3;
@@ -1154,6 +1161,69 @@ namespace TSDF
             {
                 Fail($"OBJ write failed: {e.Message}");
             }
+        }
+
+        /// <summary>Cap every open boundary loop of the mesh with a centroid
+        /// fan. Boundary edges (used by exactly one triangle) are chained into
+        /// loops via their winding direction; each loop gets one centre vertex
+        /// and reversed-order fan triangles, so the cap continues the surface's
+        /// outward orientation. Returns the number of loops capped.</summary>
+        private static int FillBoundaryLoops(List<Vector3> pos, List<int> tri)
+        {
+            // undirected edge -> directed (a,b) as wound; shared edges cancel out
+            var open = new Dictionary<long, (int a, int b)>(1024);
+            long Key(int x, int y) => x < y ? ((long)x << 32) | (uint)y : ((long)y << 32) | (uint)x;
+            for (int t = 0; t + 2 < tri.Count; t += 3)
+            {
+                for (int e = 0; e < 3; e++)
+                {
+                    int a = tri[t + e], b = tri[t + (e + 1) % 3];
+                    long k = Key(a, b);
+                    if (!open.Remove(k)) open[k] = (a, b);
+                }
+            }
+            if (open.Count == 0) return 0;
+
+            // chain: each boundary vertex has one outgoing boundary edge on a
+            // manifold-with-boundary surface (non-manifold spots just break the
+            // loop, which is then skipped)
+            var next = new Dictionary<int, int>(open.Count);
+            foreach (var e in open.Values) next[e.a] = e.b;
+
+            int loops = 0;
+            var visited = new HashSet<int>();
+            var loop = new List<int>(256);
+            foreach (var startV in new List<int>(next.Keys))
+            {
+                if (visited.Contains(startV)) continue;
+                loop.Clear();
+                int v = startV;
+                bool closedLoop = false;
+                while (next.TryGetValue(v, out int nv))
+                {
+                    if (!visited.Add(v)) break;
+                    loop.Add(v);
+                    v = nv;
+                    if (v == startV) { closedLoop = true; break; }
+                    if (loop.Count > 100000) break;
+                }
+                if (!closedLoop || loop.Count < 3) continue;
+
+                Vector3 c = Vector3.zero;
+                foreach (int vi in loop) c += pos[vi];
+                c /= loop.Count;
+                int ci = pos.Count;
+                pos.Add(c);
+                for (int i = 0; i < loop.Count; i++)
+                {
+                    int a = loop[i], b = loop[(i + 1) % loop.Count];
+                    // boundary wound a->b: the cap traverses b->a to continue
+                    // the outward orientation across the shared edge
+                    tri.Add(b); tri.Add(a); tri.Add(ci);
+                }
+                loops++;
+            }
+            return loops;
         }
 
         /// <summary>Signed volume of tri[start..start+count) about the submesh
