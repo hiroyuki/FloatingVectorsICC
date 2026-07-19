@@ -75,6 +75,7 @@ namespace Experience
         [Min(0f)] public float qrShowSeconds = 30f;
 
         [Header("Dev stage skipping (enter, then advance immediately)")]
+        [UnityEngine.Serialization.FormerlySerializedAs("skipAttract")]
         public bool skipIdle;
         public bool skipCalibrate;   // default bone profile
         public bool skipFreeMove;
