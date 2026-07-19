@@ -570,7 +570,13 @@ namespace Experience
             if (from == ExperienceState.Calibrate)
             {
                 StopRoutine(ref _calibrateRoutine);
-                CancelProfileSampling(); // timeout/leave path — stop the worker-side collection
+                // Timeout path (advancing without a held star pose): don't throw
+                // the window's samples away. Bone lengths are pose-invariant, so
+                // whatever the cameras collected over the window still yields a
+                // usable best-effort profile — the star pose only makes the
+                // samples cleaner. Walked-away/fault paths discard as before.
+                if (to == ExperienceState.FreeMove) FinalizeProfileSamplingBestEffort();
+                else CancelProfileSampling();
             }
             if (from == ExperienceState.Shoot)
             {
@@ -838,7 +844,7 @@ namespace Experience
             _calibrateRoutine = null;
         }
 
-        /// <summary>Stop a still-running profile collection (timeout / leave /
+        /// <summary>Stop a still-running profile collection (leave / fault /
         /// exit) without applying anything.</summary>
         private void CancelProfileSampling()
         {
@@ -846,6 +852,29 @@ namespace Experience
             _profileSamplingActive = false;
             if (liveFusedSource != null)
                 liveFusedSource.EndBodyProfileSampling(int.MaxValue, out _, out _);
+        }
+
+        /// <summary>Calibrate window expired without a held star pose: build the
+        /// profile from whatever the window collected anyway (the hold path
+        /// already finished sampling itself, so this is a no-op then).</summary>
+        private void FinalizeProfileSamplingBestEffort()
+        {
+            if (!_profileSamplingActive) return;
+            _profileSamplingActive = false;
+            if (liveFusedSource == null) return;
+            if (liveFusedSource.EndBodyProfileSampling(
+                    config.profileMinSamplesPerBone, out var profile, out string summary))
+            {
+                _visitorProfile = profile;
+                liveFusedSource.ApplyBodyProfile(profile);
+                Debug.Log($"[{nameof(ExperienceDirector)}] calibration window expired — " +
+                          $"best-effort per-visitor profile applied: {summary}", this);
+            }
+            else
+            {
+                Debug.LogWarning($"[{nameof(ExperienceDirector)}] calibration window expired and " +
+                                 $"sampling was insufficient ({summary}) — default profile stays.", this);
+            }
         }
 
         // Live skeleton during LIVE phases: the merged output IS the live person
