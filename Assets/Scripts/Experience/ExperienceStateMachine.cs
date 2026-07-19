@@ -1,5 +1,6 @@
 // Pure-C# state machine for the visitor experience — the one-second-take
-// sequence: Calibrate (star pose → per-visitor bone profile for the fusion) →
+// sequence: Idle (unattended: just the floor grid, no attract content) →
+// Calibrate (star pose → per-visitor bone profile for the fusion) →
 // FreeMove (free movement with the live sculpture) → Shoot (cue text →
 // countdown → ONE second recorded at zero) → Processing (v11s conversion +
 // capture of the final one-second curve window) → ResultShow (frozen finished
@@ -14,7 +15,7 @@
 //     later visitor's run.
 //   - ProcessingFailed / ExportFailed are latched: a one-frame pulse starts
 //     the fail-notice timer; the machine holds the state until
-//     exportFailNoticeSeconds then falls back to Attract (the director shows
+//     exportFailNoticeSeconds then falls back to Idle (the director shows
 //     the apology meanwhile).
 //
 // Skip flags mean "enter the state, then advance immediately on the first
@@ -33,7 +34,7 @@ namespace Experience
 {
     public enum ExperienceState
     {
-        Attract, Calibrate, FreeMove, Shoot, Processing, ResultShow, QrShow, Fault
+        Idle, Calibrate, FreeMove, Shoot, Processing, ResultShow, QrShow, Fault
     }
 
     /// <summary>Per-tick inputs from the director (already debounced where
@@ -74,12 +75,12 @@ namespace Experience
         [Min(0f)] public float qrShowSeconds = 30f;
 
         [Header("Dev stage skipping (enter, then advance immediately)")]
-        public bool skipAttract;
+        public bool skipIdle;
         public bool skipCalibrate;   // default bone profile
         public bool skipFreeMove;
         public bool skipShoot;       // director substitutes devCannedTakeRoot
         public bool skipProcessing;  // skip the v11s conversion (capture still runs)
-        public bool skipQr;          // ResultShow success goes straight to Attract
+        public bool skipQr;          // ResultShow success goes straight to Idle
 
         [Min(0.01f)]
         [Tooltip("Dev time multiplier applied to Tick dt (2 = twice as fast).")]
@@ -88,7 +89,7 @@ namespace Experience
 
     public sealed class ExperienceStateMachine
     {
-        public ExperienceState State { get; private set; } = ExperienceState.Attract;
+        public ExperienceState State { get; private set; } = ExperienceState.Idle;
         public float TimeInState { get; private set; }
 
         public event Action<ExperienceState, ExperienceState> Changed;
@@ -113,11 +114,11 @@ namespace Experience
             switch (State)
             {
                 case ExperienceState.Fault:
-                    if (!inputs.Fault) Go(ExperienceState.Attract);
+                    if (!inputs.Fault) Go(ExperienceState.Idle);
                     break;
 
-                case ExperienceState.Attract:
-                    if (t.skipAttract || inputs.Present) Go(ExperienceState.Calibrate);
+                case ExperienceState.Idle:
+                    if (t.skipIdle || inputs.Present) Go(ExperienceState.Calibrate);
                     break;
 
                 case ExperienceState.Calibrate:
@@ -147,7 +148,7 @@ namespace Experience
                     {
                         _processingFailElapsed += dt;
                         if (_processingFailElapsed >= t.exportFailNoticeSeconds)
-                            Go(ExperienceState.Attract);
+                            Go(ExperienceState.Idle);
                         break;
                     }
                     if (LeftEarly(inputs)) break;
@@ -163,23 +164,23 @@ namespace Experience
                     {
                         _exportFailElapsed += dt;
                         if (_exportFailElapsed >= t.exportFailNoticeSeconds)
-                            Go(ExperienceState.Attract);
+                            Go(ExperienceState.Idle);
                         break;
                     }
                     if (inputs.ExportDone && TimeInState >= t.resultMinSeconds)
-                        Go(t.skipQr ? ExperienceState.Attract : ExperienceState.QrShow);
+                        Go(t.skipQr ? ExperienceState.Idle : ExperienceState.QrShow);
                     break;
 
                 case ExperienceState.QrShow:
                     if (TimeInState >= t.qrShowSeconds || !inputs.Present)
-                        Go(ExperienceState.Attract);
+                        Go(ExperienceState.Idle);
                     break;
             }
 
             bool LeftEarly(in ExperienceInputs i)
             {
                 if (i.Present) return false;
-                Go(ExperienceState.Attract);
+                Go(ExperienceState.Idle);
                 return true;
             }
         }

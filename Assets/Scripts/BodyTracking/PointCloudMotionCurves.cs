@@ -691,9 +691,10 @@ namespace BodyTracking
                                 || mf.gameObject.name.StartsWith(autoSourcePrefix);
                 if (mf.TryGetComponent(out PointCloud.PointCloudRenderer live))
                 {
-                    // Attract mode: a suppressed live renderer must not seed the
-                    // curves (the ghost playback owns the sculpture) — regardless
-                    // of the name prefix. Default off, so Dev mode is unchanged.
+                    // Playback-owned phases: a suppressed live renderer must not
+                    // seed the curves (the recorded take owns the sculpture) —
+                    // regardless of the name prefix. Default off, so Dev mode is
+                    // unchanged.
                     if (live.suppressAsSource) continue;
                 }
                 else if (!prefixed) continue;
