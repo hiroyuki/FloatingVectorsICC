@@ -113,6 +113,7 @@ namespace Experience
         private string[] _savedMgrOrder, _savedRecOrder;
         private bool _savedKeepLive;
         private string _savedPlaybackFolder;
+        private bool _savedWasPlaying;
         private bool _savedCumulativeNoErase;
         private PointCloudCumulative _cumulative;
         private readonly System.Collections.Generic.Dictionary<string, bool> _savedLiveVisible =
@@ -381,6 +382,7 @@ namespace Experience
             {
                 _savedKeepLive = sensorRecorder.keepLiveRenderersOnLoad;
                 _savedPlaybackFolder = sensorRecorder.playbackFolderPath;
+                _savedWasPlaying = sensorRecorder.IsPlaying; // Idle stops it; Exit resumes it
                 sensorRecorder.keepLiveRenderersOnLoad = true;
             }
             _savedLiveVisible.Clear();
@@ -459,6 +461,15 @@ namespace Experience
             {
                 sensorRecorder.keepLiveRenderersOnLoad = _savedKeepLive;
                 sensorRecorder.playbackFolderPath = _savedPlaybackFolder;
+                // A dev playback session was running when the mode was entered
+                // (Idle stopped it) — bring it back. The playhead restarts from
+                // the beginning; "same session playing" is the restore contract.
+                if (_savedWasPlaying && !sensorRecorder.IsPlaying
+                    && !string.IsNullOrEmpty(_savedPlaybackFolder))
+                {
+                    sensorRecorder.Load();
+                    sensorRecorder.TogglePlay();
+                }
             }
             if (sensorManager != null)
             {
