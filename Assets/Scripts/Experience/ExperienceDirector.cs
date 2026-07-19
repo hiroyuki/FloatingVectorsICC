@@ -1088,7 +1088,16 @@ namespace Experience
                 yield return null;
             }
             // loop=false → the recorder stopped itself at the last frame; the
-            // scene now holds the end-of-take state (shell + pose ring).
+            // scene now holds the end-of-take state (shell + pose ring). Deadline
+            // expiry (slow disk, stalled clock): freeze the transport HERE so the
+            // capture and the ResultShow screen agree — a still-running playback
+            // would drift past whatever we export.
+            if (sensorRecorder.CurrentState == SensorRecorder.State.Playing)
+            {
+                Debug.LogWarning($"[{nameof(ExperienceDirector)}] play-through did not finish within " +
+                                 $"{duration + 10:0}s — pausing at the current frame and capturing there.", this);
+                sensorRecorder.PausePlayback();
+            }
 
             // ---- stage 3: capture the one-second window ----
             int trailFrames = Mathf.Clamp(Mathf.RoundToInt(config.captureSeconds * 30f), 2, 32);
