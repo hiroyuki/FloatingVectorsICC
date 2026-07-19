@@ -9,12 +9,56 @@ manifold from the largest component and fills all holes smoothly.
 Reads the OBJ, repairs ONLY the Human span, and writes
 <name>_fixedbody.obj with the other spans (Curves/Body) untouched.
 
-Usage:  python fix_body.py input.obj [output.obj]
+Usage:  python fix_body.py input.obj [output.obj|output.3mf]
+        (a .3mf output writes a Bambu-compatible Standard 3MF with
+         basematerials Body=black / Curves=white / Human=blue — the
+         compact ~1/6-size delivery format)
 Needs:  pip install pymeshfix numpy   (Python 3.8+)
 """
-import sys, time
+import sys, time, zipfile
 import numpy as np
 import pymeshfix
+
+MAT_COLORS = {"Body": "000000FF", "Curves": "FFFFFFFF", "Human": "669EFFFF"}
+
+
+def write_3mf(path, verts, span_faces):
+    """verts: (n,3) float mm; span_faces: list of (materialName, (m,3) int)."""
+    mats = list(MAT_COLORS.keys())
+    parts = []
+    parts.append('<?xml version="1.0" encoding="UTF-8"?>\n'
+                 '<model unit="millimeter" xml:lang="en-US" '
+                 'xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">\n'
+                 ' <resources>\n  <basematerials id="1">\n')
+    for m in mats:
+        parts.append(f'   <base name="{m}" displaycolor="#{MAT_COLORS[m]}"/>\n')
+    parts.append('  </basematerials>\n'
+                 '  <object id="2" type="model" pid="1" pindex="0">\n   <mesh>\n    <vertices>\n')
+    coords = np.round(verts, 3)
+    for x, y, z in coords:
+        parts.append(f'     <vertex x="{x:g}" y="{y:g}" z="{z:g}"/>\n')
+    parts.append('    </vertices>\n    <triangles>\n')
+    for name, faces in span_faces:
+        p1 = mats.index(name)
+        for a, b, c in faces:
+            parts.append(f'     <triangle v1="{a}" v2="{b}" v3="{c}" p1="{p1}"/>\n')
+    parts.append('    </triangles>\n   </mesh>\n  </object>\n </resources>\n'
+                 ' <build>\n  <item objectid="2"/>\n </build>\n</model>\n')
+    model = "".join(parts)
+    types = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+             '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n'
+             ' <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>\n'
+             ' <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>\n'
+             '</Types>\n')
+    rels = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n'
+            ' <Relationship Target="/3D/3dmodel.model" Id="rel-1" '
+            'Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>\n'
+            '</Relationships>\n')
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+        z.writestr("[Content_Types].xml", types)
+        z.writestr("_rels/.rels", rels)
+        z.writestr("3D/3dmodel.model", model)
 
 
 def main():
@@ -59,6 +103,20 @@ def main():
     rv, rf = fix.points, fix.faces
     print(f"MeshFix: {len(hv)}v/{len(hfr)}f -> {len(rv)}v/{len(rf)}f watertight "
           f"({time.time()-t0:.1f}s)")
+
+    if dst.lower().endswith(".3mf"):
+        base3 = len(v)
+        allv = np.vstack([v, rv]) if len(rv) else v
+        span_list = []
+        for m in order:
+            if m == "Human":
+                span_list.append(("Human", np.asarray(rf, dtype=np.int64) + base3))
+            else:
+                span_list.append((m, np.asarray(spans[m], dtype=np.int64)))
+        write_3mf(dst, allv, span_list)
+        import os
+        print(f"wrote {dst} ({os.path.getsize(dst)/1048576:.1f} MB)  ({time.time()-t0:.1f}s total)")
+        return
 
     # write output: repaired Human verts appended after the originals so the
     # untouched spans keep their indices
