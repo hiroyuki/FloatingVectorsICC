@@ -1,9 +1,9 @@
 // Programmatic pose-guide placeholders: a white HUMAN SILHOUETTE (pictogram
 // style — detached head + filled tapered-capsule body/limbs, soft anti-
 // aliased edge, transparent background) rasterized once into a Texture2D.
-// Used by the Calibrate ("この ポーズを とってね" — star pose) and BanzaiWait
-// prompts until real artwork exists; ExperienceConfig.poseGuideTexture /
-// banzaiGuideTexture override it.
+// Used by the Calibrate ("この ポーズを とってね" — star pose) prompt until
+// real artwork exists; ExperienceConfig.poseGuideTexture overrides it. The
+// banzai silhouette is kept around unused in case a raised-arms guide returns.
 //
 // The shape is a distance-field union of "cone capsules" (segments whose
 // radius tapers from a to b) plus the head disc — the standard restroom-sign
