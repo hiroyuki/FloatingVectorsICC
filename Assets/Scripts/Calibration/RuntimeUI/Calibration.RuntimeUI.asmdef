@@ -5,7 +5,8 @@
         "PointCloud",
         "Calibration",
         "Orbbec",
-        "Shared"
+        "Shared",
+        "UnityEngine.UI"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],

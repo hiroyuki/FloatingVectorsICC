@@ -11,6 +11,13 @@
 // Why a separate MonoBehaviour instead of reusing CalibrationWindow: the window
 // is an EditorWindow (IMGUI in the Editor chrome, not the build). The operator
 // runs the actual app, so the controls have to live in the running scene.
+//
+// Calibration mode is exclusive: on enter it stops recorder playback, disables
+// the recorder components, and hides every point-cloud mesh (live + _Playback_*)
+// — only raw color matters while aiming cameras. The operator HUD/grid stays on
+// display 0; displays 1 and 2 (OS "Display 2/3") get full-rate raw color feeds,
+// cams id0/id1 and id2/id3 stacked vertically. All of it is restored on exit
+// (playback itself stays stopped — press Play again).
 
 using System;
 using System.Collections.Generic;
@@ -19,6 +26,7 @@ using System.Text;
 using Orbbec;
 using PointCloud;
 using UnityEngine;
+using UnityEngine.UI;
 
 namespace Calibration.RuntimeUI
 {
@@ -81,6 +89,33 @@ namespace Calibration.RuntimeUI
         [Tooltip("In assign mode: pin the selected camera as the world origin (cam0).")]
         public KeyCode setOriginKey = KeyCode.O;
 
+        [Header("Calibration mode suppression")]
+        [Tooltip("Hide every point-cloud mesh (live renderers AND the recorder's _Playback_* " +
+                 "objects) while calibration mode is active; restored on exit. Color frames " +
+                 "keep flowing — only the depth visuals go dark. Enforced every frame so " +
+                 "late-spawned renderers are caught too.")]
+        public bool hidePointClouds = true;
+        [Tooltip("Stop SensorRecorder playback on entering calibration mode and keep the " +
+                 "recorder components disabled while it is active. Playback does NOT auto-" +
+                 "resume on exit — press the recorder's Play again.")]
+        public bool stopRecorderPlayback = true;
+        [Tooltip("When entering calibration mode with no live renderers (the scene started " +
+                 "playbackOnly, or playback freed the cameras), reconnect the live rig via " +
+                 "SensorRecorder.SwitchToLive() — calibration needs real cameras. Device " +
+                 "re-enumeration takes ~15 s; the previews fill in as streams come up.")]
+        public bool switchToLiveOnEnter = true;
+
+        [Header("External color displays")]
+        [Tooltip("Mirror the raw color feeds onto extra displays while calibration mode is " +
+                 "active: cams id0/id1 stacked vertically on displayCam01, id2/id3 on " +
+                 "displayCam23 (camera-id order = cameras.yaml). The operator HUD stays " +
+                 "on display 0.")]
+        public bool externalColorDisplays = true;
+        [Tooltip("0-based display index for cams 0+1 (1 = the OS's 'Display 2').")]
+        public int displayCam01 = 1;
+        [Tooltip("0-based display index for cams 2+3 (2 = the OS's 'Display 3').")]
+        public int displayCam23 = 2;
+
         [Header("Interfering components")]
         [Tooltip("Disable these components while this UI is enabled, restore on disable. " +
                  "Two reasons: (1) k4abt body-tracking components crash on destroy (issue #7); " +
@@ -134,6 +169,25 @@ namespace Calibration.RuntimeUI
         // BodyTracking / TSDF, mirrors CalibrationWindow's body-tracking workaround).
         private readonly Dictionary<Behaviour, bool> _suspended = new Dictionary<Behaviour, bool>();
 
+        // Scene suppression bookkeeping (hidePointClouds / stopRecorderPlayback).
+        private readonly Dictionary<MeshRenderer, bool> _hiddenMeshes = new Dictionary<MeshRenderer, bool>();
+        private readonly Dictionary<SensorRecorder, bool> _disabledRecorders = new Dictionary<SensorRecorder, bool>();
+        private readonly List<SensorRecorder> _sceneRecorders = new List<SensorRecorder>();
+
+        // External color displays (built on enter, destroyed on exit).
+        private ExternalView[] _externalViews;
+        private readonly List<GameObject> _externalCanvases = new List<GameObject>();
+
+        // One stacked cell on an external display: raw color + crosshair + label.
+        private class ExternalView
+        {
+            public RawImage Raw;
+            public AspectRatioFitter Fitter;
+            public Text Label;
+            public Texture2D Tex;
+            public ulong LastTs;
+        }
+
         private GUIStyle _label;
         private GUIStyle _hud;
 
@@ -186,7 +240,12 @@ namespace Calibration.RuntimeUI
 
         private void OnEnable()
         {
-            if (_active && suspendInterferingComponents) SuspendInterfering();
+            if (_active)
+            {
+                if (suspendInterferingComponents) SuspendInterfering();
+                SuppressScene();
+                BuildExternalDisplays();
+            }
         }
 
         private void OnDisable()
@@ -198,6 +257,8 @@ namespace Calibration.RuntimeUI
                 if (p.Tex != null) Destroy(p.Tex);
             _previews.Clear();
             if (_centerRing != null) { Destroy(_centerRing); _centerRing = null; }
+            DestroyExternalDisplays();
+            RestoreScene();
             RestoreInterfering();
         }
 
@@ -224,6 +285,8 @@ namespace Calibration.RuntimeUI
 
             HandleInput();
             UpdatePreviews();
+            EnforceHiddenPointClouds(); // every frame — catches late-spawned renderers
+            UpdateExternalDisplays();
         }
 
         // Master enable/disable. Off: stop subscription/detection, restore the suspended
@@ -236,6 +299,8 @@ namespace Calibration.RuntimeUI
             if (_active)
             {
                 if (suspendInterferingComponents) SuspendInterfering();
+                SuppressScene();
+                BuildExternalDisplays();
                 SetStatus("Calibration UI enabled.");
             }
             else
@@ -248,6 +313,8 @@ namespace Calibration.RuntimeUI
                 foreach (var p in _previews.Values)
                     if (p.Tex != null) Destroy(p.Tex);
                 _previews.Clear();
+                DestroyExternalDisplays();
+                RestoreScene();
                 RestoreInterfering();
                 SetStatus("Calibration UI disabled (normal show restored).");
             }
@@ -550,21 +617,28 @@ namespace Calibration.RuntimeUI
         // so the preview shows upright (same flip the PNG dump uses).
         private void UploadFlipped(Preview p, byte[] rgb8, int width, int height)
         {
+            p.Tex = UploadFlippedTo(p.Tex, rgb8, width, height);
+            p.Width = width;
+            p.Height = height;
+        }
+
+        // Shared flip+upload into an arbitrary texture (recreated on size change).
+        private Texture2D UploadFlippedTo(Texture2D tex, byte[] rgb8, int width, int height)
+        {
             int rowBytes = width * 3;
             int need = rowBytes * height;
             if (_flipBuffer == null || _flipBuffer.Length < need) _flipBuffer = new byte[need];
             for (int y = 0; y < height; y++)
                 Buffer.BlockCopy(rgb8, y * rowBytes, _flipBuffer, (height - 1 - y) * rowBytes, rowBytes);
 
-            if (p.Tex == null || p.Width != width || p.Height != height)
+            if (tex == null || tex.width != width || tex.height != height)
             {
-                if (p.Tex != null) Destroy(p.Tex);
-                p.Tex = new Texture2D(width, height, TextureFormat.RGB24, mipChain: false);
-                p.Width = width;
-                p.Height = height;
+                if (tex != null) Destroy(tex);
+                tex = new Texture2D(width, height, TextureFormat.RGB24, mipChain: false);
             }
-            p.Tex.SetPixelData(_flipBuffer, 0, 0);
-            p.Tex.Apply(updateMipmaps: false);
+            tex.SetPixelData(_flipBuffer, 0, 0);
+            tex.Apply(updateMipmaps: false);
+            return tex;
         }
 
         // -------- GUI --------
@@ -1122,6 +1196,256 @@ namespace Calibration.RuntimeUI
             if (string.IsNullOrEmpty(s)) return "unknown";
             foreach (char bad in Path.GetInvalidFileNameChars()) s = s.Replace(bad, '_');
             return s;
+        }
+
+        // -------- Scene suppression (depth visuals + recorder playback) --------
+
+        // Entering calibration mode: stop any recorder playback and disable the
+        // recorder components so nothing restarts it. Mesh hiding is continuous
+        // (EnforceHiddenPointClouds) because renderers spawn after manager Start().
+        private void SuppressScene()
+        {
+            _sceneRecorders.Clear();
+            _sceneRecorders.AddRange(FindObjectsByType<SensorRecorder>(
+                FindObjectsInactive.Include, FindObjectsSortMode.None));
+
+            // No live renderers (playbackOnly startup, or a Load freed the
+            // cameras) → calibration has no color source at all; reconnect the
+            // live rig. SwitchToLive stops playback and clears the loaded tracks
+            // itself, then SensorManager.StartLive re-enumerates (~15 s).
+            if (switchToLiveOnEnter && Application.isPlaying)
+            {
+                var mgr = _manager != null ? _manager : FindFirstObjectByType<SensorManager>();
+                bool noLive = mgr == null || mgr.Renderers == null || mgr.Renderers.Count == 0;
+                if (noLive && _sceneRecorders.Count > 0)
+                {
+                    SetStatus("No live cameras — switching to LIVE for calibration (~15 s)…");
+                    _sceneRecorders[0].SwitchToLive();
+                }
+            }
+
+            if (!stopRecorderPlayback) return;
+            foreach (var rec in _sceneRecorders)
+            {
+                if (_disabledRecorders.ContainsKey(rec)) continue;
+                if (rec.IsPlaying)
+                {
+                    rec.TogglePlay(); // stop — does NOT auto-resume on exit
+                    SetStatus("Recorder playback stopped for calibration (press Play again after exit).");
+                }
+                _disabledRecorders[rec] = rec.enabled;
+                rec.enabled = false;
+            }
+        }
+
+        // Hide every point-cloud mesh: live renderers plus the recorders'
+        // _Playback_* children. Runs every frame while active so late spawns are
+        // caught; each mesh's prior state is saved once and restored on exit.
+        private void EnforceHiddenPointClouds()
+        {
+            if (!hidePointClouds) return;
+
+            if (_manager != null && _manager.Renderers != null)
+            {
+                foreach (var r in _manager.Renderers)
+                {
+                    if (r == null) continue;
+                    if (r.TryGetComponent(out MeshRenderer mr) && mr.enabled)
+                    {
+                        if (!_hiddenMeshes.ContainsKey(mr)) _hiddenMeshes[mr] = true;
+                        mr.enabled = false;
+                    }
+                }
+            }
+
+            foreach (var rec in _sceneRecorders)
+            {
+                if (rec == null) continue;
+                foreach (Transform child in rec.transform)
+                {
+                    if (!child.name.StartsWith("_Playback_")) continue;
+                    if (child.TryGetComponent(out MeshRenderer pmr) && pmr.enabled)
+                    {
+                        if (!_hiddenMeshes.ContainsKey(pmr)) _hiddenMeshes[pmr] = true;
+                        pmr.enabled = false;
+                    }
+                }
+            }
+        }
+
+        private void RestoreScene()
+        {
+            int meshes = 0;
+            foreach (var kv in _hiddenMeshes)
+                if (kv.Key != null) { kv.Key.enabled = kv.Value; meshes++; }
+            _hiddenMeshes.Clear();
+
+            int recs = 0;
+            foreach (var kv in _disabledRecorders)
+                if (kv.Key != null) { kv.Key.enabled = kv.Value; recs++; }
+            _disabledRecorders.Clear();
+            _sceneRecorders.Clear();
+
+            if (meshes > 0 || recs > 0)
+                Debug.Log($"[CalibrationRuntimeUI] restored {meshes} point-cloud mesh(es), " +
+                          $"{recs} recorder component(s). Playback stays stopped — press Play to resume.");
+        }
+
+        // -------- External color displays (cams 0/1 and 2/3, stacked vertically) --------
+
+        private void BuildExternalDisplays()
+        {
+            if (!externalColorDisplays || _externalCanvases.Count > 0) return;
+            _externalViews = new ExternalView[4];
+            BuildExternalCanvas(displayCam01, firstCamId: 0);
+            BuildExternalCanvas(displayCam23, firstCamId: 2);
+        }
+
+        // One overlay canvas on the given display with two vertically stacked
+        // cells (top = firstCamId, bottom = firstCamId+1) over a black backdrop.
+        private void BuildExternalCanvas(int displayIndex, int firstCamId)
+        {
+            if (displayIndex < 0) return;
+#if !UNITY_EDITOR
+            // Secondary displays start inactive in builds. Activation is one-way,
+            // which is fine — the show's visitor displays use them anyway.
+            if (displayIndex < Display.displays.Length && !Display.displays[displayIndex].active)
+                Display.displays[displayIndex].Activate();
+#endif
+            var go = new GameObject($"_CalibColorDisplay{displayIndex}");
+            go.transform.SetParent(transform, false);
+            var canvas = go.AddComponent<Canvas>();
+            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            canvas.targetDisplay = displayIndex;
+            canvas.sortingOrder = 100; // above any visitor UI left on that display
+            var scaler = go.AddComponent<CanvasScaler>();
+            scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+            scaler.referenceResolution = new Vector2(1920f, 1080f);
+            scaler.matchWidthOrHeight = 0.5f;
+            _externalCanvases.Add(go);
+
+            var backdrop = new GameObject("Backdrop", typeof(RectTransform)).AddComponent<Image>();
+            backdrop.transform.SetParent(go.transform, false);
+            backdrop.color = Color.black;
+            backdrop.raycastTarget = false;
+            Stretch((RectTransform)backdrop.transform, Vector2.zero, Vector2.one);
+
+            for (int slot = 0; slot < 2; slot++)
+            {
+                int camId = firstCamId + slot;
+                var cell = new GameObject($"Cam{camId}", typeof(RectTransform));
+                cell.transform.SetParent(go.transform, false);
+                // Top cell = lower id, bottom cell = higher id.
+                Stretch((RectTransform)cell.transform,
+                        new Vector2(0f, slot == 0 ? 0.5f : 0f),
+                        new Vector2(1f, slot == 0 ? 1f : 0.5f));
+
+                var img = new GameObject("Image", typeof(RectTransform)).AddComponent<RawImage>();
+                img.transform.SetParent(cell.transform, false);
+                img.raycastTarget = false;
+                img.color = Color.black; // black until the first frame arrives
+                var fit = img.gameObject.AddComponent<AspectRatioFitter>();
+                fit.aspectMode = AspectRatioFitter.AspectMode.FitInParent;
+                fit.aspectRatio = 16f / 9f;
+
+                // Center crosshair (spans the fitted image, so it tracks aspect).
+                MakeLine(img.transform, "CrossV", new Vector2(0.5f, 0f), new Vector2(0.5f, 1f), new Vector2(2f, 0f));
+                MakeLine(img.transform, "CrossH", new Vector2(0f, 0.5f), new Vector2(1f, 0.5f), new Vector2(0f, 2f));
+
+                var label = new GameObject("Label", typeof(RectTransform)).AddComponent<Text>();
+                label.transform.SetParent(cell.transform, false);
+                label.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+                label.fontSize = 28;
+                label.fontStyle = FontStyle.Bold;
+                label.color = Color.white;
+                label.raycastTarget = false;
+                var lr = (RectTransform)label.transform;
+                lr.anchorMin = lr.anchorMax = lr.pivot = new Vector2(0f, 1f);
+                lr.anchoredPosition = new Vector2(12f, -8f);
+                lr.sizeDelta = new Vector2(1400f, 36f);
+
+                _externalViews[camId] = new ExternalView { Raw = img, Fitter = fit, Label = label };
+            }
+        }
+
+        private static void MakeLine(Transform parent, string name, Vector2 anchorMin, Vector2 anchorMax, Vector2 size)
+        {
+            var line = new GameObject(name, typeof(RectTransform)).AddComponent<Image>();
+            line.transform.SetParent(parent, false);
+            line.color = new Color(1f, 0f, 0f, 0.8f);
+            line.raycastTarget = false;
+            var rt = (RectTransform)line.transform;
+            rt.anchorMin = anchorMin;
+            rt.anchorMax = anchorMax;
+            rt.sizeDelta = size;
+            rt.anchoredPosition = Vector2.zero;
+        }
+
+        private static void Stretch(RectTransform rt, Vector2 anchorMin, Vector2 anchorMax)
+        {
+            rt.anchorMin = anchorMin;
+            rt.anchorMax = anchorMax;
+            rt.offsetMin = rt.offsetMax = Vector2.zero;
+        }
+
+        // Raw feed at frame rate (independent of the round-robin detection pass —
+        // the wall displays are for aiming, so they must be smooth). Labels carry
+        // the id/origin/detection info instead of baking the overlay into pixels.
+        //
+        // Slots map to the STABLE cameras.yaml order (_camOrder keeps disconnected
+        // serials), NOT the present-compacted ids the HUD grid shows — while the
+        // operator re-plugs cables, a disconnect must not shift the remaining
+        // cameras onto different displays.
+        private void UpdateExternalDisplays()
+        {
+            if (_externalViews == null) return;
+            for (int id = 0; id < _externalViews.Length; id++)
+            {
+                var v = _externalViews[id];
+                if (v == null || v.Raw == null) continue;
+                string serial = id < _camOrder.Count ? _camOrder[id] : null;
+                var r = serial != null ? FindRenderer(serial) : null;
+                if (r == null)
+                {
+                    v.Raw.texture = null;
+                    v.Raw.color = Color.black;
+                    v.LastTs = 0; // force a re-upload when the camera comes back
+                    v.Label.text = serial == null
+                        ? $"ID {id}   no camera"
+                        : $"[ID {id}] {serial}   (disconnected)";
+                    continue;
+                }
+
+                if (_latest.TryGetValue(r, out var f) && f.HasFrame && f.TimestampUs != v.LastTs)
+                {
+                    v.Tex = UploadFlippedTo(v.Tex, f.Rgb8, f.Width, f.Height);
+                    v.LastTs = f.TimestampUs;
+                    v.Raw.texture = v.Tex;
+                    v.Raw.color = Color.white;
+                    v.Fitter.aspectRatio = f.Width / (float)f.Height;
+                }
+
+                _previews.TryGetValue(r, out var p);
+                string det;
+                if (p == null || !p.HasDetectionPass)
+                    det = boardSpec == null ? "" : "...";
+                else
+                    det = (p.Detected ? "● " : "✕ ") + $"M={p.Markers} C={p.Corners}";
+                string idTag = $"ID {id}";
+                if (serial == _originSerial) idTag += " ★origin";
+                v.Label.text = $"[{idTag}] {serial}   {det}";
+            }
+        }
+
+        private void DestroyExternalDisplays()
+        {
+            if (_externalViews != null)
+                foreach (var v in _externalViews)
+                    if (v?.Tex != null) Destroy(v.Tex);
+            _externalViews = null;
+            foreach (var go in _externalCanvases)
+                if (go != null) Destroy(go);
+            _externalCanvases.Clear();
         }
 
         // -------- Interfering-component suspend (reflection, mirrors CalibrationWindow) --------
