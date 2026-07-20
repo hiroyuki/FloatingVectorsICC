@@ -2,8 +2,10 @@
 // Plans/experience-flow-plan.md → Plans/phase3-visitor-ui-plan.md).
 //
 // One ScreenSpaceCamera canvas per visitor display (default 1 and 2), built
-// programmatically — no scene/prefab dependency; the ExperienceDirector will
-// own an instance in a later phase. ScreenSpaceCamera (not Overlay) so the
+// programmatically. The ExperienceDirector prefers a scene-authored instance
+// (Experience/VisitorUI) so layout fields (pose-guide position/size/displays)
+// are tunable and persisted in the scene; it spawns a throwaway instance only
+// when none exists. ScreenSpaceCamera (not Overlay) so the
 // per-display camera routes the UI to its physical display in builds AND an
 // explicit cam.Render() captures the UI in Editor verification.
 //
@@ -44,9 +46,20 @@ namespace Experience
         [Tooltip("Black backdrop opacity behind the red alert text.")]
         public float alertBackdropAlpha = 0.75f;
 
+        [Header("Pose guide (adjust on the scene GO; live-applied while shown)")]
+        [Tooltip("Displays that show the pose guide (subset of visitorDisplays). " +
+                 "Other visitor displays keep the countdown/message only.")]
+        public int[] poseGuideDisplays = { 1 };
+
         [Min(64f)]
-        [Tooltip("Pose-guide figure size (reference pixels), shown above center.")]
+        [Tooltip("Pose-guide figure size (reference pixels).")]
         public float poseGuideSizePixels = 420f;
+
+        [Tooltip("Pose-guide figure anchored position (reference px from canvas center).")]
+        public Vector2 poseImagePosition = new Vector2(0f, 130f);
+
+        [Tooltip("Pose instruction text anchored position (reference px from canvas center).")]
+        public Vector2 poseLabelPosition = new Vector2(0f, -200f);
 
         [Min(64f)]
         [Tooltip("Progress bar width (reference pixels).")]
@@ -54,6 +67,7 @@ namespace Experience
 
         private sealed class DisplayUi
         {
+            public int display;
             public Canvas canvas;
             public Text message;
             public GameObject qrGroup;
@@ -153,15 +167,40 @@ namespace Experience
             EnsureBuilt();
             foreach (var ui in _uis)
             {
+                bool shown = PoseGuideShownOn(ui.display);
                 ui.poseImage.texture = guide;
                 ui.poseLabel.text = text ?? "";
-                ui.poseGroup.SetActive(true);
+                ApplyPoseLayout(ui);
+                ui.poseGroup.SetActive(shown);
                 ui.qrGroup.SetActive(false);
                 ui.progressGroup.SetActive(false);
                 // Drop any previous state's message; ShowCountdown re-activates
                 // the slot when digits need to overlay the guide.
                 ui.message.gameObject.SetActive(false);
             }
+        }
+
+        private bool PoseGuideShownOn(int display)
+        {
+            if (poseGuideDisplays == null || poseGuideDisplays.Length == 0) return true;
+            foreach (int d in poseGuideDisplays) if (d == display) return true;
+            return false;
+        }
+
+        // Re-applied every frame while a guide is up so the scene GO's Inspector
+        // values can be tuned live in Play mode (copy component values to keep).
+        private void ApplyPoseLayout(DisplayUi ui)
+        {
+            var rect = (RectTransform)ui.poseImage.transform;
+            rect.sizeDelta = new Vector2(poseGuideSizePixels, poseGuideSizePixels);
+            rect.anchoredPosition = poseImagePosition;
+            ui.poseLabel.rectTransform.anchoredPosition = poseLabelPosition;
+        }
+
+        private void Update()
+        {
+            foreach (var ui in _uis)
+                if (ui.poseGroup != null && ui.poseGroup.activeSelf) ApplyPoseLayout(ui);
         }
 
         /// <summary>Caption + horizontal progress bar (Processing state).</summary>
@@ -334,7 +373,7 @@ namespace Experience
             scaler.referenceResolution = new Vector2(1920f, 1080f);
             scaler.matchWidthOrHeight = 0.5f;
 
-            var ui = new DisplayUi { canvas = canvas };
+            var ui = new DisplayUi { display = display, canvas = canvas };
 
             // -- message / countdown (one slot) --
             ui.message = MakeText(root.transform, "Message", messageFontSize, Color.white,
@@ -373,17 +412,13 @@ namespace Experience
 
             var poseGo = new GameObject("PoseImage", typeof(RectTransform));
             poseGo.transform.SetParent(ui.poseGroup.transform, false);
-            var poseRect = poseGo.GetComponent<RectTransform>();
-            poseRect.sizeDelta = new Vector2(poseGuideSizePixels, poseGuideSizePixels);
-            poseRect.anchoredPosition = new Vector2(0f, 130f);
             ui.poseImage = poseGo.AddComponent<RawImage>();
             ui.poseImage.color = Color.white;
             ui.poseImage.raycastTarget = false;
 
             ui.poseLabel = MakeText(ui.poseGroup.transform, "PoseLabel", messageFontSize, Color.white,
                                     new Vector2(1700f, 200f));
-            ui.poseLabel.rectTransform.anchoredPosition =
-                new Vector2(0f, 130f - poseGuideSizePixels * 0.5f - 120f);
+            ApplyPoseLayout(ui); // poseImagePosition / poseLabelPosition / size
             ui.poseGroup.SetActive(false);
 
             // -- progress group: caption + horizontal bar --
