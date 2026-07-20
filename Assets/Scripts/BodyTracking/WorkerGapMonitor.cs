@@ -140,14 +140,15 @@ namespace BodyTracking
             if (_recorder != null && _recorder.IsPlaying)
             {
                 // Playback: on Windows the merger feeds played-back depth to live k4abt
-                // (ignoreRecordedBodies). A track only skips the worker when the flag is
-                // off AND recorded bodies exist — then bodies_main is the source by design.
+                // (ignoreRecordedBodies). A track only skips the worker when the merger's
+                // effective flag is off AND recorded bodies exist — then bodies_main (or
+                // bodies_v11s, which overrides the flag) is the source by design.
                 var tracks = _recorder.GetRecordedDepthTracks();
                 for (int i = 0; i < tracks.Count; i++)
                 {
                     string serial = tracks[i].Serial;
                     if (string.IsNullOrEmpty(serial)) continue;
-                    if (!merger.ignoreRecordedBodies && _recorder.HasRecordedBodies(serial)) continue;
+                    if (!merger.IgnoreRecordedBodiesActive && _recorder.HasRecordedBodies(serial)) continue;
                     _expectedNow.Add(serial);
                 }
                 return;
