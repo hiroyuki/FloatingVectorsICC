@@ -189,6 +189,21 @@ namespace PointCloud
         public int bodyLeadFrames = 0;
         private int _lastBodyLeadFrames;
 
+        [Tooltip("Read: when a device folder has a bodies_v11s file (offline v11s-fused bodies " +
+                 "copied next to bodies_main), load it as the body track instead of bodies_main. " +
+                 "SkeletonMerger then plays those bodies directly and never spawns k4abt workers " +
+                 "for playback — even with ignoreRecordedBodies on — so v11s playback costs no " +
+                 "BT inference. Devices without bodies_v11s fall back to bodies_main. " +
+                 "Takes effect on the next Read.")]
+        public bool useV11sBodies = false;
+
+        /// <summary>True when the last Read loaded at least one device's body track from
+        /// bodies_v11s (see <see cref="useV11sBodies"/>). SkeletonMerger reads this to let
+        /// recorded v11s bodies own the merge even when ignoreRecordedBodies is on —
+        /// live k4abt cannot reproduce the offline fusion, so re-running it would only
+        /// burn GPU to produce worse skeletons.</summary>
+        public bool PlaybackBodiesAreV11s { get; private set; }
+
         // Playback-path hot-swap poll (see Update): last resolved playback root the
         // poll acted on. Polled rather than OnValidate so path edits from the Control
         // Panel / code are caught too, not just the Inspector. Not serialized — it
@@ -1451,12 +1466,18 @@ namespace PointCloud
 
                 ClearTracks();
                 int totalDepth = 0, totalColor = 0, totalIR = 0, totalBodies = 0;
+                int v11sTracks = 0;
                 foreach (var (serial, deviceDir) in PointCloudRecording.EnumerateDevices(root))
                 {
                     string depthPath = Path.Combine(deviceDir, PointCloudRecording.DepthSensorName);
                     string colorPath = Path.Combine(deviceDir, PointCloudRecording.ColorSensorName);
                     string irPath = Path.Combine(deviceDir, PointCloudRecording.IRSensorName);
                     string bodiesPath = Path.Combine(deviceDir, PointCloudRecording.BodiesSensorName);
+                    if (useV11sBodies)
+                    {
+                        string v11sPath = Path.Combine(deviceDir, PointCloudRecording.BodiesV11sSensorName);
+                        if (File.Exists(v11sPath)) { bodiesPath = v11sPath; v11sTracks++; }
+                    }
                     bool hasDepth = File.Exists(depthPath);
                     bool hasColor = File.Exists(colorPath);
                     bool hasIR = File.Exists(irPath);
@@ -1546,8 +1567,15 @@ namespace PointCloud
                     cameraManager.DestroyAllRenderers();
                 }
 
+                PlaybackBodiesAreV11s = v11sTracks > 0;
+                if (useV11sBodies && v11sTracks < _tracks.Count)
+                    Debug.LogWarning(
+                        $"[{nameof(SensorRecorder)}] useV11sBodies: only {v11sTracks}/{_tracks.Count} device(s) " +
+                        "have bodies_v11s; the rest fall back to bodies_main.", this);
+
                 SetStatus(
                     $"Loaded {totalDepth} depth / {totalColor} color / {totalIR} IR / {totalBodies} bodies frame(s) across {_tracks.Count} device(s)"
+                    + (v11sTracks > 0 ? $", v11s bodies on {v11sTracks} device(s)" : "")
                     + (extrinsicsApplied > 0 ? $", extrinsics applied to {extrinsicsApplied} device(s)" : "")
                     + (liveDestroyed > 0 ? $", disconnected {liveDestroyed} live camera(s)" : "")
                     + $" from {root}");
@@ -2742,6 +2770,9 @@ namespace PointCloud
 
         private void ClearTracks()
         {
+            // Whatever was loaded is gone; a Rec session or a Read of a folder without
+            // bodies_v11s must not inherit the previous session's v11s ownership.
+            PlaybackBodiesAreV11s = false;
             foreach (var kv in _tracks)
             {
                 var track = kv.Value;

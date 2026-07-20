@@ -38,6 +38,9 @@ namespace PointCloud
         public const string ColorSensorName      = "color_main";
         public const string IRSensorName         = "ir_main";
         public const string BodiesSensorName     = "bodies_main";
+        // Optional sibling of bodies_main holding offline v11s-fused bodies (same RCSV
+        // payload layout). SensorRecorder.useV11sBodies selects it at Read time.
+        public const string BodiesV11sSensorName = "bodies_v11s";
 
         /// <summary>One recorded frame for a single sensor. <see cref="Bytes"/> is the raw payload.</summary>
         public sealed class Frame
