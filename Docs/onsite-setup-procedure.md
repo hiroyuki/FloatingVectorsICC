@@ -42,19 +42,29 @@
 
 ## 3. キャリブレーション（extrinsics）
 
-Game 内 UI（`CalibrationRuntimeUI`）で実施。Editor 派なら `Window > Calibration > Multi-Camera Extrinsic` でも同じパイプライン。
+Game 内 UI（`CalibrationRuntimeUI`）で実施。仕様の詳細は
+[calibration-spec.md](calibration-spec.md)。
 
-1. **F1** でキャリブモード ON（BT/TSDF は自動サスペンド）
-2. **I** で camera-id 割当モード（②）→ 矢印キーで並び順を決め、**O** で origin(cam0) 指定 → Esc。**この並びをそのまま ③ rigSerialOrder にも使う**と一貫する（rigSerialOrder の cam1→cam2 の向きが **+X 軸** = 体験の向きに直結）
-3. ChArUco ボードを全カメラから見える位置で構え、**C** で capture（全カメラ同時 + skew ゲート）。**位置・向きを変えて複数回**
-4. **S** で solve → `calibration/extrinsics.yaml` 保存（R=リセット、D=ダンプ、H=UI 隠す、F1 で通常表示へ復帰）
-5. **検証**: 人が立って 4 台の点群が 1 体に重なること
-6. **③ `ExperienceConfig.rigSerialOrder` を現地の 4 シリアル・確定した並びに差し替え**（既定値は開発機のシリアル! director が SensorManager/SensorRecorder に push する）
+1. **F1** でキャリブモード ON（BT/TSDF は自動サスペンド、カラーは 1920×1080 へ切替）
+2. **I** で camera-id 割当モード（②）→ 矢印キーで並び順を決め、**O** で origin(cam0) 指定 → **Enter で保存** → Esc
+   - **他セット（4070/5080 のもう一方）の serial が id 0-3 に残っていたら必ず消す** — 接続中カメラが id 4+ に押し出され、外部ディスプレイに映らなくなる
+3. ChArUco ボードで **C** capture。4 隅配置では 3 台以上に同時に見せるのは無理なので、**各辺の中間に立って両端 2 台に見せる**のを 4 辺ぶん、各 5〜10 枚。ボードは静止させてから押す（動くと skew 超過で不採用）
+4. **S** で solve → `extrinsics.yaml` 保存。世界の水平化・rig 周回順の自動設定・sensing area・床グリッド・frustum 表示まで自動
+5. **検証**: 4 辺が実測値どおり（前回リグは 4.6m）、対角が 2 本とも 6.5m 付近、4 台の高さが揃っていること。1 台だけ外れていたらそのカメラのサンプルを撮り直す
+6. **③ rigSerialOrder の手入力は不要になった** — `cameras.yaml` から解決される（シーン値はフォールバック）
 
 ## 4. 床高（rebase）
 
-1. rebase OFF の状態で点群の**床面の y をシーンビューで実測**（キャリブ座標系。前回リグは -0.9）
-2. その値を `SensorManager.rebaseFloorY` と `SensorRecorder.rebaseFloorY` に**同値で**設定 → 以後 y=0 = 物理床（`ExperienceConfig.floorY` は 0 のまま）
+**キャリブとは別セッションで行う**（解像度切替を挟むと点群の更新が止まるため。
+[calibration-spec.md](calibration-spec.md) 既知の問題を参照）。
+
+1. キャリブ後、**アプリを再起動**して Play
+2. **G**（キャリブモード不要）→ 点群が BoundingVolume の内側だけ表示される
+3. **↑/↓** で 1cm、**Shift+↑/↓** で 1mm 動かし、**床の点群がギリギリ消える位置**に合わせる
+4. 値は押すたび `calibration/floor.yaml` に自動保存され、次回起動時に
+   `SensorManager.rebaseFloorY` へ自動反映（Inspector への転記は不要）
+
+> `SensorRecorder.rebaseFloorY` は再生側の値。ライブと同値にする。
 
 ## 5. ライブ動作確認
 
