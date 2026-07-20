@@ -52,14 +52,22 @@ namespace BodyTracking
                  "is unavailable, so recorded bodies_main stays the playback skeleton source and " +
                  "this flag is inert. On Windows this is the intended default: playback should " +
                  "exercise the same live worker pipeline as capture; bodies_main is the fallback " +
-                 "for platforms without k4abt (Mac).")]
+                 "for platforms without k4abt (Mac). Exception: when SensorRecorder.useV11sBodies " +
+                 "loaded bodies_v11s, those recorded bodies own playback regardless of this flag " +
+                 "(live k4abt cannot reproduce the offline v11s fusion).")]
         public bool ignoreRecordedBodies = true;
+
+        // Recorded v11s bodies own playback: bodies_v11s is the offline fused output that
+        // live k4abt cannot reproduce, so when the recorder loaded it, recorded-body playback
+        // wins even with ignoreRecordedBodies on — no workers spawn, no inference cost.
+        private bool RecordedV11sOwnsPlayback =>
+            _subscribedRecorder != null && _subscribedRecorder.PlaybackBodiesAreV11s;
 
         // ignoreRecordedBodies, platform-gated: live k4abt exists only on Windows, so on any
         // other platform the flag must read as false or playback would have no skeleton source.
         private bool IgnoreRecordedActive =>
 #if UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN
-            ignoreRecordedBodies;
+            ignoreRecordedBodies && !RecordedV11sOwnsPlayback;
 #else
             false;
 #endif

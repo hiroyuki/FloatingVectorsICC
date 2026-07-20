@@ -18,6 +18,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using BodyTracking;
 using Experience.Publishing;
+using PointCloud;
 using TSDF;
 using UnityEngine;
 
@@ -36,6 +37,8 @@ namespace Experience
         public PointCloudMotionCurves motionCurves;
         public BonePoseHistory poseHistory;
         public QrOverlay qrOverlay; // added to this GameObject when missing
+        public SensorRecorder sensorRecorder; // freeze-countdown source
+        public CountdownOverlay countdownOverlay; // added to this GameObject when missing
 
         [Header("Operator controls")]
         [Range(2, 32)]
@@ -82,6 +85,9 @@ namespace Experience
             if (poseHistory == null) poseHistory = FindFirstObjectByType<BonePoseHistory>();
             if (qrOverlay == null) qrOverlay = FindFirstObjectByType<QrOverlay>()
                                                ?? gameObject.AddComponent<QrOverlay>();
+            if (sensorRecorder == null) sensorRecorder = FindFirstObjectByType<SensorRecorder>();
+            if (countdownOverlay == null) countdownOverlay = FindFirstObjectByType<CountdownOverlay>()
+                                                             ?? gameObject.AddComponent<CountdownOverlay>();
         }
 
         private void OnDisable()
@@ -107,6 +113,13 @@ namespace Experience
                 if (PreviewShowing) HidePreview();
                 else ShowPreview();
             }
+
+            // Freeze-countdown display (Space): drawn here via per-display canvases —
+            // SensorRecorder's IMGUI OnGUI never showed on the multi-display setup.
+            float cd = sensorRecorder != null ? sensorRecorder.FreezeCountdownRemaining : 0f;
+            if (cd > 0f && countdownOverlay != null)
+                countdownOverlay.Show(Mathf.CeilToInt(cd).ToString());
+            else countdownOverlay?.Hide();
         }
 
         // ---------------- export-data preview ----------------

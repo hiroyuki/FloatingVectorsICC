@@ -118,15 +118,24 @@ namespace PointCloud
                  "projection of the 4-camera centroid, +X = camera1→2 (yaw + XZ only, floor " +
                  "height stays calibrated). Needs rigSerialOrder. Off → Dev mode unchanged.")]
         public bool applyWorldRebase = false;
-        [Tooltip("The rig's 4 camera serials in order 1..4 (defines the rebased axes: " +
+        [Tooltip("FALLBACK ONLY — calibration/cameras.yaml (assign mode, machine-local) wins " +
+                 "when it lists 4 serials, so each rig set resolves its own cameras. " +
+                 "The rig's 4 camera serials in order 1..4 (defines the rebased axes: " +
                  "+X = camera1→2, +Z ≈ camera2→3). Rebase is skipped with a warning when " +
                  "these don't resolve against extrinsics.yaml.")]
         public string[] rigSerialOrder = new string[0];
 
         [Tooltip("Physical floor height in the CALIBRATION frame (m) — the rebase shifts " +
-                 "Y so this becomes the new y=0 (measured -0.9 on the current rig, the " +
-                 "cameras sit ~1 m above the floor). 0 = keep calibrated heights.")]
+                 "Y so this becomes the new y=0 (the cameras sit ~1 m above the floor). " +
+                 "0 = keep calibrated heights. OVERWRITTEN AT STARTUP by " +
+                 "calibration/floor.yaml when that exists (written by the floor-tune " +
+                 "mode), since the floor is a per-room measurement rather than a scene " +
+                 "setting — delete the file to go back to this value.")]
         public float rebaseFloorY = 0f;
+
+        [Tooltip("Load rebaseFloorY from calibration/floor.yaml at startup. Off = the " +
+                 "Inspector value always wins.")]
+        public bool loadFloorYFromCalibration = true;
 
         [Header("Frame rate")]
         [Tooltip("Cap the application frame rate via Application.targetFrameRate. " +
@@ -179,6 +188,7 @@ namespace PointCloud
 
         private void Start()
         {
+            LoadFloorYFromCalibration();
             if (playbackOnly)
             {
                 if (verboseLogging)
@@ -187,6 +197,20 @@ namespace PointCloud
                 return;
             }
             StartLive();
+        }
+
+        // The floor height belongs to the room, not the scene: the floor-tune mode
+        // writes it next to extrinsics.yaml so it survives Play mode and stays
+        // machine-local (the two rig sets stand in different rooms).
+        private void LoadFloorYFromCalibration()
+        {
+            if (!loadFloorYFromCalibration) return;
+            if (!PointCloudRecording.TryReadFloorY(ResolveExtrinsicsRoot(), out float y)) return;
+            if (Mathf.Approximately(y, rebaseFloorY)) return;
+            if (verboseLogging)
+                Debug.Log($"[{nameof(SensorManager)}] rebaseFloorY {rebaseFloorY} → {y} from calibration/floor.yaml.",
+                          this);
+            rebaseFloorY = y;
         }
 
         /// <summary>
@@ -375,13 +399,27 @@ namespace PointCloud
                 ExtrinsicsApply.ToUnityLocal(c.GlobalTrColorCamera.Value, out var pos, out _);
                 cams.Add((c.Serial, pos));
             }
-            if (!WorldFrameRebase.TryComputeFromCalibrations(cams, rigSerialOrder, out rebase, out string reason,
-                                                             rebaseFloorY))
+            var rigOrder = PointCloudRecording.ResolveRigSerialOrder(
+                ResolveExtrinsicsRoot(), rigSerialOrder, out string rigSource);
+            if (WorldFrameRebase.TryComputeFromCalibrations(cams, rigOrder, out rebase, out string reason,
+                                                            rebaseFloorY))
+                return true;
+
+            // cameras.yaml is an ID map, not necessarily a perimeter walk. When its
+            // order fails the rebase gate, fall back to the scene's hand-ordered
+            // list rather than losing the world rebase entirely.
+            if (rigSerialOrder is { Length: 4 } && !ReferenceEquals(rigOrder, rigSerialOrder)
+                && WorldFrameRebase.TryComputeFromCalibrations(cams, rigSerialOrder, out rebase, out _,
+                                                              rebaseFloorY))
             {
-                Debug.LogWarning($"[{nameof(SensorManager)}] world rebase skipped: {reason}", this);
-                return false;
+                Debug.Log($"[{nameof(SensorManager)}] world rebase: {rigSource} order rejected ({reason}); " +
+                          "used the scene's rigSerialOrder instead.", this);
+                return true;
             }
-            return true;
+
+            Debug.LogWarning($"[{nameof(SensorManager)}] world rebase skipped (order from {rigSource}): {reason}",
+                             this);
+            return false;
         }
 
         /// <summary>

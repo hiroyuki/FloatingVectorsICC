@@ -82,6 +82,11 @@ namespace Calibration.RuntimeUI
         public KeyCode resetKey = KeyCode.R;
         public KeyCode dumpKey = KeyCode.D;
         public KeyCode clearSamplesKey = KeyCode.Backspace;
+        [Tooltip("Capture the floor-anchor sample: the board lying FLAT on the physical " +
+                 "floor. At Solve the board plane becomes world y=0 with +Y up — without " +
+                 "it the world inherits the origin camera's tilt and the rebase/floor " +
+                 "grid/sensing area are all skewed.")]
+        public KeyCode floorSampleKey = KeyCode.F;
         public KeyCode toggleUiKey = KeyCode.H;
         [Tooltip("Enter/exit camera-id assign mode (also Esc to exit). In assign mode the action " +
                  "keys are suspended and the arrow keys reassign ids / pick the world origin.")]
@@ -115,6 +120,46 @@ namespace Calibration.RuntimeUI
         public int displayCam01 = 1;
         [Tooltip("0-based display index for cams 2+3 (2 = the OS's 'Display 3').")]
         public int displayCam23 = 2;
+
+        [Header("Calibration color resolution")]
+        [Tooltip("Restart the live rig with a higher color resolution while calibration " +
+                 "mode is active — AprilTag decode range scales ~linearly with pixels on " +
+                 "the marker, so 1920x1080 roughly reaches 1.5x the distance of 1280x960. " +
+                 "The show resolution is restored on exit. Each switch restarts the " +
+                 "camera pipelines (~15 s).")]
+        public bool boostColorResolution = true;
+        public uint calibColorWidth = 1920;
+        public uint calibColorHeight = 1080;
+
+        [Header("Floor anchor")]
+        [Tooltip("How Solve levels the world. BoardSample: the [floorSampleKey] shot of the " +
+                 "board flat on the floor defines y=0 (accurate but needs a steep view of the " +
+                 "board — a grazing-angle shot tilts the whole world). CameraPlaneAssumeLevel: " +
+                 "assume the 4 cameras are mounted level and coplanar, make their best-fit " +
+                 "plane horizontal at cameraHeightMeters (well-conditioned across the 4.6 m " +
+                 "span; level the physical rig instead of the software).")]
+        public FloorAnchorMode floorAnchor = FloorAnchorMode.CameraPlaneAssumeLevel;
+        [Tooltip("CameraPlaneAssumeLevel only: physical height of the camera plane above the floor (m).")]
+        public float cameraHeightMeters = 1.0f;
+
+        [Tooltip("Floor-tune mode: shows the live point clouds clipped to the sensing box and " +
+                 "nudges the world's floor height with the arrow keys, so you can park y=0 " +
+                 "right where the floor points vanish. Only meaningful in a levelled world " +
+                 "(solve with a floor anchor first) — a tilt cannot be fixed by shifting Y.")]
+        public KeyCode floorTuneKey = KeyCode.G;
+        [Tooltip("Floor-tune step per arrow press (m). Hold Shift for a tenth of it.")]
+        public float floorTuneStep = 0.01f;
+
+        public enum FloorAnchorMode { BoardSample, CameraPlaneAssumeLevel }
+
+        [Header("After solve")]
+        [Tooltip("After a Solve that applied to the live rig: fit the sensing area " +
+                 "(ExperienceSpaceBuilder.Apply → BoundingVolume reshaped, floor grid " +
+                 "attached) and turn on every camera's frustum marker, so display 0 " +
+                 "immediately shows where the cameras sit in the solved world.")]
+        public bool applySensingAidsOnSolve = true;
+        [Tooltip("Sensing-area builder to Apply after Solve. Empty → found in scene.")]
+        public Experience.ExperienceSpaceBuilder spaceBuilder;
 
         [Header("Interfering components")]
         [Tooltip("Disable these components while this UI is enabled, restore on disable. " +
@@ -186,6 +231,7 @@ namespace Calibration.RuntimeUI
             public Text Label;
             public Texture2D Tex;
             public ulong LastTs;
+            public DetectionOverlay Overlay;
         }
 
         private GUIStyle _label;
@@ -214,6 +260,11 @@ namespace Calibration.RuntimeUI
             public int Corners;
             public bool Detected;
             public bool HasDetectionPass;
+            // Latest detection geometry (image px) for the external display overlay.
+            public float[][] MarkerQuads;
+            public float[] CharucoCornerPoints;
+            public int DetWidth;
+            public int DetHeight;
         }
 
         private struct CameraResult
@@ -243,6 +294,9 @@ namespace Calibration.RuntimeUI
             if (_active)
             {
                 if (suspendInterferingComponents) SuspendInterfering();
+                // Before SuppressScene: its SwitchToLive path spawns renderers from
+                // the manager's current color fields, which Boost just overrode.
+                BoostColorResolutionForCalibration();
                 SuppressScene();
                 BuildExternalDisplays();
             }
@@ -250,6 +304,11 @@ namespace Calibration.RuntimeUI
 
         private void OnDisable()
         {
+            // Fields only, no camera restart: OnDisable also fires on teardown /
+            // playmode exit, where a ~15 s device re-open would just block. The
+            // next StartLive picks up the restored show resolution.
+            RestoreColorResolution(restartLive: false);
+            AbandonFloorTune();
             Unsubscribe();
             _estimator?.Dispose();
             _estimator = null;
@@ -266,6 +325,16 @@ namespace Calibration.RuntimeUI
         {
             // The master toggle is polled even while disabled so it can turn back on.
             if (Input.GetKeyDown(toggleActiveKey)) SetActive(!_active);
+
+            // Floor tune is independent of calibration mode: it needs the live point
+            // clouds and the arrow keys, none of what calibration sets up (marker
+            // detection, boosted color, suspended BT/TSDF, stopped playback). Runs
+            // whether or not the UI is active — that is the whole point of the
+            // "calibrate, restart the app, then tune the floor" flow.
+            if (_manager == null) _manager = FindFirstObjectByType<SensorManager>();
+            if (Input.GetKeyDown(floorTuneKey)) ToggleFloorTune();
+            if (_floorTune) { HandleFloorTuneInput(); if (!_active) return; }
+
             if (!_active) return;
 
             // (Re)acquire the manager and keep our subscription list in sync with
@@ -299,6 +368,7 @@ namespace Calibration.RuntimeUI
             if (_active)
             {
                 if (suspendInterferingComponents) SuspendInterfering();
+                BoostColorResolutionForCalibration();
                 SuppressScene();
                 BuildExternalDisplays();
                 SetStatus("Calibration UI enabled.");
@@ -307,6 +377,7 @@ namespace Calibration.RuntimeUI
             {
                 _assignMode = false;
                 _soloId = -1;
+                AbandonFloorTune();
                 Unsubscribe();
                 _estimator?.Dispose();
                 _estimator = null;
@@ -316,6 +387,7 @@ namespace Calibration.RuntimeUI
                 DestroyExternalDisplays();
                 RestoreScene();
                 RestoreInterfering();
+                RestoreColorResolution(restartLive: true);
                 SetStatus("Calibration UI disabled (normal show restored).");
             }
         }
@@ -329,11 +401,19 @@ namespace Calibration.RuntimeUI
             if (_assignMode) { HandleAssignInput(); return; }
             if (Input.GetKeyDown(assignModeKey)) { EnterAssignMode(); return; }
 
+            if (_floorTune) return; // Update already handled the nudge keys
+
             if (Input.GetKeyDown(captureKey)) DoCapture();
+            if (Input.GetKeyDown(floorSampleKey)) DoCaptureFloor();
             if (Input.GetKeyDown(solveKey)) DoSolve();
             if (Input.GetKeyDown(resetKey)) DoReset();
             if (Input.GetKeyDown(dumpKey)) DoDumpFrames();
-            if (Input.GetKeyDown(clearSamplesKey)) { _samples.Clear(); SetStatus("Samples cleared."); }
+            if (Input.GetKeyDown(clearSamplesKey))
+            {
+                _samples.Clear();
+                _hasFloorSample = false;
+                SetStatus("Samples + floor sample cleared.");
+            }
             HandleSoloInput();
         }
 
@@ -603,6 +683,10 @@ namespace Calibration.RuntimeUI
                     p.Corners = det.InterpolatedCornerCount;
                     p.Detected = det.DetectedMarkerCount > 0;
                     p.HasDetectionPass = true;
+                    p.MarkerQuads = det.MarkerQuads;
+                    p.CharucoCornerPoints = det.CharucoCornerPoints;
+                    p.DetWidth = f.Width;
+                    p.DetHeight = f.Height;
                 }
                 catch (Exception e)
                 {
@@ -645,8 +729,12 @@ namespace Calibration.RuntimeUI
 
         private void OnGUI()
         {
-            if (!_active || !showUI) return;
+            if ((!_active && !_floorTune) || !showUI) return;
             EnsureStyles();
+
+            // Floor tune runs without calibration mode, so it draws its own readout
+            // and must not fall into the "waiting for renderers" early-out below.
+            if (_floorTune) { DrawHud(); return; }
 
             if (_manager == null || _manager.Renderers.Count == 0)
             {
@@ -657,7 +745,9 @@ namespace Calibration.RuntimeUI
                 return;
             }
 
-            DrawPreviewGrid();
+            // Floor tune is a 3D judgement — the color grid would cover the very
+            // point cloud being lined up, so only the HUD line is drawn.
+            if (!_floorTune) DrawPreviewGrid();
             DrawHud();
         }
 
@@ -804,8 +894,14 @@ namespace Calibration.RuntimeUI
             else
             {
                 string solo = _soloId >= 0 ? $"id {_soloId}" : "all";
-                keys =
+                keys = _floorTune
+                    ? $"FLOOR TUNE  ↑/↓ move floor ({floorTuneStep * 100f:0.#} cm, Shift 1/10)   " +
+                      $"rebaseFloorY  {(_manager != null ? _manager.rebaseFloorY : 0f):0.####}   " +
+                      $"[{floorTuneKey}]/Esc exit"
+                    :
                     $"[{captureKey}] Capture ({_samples.Count})   " +
+                    $"[{floorSampleKey}] Floor ({(_hasFloorSample ? "set" : "NONE")})   " +
+                    $"[{floorTuneKey}] Floor-tune   " +
                     $"[{solveKey}] Solve   " +
                     $"[{resetKey}] Reset   " +
                     $"[{dumpKey}] Dump   " +
@@ -820,7 +916,8 @@ namespace Calibration.RuntimeUI
             int accepted = 0, detectedTotal = 0;
             foreach (var s in _samples) if (s.SkewOk) { accepted++; }
             GUI.Label(new Rect(10, y + 34, Screen.width - 20, 24),
-                $"samples: {_samples.Count} (skew-ok {accepted})   board: {(boardSpec != null ? boardSpec.name : "<none>")}",
+                $"samples: {_samples.Count} (skew-ok {accepted})   floor: {(_hasFloorSample ? "set" : "NONE — press " + floorSampleKey)}   " +
+                $"board: {(boardSpec != null ? boardSpec.name : "<none>")}",
                 _hud);
 
             if (!string.IsNullOrEmpty(_status))
@@ -944,6 +1041,185 @@ namespace Calibration.RuntimeUI
             }
         }
 
+        // -------- Floor tune (visual y=0 nudge) --------
+
+        private bool _floorTune;
+        private BoundingVolume.FilterMode _savedFilterMode;
+        private bool _savedFilterModeValid;
+        private PointCloudView _tunedView;
+        private bool _savedShowPointClouds;
+
+        // Shows the live clouds clipped to the sensing box so the operator can park
+        // y=0 exactly where the floor points disappear. The lever is
+        // SensorManager.rebaseFloorY (the calibration-frame height that becomes the
+        // new y=0), re-applied through ApplyExtrinsicsToLive — cheap, and it writes
+        // the same path the show reads.
+        private void ToggleFloorTune()
+        {
+            _floorTune = !_floorTune;
+            var box = _manager != null ? _manager.defaultBoundingBox : null;
+            if (_floorTune)
+            {
+                // Two separate hiders must both stand down. EnforceHiddenPointClouds
+                // already disabled these meshes, so skipping it from now on is not
+                // enough — switch them back on here. And PointCloudView re-asserts
+                // showPointClouds over every registered MeshRenderer each frame, so
+                // without this the clouds flick straight back off.
+                RestoreHiddenMeshesForTuneExit();
+                // The wall canvases are full-screen black backdrops on the very
+                // displays the scene cameras render to — leaving them up hides the
+                // point cloud completely, which is the only thing floor tune shows.
+                SetExternalCanvasesVisible(false);
+                _tunedView = _manager != null ? _manager.view : null;
+                if (_tunedView != null)
+                {
+                    _savedShowPointClouds = _tunedView.showPointClouds;
+                    _tunedView.showPointClouds = true;
+                }
+                if (box != null)
+                {
+                    _savedFilterMode = box.filterMode;
+                    _savedFilterModeValid = true;
+                    box.filterMode = BoundingVolume.FilterMode.KeepInside;
+                }
+                // Deliberately does NOT touch the color resolution: switching it
+                // restarts the pipelines, and the point clouds do not resume
+                // updating afterwards (they freeze on the last mesh — looks like
+                // leftover buffer garbage). Floor tuning is a separate session:
+                // finish marker calibration, restart the app, then tune.
+                if (_manager != null && !_manager.applyWorldRebase)
+                    SetStatus("Floor tune: SensorManager.applyWorldRebase is OFF — rebaseFloorY has no effect.", warn: true);
+                else
+                    SetStatus($"Floor tune ON: ↑/↓ move the floor ({floorTuneStep * 100f:0.#} cm, Shift = 1/10). " +
+                              $"[{floorTuneKey}] to exit.");
+            }
+            else
+            {
+                if (box != null && _savedFilterModeValid) box.filterMode = _savedFilterMode;
+                _savedFilterModeValid = false;
+                if (_tunedView != null) { _tunedView.showPointClouds = _savedShowPointClouds; _tunedView = null; }
+                SetExternalCanvasesVisible(true);
+                RestoreHiddenMeshesForTuneExit();
+                SetStatus($"Floor tune OFF. rebaseFloorY  {(_manager != null ? _manager.rebaseFloorY : 0f):0.####}" +
+                          "  (saved in calibration/floor.yaml — reloaded on next start)");
+            }
+        }
+
+        // Put every mesh back to its pre-calibration state and forget the record:
+        // on tune ENTER that reveals the clouds, on EXIT it hands them back to
+        // EnforceHiddenPointClouds with a clean slate (it only saves a mesh's prior
+        // state the first time it hides it).
+        private void RestoreHiddenMeshesForTuneExit()
+        {
+            foreach (var kv in _hiddenMeshes)
+                if (kv.Key != null) kv.Key.enabled = kv.Value;
+            _hiddenMeshes.Clear();
+        }
+
+        // Give back what floor tune borrowed, without ToggleFloorTune's side effects
+        // (re-boosting the color resolution would restart the cameras during a
+        // teardown / mode exit).
+        private void AbandonFloorTune()
+        {
+            if (!_floorTune) return;
+            _floorTune = false;
+            var box = _manager != null ? _manager.defaultBoundingBox : null;
+            if (box != null && _savedFilterModeValid) box.filterMode = _savedFilterMode;
+            _savedFilterModeValid = false;
+            if (_tunedView != null) { _tunedView.showPointClouds = _savedShowPointClouds; _tunedView = null; }
+            SetExternalCanvasesVisible(true);
+        }
+
+        private void SetExternalCanvasesVisible(bool visible)
+        {
+            foreach (var go in _externalCanvases)
+                if (go != null) go.SetActive(visible);
+        }
+
+        private void HandleFloorTuneInput()
+        {
+            if (Input.GetKeyDown(KeyCode.Escape)) { ToggleFloorTune(); return; }
+            if (_manager == null) return;
+            float step = floorTuneStep *
+                         ((Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift)) ? 0.1f : 1f);
+            float delta = 0f;
+            if (Input.GetKeyDown(KeyCode.UpArrow)) delta = step;
+            else if (Input.GetKeyDown(KeyCode.DownArrow)) delta = -step;
+            if (delta == 0f) return;
+            _manager.rebaseFloorY += delta;
+            _manager.ApplyExtrinsicsToLive();
+            // Persist every nudge: the Inspector value dies with Play mode, and this
+            // is the number the whole floor-tune session exists to produce.
+            try
+            {
+                PointCloudRecording.WriteFloorY(_manager.ResolveExtrinsicsRoot(), _manager.rebaseFloorY);
+                SetStatus($"rebaseFloorY  {_manager.rebaseFloorY:0.####}   (saved to floor.yaml)");
+            }
+            catch (Exception e)
+            {
+                SetStatus($"rebaseFloorY  {_manager.rebaseFloorY:0.####}   ⚠ save failed: {e.Message}", warn: true);
+            }
+        }
+
+        private CaptureSample _floorSample;
+        private bool _hasFloorSample;
+
+        // Floor anchor: one shot of the board lying FLAT on the physical floor.
+        // Unlike DoCapture it needs no skew gate and no full-rig coverage — the
+        // board is static, one camera's view fixes the plane.
+        private void DoCaptureFloor()
+        {
+            try
+            {
+                if (boardSpec == null) { SetStatus("Floor sample aborted: no board spec assigned.", warn: true); return; }
+                EnsureEstimator();
+                if (_manager == null || _manager.Renderers.Count == 0)
+                {
+                    SetStatus("Floor sample aborted: no renderers.", warn: true); return;
+                }
+
+                var sample = new CaptureSample
+                {
+                    CapturedAtUtc = DateTime.UtcNow,
+                    SkewMs = 0,
+                    SkewOk = true,
+                    Cameras = new List<CameraResult>(),
+                };
+                int detected = 0;
+                foreach (var r in _manager.Renderers)
+                {
+                    if (r == null || !r.CameraParam.HasValue) continue;
+                    if (!_latest.TryGetValue(r, out var f) || !f.HasFrame) continue;
+                    var p = r.CameraParam.Value;
+                    var distArr = new double[] { p.RgbDistortion.K1, p.RgbDistortion.K2, p.RgbDistortion.P1, p.RgbDistortion.P2, p.RgbDistortion.K3 };
+                    var res = _estimator.Estimate(
+                        f.Rgb8, f.Width, f.Height,
+                        p.RgbIntrinsic.Fx, p.RgbIntrinsic.Fy, p.RgbIntrinsic.Cx, p.RgbIntrinsic.Cy, distArr);
+                    if (!res.Success) continue;
+                    detected++;
+                    sample.Cameras.Add(new CameraResult
+                    {
+                        Serial = r.deviceSerial, Detected = true,
+                        Markers = res.DetectedMarkerCount, Corners = res.InterpolatedCornerCount,
+                        CamTrMarker = new Rigid3d(res.Rotation, res.Translation),
+                    });
+                }
+                if (detected == 0)
+                {
+                    SetStatus("Floor sample: board not detected by any camera — lay it flat on the floor in view.", warn: true);
+                    return;
+                }
+                _floorSample = sample;
+                _hasFloorSample = true;
+                SetStatus($"Floor sample set ({detected} camera(s) see the board). Solve will anchor the world to it.");
+            }
+            catch (Exception e)
+            {
+                SetStatus($"Floor sample failed: {e.Message}", warn: true);
+                Debug.LogException(e);
+            }
+        }
+
         private void DoSolve()
         {
             try
@@ -998,6 +1274,60 @@ namespace Calibration.RuntimeUI
                     return;
                 }
 
+                // Floor anchor: re-express the cam0-anchored solution in a
+                // gravity-aligned frame. Without it the world inherits the origin
+                // camera's tilt and the rebase gate / floor grid are skewed.
+                string floorNote;
+                bool gravityAligned = false;
+                if (floorAnchor == FloorAnchorMode.CameraPlaneAssumeLevel)
+                {
+                    string planeErr = serials.Count != 4 ? $"need 4 cameras, have {serials.Count}" : null;
+                    if (planeErr == null && TryAnchorToCameraPlane(ref solve, serials.Count, out planeErr))
+                    {
+                        gravityAligned = true;
+                        floorNote = $" (camera-plane anchored, cams at {cameraHeightMeters:0.00} m)";
+                    }
+                    else
+                    {
+                        floorNote = $" ⚠ camera-plane anchor failed ({planeErr}) — world stays camera-tilted";
+                    }
+                }
+                else if (_hasFloorSample)
+                {
+                    int fi = -1;
+                    Rigid3d camTrMarker = Rigid3d.Identity;
+                    foreach (var c in _floorSample.Cameras)
+                    {
+                        if (!c.Detected || !serialToIdx.TryGetValue(c.Serial, out var idx)) continue;
+                        fi = idx; camTrMarker = c.CamTrMarker; break;
+                    }
+                    if (fi < 0)
+                    {
+                        floorNote = " ⚠ floor sample's cameras aren't in this solve — world stays camera-tilted";
+                    }
+                    else
+                    {
+                        var globalTrMarker = Rigid3d.Compose(solve.GlobalTrCamera[fi], camTrMarker);
+                        // Marker→world axis shuffle: board X stays x, board Z (out of
+                        // the pattern, i.e. up off the floor) becomes -y (down in the
+                        // OpenCV convention this file stores = up in Unity), board Y
+                        // becomes z. Determinant +1.
+                        var axis = new Rigid3d(
+                            new[] { 1.0, 0, 0, 0, 0, -1.0, 0, 1.0, 0 },
+                            new[] { 0.0, 0, 0 });
+                        var worldTrGlobal = Rigid3d.Compose(axis, globalTrMarker.Inverse());
+                        for (int i = 0; i < solve.GlobalTrCamera.Length; i++)
+                            solve.GlobalTrCamera[i] = Rigid3d.Compose(worldTrGlobal, solve.GlobalTrCamera[i]);
+                        floorNote = " (floor-anchored)";
+                        gravityAligned = true;
+                    }
+                }
+                else
+                {
+                    floorNote = $" ⚠ no floor sample — lay the board flat on the floor and press [{floorSampleKey}] " +
+                                "before Solve, or the world stays camera-tilted";
+                }
+
                 var calibrations = new List<PointCloudRecording.DeviceCalibration>(serials.Count);
                 for (int i = 0; i < serials.Count; i++)
                 {
@@ -1019,6 +1349,29 @@ namespace Calibration.RuntimeUI
                     });
                 }
 
+                // Auto-derive the rig perimeter order from the solved layout so the
+                // rebase never fails on a hand-entered camera-id order. Only
+                // meaningful in a gravity-aligned world.
+                string orderNote = "";
+                if (gravityAligned && serials.Count == 4)
+                {
+                    var posBySerial = new Dictionary<string, Vector3>();
+                    for (int i = 0; i < serials.Count; i++)
+                    {
+                        ExtrinsicsApply.ToUnityLocal(ToObExtrinsicMm(solve.GlobalTrCamera[i]), out var upos, out _);
+                        posBySerial[serials[i]] = upos;
+                    }
+                    var perim = FindPerimeterOrder(posBySerial, serials[0]);
+                    if (perim != null)
+                    {
+                        ApplyPresentOrder(perim);
+                        SaveCameraMap();
+                        orderNote = " rig order auto-set: " +
+                                    string.Join("→", perim.ConvertAll(s => s.Substring(s.Length - 2)));
+                    }
+                    else orderNote = " ⚠ no valid rig perimeter order found from solved positions";
+                }
+
                 string root = ResolveRoot();
                 PointCloudRecording.WriteExtrinsicsYaml(root, calibrations);
                 string outPath = Path.Combine(PointCloudRecording.CalibrationDir(root), "extrinsics.yaml");
@@ -1035,16 +1388,230 @@ namespace Calibration.RuntimeUI
                     string mgrRoot = _manager.ResolveExtrinsicsRoot();
                     bool sameRoot = string.Equals(
                         Path.GetFullPath(root), Path.GetFullPath(mgrRoot), StringComparison.OrdinalIgnoreCase);
-                    if (sameRoot) { _manager.ApplyExtrinsicsToLive(); applyNote = " (applied to live)"; }
+                    if (sameRoot)
+                    {
+                        _manager.ApplyExtrinsicsToLive();
+                        applyNote = " (applied to live)";
+                        // Camera poses are now solved-world; safe to fit the box/grid
+                        // and show the frustums.
+                        if (applySensingAidsOnSolve) applyNote += ApplySensingAids();
+                    }
                     else applyNote = $" (manager root differs: {mgrRoot})";
                 }
-                SetStatus($"Solved. Wrote {calibrations.Count} entries to {outPath}.{applyNote}");
+                SetStatus($"Solved{floorNote}. Wrote {calibrations.Count} entries to {outPath}.{orderNote}{applyNote}");
             }
             catch (Exception e)
             {
                 SetStatus($"Solve failed: {e.Message}", warn: true);
                 Debug.LogException(e);
             }
+        }
+
+        // CameraPlaneAssumeLevel anchor: make the best-fit plane through the four
+        // (near-coplanar) camera positions horizontal, with the plane at
+        // cameraHeightMeters above the new floor. Works in the solver's OpenCV
+        // frame (+y down); the down direction is disambiguated by the cameras'
+        // own +y (image-down) axes, which point at the physical floor for any
+        // upright-mounted camera. Far better conditioned than a distant board
+        // shot (4.6 m baseline vs a 0.7 m board patch at grazing angle).
+        private bool TryAnchorToCameraPlane(ref PairwiseCalibrationMath.SolveResult solve, int count, out string err)
+        {
+            err = null;
+            var p = new UnityEngine.Vector3[count];
+            for (int i = 0; i < count; i++)
+            {
+                var t = solve.GlobalTrCamera[i].Translation;
+                p[i] = new Vector3((float)t[0], (float)t[1], (float)t[2]);
+            }
+            Vector3 c = (p[0] + p[1] + p[2] + p[3]) * 0.25f;
+
+            // Plane normal: average of the two triangle normals, sign-aligned.
+            Vector3 n1 = Vector3.Cross(p[1] - p[0], p[2] - p[0]);
+            Vector3 n2 = Vector3.Cross(p[2] - p[0], p[3] - p[0]);
+            if (n1.magnitude < 1e-6f || n2.magnitude < 1e-6f) { err = "degenerate camera layout"; return false; }
+            if (Vector3.Dot(n1, n2) < 0f) n2 = -n2;
+            Vector3 n = (n1.normalized + n2.normalized);
+            if (n.magnitude < 1e-6f) { err = "degenerate camera layout"; return false; }
+            n.Normalize();
+
+            // Physical down = average image-down (+y) axis of the cameras
+            // (rotation column 1 of global_tr_cam maps camera +y into global).
+            Vector3 downAvg = Vector3.zero;
+            for (int i = 0; i < count; i++)
+            {
+                var r = solve.GlobalTrCamera[i].Rotation;
+                downAvg += new Vector3((float)r[1], (float)r[4], (float)r[7]);
+            }
+            if (downAvg.magnitude < 1e-6f) { err = "cannot resolve down direction"; return false; }
+            if (Vector3.Dot(n, downAvg) < 0f) n = -n; // n = down in the OpenCV frame
+
+            // Orthonormal basis: y' = n (down), x' = first edge projected onto the
+            // plane (yaw is arbitrary here — the rebase re-yaws to camera1→2),
+            // z' = x' × y' (right-handed).
+            Vector3 xp = (p[1] - p[0]) - Vector3.Dot(p[1] - p[0], n) * n;
+            if (xp.magnitude < 1e-6f) { err = "degenerate camera layout"; return false; }
+            xp.Normalize();
+            Vector3 zp = Vector3.Cross(xp, n);
+
+            // world_tr_global: rows = new axes; centroid maps to (0, -h, 0) so the
+            // camera plane sits h metres above the floor (OpenCV y is down; the
+            // Unity conversion flips it to +h up).
+            var rot = new double[]
+            {
+                xp.x, xp.y, xp.z,
+                n.x,  n.y,  n.z,
+                zp.x, zp.y, zp.z,
+            };
+            var rc = new Vector3(
+                (float)(rot[0] * c.x + rot[1] * c.y + rot[2] * c.z),
+                (float)(rot[3] * c.x + rot[4] * c.y + rot[5] * c.z),
+                (float)(rot[6] * c.x + rot[7] * c.y + rot[8] * c.z));
+            var trans = new double[] { -rc.x, -cameraHeightMeters - rc.y, -rc.z };
+            var worldTrGlobal = new Rigid3d(rot, trans);
+            for (int i = 0; i < solve.GlobalTrCamera.Length; i++)
+                solve.GlobalTrCamera[i] = Rigid3d.Compose(worldTrGlobal, solve.GlobalTrCamera[i]);
+            return true;
+        }
+
+        // Perimeter walk that satisfies the WorldFrameRebase gate: camera1→2 is
+        // the X axis, camera2→3 must agree with X̂ × up within its 10° tolerance.
+        // Starting camera fixed to the origin serial; tries the 6 orderings of
+        // the remaining three and returns the first valid winding.
+        private static List<string> FindPerimeterOrder(Dictionary<string, Vector3> pos, string first)
+        {
+            var rest = new List<string>(pos.Keys);
+            rest.Remove(first);
+            if (rest.Count != 3) return null;
+            for (int a = 0; a < 3; a++)
+            {
+                for (int b = 0; b < 3; b++)
+                {
+                    if (b == a) continue;
+                    int c = 3 - a - b;
+                    var ord = new List<string> { first, rest[a], rest[b], rest[c] };
+                    Vector3 x = pos[ord[1]] - pos[ord[0]]; x.y = 0f;
+                    Vector3 z = pos[ord[2]] - pos[ord[1]]; z.y = 0f;
+                    if (x.magnitude < 0.01f || z.magnitude < 0.01f) continue;
+                    var zAxis = Vector3.Cross(x.normalized, Vector3.up);
+                    if (Vector3.Dot(zAxis, z.normalized) >= Mathf.Cos(10f * Mathf.Deg2Rad)) return ord;
+                }
+            }
+            return null;
+        }
+
+        // Post-solve scene aids on display 0: sensing-area box + floor grid via
+        // ExperienceSpaceBuilder, camera frustum markers via SensorManager (the
+        // point clouds stay hidden in calibration mode, so the frustums + grid
+        // are what shows the solved rig). Returns a note for the status line.
+        private string ApplySensingAids()
+        {
+            if (_manager != null) _manager.showCameraMarkers = true;
+            var builder = spaceBuilder != null
+                ? spaceBuilder
+                : FindFirstObjectByType<Experience.ExperienceSpaceBuilder>(FindObjectsInactive.Include);
+            if (builder == null) builder = _ownedSpaceBuilder != null ? _ownedSpaceBuilder : CreateSpaceBuilderFromDirector();
+            if (builder == null)
+                return " — no ExperienceSpaceBuilder and no wired ExperienceDirector in scene, sensing area NOT fitted";
+            builder.Apply(); // warns on its own when the layout is degenerate
+            if (builder.floorOrigin != null)
+            {
+                builder.floorOrigin.showGrid = true;
+                builder.floorOrigin.fitToBoundingBox = true;
+            }
+            return " + sensing area fitted, floor grid on, camera frustums shown";
+        }
+
+        // -------- Calibration-time color resolution boost --------
+
+        private uint _savedColorW, _savedColorH;
+        private bool _colorBoosted;
+
+        private void BoostColorResolutionForCalibration()
+        {
+            if (!boostColorResolution || _colorBoosted) return;
+            var mgr = _manager != null ? _manager : FindFirstObjectByType<SensorManager>();
+            if (mgr == null) return;
+            if (mgr.colorWidth == calibColorWidth && mgr.colorHeight == calibColorHeight) return;
+            _savedColorW = mgr.colorWidth;
+            _savedColorH = mgr.colorHeight;
+            mgr.colorWidth = calibColorWidth;
+            mgr.colorHeight = calibColorHeight;
+            _colorBoosted = true;
+            RestartLiveRenderers(mgr, $"color {calibColorWidth}x{calibColorHeight} for calibration");
+        }
+
+        private void RestoreColorResolution(bool restartLive)
+        {
+            if (!_colorBoosted) return;
+            var mgr = _manager != null ? _manager : FindFirstObjectByType<SensorManager>();
+            // Clear the flag only once the fields are actually restorable —
+            // forgetting the boost with the manager gone would let the next Boost
+            // save the CALIBRATION size as the show size and pin it there.
+            if (mgr == null) return;
+            _colorBoosted = false;
+            mgr.colorWidth = _savedColorW;
+            mgr.colorHeight = _savedColorH;
+            if (restartLive) RestartLiveRenderers(mgr, $"color restored to {_savedColorW}x{_savedColorH}");
+        }
+
+        // The stream profile is fixed at pipeline start, so a resolution change
+        // means destroy + re-enumerate (~15 s). No-op with zero live renderers —
+        // the next StartLive/SwitchToLive spawns from the already-updated fields.
+        private void RestartLiveRenderers(SensorManager mgr, string why)
+        {
+            if (mgr.Renderers == null || mgr.Renderers.Count == 0) return;
+            mgr.DestroyAllRenderers();
+            mgr.StartLive();
+            // Same count in, same count out — Update's count-based re-subscribe
+            // check cannot see that every renderer is a NEW object, so the frame
+            // handlers would stay bound to the destroyed ones and no preview,
+            // external display or capture would ever get a frame again.
+            PurgeDeadFrameCaches();
+            Subscribe();
+            SetStatus($"Restarting live cameras: {why} (~15 s)…");
+        }
+
+        // Drop _latest/_previews entries for renderers that are no longer the
+        // manager's, so a rig restart doesn't leak textures or keep stale frames.
+        // Membership, not a null check: Destroy is deferred to end of frame, so
+        // just-destroyed renderers still compare non-null in this same frame.
+        private void PurgeDeadFrameCaches()
+        {
+            var live = new HashSet<PointCloudRenderer>();
+            if (_manager != null && _manager.Renderers != null)
+                foreach (var r in _manager.Renderers)
+                    if (r != null) live.Add(r);
+
+            var deadPrev = new List<PointCloudRenderer>();
+            foreach (var kv in _previews)
+                if (kv.Key == null || !live.Contains(kv.Key))
+                { if (kv.Value.Tex != null) Destroy(kv.Value.Tex); deadPrev.Add(kv.Key); }
+            foreach (var k in deadPrev) _previews.Remove(k);
+
+            var deadLatest = new List<PointCloudRenderer>();
+            foreach (var kv in _latest)
+                if (kv.Key == null || !live.Contains(kv.Key)) deadLatest.Add(kv.Key);
+            foreach (var k in deadLatest) _latest.Remove(k);
+        }
+
+        private Experience.ExperienceSpaceBuilder _ownedSpaceBuilder;
+
+        // The scene keeps no persistent ExperienceSpaceBuilder — ExperienceDirector
+        // AddComponents its own on experience start. Mirror that here, borrowing the
+        // director's serialized refs so calibration fits the same box/grid the show
+        // will use. The component lives on this GO for the rest of the play session;
+        // the fitted volume intentionally survives calibration-mode exit.
+        private Experience.ExperienceSpaceBuilder CreateSpaceBuilderFromDirector()
+        {
+            var dir = FindFirstObjectByType<Experience.ExperienceDirector>(FindObjectsInactive.Include);
+            if (dir == null || dir.boundingVolume == null) return null;
+            _ownedSpaceBuilder = gameObject.AddComponent<Experience.ExperienceSpaceBuilder>();
+            _ownedSpaceBuilder.boundingVolume = dir.boundingVolume;
+            _ownedSpaceBuilder.floorOrigin = dir.floorOrigin;
+            _ownedSpaceBuilder.sensorManager = dir.sensorManager != null ? dir.sensorManager : _manager;
+            _ownedSpaceBuilder.sensorRecorder = dir.sensorRecorder;
+            if (dir.config != null) _ownedSpaceBuilder.floorY = dir.config.floorY;
+            return _ownedSpaceBuilder;
         }
 
         private void DoReset()
@@ -1243,7 +1810,7 @@ namespace Calibration.RuntimeUI
         // caught; each mesh's prior state is saved once and restored on exit.
         private void EnforceHiddenPointClouds()
         {
-            if (!hidePointClouds) return;
+            if (!hidePointClouds || _floorTune) return; // floor tune needs to SEE the clouds
 
             if (_manager != null && _manager.Renderers != null)
             {
@@ -1352,6 +1919,14 @@ namespace Calibration.RuntimeUI
                 MakeLine(img.transform, "CrossV", new Vector2(0.5f, 0f), new Vector2(0.5f, 1f), new Vector2(2f, 0f));
                 MakeLine(img.transform, "CrossH", new Vector2(0f, 0.5f), new Vector2(1f, 0.5f), new Vector2(0f, 2f));
 
+                // Detection overlay (marker quads + ChArUco corners) — child of the
+                // fitted image so its rect matches the displayed pixels exactly.
+                var overlay = new GameObject("DetectOverlay", typeof(RectTransform), typeof(CanvasRenderer))
+                    .AddComponent<DetectionOverlay>();
+                overlay.transform.SetParent(img.transform, false);
+                overlay.raycastTarget = false;
+                Stretch((RectTransform)overlay.transform, Vector2.zero, Vector2.one);
+
                 var label = new GameObject("Label", typeof(RectTransform)).AddComponent<Text>();
                 label.transform.SetParent(cell.transform, false);
                 label.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
@@ -1364,7 +1939,7 @@ namespace Calibration.RuntimeUI
                 lr.anchoredPosition = new Vector2(12f, -8f);
                 lr.sizeDelta = new Vector2(1400f, 36f);
 
-                _externalViews[camId] = new ExternalView { Raw = img, Fitter = fit, Label = label };
+                _externalViews[camId] = new ExternalView { Raw = img, Fitter = fit, Label = label, Overlay = overlay };
             }
         }
 
@@ -1399,6 +1974,11 @@ namespace Calibration.RuntimeUI
         private void UpdateExternalDisplays()
         {
             if (_externalViews == null) return;
+            // Sample tallies for the wall labels: global count + skew-ok (same
+            // numbers as the HUD status bar) plus per-camera detected count, so
+            // the operator sees capture coverage without walking back to display 0.
+            int sampleTotal = _samples.Count, sampleSkewOk = 0;
+            foreach (var s in _samples) if (s.SkewOk) sampleSkewOk++;
             for (int id = 0; id < _externalViews.Length; id++)
             {
                 var v = _externalViews[id];
@@ -1413,6 +1993,7 @@ namespace Calibration.RuntimeUI
                     v.Label.text = serial == null
                         ? $"ID {id}   no camera"
                         : $"[ID {id}] {serial}   (disconnected)";
+                    if (v.Overlay != null) v.Overlay.SetDetections(null, null, 0, 0);
                     continue;
                 }
 
@@ -1433,7 +2014,26 @@ namespace Calibration.RuntimeUI
                     det = (p.Detected ? "● " : "✕ ") + $"M={p.Markers} C={p.Corners}";
                 string idTag = $"ID {id}";
                 if (serial == _originSerial) idTag += " ★origin";
-                v.Label.text = $"[{idTag}] {serial}   {det}";
+                int camSamples = 0;
+                foreach (var s in _samples)
+                {
+                    if (s.Cameras == null) continue;
+                    foreach (var c in s.Cameras)
+                        if (c.Detected && c.Serial == serial) { camSamples++; break; }
+                }
+                v.Label.text = $"[{idTag}] {serial}   {det}   " +
+                               $"smp {camSamples}/{sampleTotal} (skew-ok {sampleSkewOk})";
+
+                // Detection geometry rides the same round-robin pass as the HUD
+                // previews; showUI off stops that pass, so blank the overlay
+                // rather than freezing a stale one over the live feed.
+                if (v.Overlay != null)
+                {
+                    if (p != null && p.HasDetectionPass && showUI)
+                        v.Overlay.SetDetections(p.MarkerQuads, p.CharucoCornerPoints, p.DetWidth, p.DetHeight);
+                    else
+                        v.Overlay.SetDetections(null, null, 0, 0);
+                }
             }
         }
 

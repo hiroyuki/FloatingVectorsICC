@@ -92,7 +92,9 @@ namespace PointCloud
                  "Needs rigSerialOrder. Off → Dev mode unchanged.")]
         public bool applyWorldRebase = false;
 
-        [Tooltip("The rig's 4 camera serials in order 1..4 (must match SensorManager.rigSerialOrder). " +
+        [Tooltip("FALLBACK ONLY — the playback take's calibration/cameras.yaml wins when it " +
+                 "lists 4 serials (recordings carry their rig's map since Save copies it). " +
+                 "The rig's 4 camera serials in order 1..4 (must match SensorManager.rigSerialOrder). " +
                  "Rebase is skipped with a warning when these don't resolve against extrinsics.yaml.")]
         public string[] rigSerialOrder = new string[0];
 
@@ -161,6 +163,15 @@ namespace PointCloud
         // Wall-clock (Time.timeAsDouble) when the pending live freeze fires; < 0 = none.
         private double _freezeCountdownEnd = -1.0;
 
+        [Min(0f)]
+        [Tooltip("When a live freeze engages DURING recording, stop the recording this many " +
+                 "seconds later — the take closes itself with a short tail after the frozen " +
+                 "moment. 0 = never auto-stop (manual F9). Unfreezing cancels the pending stop.")]
+        public float stopRecAfterFreezeSeconds = 3f;
+
+        // Wall-clock when the freeze-initiated auto rec-stop fires; < 0 = none.
+        private double _recAutoStopAt = -1.0;
+
         [Header("Playback")]
         public bool loop = true;
 
@@ -188,6 +199,21 @@ namespace PointCloud
                  "body and depth tracks are 1:1. Playback only.")]
         public int bodyLeadFrames = 0;
         private int _lastBodyLeadFrames;
+
+        [Tooltip("Read: when a device folder has a bodies_v11s file (offline v11s-fused bodies " +
+                 "copied next to bodies_main), load it as the body track instead of bodies_main. " +
+                 "SkeletonMerger then plays those bodies directly and never spawns k4abt workers " +
+                 "for playback — even with ignoreRecordedBodies on — so v11s playback costs no " +
+                 "BT inference. Devices without bodies_v11s fall back to bodies_main. " +
+                 "Takes effect on the next Read.")]
+        public bool useV11sBodies = false;
+
+        /// <summary>True when the last Read loaded at least one device's body track from
+        /// bodies_v11s (see <see cref="useV11sBodies"/>). SkeletonMerger reads this to let
+        /// recorded v11s bodies own the merge even when ignoreRecordedBodies is on —
+        /// live k4abt cannot reproduce the offline fusion, so re-running it would only
+        /// burn GPU to produce worse skeletons.</summary>
+        public bool PlaybackBodiesAreV11s { get; private set; }
 
         // Playback-path hot-swap poll (see Update): last resolved playback root the
         // poll acted on. Polled rather than OnValidate so path edits from the Control
@@ -739,37 +765,22 @@ namespace PointCloud
             foreach (var r in mgr.Renderers)
                 if (r != null) r.holdLiveFrame = freeze;
             IsPaused = freeze;
+            bool autoStop = freeze && CurrentState == State.Recording && stopRecAfterFreezeSeconds > 0f;
+            _recAutoStopAt = autoStop ? Time.timeAsDouble + stopRecAfterFreezeSeconds : -1.0;
             SetStatus(freeze ? (CurrentState == State.Recording
-                                   ? "Live frozen (REC continues) — Space resumes."
+                                   ? (autoStop
+                                       ? $"Live frozen — REC auto-stops in {stopRecAfterFreezeSeconds:0}s. Space resumes."
+                                       : "Live frozen (REC continues) — Space resumes.")
                                    : "Live frozen — Space resumes.")
                              : $"Live mode: {mgr.Renderers.Count} camera(s) connected.");
         }
 
-        /// <summary>Seconds until a pending Space-initiated live freeze fires; 0 = none.</summary>
+        /// <summary>Seconds until a pending Space-initiated live freeze fires; 0 = none.
+        /// The on-screen countdown is rendered by Experience.OperatorPublisher via
+        /// per-display canvases (an IMGUI OnGUI here never showed on the
+        /// multi-display game-view setup).</summary>
         public float FreezeCountdownRemaining =>
             _freezeCountdownEnd < 0.0 ? 0f : Mathf.Max(0f, (float)(_freezeCountdownEnd - Time.timeAsDouble));
-
-        private GUIStyle _countdownStyle;
-
-        // Big centre-screen countdown so the dancer can see the freeze coming.
-        private void OnGUI()
-        {
-            float remain = FreezeCountdownRemaining;
-            if (remain <= 0f) return;
-            if (_countdownStyle == null)
-                _countdownStyle = new GUIStyle
-                {
-                    alignment = TextAnchor.MiddleCenter,
-                    fontStyle = FontStyle.Bold,
-                };
-            _countdownStyle.fontSize = Screen.height / 3;
-            string text = Mathf.CeilToInt(remain).ToString();
-            var rect = new Rect(0, 0, Screen.width, Screen.height);
-            _countdownStyle.normal.textColor = new Color(0f, 0f, 0f, 0.8f);
-            GUI.Label(new Rect(rect.x + 6, rect.y + 6, rect.width, rect.height), text, _countdownStyle);
-            _countdownStyle.normal.textColor = Color.white;
-            GUI.Label(rect, text, _countdownStyle);
-        }
 
         // Rec/Play must consume fresh frames; drop a live freeze before either starts.
         private void UnfreezeLiveIfFrozen()
@@ -1430,6 +1441,23 @@ namespace PointCloud
             PointCloudRecording.WriteDatasetMetadata(root, host, ds, serials);
             if (calibrations.Count > 0)
                 PointCloudRecording.WriteExtrinsicsYaml(root, calibrations);
+
+            // Recordings are self-contained: carry the rig's camera-id map so playback
+            // on the other set ("4070"/"5080") rebases with the recorded rig instead of
+            // the playing machine's local map.
+            if (cameraManager != null)
+            {
+                try
+                {
+                    var camMap = PointCloudRecording.ReadCamerasYaml(cameraManager.ResolveExtrinsicsRoot());
+                    if (camMap != null) PointCloudRecording.WriteCamerasYaml(root, camMap);
+                }
+                catch (Exception mapEx)
+                {
+                    Debug.LogWarning(
+                        $"[{nameof(SensorRecorder)}] could not copy cameras.yaml into recording: {mapEx.Message}", this);
+                }
+            }
         }
 
         [ContextMenu("Read")]
@@ -1451,12 +1479,18 @@ namespace PointCloud
 
                 ClearTracks();
                 int totalDepth = 0, totalColor = 0, totalIR = 0, totalBodies = 0;
+                int v11sTracks = 0;
                 foreach (var (serial, deviceDir) in PointCloudRecording.EnumerateDevices(root))
                 {
                     string depthPath = Path.Combine(deviceDir, PointCloudRecording.DepthSensorName);
                     string colorPath = Path.Combine(deviceDir, PointCloudRecording.ColorSensorName);
                     string irPath = Path.Combine(deviceDir, PointCloudRecording.IRSensorName);
                     string bodiesPath = Path.Combine(deviceDir, PointCloudRecording.BodiesSensorName);
+                    if (useV11sBodies)
+                    {
+                        string v11sPath = Path.Combine(deviceDir, PointCloudRecording.BodiesV11sSensorName);
+                        if (File.Exists(v11sPath)) { bodiesPath = v11sPath; v11sTracks++; }
+                    }
                     bool hasDepth = File.Exists(depthPath);
                     bool hasColor = File.Exists(colorPath);
                     bool hasIR = File.Exists(irPath);
@@ -1546,8 +1580,15 @@ namespace PointCloud
                     cameraManager.DestroyAllRenderers();
                 }
 
+                PlaybackBodiesAreV11s = v11sTracks > 0;
+                if (useV11sBodies && v11sTracks < _tracks.Count)
+                    Debug.LogWarning(
+                        $"[{nameof(SensorRecorder)}] useV11sBodies: only {v11sTracks}/{_tracks.Count} device(s) " +
+                        "have bodies_v11s; the rest fall back to bodies_main.", this);
+
                 SetStatus(
                     $"Loaded {totalDepth} depth / {totalColor} color / {totalIR} IR / {totalBodies} bodies frame(s) across {_tracks.Count} device(s)"
+                    + (v11sTracks > 0 ? $", v11s bodies on {v11sTracks} device(s)" : "")
                     + (extrinsicsApplied > 0 ? $", extrinsics applied to {extrinsicsApplied} device(s)" : "")
                     + (liveDestroyed > 0 ? $", disconnected {liveDestroyed} live camera(s)" : "")
                     + $" from {root}");
@@ -1621,10 +1662,16 @@ namespace PointCloud
                 Calibration.ExtrinsicsApply.ToUnityLocal(kv.Value.GlobalTrColorCamera.Value, out var pos, out _);
                 cams.Add((kv.Key, pos));
             }
+            // Playback rebases with the RECORDED rig's order: the recording folder's
+            // cameras.yaml (written at Save) beats the scene value, so a take from the
+            // other set still rebases correctly on this machine.
+            var rigOrder = PointCloudRecording.ResolveRigSerialOrder(
+                ResolvePlaybackRoot(), rigSerialOrder, out string rigSource);
             if (!Calibration.WorldFrameRebase.TryComputeFromCalibrations(
-                    cams, rigSerialOrder, out _worldRebase, out string reason, rebaseFloorY))
+                    cams, rigOrder, out _worldRebase, out string reason, rebaseFloorY))
             {
-                Debug.LogWarning($"[{nameof(SensorRecorder)}] world rebase skipped: {reason}", this);
+                Debug.LogWarning($"[{nameof(SensorRecorder)}] world rebase skipped (order from {rigSource}): {reason}",
+                                 this);
                 _worldRebase = Pose.identity;
                 return;
             }
@@ -1748,6 +1795,11 @@ namespace PointCloud
         {
             if (CurrentState == State.Playing) StopPlayback();
             UnfreezeLiveIfFrozen();
+            // Stale freeze state must not leak into the new take: a pending
+            // auto-stop would clip it, a pending Space countdown would freeze
+            // (and with it auto-stop) the recording seconds after it starts.
+            _recAutoStopAt = -1.0;
+            _freezeCountdownEnd = -1.0;
             ClearTracks();
 
             var renderers = CollectSourceRenderers();
@@ -2025,6 +2077,7 @@ namespace PointCloud
         {
             if (CurrentState == State.Recording) StopRecording();
             UnfreezeLiveIfFrozen();
+            _freezeCountdownEnd = -1.0; // a pending Space countdown must not freeze playback
             if (_tracks.Count == 0)
             {
                 // Auto-Read: pressing Play with nothing loaded loads the configured
@@ -2184,6 +2237,14 @@ namespace PointCloud
             // diag heartbeat to log capture-side fps / drops while it's happening.
             if (CurrentState == State.Recording)
             {
+                // Freeze-initiated auto-stop: close the take a short tail after the
+                // frozen moment (stopRecAfterFreezeSeconds). The freeze itself stays.
+                if (_recAutoStopAt >= 0.0 && Time.timeAsDouble >= _recAutoStopAt)
+                {
+                    _recAutoStopAt = -1.0;
+                    StopRecording();
+                    return;
+                }
                 if (diagnosticLogging) PerSecondDiag();
                 return;
             }
@@ -2742,6 +2803,9 @@ namespace PointCloud
 
         private void ClearTracks()
         {
+            // Whatever was loaded is gone; a Rec session or a Read of a folder without
+            // bodies_v11s must not inherit the previous session's v11s ownership.
+            PlaybackBodiesAreV11s = false;
             foreach (var kv in _tracks)
             {
                 var track = kv.Value;
@@ -2854,7 +2918,9 @@ namespace PointCloud
         // playbackFolderPath so replaying an old take never touches the recording
         // destination. Falls back to the recording root when playbackFolderPath is
         // blank, preserving the pre-split single-folder behaviour.
-        private string ResolvePlaybackRoot()
+        // Public so ExperienceSpaceBuilder can read the playback take's cameras.yaml
+        // when the sensing area is built from playback GOs instead of live renderers.
+        public string ResolvePlaybackRoot()
         {
             if (string.IsNullOrWhiteSpace(playbackFolderPath)) return ResolveRoot();
             string macOverride = playbackFolderPathMacOverride;

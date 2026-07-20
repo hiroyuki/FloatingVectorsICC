@@ -18,6 +18,35 @@ Unity上でリアルタイムにポイントクラウドとして描画する。
 - 2 人以上が検出された場合の振る舞い: **画面に Alert を出す**（来場者への運用フィードバック）。人数カウント機能自体は Alert 用途のため "nice to have" として実装する
 - 入れ替わり耐性 / Hungarian-style 多人数追跡は実装しない
 
+### 展示構成: 同一セット×2（呼称「4070」「5080」）
+実際の展示では **「PC 1台 + Femto Bolt 4台」の同一構成セットが 2 セット**存在する。
+呼称は搭載 GPU から **「4070（セット）」「5080（セット）」**。コード・シーンは共通だが、
+**カメラのシリアル番号はセットごとに異なる**。
+
+| セット | GPU | カメラ serial |
+|---|---|---|
+| 4070 | RTX 4070 | CL8F253004N / CL8F253004Z / CL8F253004L / CL8F25300EG |
+| 5080 | RTX 5080 | CL8F25300CA / CL8F25300HJ / CL8F25300C6 / CL8F25300F0 |
+
+- カメラ ID 割当（`cameras.yaml`）はマシンローカル（persistentDataPath 配下）。
+  **セットをまたいで serial を持ち込まない** — 別セットの serial が id 0-3 を占有すると、
+  接続中カメラが id 4+ に追いやられ、外部カラーディスプレイ（id 0-3 のみ表示）に映らなくなる
+- 新しいセット/マシンで初回キャリブする際は、キャリブ UI の assign mode（I キー）で
+  そのセットの 4 台に id 0-3 を割当て直して保存する
+
+#### カメラ ID マッピングやり直し手順（各セット共通）
+1. Play → キャリブモード ON（F1、または AI が `CalibrationRuntimeUI.SetActive(true)` を reflection で呼ぶ。
+   シーンが playbackOnly の場合は先に `SensorManager.StartLive()` でライブ起動）
+2. `cameras.yaml`（`persistentDataPath/Recordings/recording/calibration/`）に
+   **別セットの serial が残っていたら削除**（`_camOrder` から非 present を除去して `SaveCameraMap`、
+   または yaml を直接消してから Reconcile させる）。CLAUDE.md の serial 対応表で判別
+3. Game ビューで **I** → assign mode。カメラの前で手を振って個体を特定し、
+   矢印で選択 → 数字キーで id 割当 → **O** で origin 指定 → **Enter** で保存
+4. 外部ディスプレイ（display2 に cam0/1、display3 に cam2/3）で並びを確認
+- シーンにシリアルを直接シリアライズしている箇所（例: `SensorRecorder.rigSerialOrder`）は
+  セット間で git 同期すると別セットの serial が入ってくるので注意。
+  シリアル依存の設定は極力マシンローカルなファイルに置く
+
 ## 技術スタック
 - Unity 6 LTS (URP - Universal 3D)
 - OrbbecSDK v2（C/C++ネイティブSDK、直接P/Invoke経由で利用）
