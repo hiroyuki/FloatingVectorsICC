@@ -1,5 +1,6 @@
 // Pure-C# state machine for the visitor experience — the one-second-take
 // sequence: Idle (unattended: just the floor grid, no attract content) →
+// Welcome (greeting on area entry, machine-owned timer) →
 // Calibrate (star pose → per-visitor bone profile for the fusion) →
 // FreeMove (free movement with the live sculpture) → Shoot (cue text →
 // countdown → ONE second recorded at zero) → Processing (v11s conversion +
@@ -34,7 +35,7 @@ namespace Experience
 {
     public enum ExperienceState
     {
-        Idle, Calibrate, FreeMove, Shoot, Processing, ResultShow, QrShow, Fault
+        Idle, Welcome, Calibrate, FreeMove, Shoot, Processing, ResultShow, QrShow, Fault
     }
 
     /// <summary>Per-tick inputs from the director (already debounced where
@@ -58,6 +59,9 @@ namespace Experience
     public class ExperienceTimings
     {
         [Min(0f)]
+        [Tooltip("Welcome greeting duration on area entry, before the star-pose window.")]
+        public float welcomeSeconds = 4f;
+        [Min(0f)]
         [Tooltip("Star-pose window. Expiry advances with the DEFAULT bone profile.")]
         public float calibrateSeconds = 10f;
         [Min(1f)]
@@ -77,6 +81,7 @@ namespace Experience
         [Header("Dev stage skipping (enter, then advance immediately)")]
         [UnityEngine.Serialization.FormerlySerializedAs("skipAttract")]
         public bool skipIdle;
+        public bool skipWelcome;
         public bool skipCalibrate;   // default bone profile
         public bool skipFreeMove;
         public bool skipShoot;       // director substitutes devCannedTakeRoot
@@ -119,7 +124,13 @@ namespace Experience
                     break;
 
                 case ExperienceState.Idle:
-                    if (t.skipIdle || inputs.Present) Go(ExperienceState.Calibrate);
+                    if (t.skipIdle || inputs.Present) Go(ExperienceState.Welcome);
+                    break;
+
+                case ExperienceState.Welcome:
+                    if (LeftEarly(inputs)) break;
+                    if (t.skipWelcome || TimeInState >= t.welcomeSeconds)
+                        Go(ExperienceState.Calibrate);
                     break;
 
                 case ExperienceState.Calibrate:

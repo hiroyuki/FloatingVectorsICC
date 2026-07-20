@@ -61,6 +61,18 @@ namespace Experience
         [Tooltip("Pose instruction text anchored position (reference px from canvas center).")]
         public Vector2 poseLabelPosition = new Vector2(0f, -200f);
 
+        [Tooltip("Countdown digits anchored position (reference px from canvas center) — " +
+                 "the message slot moves here while it is showing a countdown, so the " +
+                 "digits can sit clear of the pose guide / visitor.")]
+        public Vector2 countdownPosition = Vector2.zero;
+
+        [Tooltip("Message text anchored position (reference px from canvas center).")]
+        public Vector2 messagePosition = Vector2.zero;
+
+        [Tooltip("Headline above the QR (e.g. できたよ！) anchored position " +
+                 "(reference px from canvas center).")]
+        public Vector2 qrHeadlinePosition = new Vector2(0f, 420f);
+
         [Min(64f)]
         [Tooltip("Progress bar width (reference pixels).")]
         public float progressBarWidth = 800f;
@@ -73,6 +85,7 @@ namespace Experience
             public GameObject qrGroup;
             public RawImage qrImage;
             public Text qrCaption;
+            public Text qrHeadline;
             public GameObject poseGroup;
             public RawImage poseImage;
             public Text poseLabel;
@@ -85,7 +98,6 @@ namespace Experience
 
         private readonly List<DisplayUi> _uis = new List<DisplayUi>();
         private Font _font;
-        private bool _built;
         // Operator-side alert state. The gate is static/shared — only the
         // instance that raised it may clear it (multiple instances must not
         // stomp each other's alert).
@@ -122,21 +134,35 @@ namespace Experience
             foreach (var ui in _uis)
                 if (ui.canvas != null) Destroy(ui.canvas.gameObject);
             _uis.Clear();
+            _builtDisplays.Clear();
+            _warnedDisplays.Clear();
             if (_backdropTex != null) Destroy(_backdropTex);
-            _built = false;
         }
 
         // ---------------- public API ----------------
 
         /// <summary>Centered white message on every visitor display. Replaces the
         /// whole non-alert screen (pose guide / progress / QR go down with it).</summary>
+        // The content currently on screen, re-applied to canvases that a late
+        // camera adds after the Show* call (startup ordering) so they don't come
+        // up blank. Two layers: the base full-screen setter, plus an optional
+        // countdown overlay (Calibrate shows digits ON TOP of the pose guide, so
+        // the base must replay too). The alert replays separately from _alertOwned.
+        private System.Action _replayBase;
+        private int _countdownOverlay = -1; // -1 = no countdown on screen
+        private bool _replaying;
+
         public void ShowMessage(string text)
         {
             EnsureBuilt();
+            _replayBase = () => ShowMessage(text);
+            _countdownOverlay = -1;
+            _countdownMode = false;
             foreach (var ui in _uis)
             {
                 ui.message.fontSize = messageFontSize;
                 ui.message.text = text ?? "";
+                ui.message.rectTransform.anchoredPosition = messagePosition;
                 ui.message.gameObject.SetActive(true);
                 ui.qrGroup.SetActive(false);
                 ui.poseGroup.SetActive(false);
@@ -144,18 +170,26 @@ namespace Experience
             }
         }
 
-        /// <summary>Big countdown digits (same slot as the message).</summary>
+        /// <summary>Big countdown digits (same slot as the message, repositioned
+        /// to countdownPosition so they can sit clear of the pose guide).</summary>
         public void ShowCountdown(int seconds)
         {
             EnsureBuilt();
+            // Overlay only — the base (pose guide / cue message) stays as set.
+            _countdownOverlay = seconds;
+            _countdownMode = true;
             foreach (var ui in _uis)
             {
                 ui.message.fontSize = countdownFontSize;
                 ui.message.text = seconds.ToString();
+                ui.message.rectTransform.anchoredPosition = countdownPosition;
                 ui.message.gameObject.SetActive(true);
                 ui.qrGroup.SetActive(false);
             }
         }
+
+        // Which layout the shared message slot is currently using (live-apply).
+        private bool _countdownMode;
 
         /// <summary>
         /// Pose-guide figure (above center) + instruction text (below). The
@@ -165,6 +199,8 @@ namespace Experience
         public void ShowPoseGuide(Texture2D guide, string text)
         {
             EnsureBuilt();
+            _replayBase = () => ShowPoseGuide(guide, text);
+            _countdownOverlay = -1; // director re-issues ShowCountdown each second
             foreach (var ui in _uis)
             {
                 bool shown = PoseGuideShownOn(ui.display);
@@ -199,14 +235,26 @@ namespace Experience
 
         private void Update()
         {
+            // retry canvases for displays whose camera wasn't up at OnEnable
+            if (_uis.Count < visitorDisplays.Length) EnsureBuilt();
             foreach (var ui in _uis)
+            {
                 if (ui.poseGroup != null && ui.poseGroup.activeSelf) ApplyPoseLayout(ui);
+                // live-apply countdown/message position (Inspector tuning in Play mode)
+                if (ui.message != null && ui.message.gameObject.activeSelf)
+                    ui.message.rectTransform.anchoredPosition =
+                        _countdownMode ? countdownPosition : messagePosition;
+                if (ui.qrHeadline != null && ui.qrHeadline.gameObject.activeSelf)
+                    ui.qrHeadline.rectTransform.anchoredPosition = qrHeadlinePosition;
+            }
         }
 
         /// <summary>Caption + horizontal progress bar (Processing state).</summary>
         public void ShowProgress(float value01, string caption)
         {
             EnsureBuilt();
+            _replayBase = () => ShowProgress(value01, caption);
+            _countdownOverlay = -1;
             float v = Mathf.Clamp01(value01);
             foreach (var ui in _uis)
             {
@@ -219,14 +267,45 @@ namespace Experience
             }
         }
 
-        /// <summary>QR + caption, centered. Hidden behind the alert if one is up.</summary>
-        public void ShowQr(Texture2D qr, string caption)
+        /// <summary>The result screen BEFORE the QR exists (upload still
+        /// running): the headline (できたよ！) already sits at its final
+        /// QR-screen position so ShowQr later just adds the code beneath it —
+        /// one seamless scene, no text jump.</summary>
+        public void ShowResult(string headline)
         {
             EnsureBuilt();
+            _replayBase = () => ShowResult(headline);
+            _countdownOverlay = -1;
+            foreach (var ui in _uis)
+            {
+                ui.qrImage.gameObject.SetActive(false);
+                ui.qrCaption.text = "";
+                ui.qrHeadline.text = headline ?? "";
+                ui.qrHeadline.rectTransform.anchoredPosition = qrHeadlinePosition;
+                ui.qrHeadline.gameObject.SetActive(!string.IsNullOrEmpty(headline));
+                ui.qrGroup.SetActive(true);
+                ui.message.gameObject.SetActive(false);
+                ui.poseGroup.SetActive(false);
+                ui.progressGroup.SetActive(false);
+            }
+        }
+
+        /// <summary>QR + caption, centered, with an optional headline above the
+        /// code (e.g. できたよ！ so the result cheer and the QR share one
+        /// screen). Hidden behind the alert if one is up.</summary>
+        public void ShowQr(Texture2D qr, string caption, string headline = null)
+        {
+            EnsureBuilt();
+            _replayBase = () => ShowQr(qr, caption, headline);
+            _countdownOverlay = -1;
             foreach (var ui in _uis)
             {
                 ui.qrImage.texture = qr;
+                ui.qrImage.gameObject.SetActive(true);
                 ui.qrCaption.text = caption ?? "";
+                ui.qrHeadline.text = headline ?? "";
+                ui.qrHeadline.rectTransform.anchoredPosition = qrHeadlinePosition;
+                ui.qrHeadline.gameObject.SetActive(!string.IsNullOrEmpty(headline));
                 ui.qrGroup.SetActive(true);
                 ui.message.gameObject.SetActive(false);
                 ui.poseGroup.SetActive(false);
@@ -265,6 +344,8 @@ namespace Experience
         /// outlives whatever the show was doing).</summary>
         public void ClearAll()
         {
+            _replayBase = null; // late canvases stay blank (Idle floor-grid only)
+            _countdownOverlay = -1;
             foreach (var ui in _uis)
             {
                 if (ui.message != null) ui.message.gameObject.SetActive(false);
@@ -309,21 +390,50 @@ namespace Experience
 
         // ---------------- construction ----------------
 
+        // Per-display build with retry: a scene-authored instance's OnEnable can
+        // run before the display cameras are enabled (startup ordering), so a
+        // missing camera must NOT permanently skip that display — every call
+        // (Show*, Update) retries the still-unbuilt ones until the camera shows up.
+        private readonly HashSet<int> _builtDisplays = new HashSet<int>();
+        private readonly HashSet<int> _warnedDisplays = new HashSet<int>();
+
         private void EnsureBuilt()
         {
-            if (_built) return;
-            _built = true;
             ResolveFont();
+            bool addedAny = false;
             foreach (int d in visitorDisplays)
             {
+                if (_builtDisplays.Contains(d)) continue;
                 var cam = FindDisplayCamera(d);
                 if (cam == null)
                 {
-                    Debug.LogWarning($"[{nameof(VisitorMessageUI)}] no enabled camera with " +
-                                     $"targetDisplay {d} — skipping that display.", this);
+                    if (_warnedDisplays.Add(d))
+                        Debug.LogWarning($"[{nameof(VisitorMessageUI)}] no enabled camera with " +
+                                         $"targetDisplay {d} yet — will keep retrying.", this);
                     continue;
                 }
                 _uis.Add(BuildDisplayUi(d, cam));
+                _builtDisplays.Add(d);
+                addedAny = true;
+                if (_warnedDisplays.Remove(d))
+                    Debug.Log($"[{nameof(VisitorMessageUI)}] display {d} camera appeared — canvas built.", this);
+            }
+
+            // Newly built canvases start blank — replay the current visual onto
+            // them so a late display shows the same thing as its siblings. Guard
+            // re-entrancy: the Show* replays call EnsureBuilt again (no-op now).
+            if (addedAny && !_replaying)
+            {
+                _replaying = true;
+                int cd = _countdownOverlay; // _replayBase resets it — capture first
+                _replayBase?.Invoke();
+                if (cd >= 0) ShowCountdown(cd);
+                if (_alertOwned) foreach (var ui in _uis)
+                {
+                    ui.alertText.text = _alertMessage;
+                    ui.alertGroup.SetActive(true);
+                }
+                _replaying = false;
             }
         }
 
@@ -401,6 +511,11 @@ namespace Experience
             ui.qrCaption.resizeTextForBestFit = true;                      // shrink long URLs
             ui.qrCaption.resizeTextMaxSize = captionFontSize;
             ui.qrCaption.resizeTextMinSize = 12;
+
+            ui.qrHeadline = MakeText(ui.qrGroup.transform, "QrHeadline", messageFontSize,
+                                     Color.white, new Vector2(1700f, 120f));
+            ui.qrHeadline.rectTransform.anchoredPosition = qrHeadlinePosition;
+            ui.qrHeadline.gameObject.SetActive(false);
             ui.qrGroup.SetActive(false);
 
             // -- pose-guide group: figure above center, instruction below.

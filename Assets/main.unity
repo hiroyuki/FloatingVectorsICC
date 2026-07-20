@@ -302,7 +302,7 @@ MonoBehaviour:
   cumulative: {fileID: 18533122}
   folderPath: D:\FloatingVectorsICC\RecordingBase
   folderPathMacOverride: /Volumes/horristicSSD2T/Dropbox/projects/ICC/Recordings/Rec2_jump
-  playbackFolderPath: F:\RecordingBase\2026-07-14_14-58-58
+  playbackFolderPath: F:\RecordingBaseV11s\2026-07-14_15-09-52
   playbackFolderPathMacOverride: /Users/horihiroyuki/Dropbox/projects/ICC/Recordings/RecordingBase/2026-07-14_13-33-44
   applyWorldRebase: 1
   rigSerialOrder:
@@ -769,6 +769,8 @@ MonoBehaviour:
   poseGuideSizePixels: 420
   poseImagePosition: {x: 0, y: -250}
   poseLabelPosition: {x: 0, y: 70}
+  countdownPosition: {x: 0, y: 350}
+  messagePosition: {x: 0, y: 0}
   progressBarWidth: 800
 --- !u!1 &814255262
 GameObject:
