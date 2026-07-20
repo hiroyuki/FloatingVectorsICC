@@ -80,6 +80,12 @@ namespace TSDF
                  "trail reads as a long square pyramid — the chosen look).")]
         public bool tubeRaindrop = false;
 
+        [Tooltip("Fan-cap open boundary loops of the body mesh at export. The " +
+                 "centroid fan is ROUGH on concave blind-spot rims (can self-" +
+                 "intersect); the sanctioned repair is eval/tools/fix_body.py " +
+                 "(MeshFix), so leave this off when using that workflow.")]
+        public bool stlFanCapBoundaries = false;
+
         [Tooltip("Run Close Holes automatically before capturing the body for " +
                  "an export, then restore the pre-close volume. The raw MC body " +
                  "carries phantom tau-band shells + open crop rims whose faces " +
@@ -784,10 +790,15 @@ namespace TSDF
                 // Mesh-level cap for holes the volume pass cannot reach — the
                 // crown of the head is a blind spot of all four cameras (no
                 // observations at all), so no voxel closing radius spans it.
-                int capped = FillBoundaryLoops(pos, tri);
-                if (capped > 0)
-                    Debug.Log($"[TSDFPrintExporter] body: capped {capped} open boundary loop(s) " +
-                              "(camera blind spots — crown etc.).", this);
+                // Default OFF: the fan caps self-intersect on concave rims;
+                // fix_body.py (MeshFix) is the sanctioned repair.
+                if (stlFanCapBoundaries)
+                {
+                    int capped = FillBoundaryLoops(pos, tri);
+                    if (capped > 0)
+                        Debug.Log($"[TSDFPrintExporter] body: capped {capped} open boundary loop(s) " +
+                                  "(camera blind spots — crown etc.).", this);
+                }
                 asm.BodyVol = OrientOutward(pos, tri, 0, tri.Count);
             }
             asm.BodyTris = tri.Count / 3;
@@ -1419,18 +1430,23 @@ namespace TSDF
 
                 var cropB = new Bounds(cropCenter, cropSize);
                 var run = new List<Vector3>(64);
-                var trimmedTips = tubeHeadTrim > 1e-4f ? new Dictionary<uint, Vector3>() : null;
+                // bridge bookkeeping: when trimming or cropping moves/removes a
+                // chain's newest end, the bridge must anchor at the newest point
+                // that was ACTUALLY emitted — or be suppressed entirely when the
+                // chain produced no tube (an orphan bridge is a floating shell).
+                bool trackTips = tubeHeadTrim > 1e-4f || cropEnabled;
+                var bridgeTips = trackTips ? new Dictionary<uint, Vector3>() : null;
+                var bridgeSuppressed = trackTips ? new HashSet<uint>() : null;
                 void EmitWhole(uint seed, List<int> idxs)
                 {
                     pts.Clear();
                     pts.Add(segs[idxs[0]].a);
                     foreach (int i in idxs) pts.Add(segs[i].b);
-                    if (pts.Count < 2) return;
+                    if (pts.Count < 2) { bridgeSuppressed?.Add(seed); return; }
 
                     // head trim: cut arc length off the NEWEST end so the tip
-                    // ends short of the body surface instead of piercing it;
-                    // the bridge is re-anchored to the trimmed tip below
-                    if (trimmedTips != null)
+                    // ends short of the body surface instead of piercing it
+                    if (tubeHeadTrim > 1e-4f)
                     {
                         float remain = tubeHeadTrim;
                         int last = pts.Count - 1;
@@ -1446,18 +1462,29 @@ namespace TSDF
                             pts.RemoveAt(last);
                             last--;
                         }
-                        if (pts.Count < 2) return; // chain shorter than the trim
-                        trimmedTips[seed] = pts[pts.Count - 1];
+                        if (pts.Count < 2) { bridgeSuppressed.Add(seed); return; } // fully trimmed away
                     }
                     Vector3 colour = segs[idxs[0]].color;
-                    if (!cropEnabled) { EmitChain(pts, colour); return; }
+                    if (!cropEnabled)
+                    {
+                        EmitChain(pts, colour);
+                        if (bridgeTips != null) bridgeTips[seed] = pts[pts.Count - 1];
+                        return;
+                    }
                     // crop: each maximal in-box run becomes its own tube; drop
                     // stubs under 5 cm — chopped fragments read as debris
+                    bool anyRun = false;
+                    Vector3 newestEmittedTip = default;
                     void EmitRun()
                     {
                         float arc = 0f;
                         for (int i = 1; i < run.Count; i++) arc += (run[i] - run[i - 1]).magnitude;
-                        if (arc >= 0.05f) EmitChain(run, colour);
+                        if (arc >= 0.05f)
+                        {
+                            EmitChain(run, colour);
+                            anyRun = true;
+                            newestEmittedTip = run[run.Count - 1]; // runs go oldest -> newest
+                        }
                         run.Clear();
                     }
                     run.Clear();
@@ -1467,6 +1494,8 @@ namespace TSDF
                         EmitRun();
                     }
                     EmitRun();
+                    if (anyRun) bridgeTips[seed] = newestEmittedTip;
+                    else bridgeSuppressed.Add(seed);
                 }
 
                 // per-line random black/white split ("curved lineの色を白と黒で
@@ -1500,15 +1529,26 @@ namespace TSDF
                 if (includeBridges)
                 {
                     var anchors = new List<Vector3>(bridges.Count);
+                    int bridgesOverLength = 0;
                     foreach (int i in bridges)
                     {
-                        // head trim moved this seed's tube tip — re-anchor the
-                        // bridge there so it spans trimmed-tip -> bone with no gap
-                        Vector3 bridgeA = segs[i].a;
+                        // trim/crop moved or removed this seed's tube tip —
+                        // anchor the bridge at the newest EMITTED point, or
+                        // skip it when the chain produced no tube at all
                         uint bseed = (uint)segs[i].pad >> 1;
-                        if (trimmedTips != null && trimmedTips.TryGetValue(bseed, out var tip))
+                        if (bridgeSuppressed != null && bridgeSuppressed.Contains(bseed)) continue;
+                        Vector3 bridgeA = segs[i].a;
+                        if (bridgeTips != null)
+                        {
+                            if (!bridgeTips.TryGetValue(bseed, out var tip)) continue; // never emitted
                             bridgeA = tip;
+                        }
                         if ((segs[i].b - bridgeA).sqrMagnitude < 1e-10f) continue;
+                        // The GPU pass length-gated the ORIGINAL tip; a re-anchored
+                        // bridge can span much farther (e.g. across a cropped-out
+                        // region) — re-apply the limit here.
+                        if ((segs[i].b - bridgeA).magnitude > maxBridgeLength)
+                        { bridgesOverLength++; continue; }
                         line[0] = new[] { bridgeA, segs[i].b };
                         col[0] = segs[i].color;
                         float rb = Mathf.Max(segs[i].rb, 1e-4f);
@@ -1518,6 +1558,10 @@ namespace TSDF
                         bridgeCount++;
                         anchors.Add(segs[i].b); // body-side anchor = wireframe node
                     }
+                    if (bridgesOverLength > 0)
+                        Debug.LogWarning($"[TSDFPrintExporter] STL bridges: {bridgesOverLength} skipped " +
+                                         $"(re-anchored span over maxBridgeLength {maxBridgeLength} m) — " +
+                                         "those curves hang on their tip contact only.", this);
 
                     if (rootWireframe)
                     {
