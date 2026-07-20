@@ -991,6 +991,12 @@ MonoBehaviour:
   toggleUiKey: 104
   assignModeKey: 105
   setOriginKey: 111
+  hidePointClouds: 1
+  stopRecorderPlayback: 1
+  switchToLiveOnEnter: 1
+  externalColorDisplays: 1
+  displayCam01: 1
+  displayCam23: 2
   suspendInterferingComponents: 1
   suspendComponentTypeNames:
   - BodyTracking.SkeletonMerger, BodyTracking
@@ -2297,6 +2303,8 @@ MonoBehaviour:
   printRadius: 0.006
   tubeTailTaper: 0.2
   tubeRaindrop: 1
+  stlFanCapBoundaries: 0
+  stlAutoCloseHoles: 1
   stlIncludeBridges: 1
   tubeHeadTrim: 0
   tubeAlignUp: 1
