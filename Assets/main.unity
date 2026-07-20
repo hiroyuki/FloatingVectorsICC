@@ -302,8 +302,8 @@ MonoBehaviour:
   cumulative: {fileID: 18533122}
   folderPath: D:\FloatingVectorsICC\RecordingBase
   folderPathMacOverride: /Volumes/horristicSSD2T/Dropbox/projects/ICC/Recordings/Rec2_jump
-  playbackFolderPath: F:\RecordingBase\2026-07-14_14-58-58
-  playbackFolderPathMacOverride: /Users/horihiroyuki/Dropbox/projects/ICC/Recordings/RecordingBase/2026-07-14_13-33-44
+  playbackFolderPath: D:\FloatingVectorsICC\rec2_turn
+  playbackFolderPathMacOverride: /Volumes/horristicSSD2T/Dropbox/projects/ICC/Recordings/rec2_turn
   applyWorldRebase: 1
   rigSerialOrder:
   - CL8F253004N

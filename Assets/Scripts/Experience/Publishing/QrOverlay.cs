@@ -74,7 +74,24 @@ namespace Experience.Publishing
             root.transform.SetParent(transform, false);
 
             var canvas = root.AddComponent<Canvas>();
-            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            // ScreenSpaceCamera through the display's own camera (same approach as
+            // VisitorMessageUI): a ScreenSpaceOverlay canvas on a secondary display
+            // sizes itself from the wrong screen when the game views differ, which
+            // pushed the "top-right" QR toward the centre. Overlay is the fallback
+            // when no camera renders to that display.
+            Camera cam = null;
+            foreach (var c in Camera.allCameras) // enabled cameras only
+                if (c.targetDisplay == display) { cam = c; break; }
+            if (cam != null)
+            {
+                canvas.renderMode = RenderMode.ScreenSpaceCamera;
+                canvas.worldCamera = cam;
+                canvas.planeDistance = 1f;
+            }
+            else
+            {
+                canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            }
             canvas.targetDisplay = display;
             canvas.sortingOrder = 6000; // above VisitorMessageUI (5000)
 
