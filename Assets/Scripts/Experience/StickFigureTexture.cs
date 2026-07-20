@@ -1,13 +1,14 @@
-// Programmatic pose-guide placeholders: a white HUMAN SILHOUETTE (pictogram
-// style — detached head + filled tapered-capsule body/limbs, soft anti-
-// aliased edge, transparent background) rasterized once into a Texture2D.
+// Programmatic pose-guide placeholders: a white HUMAN OUTLINE (pictogram
+// proportions — detached head + tapered-capsule body/limbs, drawn as a
+// contour stroke instead of a filled silhouette so the live scene stays
+// visible through the figure) rasterized once into a Texture2D.
 // Used by the Calibrate ("この ポーズを とってね" — star pose) and BanzaiWait
 // prompts until real artwork exists; ExperienceConfig.poseGuideTexture /
 // banzaiGuideTexture override it.
 //
 // The shape is a distance-field union of "cone capsules" (segments whose
-// radius tapers from a to b) plus the head disc — the standard restroom-sign
-// look, deliberately outline-only in silhouette rather than a bone skeleton.
+// radius tapers from a to b) plus the head disc; the stroke is a band around
+// the union's zero isoline (|d| < OutlineHalfWidth).
 
 using UnityEngine;
 
@@ -24,14 +25,16 @@ namespace Experience
             { A = new Vector2(ax, ay); B = new Vector2(bx, by); Ra = ra; Rb = rb; }
         }
 
-        /// <summary>Star pose (大の字): arms out slightly raised, legs spread.</summary>
+        /// <summary>Star pose (大の字): arms straight out to the sides
+        /// (level with the ground — matches the star-pose detector's
+        /// arms-level criterion), legs spread.</summary>
         public static Texture2D DrawStarPose(int size = 512) => Draw(size, new[]
         {
             // torso — shoulders wider than hips
             new Part(0.50f, 0.70f, 0.50f, 0.46f, 0.095f, 0.072f),
-            // arms — from the shoulder edges, slightly raised, tapering to the wrists
-            new Part(0.45f, 0.68f, 0.14f, 0.80f, 0.042f, 0.026f),
-            new Part(0.55f, 0.68f, 0.86f, 0.80f, 0.042f, 0.026f),
+            // arms — from the shoulder edges, horizontal, tapering to the wrists
+            new Part(0.45f, 0.68f, 0.14f, 0.68f, 0.042f, 0.026f),
+            new Part(0.55f, 0.68f, 0.86f, 0.68f, 0.042f, 0.026f),
             // legs — spread wide
             new Part(0.47f, 0.47f, 0.29f, 0.06f, 0.058f, 0.032f),
             new Part(0.53f, 0.47f, 0.71f, 0.06f, 0.058f, 0.032f),
@@ -50,14 +53,16 @@ namespace Experience
         });
 
         const float HeadRadius = 0.078f;
-        const float SoftEdge = 0.008f;
+        const float SoftEdge = 0.004f;
+        // Half-width of the contour stroke in UV units (512px → ~7px line).
+        const float OutlineHalfWidth = 0.007f;
 
         static Texture2D Draw(int size, Part[] parts)
         {
             size = Mathf.Clamp(size, 64, 2048);
             var tex = new Texture2D(size, size, TextureFormat.RGBA32, false)
             {
-                name = "PoseSilhouette",
+                name = "PoseOutline",
                 wrapMode = TextureWrapMode.Clamp,
             };
             var pixels = new Color32[size * size];
@@ -77,8 +82,11 @@ namespace Experience
                     foreach (var part in parts)
                         d = Mathf.Min(d, ConeCapsuleDistance(p, part));
 
+                    // Outline: opaque where |d| is inside the stroke band,
+                    // anti-aliased over SoftEdge on both sides.
+                    float band = Mathf.Abs(d) - OutlineHalfWidth;
                     float alpha = 1f - Mathf.SmoothStep(0f, 1f,
-                        Mathf.InverseLerp(-SoftEdge, SoftEdge, d));
+                        Mathf.InverseLerp(-SoftEdge, SoftEdge, band));
                     pixels[y * size + x] = new Color32(255, 255, 255, (byte)(alpha * 255f));
                 }
             }
