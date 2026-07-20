@@ -2,9 +2,9 @@
 // proportions — detached head + tapered-capsule body/limbs, drawn as a
 // contour stroke instead of a filled silhouette so the live scene stays
 // visible through the figure) rasterized once into a Texture2D.
-// Used by the Calibrate ("この ポーズを とってね" — star pose) and BanzaiWait
-// prompts until real artwork exists; ExperienceConfig.poseGuideTexture /
-// banzaiGuideTexture override it.
+// Used by the Calibrate ("この ポーズを とってね" — star pose) prompt until
+// real artwork exists; ExperienceConfig.poseGuideTexture overrides it. The
+// banzai silhouette is kept around unused in case a raised-arms guide returns.
 //
 // The shape is a distance-field union of "cone capsules" (segments whose
 // radius tapers from a to b) plus the head disc; the stroke is a band around

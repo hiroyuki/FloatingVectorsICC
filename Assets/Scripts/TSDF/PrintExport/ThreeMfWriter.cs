@@ -61,7 +61,11 @@ namespace TSDF
             w.Write("  <object id=\"2\" type=\"model\" pid=\"1\" pindex=\"0\">\n   <mesh>\n    <vertices>\n");
             for (int i = 0; i < pos.Count; i++)
             {
-                Vector3 v = (pos[i] - center) * scale;
+                // Unity is LEFT-handed; 3MF consumers read right-handed —
+                // mirror X (and swap winding below) so the print isn't a
+                // mirror image of the performance.
+                Vector3 p = pos[i];
+                Vector3 v = new Vector3(-(p.x - center.x), p.y - center.y, p.z - center.z) * scale;
                 // 3 decimals of a millimetre = micron precision, compact XML
                 w.Write("     <vertex x=\"");
                 w.Write(v.x.ToString("0.###", inv));
@@ -78,12 +82,14 @@ namespace TSDF
                 for (int t = span.StartTri; t < span.StartTri + span.TriCount; t++)
                 {
                     int b = t * 3;
+                    // winding swapped (v3 before v2): the X mirror inverts
+                    // orientation, this restores outward
                     w.Write("     <triangle v1=\"");
                     w.Write(tri[b].ToString(inv));
                     w.Write("\" v2=\"");
-                    w.Write(tri[b + 1].ToString(inv));
-                    w.Write("\" v3=\"");
                     w.Write(tri[b + 2].ToString(inv));
+                    w.Write("\" v3=\"");
+                    w.Write(tri[b + 1].ToString(inv));
                     w.Write("\" p1=\"");
                     w.Write(p1);
                     w.Write("\"/>\n");

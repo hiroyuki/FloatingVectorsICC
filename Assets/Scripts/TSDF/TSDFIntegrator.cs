@@ -330,8 +330,9 @@ namespace TSDF
         private void HandleLiveRawFrame(PointCloudRenderer r, RawFrameData raw)
         {
             if (r == null) return;
-            // Attract mode: the ghost playback owns the sculpture — a suppressed
-            // live renderer keeps streaming (BT / occupancy) but must not integrate.
+            // Playback-owned phases: the recorded take owns the sculpture — a
+            // suppressed live renderer keeps streaming (BT / occupancy) but must
+            // not integrate.
             if (r.suppressAsSource) return;
             // Live freeze: raw frames keep flowing (recording / health monitor)
             // but the sculpture must hold the frozen moment.

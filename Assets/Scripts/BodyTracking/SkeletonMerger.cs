@@ -69,14 +69,16 @@ namespace BodyTracking
         /// decision exactly — on non-Windows platforms the flag is inert and reads false.</summary>
         public bool IgnoreRecordedBodiesActive => IgnoreRecordedActive;
 
-        /// <summary>While true, k4abt worker output is dropped at ingest (merge slots stay
-        /// untouched and nothing is persisted to a recording). The experience director sets
-        /// this during visitor-playback states, where the recorded bodies_main drives the
-        /// sculpture and the workers are re-purposed by LiveSkeletonFeed to track the LIVE
-        /// visitor for pose detection: their live-clock results must never fight the
-        /// recorded-clock merge. (The playhead-ahead guard below already drops live-clock
-        /// results in practice; this flag makes the contract explicit and airtight.)
-        /// Runtime-only by design — never serialized, so a crash can't strand it true.</summary>
+        /// <summary>While true, the k4abt worker path is fully muted: worker OUTPUT is
+        /// dropped at ingest (merge slots stay untouched, nothing persists to a
+        /// recording) and this merger stops FEEDING/spawning workers from raw frames.
+        /// The experience director sets it whenever recorded bodies own the merge
+        /// (attract ghost, visitor playback and the frozen result view after that
+        /// playback stops) — live-clock k4abt results must never fight the recorded
+        /// merge, and the live-idle feed path must not spawn workers under the frozen
+        /// result. External feeders (LiveSkeletonFeed) are unaffected — they talk to
+        /// the worker host directly. Runtime-only by design — never serialized, so a
+        /// crash can't strand it true.</summary>
         [System.NonSerialized] public bool muteWorkerIngest;
 
         [Tooltip("External body source mode (e.g. LiveFusedBodySource running the RTMPose " +
@@ -974,6 +976,11 @@ namespace BodyTracking
             // External-source mode: skeletons arrive through SubmitExternalBodies;
             // never spawn or feed k4abt workers.
             if (useExternalBodies) return;
+
+            // Muted (recorded bodies own the merge): don't spawn/feed workers either —
+            // e.g. the frozen result view after a visitor playback stopped would
+            // otherwise re-enter the live-idle feed path and spawn workers under it.
+            if (muteWorkerIngest) return;
 
             // Recorded BT short-circuit: when the recorder is in Playing state AND
             // has a bodies_main track for this serial, skeletons flow in through

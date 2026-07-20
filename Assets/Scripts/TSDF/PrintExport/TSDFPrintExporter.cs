@@ -80,6 +80,31 @@ namespace TSDF
                  "trail reads as a long square pyramid — the chosen look).")]
         public bool tubeRaindrop = false;
 
+        [Tooltip("Fan-cap open boundary loops of the body mesh at export. The " +
+                 "centroid fan is ROUGH on concave blind-spot rims (can self-" +
+                 "intersect); the sanctioned repair is eval/tools/fix_body.py " +
+                 "(MeshFix), so leave this off when using that workflow.")]
+        public bool stlFanCapBoundaries = false;
+
+        [Tooltip("Run Close Holes automatically before capturing the body for " +
+                 "an export, then restore the pre-close volume. The raw MC body " +
+                 "carries phantom tau-band shells + open crop rims whose faces " +
+                 "read as inverted normals in viewers ('法線が逆', 2026-07-19).")]
+        public bool stlAutoCloseHoles = true;
+
+        [Tooltip("Bridges from each tube tip to its bone anchor. Off = tubes " +
+                 "end free at the (trimmed) tip — chosen when the body mesh is " +
+                 "present and the black connector stubs read as noise.")]
+        public bool stlIncludeBridges = true;
+
+        [Range(0f, 0.15f)]
+        [Tooltip("Trim this much arc length (m) off each tube's NEWEST end. " +
+                 "With the body mesh included, raw tips pierce outward through " +
+                 "the skin ('新しい側の先っぽが突き出る'); trimming ends the tube " +
+                 "short of the surface and the bridge (re-anchored to the " +
+                 "trimmed tip) carries the attachment into the body. 0 = off.")]
+        public float tubeHeadTrim = 0f;
+
         [Tooltip("Align the cross-section to WORLD UP instead of the twisting " +
                  "parallel-transport frame: with 4 sides one vertex always points " +
                  "up, so horizontal runs print as self-supporting 45° diamond " +
@@ -246,6 +271,10 @@ namespace TSDF
         [Tooltip("Body + floor plate colour in the 3MF export. Bambu Studio's " +
                  "Standard-3MF colour parsing maps it to the closest filament.")]
         public Color threeMfBodyColor = Color.black;
+
+        [Tooltip("Colour of the HUMAN body mesh — its own material, separate " +
+                 "from the black armature (floor/pillars/links).")]
+        public Color threeMfHumanColor = new Color(0.4f, 0.62f, 1f);
 
         [Tooltip("Curve tubes + bridges + wireframe colour in the 3MF export.")]
         public Color threeMfCurveColor = Color.white;
@@ -736,11 +765,18 @@ namespace TSDF
             // stlIncludeBody=false skips the whole capture — tubes-only variant.
             if (stlIncludeBody)
             {
+                // Close holes first: the raw MC body carries phantom tau-band
+                // shells and open crop rims that read as inverted normals.
+                // CloseHoles snapshots the pre-close volume; we restore it after
+                // the capture so the live display stays untouched.
+                bool closed = false;
+                if (stlAutoCloseHoles) { CloseHoles(); closed = true; }
                 var opt = WebCaptureOptions();
                 opt.meshTargetTris = 0;     // print wants full resolution
                 opt.includeCurves = false;  // STL curves come from the CSEmitSegs readback below,
                                             // NOT the drawn ribbon buffer — see BuildCurveAndBridgeTubes
                 var snap = TSDFSnapshotBuilder.Capture(volume, null, opt, out string err);
+                if (closed) RestoreSnapshot();
                 if (snap == null) { Fail(err); return null; }
                 pos.AddRange(snap.pos);
                 tri.Capacity = snap.tri.Length;
@@ -751,6 +787,18 @@ namespace TSDF
                     tri.Add(i0); tri.Add(i1); tri.Add(i2);
                 }
                 if (tri.Count == 0) { Fail("no non-degenerate triangles after weld"); return null; }
+                // Mesh-level cap for holes the volume pass cannot reach — the
+                // crown of the head is a blind spot of all four cameras (no
+                // observations at all), so no voxel closing radius spans it.
+                // Default OFF: the fan caps self-intersect on concave rims;
+                // fix_body.py (MeshFix) is the sanctioned repair.
+                if (stlFanCapBoundaries)
+                {
+                    int capped = FillBoundaryLoops(pos, tri);
+                    if (capped > 0)
+                        Debug.Log($"[TSDFPrintExporter] body: capped {capped} open boundary loop(s) " +
+                                  "(camera blind spots — crown etc.).", this);
+                }
                 asm.BodyVol = OrientOutward(pos, tri, 0, tri.Count);
             }
             asm.BodyTris = tri.Count / 3;
@@ -776,7 +824,7 @@ namespace TSDF
                 var webPts = stlContactFillets ? new List<(Vector3 p, float r, Vector3 tan)>() : null;
                 var webRanges = stlContactFillets ? new List<(int start, int count)>() : null;
                 BuildCurveAndBridgeTubes(tp, tn, tc, ti, out asm.TubeCount, out asm.BridgeCount,
-                                         includeBridges: stlIncludeBody || wireframe,
+                                         includeBridges: stlIncludeBridges && (stlIncludeBody || wireframe),
                                          rootWireframe: wireframe, out asm.WireCount,
                                          out int wireTriStartLocal, out int tubeBlackTriStartLocal,
                                          supportPts, supportCands, chainLows,
@@ -1048,7 +1096,7 @@ namespace TSDF
             {
                 Directory.CreateDirectory(dir);
                 ThreeMfWriter.Write(path3mf, asm.Pos, asm.Tri, spans,
-                    new[] { ("Body", threeMfBodyColor), ("Curves", threeMfCurveColor) },
+                    new[] { ("Body", threeMfBodyColor), ("Curves", threeMfCurveColor), ("Human", threeMfHumanColor) },
                     asm.Center, scale);
                 long bytes = new FileInfo(path3mf).Length;
                 string wireNote = asm.WireCount > 0 ? $" + {asm.WireCount} wires" : "";
@@ -1077,7 +1125,7 @@ namespace TSDF
                 int start = fromTriIdx / 3, count = (toTriIdx - fromTriIdx) / 3;
                 if (count > 0) spans.Add(new ThreeMfWriter.Span { StartTri = start, TriCount = count, Material = mat });
             }
-            Add(0, asm.CurveTriStart, 0);                          // body
+            Add(0, asm.CurveTriStart, 2);                          // human body (own colour)
             Add(asm.CurveTriStart, asm.TubeBlackTriStart, 1);      // white lines
             Add(asm.TubeBlackTriStart, asm.WireTriStart, 0);       // black lines (+ bridges)
             Add(asm.WireTriStart, asm.PatchTriStart, 0);           // wireframe + isolation links
@@ -1109,7 +1157,7 @@ namespace TSDF
             {
                 Directory.CreateDirectory(dir);
                 ObjMaterialWriter.Write(pathObj, asm.Pos, asm.Tri, spans,
-                    new[] { ("Body", threeMfBodyColor), ("Curves", threeMfCurveColor) },
+                    new[] { ("Body", threeMfBodyColor), ("Curves", threeMfCurveColor), ("Human", threeMfHumanColor) },
                     asm.Center, scale);
                 long bytes = new FileInfo(pathObj).Length;
                 string wireNote = asm.WireCount > 0 ? $" + {asm.WireCount} wires" : "";
@@ -1124,6 +1172,69 @@ namespace TSDF
             {
                 Fail($"OBJ write failed: {e.Message}");
             }
+        }
+
+        /// <summary>Cap every open boundary loop of the mesh with a centroid
+        /// fan. Boundary edges (used by exactly one triangle) are chained into
+        /// loops via their winding direction; each loop gets one centre vertex
+        /// and reversed-order fan triangles, so the cap continues the surface's
+        /// outward orientation. Returns the number of loops capped.</summary>
+        private static int FillBoundaryLoops(List<Vector3> pos, List<int> tri)
+        {
+            // undirected edge -> directed (a,b) as wound; shared edges cancel out
+            var open = new Dictionary<long, (int a, int b)>(1024);
+            long Key(int x, int y) => x < y ? ((long)x << 32) | (uint)y : ((long)y << 32) | (uint)x;
+            for (int t = 0; t + 2 < tri.Count; t += 3)
+            {
+                for (int e = 0; e < 3; e++)
+                {
+                    int a = tri[t + e], b = tri[t + (e + 1) % 3];
+                    long k = Key(a, b);
+                    if (!open.Remove(k)) open[k] = (a, b);
+                }
+            }
+            if (open.Count == 0) return 0;
+
+            // chain: each boundary vertex has one outgoing boundary edge on a
+            // manifold-with-boundary surface (non-manifold spots just break the
+            // loop, which is then skipped)
+            var next = new Dictionary<int, int>(open.Count);
+            foreach (var e in open.Values) next[e.a] = e.b;
+
+            int loops = 0;
+            var visited = new HashSet<int>();
+            var loop = new List<int>(256);
+            foreach (var startV in new List<int>(next.Keys))
+            {
+                if (visited.Contains(startV)) continue;
+                loop.Clear();
+                int v = startV;
+                bool closedLoop = false;
+                while (next.TryGetValue(v, out int nv))
+                {
+                    if (!visited.Add(v)) break;
+                    loop.Add(v);
+                    v = nv;
+                    if (v == startV) { closedLoop = true; break; }
+                    if (loop.Count > 100000) break;
+                }
+                if (!closedLoop || loop.Count < 3) continue;
+
+                Vector3 c = Vector3.zero;
+                foreach (int vi in loop) c += pos[vi];
+                c /= loop.Count;
+                int ci = pos.Count;
+                pos.Add(c);
+                for (int i = 0; i < loop.Count; i++)
+                {
+                    int a = loop[i], b = loop[(i + 1) % loop.Count];
+                    // boundary wound a->b: the cap traverses b->a to continue
+                    // the outward orientation across the shared edge
+                    tri.Add(b); tri.Add(a); tri.Add(ci);
+                }
+                loops++;
+            }
+            return loops;
         }
 
         /// <summary>Signed volume of tri[start..start+count) about the submesh
@@ -1319,21 +1430,61 @@ namespace TSDF
 
                 var cropB = new Bounds(cropCenter, cropSize);
                 var run = new List<Vector3>(64);
+                // bridge bookkeeping: when trimming or cropping moves/removes a
+                // chain's newest end, the bridge must anchor at the newest point
+                // that was ACTUALLY emitted — or be suppressed entirely when the
+                // chain produced no tube (an orphan bridge is a floating shell).
+                bool trackTips = tubeHeadTrim > 1e-4f || cropEnabled;
+                var bridgeTips = trackTips ? new Dictionary<uint, Vector3>() : null;
+                var bridgeSuppressed = trackTips ? new HashSet<uint>() : null;
                 void EmitWhole(uint seed, List<int> idxs)
                 {
                     pts.Clear();
                     pts.Add(segs[idxs[0]].a);
                     foreach (int i in idxs) pts.Add(segs[i].b);
-                    if (pts.Count < 2) return;
+                    if (pts.Count < 2) { bridgeSuppressed?.Add(seed); return; }
+
+                    // head trim: cut arc length off the NEWEST end so the tip
+                    // ends short of the body surface instead of piercing it
+                    if (tubeHeadTrim > 1e-4f)
+                    {
+                        float remain = tubeHeadTrim;
+                        int last = pts.Count - 1;
+                        while (last > 0 && remain > 0f)
+                        {
+                            float seg = (pts[last] - pts[last - 1]).magnitude;
+                            if (seg > remain)
+                            {
+                                pts[last] += (pts[last - 1] - pts[last]) * (remain / seg);
+                                break;
+                            }
+                            remain -= seg;
+                            pts.RemoveAt(last);
+                            last--;
+                        }
+                        if (pts.Count < 2) { bridgeSuppressed.Add(seed); return; } // fully trimmed away
+                    }
                     Vector3 colour = segs[idxs[0]].color;
-                    if (!cropEnabled) { EmitChain(pts, colour); return; }
+                    if (!cropEnabled)
+                    {
+                        EmitChain(pts, colour);
+                        if (bridgeTips != null) bridgeTips[seed] = pts[pts.Count - 1];
+                        return;
+                    }
                     // crop: each maximal in-box run becomes its own tube; drop
                     // stubs under 5 cm — chopped fragments read as debris
+                    bool anyRun = false;
+                    Vector3 newestEmittedTip = default;
                     void EmitRun()
                     {
                         float arc = 0f;
                         for (int i = 1; i < run.Count; i++) arc += (run[i] - run[i - 1]).magnitude;
-                        if (arc >= 0.05f) EmitChain(run, colour);
+                        if (arc >= 0.05f)
+                        {
+                            EmitChain(run, colour);
+                            anyRun = true;
+                            newestEmittedTip = run[run.Count - 1]; // runs go oldest -> newest
+                        }
                         run.Clear();
                     }
                     run.Clear();
@@ -1343,6 +1494,8 @@ namespace TSDF
                         EmitRun();
                     }
                     EmitRun();
+                    if (anyRun) bridgeTips[seed] = newestEmittedTip;
+                    else bridgeSuppressed.Add(seed);
                 }
 
                 // per-line random black/white split ("curved lineの色を白と黒で
@@ -1376,10 +1529,27 @@ namespace TSDF
                 if (includeBridges)
                 {
                     var anchors = new List<Vector3>(bridges.Count);
+                    int bridgesOverLength = 0;
                     foreach (int i in bridges)
                     {
-                        if ((segs[i].b - segs[i].a).sqrMagnitude < 1e-10f) continue;
-                        line[0] = new[] { segs[i].a, segs[i].b };
+                        // trim/crop moved or removed this seed's tube tip —
+                        // anchor the bridge at the newest EMITTED point, or
+                        // skip it when the chain produced no tube at all
+                        uint bseed = (uint)segs[i].pad >> 1;
+                        if (bridgeSuppressed != null && bridgeSuppressed.Contains(bseed)) continue;
+                        Vector3 bridgeA = segs[i].a;
+                        if (bridgeTips != null)
+                        {
+                            if (!bridgeTips.TryGetValue(bseed, out var tip)) continue; // never emitted
+                            bridgeA = tip;
+                        }
+                        if ((segs[i].b - bridgeA).sqrMagnitude < 1e-10f) continue;
+                        // The GPU pass length-gated the ORIGINAL tip; a re-anchored
+                        // bridge can span much farther (e.g. across a cropped-out
+                        // region) — re-apply the limit here.
+                        if ((segs[i].b - bridgeA).magnitude > maxBridgeLength)
+                        { bridgesOverLength++; continue; }
+                        line[0] = new[] { bridgeA, segs[i].b };
                         col[0] = segs[i].color;
                         float rb = Mathf.Max(segs[i].rb, 1e-4f);
                         CurveTubeBuilder.AppendCurveTubes(line, col, 1f, rb, stlCurveSides,
@@ -1388,6 +1558,10 @@ namespace TSDF
                         bridgeCount++;
                         anchors.Add(segs[i].b); // body-side anchor = wireframe node
                     }
+                    if (bridgesOverLength > 0)
+                        Debug.LogWarning($"[TSDFPrintExporter] STL bridges: {bridgesOverLength} skipped " +
+                                         $"(re-anchored span over maxBridgeLength {maxBridgeLength} m) — " +
+                                         "those curves hang on their tip contact only.", this);
 
                     if (rootWireframe)
                     {

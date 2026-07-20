@@ -150,6 +150,98 @@ namespace BodyTracking.Eval.Rtmpose
             return true;
         }
 
+        // ---- per-visitor body-profile sampling (Calibrate star-pose hold) ----
+        // Bone lengths are measured from the PER-CAMERA raw skeletons
+        // (OnPerCameraSkeletons, pre-fusion): the fused output is length-
+        // constrained toward the CURRENT profile, so measuring it would just
+        // echo the defaults back. Same-camera measurement also cancels the
+        // depth-lift Z error (the BodyProfileBuilder finding). Worker thread
+        // appends under a lock; Begin/End run on the main thread.
+
+        private readonly object _profileLock = new object();
+        private List<float>[] _profileSamples;
+        private volatile bool _profileSampling;
+
+        /// <summary>Start collecting per-camera bone-length samples (Calibrate entry).</summary>
+        public void BeginBodyProfileSampling()
+        {
+            lock (_profileLock)
+            {
+                _profileSamples = new List<float>[FusedRtmposeAdapter.Bones.Length];
+                for (int b = 0; b < _profileSamples.Length; b++) _profileSamples[b] = new List<float>();
+            }
+            _profileSampling = true;
+        }
+
+        /// <summary>Stop sampling and build a per-visitor profile. False when any
+        /// bone has fewer than <paramref name="minSamplesPerBone"/> plausible
+        /// samples — caller keeps the default profile then.</summary>
+        public bool EndBodyProfileSampling(int minSamplesPerBone, out BodyProfile profile, out string summary)
+        {
+            _profileSampling = false;
+            profile = null;
+            List<float>[] samples;
+            lock (_profileLock) { samples = _profileSamples; _profileSamples = null; }
+            if (samples == null) { summary = "sampling was never started"; return false; }
+
+            var p = new BodyProfile();
+            var sb = new System.Text.StringBuilder();
+            for (int b = 0; b < samples.Length; b++)
+            {
+                var list = samples[b];
+                if (list.Count < minSamplesPerBone)
+                {
+                    summary = $"bone {FusedRtmposeAdapter.Bones[b].a}-{FusedRtmposeAdapter.Bones[b].b}: " +
+                              $"{list.Count}/{minSamplesPerBone} samples";
+                    return false;
+                }
+                list.Sort();
+                p.LengthMm[b] = list[list.Count / 2];
+                sb.Append($"{FusedRtmposeAdapter.Bones[b].a}-{FusedRtmposeAdapter.Bones[b].b}=" +
+                          $"{p.LengthMm[b]:0}mm({list.Count}) ");
+            }
+            profile = p;
+            summary = sb.ToString();
+            return true;
+        }
+
+        /// <summary>The fusion's current bone-length profile (the default loaded
+        /// from bodyProfilePath, or a per-visitor calibration). Null = fusion
+        /// runs without bone-length priors.</summary>
+        public BodyProfile CurrentBodyProfile => _session?.Fused?.Profile;
+
+        /// <summary>Swap the fusion's bone-length profile (per-visitor calibration,
+        /// or restoring the session default between visitors — null is a valid
+        /// value meaning "no priors"). Reference assignment is atomic; the worker
+        /// picks it up on its next fuse, and RebuildAdapter carries it across
+        /// playback-loop rebuilds.</summary>
+        public void ApplyBodyProfile(BodyProfile profile)
+        {
+            var s = _session;
+            if (s?.Fused != null) s.Fused.Profile = profile;
+        }
+
+        // Worker thread (per-camera inference callback).
+        private void OnPerCameraSkeletonsForProfile(EvalSkeletonFrame f)
+        {
+            if (!_profileSampling) return;
+            var p = f.Primary();
+            if (p == null) return;
+            lock (_profileLock)
+            {
+                if (_profileSamples == null) return;
+                for (int b = 0; b < FusedRtmposeAdapter.Bones.Length; b++)
+                {
+                    var (a, c) = FusedRtmposeAdapter.Bones[b];
+                    if (!p.Joints[(int)a].Valid || !p.Joints[(int)c].Valid) continue;
+                    float len = Vector3.Distance(p.Joints[(int)a].PositionMm, p.Joints[(int)c].PositionMm);
+                    // Rigid-invariant same-camera length; drop implausible outliers so a
+                    // partial detection can't poison the median.
+                    if (len > 50f && len < 1000f) _profileSamples[b].Add(len);
+                }
+            }
+        }
+
         /// <summary>Runtime toggle for <see cref="submitToMerger"/> that keeps the
         /// merger's useExternalBodies flag in sync. Pausing FORCES external-body
         /// mode off regardless of who set it — this component is the only
@@ -302,6 +394,7 @@ namespace BodyTracking.Eval.Rtmpose
                     s.Fused.Profile = BodyProfile.Load(profile);
                 s.Fused.SetCaptureVolume(captureVolumeCenterMm, captureVolumeHalfMm);
                 s.Fused.OnSkeletons += f => OnFusedSkeletons(s, f); // worker thread!
+                s.Fused.OnPerCameraSkeletons += OnPerCameraSkeletonsForProfile; // worker thread!
             }
             catch (Exception e)
             {
@@ -449,7 +542,7 @@ namespace BodyTracking.Eval.Rtmpose
         {
             // Live-only fusion runs on the monotonic live clock — a playback loop
             // wrap doesn't touch it, so keep the adapter (a rebuild would drop
-            // the visitor's tracking continuity mid-BanzaiWait).
+            // the on-stage visitor's tracking continuity for no reason).
             if (liveFramesOnly) return;
             var s = _session;
             if (s == null) return;
@@ -816,6 +909,7 @@ namespace BodyTracking.Eval.Rtmpose
                 next.SetCaptureVolume(captureVolumeCenterMm, captureVolumeHalfMm);
                 foreach (var kv in s.Xform) next.SetWorldTransform(kv.Key, kv.Value.G);
                 next.OnSkeletons += f => OnFusedSkeletons(s, f);
+                next.OnPerCameraSkeletons += OnPerCameraSkeletonsForProfile;
                 s.Fused = next; // old adapter (and its subscription) drops with it
                 lock (s.SlotLock)
                     foreach (var kv in s.Slots)
