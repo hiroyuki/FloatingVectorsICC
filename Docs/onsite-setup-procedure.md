@@ -63,22 +63,20 @@ Game 内 UI（`CalibrationRuntimeUI`）で実施。Editor 派なら `Window > Ca
 - [ ] presence: 入退場で occupancy が反応するか（閾値は checklist のチューニング項）
 - [ ] freeze(Space)+Rec(F9) の同時動作（コードパス未実機検証 → dancer-session.md 参照）
 
-## 6. Experience 用データ・設定
+## 6. Experience 用設定
 
-1. **アトラクト用テイク収録**（F9。BT が乗る動きのある 1 人テイクを複数）
-2. 収録テイクを **v11s 変換**（`FloatingVectors > Eval BT` の FusedBatchConvert、または FusedTakeConverter。10 秒テイク ≈ 十数秒/本）
-3. `ExperienceConfig`（Assets/Settings/ExperienceConfig.asset）:
-   - `attractRecordingRoot` = 変換済みテイク群のフォルダ（`attractUseRecordedBodies=ON` 既定）
-   - `visitorRecordingRoot` = 来場者テイク書き込み先（**高速ディスク**・attract とは別フォルダ・容量監視）
+1. `ExperienceConfig`（Assets/Settings/ExperienceConfig.asset）:
+   - `visitorRecordingRoot` = 来場者テイク書き込み先（**高速ディスク**・容量監視）
    - `dryRunPublish=false`、`qrUrlKind`（LFKS の見え方で決定）
-4. シーンに **ExperienceDirector GO** を追加し config 割当（HUD に Experience Mode チェックボックスが出る）
-5. （任意）ポーズガイド画像/SE 差し替え（`poseGuideTexture` / `banzaiGuideTexture` / AudioClip 群。未設定はシルエット+無音で動作）
+2. シーンに **ExperienceDirector GO** を追加し config 割当（HUD に Experience Mode チェックボックスが出る）
+3. （任意）ポーズガイド画像/SE 差し替え（`poseGuideTexture` / AudioClip 群。未設定はシルエット+無音で動作）
+※ 無人時（Idle）は床グリッドのみ表示 — アトラクト用テイクの収録・変換は不要になった
 
 ## 7. 通し（E2E）
 
 1. HUD の **Experience Mode ON** → 実人物で 1 サイクル:
-   大の字（計測ログ確認）→ 10 秒収録 → 変換プログレス → ループ再生 → **ばんざい** → QR をスマホでスキャン → モデルが開くこと
-2. 3 ループ放置のフォールバック、途中離脱 → Attract 復帰、USB 抜き → Fault → 復帰も一度ずつ
+   大の字（`per-visitor bone profile applied` ログ確認）→ 自由時間 → カウントダウン → **0 から 1 秒撮影** → 変換プログレス → 結果表示（凍結彫刻）→ QR をスマホでスキャン → モデルが開くこと
+2. 大の字タイムアウト（既定プロファイル続行）、途中離脱 → Attract 復帰、USB 抜き → Fault → 復帰も一度ずつ
 3. しきい値・文言・タイミング調整 → ソークテスト（checklist の該当項目へ）
 
 ## トラブル時の分岐

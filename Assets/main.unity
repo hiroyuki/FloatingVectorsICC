@@ -2297,6 +2297,8 @@ MonoBehaviour:
   printRadius: 0.006
   tubeTailTaper: 0.2
   tubeRaindrop: 1
+  stlIncludeBridges: 1
+  tubeHeadTrim: 0
   tubeAlignUp: 1
   stlContactBeads: 1
   stlBlackLineRatio: 0.5
@@ -2327,6 +2329,7 @@ MonoBehaviour:
   stlFloorPillarBand: 0.05
   stlFloorPillarRadius: 0.012
   threeMfBodyColor: {r: 0, g: 0, b: 0, a: 1}
+  threeMfHumanColor: {r: 0.4, g: 0.62, b: 1, a: 1}
   threeMfCurveColor: {r: 1, g: 1, b: 1, a: 1}
   stlRootWireframe: 1
   stlWireframeNeighbors: 2

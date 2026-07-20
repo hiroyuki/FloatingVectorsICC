@@ -23,8 +23,23 @@ using UnityEngine;
 namespace Calibration.RuntimeUI
 {
     [AddComponentMenu("Calibration/Calibration Runtime UI")]
-    public class CalibrationRuntimeUI : MonoBehaviour
+    public class CalibrationRuntimeUI : MonoBehaviour, Shared.IViewToggle
     {
+        // ---- IViewToggle ("Calibration mode" in the Control Panel Views list) ----
+        // Same lever as toggleActiveKey (F1): entering suspends interfering
+        // components and shows the camera grid; exiting restores them.
+        // Edit mode is side-effect free: _active is only meaningful after Awake
+        // normalizes it, and SetActive would flip other components' enabled
+        // flags in the saved scene (no undo). Outside Play the getter reflects
+        // startActive and the setter is a no-op (flip startActive in the
+        // Inspector to change the launch state).
+        public string ViewLabel => "Calibration mode";
+        public bool Visible
+        {
+            get => Application.isPlaying ? _active : startActive;
+            set { if (Application.isPlaying) SetActive(value); }
+        }
+
         [Header("Board / gating")]
         [Tooltip("ChArUco board spec asset (same one the Editor CalibrationWindow uses). " +
                  "Required before Capture works.")]

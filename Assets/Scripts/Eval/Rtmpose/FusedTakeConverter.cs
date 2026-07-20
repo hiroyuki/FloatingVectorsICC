@@ -47,6 +47,9 @@ namespace BodyTracking.Eval.Rtmpose
             /// <summary>Bone-length profile JSON, project-root relative (or absolute).
             /// Empty/missing = fusion runs without bone-length priors.</summary>
             public string BodyProfilePath = "eval/body_profile.json";
+            /// <summary>Per-visitor profile measured during the calibration pose.
+            /// Non-null overrides BodyProfilePath.</summary>
+            public BodyProfile ProfileOverride;
             public OrtProvider Provider = OrtProvider.Cuda;
             public float ConfThreshold = 0.3f;
             /// <summary>Run the catch-up smoothing post-pass (the "s" in v11s).</summary>
@@ -237,7 +240,9 @@ namespace BodyTracking.Eval.Rtmpose
                 // medianLagFilter (true) / AsyncDetect (false) reproduce the
                 // offline v11s output exactly.
                 var fused = new FusedRtmposeAdapter(backend) { ConfThreshold = options.ConfThreshold };
-                if (profilePath != null && File.Exists(profilePath))
+                if (options.ProfileOverride != null)
+                    fused.Profile = options.ProfileOverride;
+                else if (profilePath != null && File.Exists(profilePath))
                     fused.Profile = BodyProfile.Load(profilePath);
                 fused.SetCaptureVolume(options.CaptureVolumeCenterMm, options.CaptureVolumeHalfMm);
                 foreach (var t in tracks)

@@ -1,34 +1,36 @@
-// The show's single owner: drives the pose-driven ExperienceStateMachine
-// (Calibrate → Explore → Processing → Watch → BanzaiWait → Exporting →
-// QrShow), owns every runtime object the experience spawns (visitor UI,
-// presence detector, live skeleton feed), snapshots the dev-mode values it
-// touches on Enter and restores them all on Exit — Dev mode must come back
-// bit-identical.
+// The show's single owner: drives the one-second-take ExperienceStateMachine
+// (Idle → Calibrate → FreeMove → Shoot → Processing → ResultShow → QrShow —
+// Idle shows nothing but the floor grid while unattended), owns
+// every runtime object the experience spawns (visitor UI, presence detector,
+// live skeleton feed), snapshots the dev-mode values it touches on Enter and
+// restores them all on Exit — Dev mode must come back bit-identical.
 //
 // Sequence responsibilities per state:
-//   Calibrate  — star-pose guide + window countdown; on a held star pose the
-//                visitor's body metrics are measured (banzai personal
-//                adaptation); window expiry proceeds with defaults.
-//   Explore    — records ~exploreSeconds of raw sensor data via SensorRecorder
-//                (bodies_main written by the merger's recording path), last
-//                countdownSeconds shown as digits.
-//   Processing — FusedTakeConverter (v11s) on a worker thread; progress bar;
-//                timeout/failure falls back to the recorded k4abt bodies so
+//   Calibrate  — star-pose guide + window countdown; while the pose is held,
+//                per-camera bone lengths are sampled (LiveFusedBodySource)
+//                and become the PER-VISITOR fusion profile — applied to the
+//                live fusion immediately and to the take conversion later.
+//                Window expiry proceeds with the default profile.
+//   FreeMove   — free movement with the (now personally calibrated) live
+//                sculpture.
+//   Shoot      — cue text → countdown (recording starts WITH the countdown so
+//                the fusion has warm-up) → at zero ONE second is the take →
+//                recording stops.
+//   Processing — FusedTakeConverter (v11s, per-visitor profile) on a worker
+//                thread with a progress bar, then a single play-through of
+//                the converted take (loop off) and the final capture over the
+//                one-second trail window. Failure at any step falls back so
 //                the visitor is never dead-ended.
-//   Watch      — visitor playback starts: merger consumes recorded bodies
-//                (ignoreRecordedBodies=false, muteWorkerIngest=true), live is
-//                suppressed as sculpture source, LiveSkeletonFeed re-purposes
-//                the k4abt workers to track the LIVE visitor.
-//   BanzaiWait — looping playback; a held banzai (or the loop fallback with a
-//                random seek) captures the sculpture at that playback moment.
-//   Exporting  — glb/usdz export + publish while playback keeps looping.
-//   QrShow     — QR + scan prompt; playback still looping behind it.
+//   ResultShow — the sculpture stays frozen at the captured moment (that IS
+//                the exported shape) while glb/usdz export + upload run.
+//   QrShow     — QR + scan prompt over the frozen result.
 //
-// Capture protocol (carried over): set historySamples=15 -> wait for
-// PointCloudMotionCurves.BuildVersion +2 (2 s timeout) -> TSDFSnapshotBuilder
-// .Capture (sync, non-destructive) -> restore historySamples. Playback is NOT
-// paused for the capture — a stalled playback would stop BuildVersion from
-// advancing and the 15-sample window would never take effect.
+// Capture protocol (carried over): set historySamples to the one-second
+// window -> wait for PointCloudMotionCurves.BuildVersion +2 (2 s timeout;
+// the ring always holds MaxK frames, so this works while stopped) ->
+// TSDFSnapshotBuilder.Capture (sync, non-destructive). The window stays
+// applied through ResultShow/QrShow so the screen keeps showing exactly what
+// was exported; it is restored on the next Idle.
 
 using System;
 using System.Collections;
@@ -65,9 +67,10 @@ namespace Experience
 
         [Tooltip("Live CUDA fusion source (RTMPose). When an enabled instance exists " +
                  "it IS the live skeleton pipeline: fused bodies drive the merger " +
-                 "during live phases, banzai detection reads it directly during " +
-                 "playback, and the k4abt LiveSkeletonFeed stays dormant. " +
-                 "Auto-resolves when empty; absent = k4abt live pipeline.")]
+                 "during live phases and the calibration pose samples the per-visitor " +
+                 "bone profile from its per-camera skeletons. The k4abt " +
+                 "LiveSkeletonFeed stays dormant. Auto-resolves when empty; absent = " +
+                 "k4abt live pipeline (no per-visitor profile).")]
         public LiveFusedBodySource liveFusedSource;
 
         [Header("Debug")]
@@ -83,13 +86,14 @@ namespace Experience
             set { if (value && !_active) EnterMode(); else if (!value && _active) ExitMode(); }
         }
 
-        public ExperienceState CurrentState => _fsm?.State ?? ExperienceState.Attract;
+        public ExperienceState CurrentState => _fsm?.State ?? ExperienceState.Idle;
         public bool IsActive => _active;
         /// <summary>Session body metrics (defaults until the star pose measured them).</summary>
         public VisitorBodyMetrics CurrentMetrics => _metrics;
-        /// <summary>True once the star pose actually measured the visitor (false =
-        /// running on VisitorBodyMetrics.Default).</summary>
+        /// <summary>True once the star pose actually measured the visitor.</summary>
         public bool MetricsMeasured => _metricsMeasured;
+        /// <summary>True once the per-visitor bone profile was measured and applied.</summary>
+        public bool ProfileMeasured => _visitorProfile != null;
 
         private bool _active;
         private ExperienceStateMachine _fsm;
@@ -101,7 +105,7 @@ namespace Experience
         private LiveSkeletonFeed _liveFeed;
         private ExperienceSpaceBuilder _space;
         private AudioSource _audio;
-        private Texture2D _starGuideGenerated, _banzaiGuideGenerated;
+        private Texture2D _starGuideGenerated;
 
         // dev-value snapshot (restored on Exit)
         private int _savedHistorySamples;
@@ -110,6 +114,10 @@ namespace Experience
         private string[] _savedMgrOrder, _savedRecOrder;
         private bool _savedKeepLive;
         private string _savedPlaybackFolder;
+        private bool _savedWasPlaying;
+        private bool _savedWasPaused;
+        private bool _savedWasLoaded;
+        private bool _savedLiveFrozen;
         private bool _savedCumulativeNoErase;
         private PointCloudCumulative _cumulative;
         private readonly System.Collections.Generic.Dictionary<string, bool> _savedLiveVisible =
@@ -117,22 +125,17 @@ namespace Experience
         private readonly System.Collections.Generic.Dictionary<string, bool> _savedLiveSuppress =
             new System.Collections.Generic.Dictionary<string, bool>();
 
-        // attract playback
-        private AttractPlaybackController _attract;
-        private bool _attractOwnsPlayback;
-        private bool _devFallbackLogged;
-
-        // visitor recording (Explore)
+        // visitor recording (Shoot)
         private bool _visitorRecordingActive;
         private string _savedRecFolderPath;
         private bool _savedRecAutoTimestamp;
 
-        // visitor playback (Watch/BanzaiWait/Exporting/QrShow)
+        // visitor playback (the Processing play-through; stays switched through
+        // ResultShow/QrShow so the frozen result keeps its transport)
         private bool _visitorPlaybackActive;
         private bool _takeHasBodies = true;
         private int _savedRenderDelay;
         private bool _savedLoop;
-        private int _playbackLoops;
 
         // body-source snapshot (EnterMode) — restored on Exit
         private bool _savedIgnoreRecorded;
@@ -143,18 +146,18 @@ namespace Experience
         // per-run state
         private VisitorBodyMetrics _metrics = VisitorBodyMetrics.Default;
         private bool _metricsMeasured;
-        private PoseHoldDetector _starHold, _banzaiHold;
+        private BodyProfile _visitorProfile;
+        private BodyProfile _defaultProfile; // the fusion's profile before any visitor calibration
+        private bool _profileSamplingActive;
+        private PoseHoldDetector _starHold;
         private bool _calibrationDone;
         private bool _recordingDone;
         private bool _processingDone, _processingFailed;
         private string _takeRoot;
         private FusedTakeConverter _converter;
         private TSDFSnapshot _snapshot;
-        private bool _captureDone;
-        private bool _debugBanzaiPulse;
         private bool _exportDone, _exportFailed;
-        private Coroutine _calibrateRoutine, _exploreRoutine, _processingRoutine,
-                          _captureRoutine, _exportRoutine;
+        private Coroutine _calibrateRoutine, _shootRoutine, _processingRoutine, _exportRoutine;
         private CancellationTokenSource _cts;
         private Task<PublishResult> _publishTask;
         private string _qrUrl;
@@ -205,20 +208,17 @@ namespace Experience
                 RecordingDone = _recordingDone,
                 ProcessingDone = _processingDone,
                 ProcessingFailed = _processingFailed,
-                PlaybackLoops = _playbackLoops,
-                CaptureDone = _captureDone,
                 ExportDone = _exportDone,
                 ExportFailed = _exportFailed,
             };
             _fsm.Tick(Time.deltaTime, in inputs, config.timings);
-            UpdateBanzaiDetection();
             UpdateCrowdNotice();
 
             // Fused source died mid-session (CUDA fault, component disabled):
-            // bring up the k4abt fallback feed so calibration/banzai/presence
-            // keep a live-skeleton provider. On recovery, retire the fallback
-            // again — two live pipelines would fight for the GPU — and reassert
-            // the current state's body-source mode (the recovered component
+            // bring up the k4abt fallback feed so calibration/presence keep a
+            // live-skeleton provider. On recovery, retire the fallback again —
+            // two live pipelines would fight for the GPU — and reassert the
+            // current state's body-source mode (the recovered component
             // re-enabled with its own serialized flags).
             if (_liveFeed == null && !LfbsActive)
             {
@@ -240,22 +240,23 @@ namespace Experience
         {
             switch (s)
             {
-                case ExperienceState.Attract:
-                    ApplyBodySource(BodySource.AttractGhost);
-                    break;
+                case ExperienceState.Idle:
                 case ExperienceState.Calibrate:
-                case ExperienceState.Explore:
-                case ExperienceState.Processing:
+                case ExperienceState.FreeMove:
+                case ExperienceState.Shoot:
                     ApplyBodySource(BodySource.Live);
                     break;
-                case ExperienceState.Watch:
-                case ExperienceState.BanzaiWait:
-                case ExperienceState.Exporting:
+                case ExperienceState.Processing:
+                    // Live until the play-through switches the transport.
+                    if (_visitorPlaybackActive) ApplyBodySource(BodySource.VisitorPlayback, _takeHasBodies);
+                    else ApplyBodySource(BodySource.Live);
+                    break;
+                case ExperienceState.ResultShow:
                 case ExperienceState.QrShow:
                     ApplyBodySource(BodySource.VisitorPlayback, _takeHasBodies);
                     break;
                     // Fault: leave the transport as the preceding state set it —
-                    // the alert owns the screen, recovery goes through Attract.
+                    // the alert owns the screen, recovery goes through Idle.
             }
         }
 
@@ -270,25 +271,18 @@ namespace Experience
             _liveFeed.trackingVolume = boundingVolume;
         }
 
-        // While recorded bodies drive the merge (visitor playback; attract with
-        // recorded-ghost bodies) the merged-BT presence path sees the GHOST —
+        // While the visitor take's recorded bodies drive the merge (Processing
+        // play-through onward) the merged-BT presence path sees the GHOST —
         // presence must come from live-only signals: GPU occupancy, the fused
-        // live skeleton, or the k4abt live feed.
+        // live skeleton, or the k4abt live feed. In the no-bodies fallback the
+        // merger re-runs k4abt on the playback — that "ghost" IS the visitor's
+        // own take, so the merged path stays valid there (overstay risk is
+        // bounded by the QR timeout). Idle has no ghost at all: the normal
+        // presence blend fires the moment someone steps in.
         private bool ComputePresent()
         {
             if (_presence == null) return false;
-            var s = _fsm.State;
-            bool playbackState =
-                s == ExperienceState.Watch || s == ExperienceState.BanzaiWait
-                || s == ExperienceState.Exporting || s == ExperienceState.QrShow;
-            // The merged-BT presence path only lies when RECORDED bodies own the
-            // merge. In the no-bodies fallback the merger re-runs k4abt on the
-            // playback — the "ghost" it sees IS the visitor's own take, and
-            // excluding it would end the show whenever occupancy under-fires
-            // (the overstay risk is bounded: loops → capture → QR timeout).
-            bool ghostDrivesMerge =
-                (playbackState && _takeHasBodies)
-                || (s == ExperienceState.Attract && config.attractUseRecordedBodies && _attract != null);
+            bool ghostDrivesMerge = _visitorPlaybackActive && _takeHasBodies;
             if (!ghostDrivesMerge) return _presence.IsPresent;
             return _presence.OccupancyActive
                 || (LfbsActive && liveFusedSource.HasRecentFused)
@@ -317,7 +311,7 @@ namespace Experience
                 motionCurves.freeze = false;
             }
 
-            // 2) world rebase on (single reversible hook, Phase 2).
+            // 2) world rebase on (single reversible hook).
             if (sensorManager != null)
             {
                 _savedMgrRebase = sensorManager.applyWorldRebase;
@@ -387,18 +381,28 @@ namespace Experience
             {
                 _savedLfbsSubmit = liveFusedSource.submitToMerger;
                 _savedLfbsLiveOnly = liveFusedSource.liveFramesOnly;
+                // the session default (json-loaded or null) — restored between
+                // visitors so one visitor's bones never shape the next
+                _defaultProfile = liveFusedSource.CurrentBodyProfile;
             }
 
             _starHold = new PoseHoldDetector(config.starHoldSeconds, config.poseHoldDropoutSeconds);
-            _banzaiHold = new PoseHoldDetector(config.banzaiHoldSeconds, config.poseHoldDropoutSeconds);
 
-            // 4b) attract coexistence: keep the live rig through playback loads,
+            // 4b) playback coexistence: keep the live rig through playback loads,
             // hide the raw clouds (the TSDF mesh is the star), pause cumulative
-            // snapshots, spawn the attract controller.
+            // snapshots.
             if (sensorRecorder != null)
             {
                 _savedKeepLive = sensorRecorder.keepLiveRenderersOnLoad;
                 _savedPlaybackFolder = sensorRecorder.playbackFolderPath;
+                _savedWasPlaying = sensorRecorder.IsPlaying;             // Idle stops it; Exit resumes it
+                _savedWasPaused = sensorRecorder.IsPaused;               // resume paused, not advancing
+                _savedWasLoaded = sensorRecorder.RecordedFrameCount > 0; // loaded-but-stopped: Exit reloads
+                // A live freeze (Space) must not carry into the show — every
+                // renderer would keep holdLiveFrame and the whole experience
+                // (sculpture, BT, curves) would stay frozen. Exit re-freezes.
+                _savedLiveFrozen = !sensorRecorder.IsPlaying && sensorRecorder.IsPaused;
+                if (_savedLiveFrozen) sensorRecorder.ResumeFrames();
                 sensorRecorder.keepLiveRenderersOnLoad = true;
             }
             _savedLiveVisible.Clear();
@@ -420,22 +424,13 @@ namespace Experience
                 _savedCumulativeNoErase = _cumulative.noErase;
                 _cumulative.noErase = false;
             }
-            if (!string.IsNullOrEmpty(config.attractRecordingRoot) && sensorRecorder != null)
-            {
-                _attract = gameObject.AddComponent<AttractPlaybackController>();
-                _attract.sensorRecorder = sensorRecorder;
-                _attract.attractRootPath = config.attractRecordingRoot;
-            }
-            _attractOwnsPlayback = false;
-            _devFallbackLogged = false;
-
             // 5) run.
             ResetRunState();
             _fsm = new ExperienceStateMachine();
             _fsm.Changed += OnStateChanged;
-            _fsm.ResetTo(ExperienceState.Attract);
+            _fsm.ResetTo(ExperienceState.Idle);
             _active = true;
-            ApplyStateSideEffects(ExperienceState.Attract);
+            ApplyStateSideEffects(ExperienceState.Idle);
             Debug.Log($"[{nameof(ExperienceDirector)}] experience mode ON.", this);
         }
 
@@ -444,11 +439,11 @@ namespace Experience
             _active = false;
 
             StopRoutine(ref _calibrateRoutine);
-            StopRoutine(ref _exploreRoutine);
+            StopRoutine(ref _shootRoutine);
             StopRoutine(ref _processingRoutine);
-            StopRoutine(ref _captureRoutine);
             StopRoutine(ref _exportRoutine);
             CancelPublish();
+            CancelProfileSampling();
             _converter?.Abort();
             _converter = null;
             AbortVisitorRecording();
@@ -463,6 +458,8 @@ namespace Experience
             {
                 liveFusedSource.SetSubmitToMerger(_savedLfbsSubmit);
                 liveFusedSource.liveFramesOnly = _savedLfbsLiveOnly;
+                if (_visitorProfile != null)
+                    liveFusedSource.ApplyBodyProfile(_defaultProfile);
             }
             if (merger != null)
             {
@@ -483,21 +480,30 @@ namespace Experience
             if (_presence != null) { Destroy(_presence.gameObject); _presence = null; }
             if (_liveFeed != null) { Destroy(_liveFeed.gameObject); _liveFeed = null; }
             if (_starGuideGenerated != null) { Destroy(_starGuideGenerated); _starGuideGenerated = null; }
-            if (_banzaiGuideGenerated != null) { Destroy(_banzaiGuideGenerated); _banzaiGuideGenerated = null; }
             _snapshot = null;
 
-            // attract coexistence teardown (before space/rebase restore)
-            if (_attract != null)
-            {
-                if (_attractOwnsPlayback) _attract.Stop();
-                Destroy(_attract);
-                _attract = null;
-                _attractOwnsPlayback = false;
-            }
             if (sensorRecorder != null)
             {
                 sensorRecorder.keepLiveRenderersOnLoad = _savedKeepLive;
                 sensorRecorder.playbackFolderPath = _savedPlaybackFolder;
+                // A dev playback session existed when the mode was entered
+                // (Idle unloaded it) — bring it back in the same transport
+                // state: reload when it was merely loaded, resume when it was
+                // playing, re-pause when it was paused. The playhead restarts
+                // from the beginning. An empty playbackFolderPath is fine —
+                // Load() resolves the recorder's default root itself.
+                if ((_savedWasPlaying || _savedWasLoaded) && !sensorRecorder.IsPlaying)
+                {
+                    sensorRecorder.Load();
+                    if (_savedWasPlaying)
+                    {
+                        sensorRecorder.TogglePlay();
+                        if (_savedWasPaused) sensorRecorder.PausePlayback();
+                    }
+                }
+                // Reapply the live freeze the operator had before the show.
+                if (_savedLiveFrozen && !sensorRecorder.IsPlaying && !sensorRecorder.IsPaused)
+                    sensorRecorder.HoldFrames();
             }
             if (sensorManager != null)
             {
@@ -550,22 +556,24 @@ namespace Experience
 
         private void ResetRunState()
         {
+            // Undo the previous visitor's fusion calibration BEFORE clearing the
+            // reference — the live fusion must start every run on the session
+            // default (or its absence), never on the last visitor's bones.
+            if (_visitorProfile != null && liveFusedSource != null)
+                liveFusedSource.ApplyBodyProfile(_defaultProfile);
             _metrics = VisitorBodyMetrics.Default;
             _metricsMeasured = false;
+            _visitorProfile = null;
             _calibrationDone = false;
             _recordingDone = false;
             _processingDone = _processingFailed = false;
             _takeRoot = null;
             _snapshot = null;
-            _captureDone = false;
-            _debugBanzaiPulse = false;
             _exportDone = _exportFailed = false;
-            _playbackLoops = 0;
             _takeHasBodies = true;
             _qrUrl = null;
             _crowdShowing = false;
             _starHold?.Reset();
-            _banzaiHold?.Reset();
         }
 
         // ------------------------------------------------ state side effects ----
@@ -574,57 +582,40 @@ namespace Experience
         {
             // Routine / device cleanup when a state is left by any path
             // (advance, walked away, fault).
-            if (from == ExperienceState.Calibrate) StopRoutine(ref _calibrateRoutine);
-            if (from == ExperienceState.Explore)
+            if (from == ExperienceState.Calibrate)
             {
-                StopRoutine(ref _exploreRoutine);
+                StopRoutine(ref _calibrateRoutine);
+                // Timeout path (advancing without a held star pose): don't throw
+                // the window's samples away. Bone lengths are pose-invariant, so
+                // whatever the cameras collected over the window still yields a
+                // usable best-effort profile — the star pose only makes the
+                // samples cleaner. Walked-away/fault paths discard as before.
+                if (to == ExperienceState.FreeMove) FinalizeProfileSamplingBestEffort();
+                else CancelProfileSampling();
+            }
+            if (from == ExperienceState.Shoot)
+            {
+                StopRoutine(ref _shootRoutine);
                 if (to != ExperienceState.Processing) AbortVisitorRecording();
             }
             if (from == ExperienceState.Processing && _processingRoutine != null)
             {
                 StopRoutine(ref _processingRoutine);
                 _converter?.Abort();
+                RestoreHistorySamples(); // the capture may have been mid-flight
             }
-            if (from == ExperienceState.BanzaiWait && _captureRoutine != null)
-            {
-                StopRoutine(ref _captureRoutine);
-                RestoreHistorySamples();
-            }
-            if (from == ExperienceState.Exporting && to == ExperienceState.Attract)
+            if (from == ExperienceState.ResultShow && to == ExperienceState.Idle)
                 CancelPublish(); // fail path or skip; success path already completed
 
-            // Attract → visitor handoff: the ghost stops, live becomes the
-            // sculpture source, k4abt workers restart (clock jump guard). Only
-            // when a live rig exists — the dev/Mac fallback keeps the playback
-            // running as the only source.
-            if (from == ExperienceState.Attract && to == ExperienceState.Calibrate)
+            // Idle → visitor handoff (k4abt pipeline only): restart the workers
+            // across the clock jump left by the previous run's playback. The
+            // fused source has no workers to restart.
+            if (from == ExperienceState.Idle && to == ExperienceState.Calibrate)
             {
-                ApplyBodySource(BodySource.Live);
-                if (HasLiveRenderers())
-                {
-                    _attract?.Stop();
-                    _attractOwnsPlayback = false;
-                    sensorManager?.SetLiveSuppressedAsSource(false);
-                    // k4abt pipeline only: restart the workers across the clock
-                    // jump. With the fused source there are no workers to restart.
-                    if (merger != null && !LfbsActive) merger.RestartWorkers();
-                }
-                else
-                {
-                    // Dev/Mac fallback: the ghost stays the only sculpture source
-                    // — keep it playing but freeze take rotation until the next
-                    // Attract (a mid-experience switch would yank the source).
-                    if (_attract != null) _attract.RotationEnabled = false;
-                    if (!_devFallbackLogged)
-                    {
-                        Debug.Log($"[{nameof(ExperienceDirector)}] no live rig — attract playback keeps " +
-                                  "running through the experience (dev fallback).", this);
-                        _devFallbackLogged = true;
-                    }
-                }
+                if (merger != null && !LfbsActive && HasLiveRenderers()) merger.RestartWorkers();
             }
 
-            if (to == ExperienceState.Attract || from == ExperienceState.QrShow)
+            if (to == ExperienceState.Idle || from == ExperienceState.QrShow)
                 ResetRunState();
 
             ApplyStateSideEffects(to);
@@ -638,40 +629,45 @@ namespace Experience
             var t = config.timings;
             switch (state)
             {
-                case ExperienceState.Attract:
+                case ExperienceState.Idle:
+                    // Unattended: nothing on the screens but the scene itself —
+                    // the floor grid (ExperienceSpaceBuilder) and, as someone
+                    // steps in, their live sculpture.
                     StopVisitorPlayback();
+                    // A playback session that predates Experience mode (dev
+                    // session running, or loaded-and-stopped with its _Playback_*
+                    // objects still showing the last frame) must not keep
+                    // painting the stage — Idle owns it now. playbackFolderPath
+                    // is restored on Exit.
+                    if (sensorRecorder != null
+                        && (sensorRecorder.IsPlaying || sensorRecorder.RecordedFrameCount > 0))
+                        sensorRecorder.StopAndUnload();
+                    RestoreHistorySamples(); // drop the one-second window of the previous run
                     _ui.ClearAll();
-                    ApplyBodySource(BodySource.AttractGhost);
-                    StartAttractPlayback();
+                    ApplyBodySource(BodySource.Live);
+                    if (HasLiveRenderers()) sensorManager?.SetLiveSuppressedAsSource(false);
                     break;
                 case ExperienceState.Calibrate:
                     PlaySe(config.startSe);
                     if (!t.skipCalibrate)
                         _calibrateRoutine = StartCoroutine(CalibrateRoutine());
                     break;
-                case ExperienceState.Explore:
-                    if (t.skipExplore)
+                case ExperienceState.FreeMove:
+                    break; // message only — the live sculpture is the content
+                case ExperienceState.Shoot:
+                    if (t.skipShoot)
                     {
                         _takeRoot = config.devCannedTakeRoot; // pre-recorded dev take
                     }
                     else
                     {
-                        StartVisitorRecording();
-                        _exploreRoutine = StartCoroutine(ExploreRoutine());
+                        _shootRoutine = StartCoroutine(ShootRoutine());
                     }
                     break;
                 case ExperienceState.Processing:
-                    if (!t.skipProcessing)
-                        _processingRoutine = StartCoroutine(ProcessingRoutine());
+                    _processingRoutine = StartCoroutine(ProcessingRoutine());
                     break;
-                case ExperienceState.Watch:
-                    StartVisitorPlayback(_takeRoot);
-                    break;
-                case ExperienceState.BanzaiWait:
-                    _banzaiHold.Reset();
-                    _debugBanzaiPulse = false;
-                    break;
-                case ExperienceState.Exporting:
+                case ExperienceState.ResultShow:
                     _exportRoutine = StartCoroutine(ExportAndPublish());
                     break;
                 case ExperienceState.QrShow:
@@ -687,39 +683,18 @@ namespace Experience
         }
 
         // ---------------- body-source switching ----------------
-        // Three skeleton contexts, one switchboard. The LIVE pipeline is either
+        // Two skeleton contexts, one switchboard. The LIVE pipeline is either
         // LiveFusedBodySource (CUDA RTMPose fusion → merger via external bodies)
-        // or the k4abt workers; recorded bodies_main serves the attract ghost
-        // and the visitor playback.
-        private enum BodySource { Live, AttractGhost, VisitorPlayback }
+        // or the k4abt workers; recorded bodies_main serves the visitor take
+        // from the Processing play-through onward.
+        private enum BodySource { Live, VisitorPlayback }
 
         private void ApplyBodySource(BodySource mode, bool takeHasBodies = true)
         {
             bool lfbs = LfbsActive;
-            bool attractGhostBodies = mode == BodySource.AttractGhost
-                                      && config.attractUseRecordedBodies && _attract != null;
             switch (mode)
             {
-                case BodySource.AttractGhost when attractGhostBodies:
-                    if (lfbs)
-                    {
-                        // keep fusing LIVE camera frames only: HasRecentFused then
-                        // means "someone stepped onto the stage", and the ghost
-                        // recording can't leak into the fusion via the dev tap.
-                        liveFusedSource.SetSubmitToMerger(false);
-                        liveFusedSource.liveFramesOnly = true;
-                    }
-                    if (merger != null)
-                    {
-                        merger.ignoreRecordedBodies = false; // takes' (v11s) bodies drive the ghost
-                        // live k4abt results must not join the ghost's merge; the
-                        // LiveSkeletonFeed still ingests worker events for presence.
-                        merger.muteWorkerIngest = true;
-                    }
-                    break;
-
                 case BodySource.Live:
-                case BodySource.AttractGhost: // legacy attract = live-source rules
                     if (lfbs)
                     {
                         liveFusedSource.SetSubmitToMerger(true);
@@ -735,15 +710,15 @@ namespace Experience
                 case BodySource.VisitorPlayback:
                     if (lfbs)
                     {
-                        liveFusedSource.SetSubmitToMerger(false); // v11s bodies own the merge
-                        liveFusedSource.liveFramesOnly = true;    // fuse the visitor, not the replay
+                        liveFusedSource.SetSubmitToMerger(false); // the take's bodies own the merge
+                        liveFusedSource.liveFramesOnly = true;    // fuse the stage, not the replay
                     }
                     if (merger != null)
                     {
                         if (takeHasBodies)
                         {
                             merger.ignoreRecordedBodies = false;
-                            merger.muteWorkerIngest = true; // workers (if any) belong to LiveSkeletonFeed
+                            merger.muteWorkerIngest = true; // and no worker spawn under the frozen result
                         }
                         else
                         {
@@ -757,44 +732,28 @@ namespace Experience
             }
         }
 
-        // Attract ghost: start only when the recorder is idle (a dev playback
-        // session already running is left untouched) or when the attract
-        // controller already owns the playback (loop re-roll case).
-        private void StartAttractPlayback()
-        {
-            if (_attract == null || sensorRecorder == null) return;
-            _attract.RotationEnabled = true;
-            if (sensorRecorder.IsPlaying && !_attractOwnsPlayback) return;
-            if (HasLiveRenderers()) sensorManager?.SetLiveSuppressedAsSource(true);
-            _attract.PlayRandomTake();
-            _attractOwnsPlayback = _attract.IsRunning;
-        }
-
         // Idempotent message repaint for the current state (also used when the
         // crowd notice clears).
         private void ShowStateMessage(ExperienceState state)
         {
             switch (state)
             {
-                case ExperienceState.Attract:
-                    // Empty attract text = clean screen (floor grid + scene only).
-                    if (string.IsNullOrEmpty(config.attractText)) _ui.ClearAll();
-                    else _ui.ShowMessage(config.attractText);
-                    break;
+                case ExperienceState.Idle: _ui.ClearAll(); break; // floor grid only
                 case ExperienceState.Calibrate:
                     if (_calibrationDone) _ui.ShowMessage(config.calibrateMatchedText);
                     else _ui.ShowPoseGuide(StarGuide(), config.calibrateText);
                     break;
-                case ExperienceState.Explore: _ui.ShowMessage(config.exploreText); break;
+                case ExperienceState.FreeMove: _ui.ShowMessage(config.freeMoveText); break;
+                case ExperienceState.Shoot:
+                    // the routine owns the cue → countdown → shooting sequence;
+                    // repaint just restores the cue text
+                    _ui.ShowMessage(config.shootCueText);
+                    break;
                 case ExperienceState.Processing:
                     _ui.ShowProgress(_converter?.Progress ?? 0f, config.processingText);
                     break;
-                case ExperienceState.Watch: _ui.ShowMessage(config.watchText); break;
-                case ExperienceState.BanzaiWait:
-                    _ui.ShowPoseGuide(BanzaiGuide(), config.banzaiText);
-                    break;
-                case ExperienceState.Exporting:
-                    _ui.ShowMessage(_exportFailed ? config.exportFailedText : config.exportingText);
+                case ExperienceState.ResultShow:
+                    _ui.ShowMessage(_exportFailed ? config.exportFailedText : config.resultText);
                     break;
                 case ExperienceState.QrShow: ShowQr(); break;
                 case ExperienceState.Fault: break; // the alert owns the screen
@@ -805,11 +764,6 @@ namespace Experience
             config.poseGuideTexture != null
                 ? config.poseGuideTexture
                 : _starGuideGenerated ??= StickFigureTexture.DrawStarPose();
-
-        private Texture2D BanzaiGuide() =>
-            config.banzaiGuideTexture != null
-                ? config.banzaiGuideTexture
-                : _banzaiGuideGenerated ??= StickFigureTexture.DrawBanzaiPose();
 
         private void PlaySe(AudioClip clip)
         {
@@ -822,9 +776,20 @@ namespace Experience
         {
             var t = config.timings;
             int shown = -1;
-            // metric accumulation while the star pose is held
+            // visitor-size logging while the star pose is held
             float armSum = 0f, spanSum = 0f, shoulderSum = 0f, heightSum = 0f;
             int sampleCount = 0;
+
+            // Per-visitor bone profile: the fused source samples per-camera raw
+            // skeletons while the pose is held (per-camera lengths avoid both the
+            // fused output's length-projection circularity and the depth-lift Z
+            // error). Without the fused source there is nothing to calibrate —
+            // k4abt doesn't take a profile.
+            if (LfbsActive)
+            {
+                liveFusedSource.BeginBodyProfileSampling();
+                _profileSamplingActive = true;
+            }
 
             while (_active && _fsm.State == ExperienceState.Calibrate)
             {
@@ -862,6 +827,25 @@ namespace Experience
                         StandingHeightMeters = heightSum / sampleCount,
                     };
                     _metricsMeasured = true;
+
+                    if (_profileSamplingActive)
+                    {
+                        _profileSamplingActive = false;
+                        if (liveFusedSource.EndBodyProfileSampling(
+                                config.profileMinSamplesPerBone, out var profile, out string summary))
+                        {
+                            _visitorProfile = profile;
+                            liveFusedSource.ApplyBodyProfile(profile);
+                            Debug.Log($"[{nameof(ExperienceDirector)}] per-visitor bone profile " +
+                                      $"applied: {summary}", this);
+                        }
+                        else
+                        {
+                            Debug.LogWarning($"[{nameof(ExperienceDirector)}] bone-profile sampling " +
+                                             $"insufficient ({summary}) — default profile stays.", this);
+                        }
+                    }
+
                     _calibrationDone = true;
                     PlaySe(config.poseMatchedSe);
                     _ui.ShowMessage(config.calibrateMatchedText);
@@ -875,7 +859,51 @@ namespace Experience
             _calibrateRoutine = null;
         }
 
-        // ------------------------------------------------ Explore (recording) ----
+        /// <summary>Stop a still-running profile collection (leave / fault /
+        /// exit) without applying anything.</summary>
+        private void CancelProfileSampling()
+        {
+            if (!_profileSamplingActive) return;
+            _profileSamplingActive = false;
+            if (liveFusedSource != null)
+                liveFusedSource.EndBodyProfileSampling(int.MaxValue, out _, out _);
+        }
+
+        /// <summary>Calibrate window expired without a held star pose: build the
+        /// profile from whatever the window collected anyway (the hold path
+        /// already finished sampling itself, so this is a no-op then).</summary>
+        private void FinalizeProfileSamplingBestEffort()
+        {
+            if (!_profileSamplingActive) return;
+            _profileSamplingActive = false;
+            if (liveFusedSource == null) return;
+            if (liveFusedSource.EndBodyProfileSampling(
+                    config.profileMinSamplesPerBone, out var profile, out string summary))
+            {
+                _visitorProfile = profile;
+                liveFusedSource.ApplyBodyProfile(profile);
+                Debug.Log($"[{nameof(ExperienceDirector)}] calibration window expired — " +
+                          $"best-effort per-visitor profile applied: {summary}", this);
+            }
+            else
+            {
+                Debug.LogWarning($"[{nameof(ExperienceDirector)}] calibration window expired and " +
+                                 $"sampling was insufficient ({summary}) — default profile stays.", this);
+            }
+        }
+
+        // Live skeleton during LIVE phases: the merged output IS the live person
+        // there — source-agnostic (fused-submitted or k4abt).
+        private bool TryGetLiveSkeleton(out Vector3[] joints, out bool[] valid)
+        {
+            if (merger != null && merger.TryGetPrimarySkeleton(out joints, out valid)) return true;
+            if (_liveFeed != null && _liveFeed.TryGetBestSkeleton(out joints, out valid)) return true;
+            joints = null;
+            valid = null;
+            return false;
+        }
+
+        // ------------------------------------------------ Shoot (recording) ----
 
         private void StartVisitorRecording()
         {
@@ -889,34 +917,47 @@ namespace Experience
             _visitorRecordingActive = sensorRecorder.CurrentState == SensorRecorder.State.Recording;
             if (!_visitorRecordingActive)
             {
-                Debug.LogError($"[{nameof(ExperienceDirector)}] Explore recording failed to start " +
+                Debug.LogError($"[{nameof(ExperienceDirector)}] recording failed to start " +
                                "(no live renderers?) — the take will be empty.", this);
                 RestoreRecorderFolderConfig();
             }
         }
 
-        private IEnumerator ExploreRoutine()
+        // Cue text → countdown (recording starts WITH the countdown so the
+        // fusion has ~countdownSeconds of warm-up before the second that
+        // counts) → zero → captureSeconds of the actual take → stop.
+        private IEnumerator ShootRoutine()
         {
             var t = config.timings;
-            float countdownFrom = Mathf.Max(0f, t.exploreSeconds - config.countdownSeconds);
-            int shown = -1;
+            float cueEnd = config.shootCueSeconds;
+            float zeroAt = cueEnd + config.countdownSeconds;
+            float shootEnd = zeroAt + config.captureSeconds;
 
-            while (_active && _fsm.State == ExperienceState.Explore
-                   && _fsm.TimeInState < t.exploreSeconds)
+            while (_active && _fsm.State == ExperienceState.Shoot && _fsm.TimeInState < cueEnd)
+                yield return null;
+            if (!_active || _fsm.State != ExperienceState.Shoot) yield break;
+
+            StartVisitorRecording();
+
+            int shown = -1;
+            while (_active && _fsm.State == ExperienceState.Shoot && _fsm.TimeInState < zeroAt)
             {
-                if (_fsm.TimeInState >= countdownFrom)
+                int remain = Mathf.Max(1, Mathf.CeilToInt(zeroAt - _fsm.TimeInState));
+                if (remain != shown)
                 {
-                    int remain = Mathf.Max(1, Mathf.CeilToInt(t.exploreSeconds - _fsm.TimeInState));
-                    if (remain != shown)
-                    {
-                        _ui.ShowCountdown(remain);
-                        PlaySe(config.countdownTickSe);
-                        shown = remain;
-                    }
+                    _ui.ShowCountdown(remain);
+                    PlaySe(config.countdownTickSe);
+                    shown = remain;
                 }
                 yield return null;
             }
-            if (!_active || _fsm.State != ExperienceState.Explore) yield break; // exit cleanup aborts
+            if (!_active || _fsm.State != ExperienceState.Shoot) yield break; // exit cleanup aborts
+
+            PlaySe(config.recordEndSe); // shutter at zero
+            _ui.ShowMessage(config.shootingText);
+            while (_active && _fsm.State == ExperienceState.Shoot && _fsm.TimeInState < shootEnd)
+                yield return null;
+            if (!_active || _fsm.State != ExperienceState.Shoot) yield break;
 
             if (_visitorRecordingActive && sensorRecorder != null)
             {
@@ -927,7 +968,7 @@ namespace Experience
             }
             PlaySe(config.recordEndSe);
             _recordingDone = true;
-            _exploreRoutine = null;
+            _shootRoutine = null;
         }
 
         /// <summary>Visitor walked away / fault mid-recording: stop and DISCARD
@@ -949,10 +990,11 @@ namespace Experience
             sensorRecorder.autoTimestampFolder = _savedRecAutoTimestamp;
         }
 
-        // ------------------------------------------------ Processing (v11s) ----
+        // -------------------------- Processing (v11s + play-through + capture) ----
 
         private IEnumerator ProcessingRoutine()
         {
+            var t = config.timings;
             if (string.IsNullOrEmpty(_takeRoot) || !Directory.Exists(_takeRoot))
             {
                 Debug.LogError($"[{nameof(ExperienceDirector)}] no take to process ('{_takeRoot}').", this);
@@ -962,222 +1004,106 @@ namespace Experience
                 yield break;
             }
 
+            // ---- stage 1: v11s conversion (skippable) ----
             // Canned-take protection: the conversion rewrites bodies_main IN PLACE.
             // A dev E2E run must never mutate the canonical recording unless the
             // operator explicitly opted in with a disposable copy.
-            if (config.timings.skipExplore && !config.allowCannedTakeConversion)
-            {
+            bool convert = !t.skipProcessing
+                && !(t.skipShoot && !config.allowCannedTakeConversion);
+            if (t.skipShoot && !config.allowCannedTakeConversion && !t.skipProcessing)
                 Debug.Log($"[{nameof(ExperienceDirector)}] canned take — skipping v11s conversion " +
                           "(allowCannedTakeConversion is off); playing existing bodies_main.", this);
-                _processingDone = true;
+
+            if (convert)
+            {
+                _converter = new FusedTakeConverter();
+                bool started = _converter.Start(_takeRoot, new FusedTakeConverter.Options
+                {
+                    ModelsDir = config.conversionModelsDir,
+                    BodyProfilePath = config.conversionBodyProfilePath,
+                    ProfileOverride = _visitorProfile, // per-visitor calibration, if measured
+                    Provider = config.conversionProvider,
+                    ConfThreshold = config.conversionConfThreshold,
+                    RunCatchupSmooth = config.runCatchupSmooth,
+                });
+                if (!started)
+                {
+                    Debug.LogWarning($"[{nameof(ExperienceDirector)}] v11s conversion could not start " +
+                                     $"({_converter.Error}) — falling back to the take's own bodies.", this);
+                }
+                else
+                {
+                    float deadline = Time.realtimeSinceStartup + t.processingTimeoutSeconds;
+                    float abandonAt = float.PositiveInfinity;
+                    while (_converter.Status == FusedTakeConverter.ConvertStatus.Running)
+                    {
+                        float now = Time.realtimeSinceStartup;
+                        if (float.IsInfinity(abandonAt) && now > deadline)
+                        {
+                            Debug.LogWarning($"[{nameof(ExperienceDirector)}] v11s conversion exceeded " +
+                                             $"{t.processingTimeoutSeconds:0}s — aborting, falling back " +
+                                             "to the take's own bodies.", this);
+                            _converter.Abort();
+                            abandonAt = now + 5f; // grace for the cooperative stop
+                        }
+                        // Abort() is cooperative — a worker stuck inside a native ORT
+                        // call can't observe it. Don't hold the visitor hostage:
+                        // abandon the thread after the grace window. Abort() locked
+                        // the converter's finalize gate, so an abandoned thread can
+                        // never rename/smooth bodies_main under the playback we
+                        // start next — unless it already ENTERED finalize (bounded
+                        // file I/O), which we wait out instead of racing.
+                        if (now > abandonAt && !_converter.IsFinalizing)
+                        {
+                            Debug.LogWarning($"[{nameof(ExperienceDirector)}] converter did not stop " +
+                                             "within the grace window — abandoning it.", this);
+                            break;
+                        }
+                        _ui.ShowProgress(_converter.Progress * 0.8f, config.processingText);
+                        yield return null;
+                    }
+                    if (_converter.Status != FusedTakeConverter.ConvertStatus.Done)
+                        Debug.LogWarning($"[{nameof(ExperienceDirector)}] v11s conversion ended " +
+                                         $"{_converter.Status} ({_converter.Error}) — playing the take's " +
+                                         "own bodies.", this);
+                }
+            }
+
+            // ---- stage 2: single play-through of the take (loop off) ----
+            StartVisitorPlayback(_takeRoot);
+            if (!_visitorPlaybackActive || sensorRecorder == null || !sensorRecorder.IsPlaying)
+            {
+                Debug.LogError($"[{nameof(ExperienceDirector)}] take play-through failed to start.", this);
+                _processingFailed = true;
+                _ui.ShowMessage(config.exportFailedText);
                 _processingRoutine = null;
                 yield break;
             }
-
-            _converter = new FusedTakeConverter();
-            bool started = _converter.Start(_takeRoot, new FusedTakeConverter.Options
+            double duration = sensorRecorder.PlaybackDurationSeconds;
+            float playDeadline = Time.realtimeSinceStartup + (float)duration + 10f;
+            while (sensorRecorder.CurrentState == SensorRecorder.State.Playing
+                   && Time.realtimeSinceStartup < playDeadline)
             {
-                ModelsDir = config.conversionModelsDir,
-                BodyProfilePath = config.conversionBodyProfilePath,
-                Provider = config.conversionProvider,
-                ConfThreshold = config.conversionConfThreshold,
-                RunCatchupSmooth = config.runCatchupSmooth,
-            });
-            if (!started)
-            {
-                Debug.LogWarning($"[{nameof(ExperienceDirector)}] v11s conversion could not start " +
-                                 $"({_converter.Error}) — falling back to recorded k4abt bodies.", this);
-                _processingDone = true;
-                _processingRoutine = null;
-                yield break;
-            }
-
-            float deadline = Time.realtimeSinceStartup + config.timings.processingTimeoutSeconds;
-            float abandonAt = float.PositiveInfinity;
-            while (_converter.Status == FusedTakeConverter.ConvertStatus.Running)
-            {
-                float now = Time.realtimeSinceStartup;
-                if (float.IsInfinity(abandonAt) && now > deadline)
-                {
-                    Debug.LogWarning($"[{nameof(ExperienceDirector)}] v11s conversion exceeded " +
-                                     $"{config.timings.processingTimeoutSeconds:0}s — aborting, " +
-                                     "falling back to recorded k4abt bodies.", this);
-                    _converter.Abort();
-                    abandonAt = now + 5f; // grace for the cooperative stop
-                }
-                // Abort() is cooperative — a worker stuck inside a native ORT call
-                // can't observe it. Don't hold the visitor hostage: abandon the
-                // thread after the grace window. Abort() atomically locked the
-                // converter's finalize gate, so an abandoned thread can never
-                // rename/smooth bodies_main under the k4abt playback we start
-                // next. The one exception: the worker already ENTERED finalize
-                // (bounded file I/O) — wait that out instead of racing it.
-                if (now > abandonAt && !_converter.IsFinalizing)
-                {
-                    Debug.LogWarning($"[{nameof(ExperienceDirector)}] converter did not stop within " +
-                                     "the grace window — abandoning it and continuing with k4abt bodies.", this);
-                    break;
-                }
-                _ui.ShowProgress(_converter.Progress, config.processingText);
+                float frac = duration > 0.01
+                    ? Mathf.Clamp01((float)(sensorRecorder.CurrentPlayheadSeconds / duration)) : 1f;
+                _ui.ShowProgress(0.8f + 0.18f * frac, config.processingText);
                 yield return null;
             }
-
-            if (_converter.Status == FusedTakeConverter.ConvertStatus.Done)
+            // loop=false → the recorder stopped itself at the last frame; the
+            // scene now holds the end-of-take state (shell + pose ring). Deadline
+            // expiry (slow disk, stalled clock): freeze the transport HERE so the
+            // capture and the ResultShow screen agree — a still-running playback
+            // would drift past whatever we export.
+            if (sensorRecorder.CurrentState == SensorRecorder.State.Playing)
             {
-                _ui.ShowProgress(1f, config.processingText);
-            }
-            else
-            {
-                Debug.LogWarning($"[{nameof(ExperienceDirector)}] v11s conversion ended " +
-                                 $"{_converter.Status} ({_converter.Error}) — playing back with " +
-                                 "the recorded k4abt bodies.", this);
-            }
-            // Either way the take is playable (fused bodies_main, or the
-            // untouched k4abt original) — never dead-end the visitor.
-            _processingDone = true;
-            _processingRoutine = null;
-        }
-
-        // ------------------------------------------------ visitor playback ----
-
-        private void StartVisitorPlayback(string takeRoot)
-        {
-            if (sensorRecorder == null) return;
-            if (string.IsNullOrEmpty(takeRoot) || !Directory.Exists(takeRoot))
-            {
-                Debug.LogError($"[{nameof(ExperienceDirector)}] no playable take ('{takeRoot}') — " +
-                               "the show will return to Attract when the visitor leaves.", this);
-                return;
+                Debug.LogWarning($"[{nameof(ExperienceDirector)}] play-through did not finish within " +
+                                 $"{duration + 10:0}s — pausing at the current frame and capturing there.", this);
+                sensorRecorder.PausePlayback();
             }
 
-            // The visitor take replaces whatever is playing (attract ghost in the
-            // dev fallback; nothing on the live rig path).
-            if (_attract != null) { _attract.Stop(); _attract.RotationEnabled = false; }
-            _attractOwnsPlayback = false;
-            if (sensorRecorder.IsPlaying) sensorRecorder.StopAndUnload();
-
-            _savedRenderDelay = sensorRecorder.playbackRenderDelayFrames;
-            sensorRecorder.playbackRenderDelayFrames = config.playbackRenderDelayFrames;
-            _savedLoop = sensorRecorder.loop;
-            sensorRecorder.loop = true;
-            if (HasLiveRenderers()) sensorManager?.SetLiveSuppressedAsSource(true);
-
-            sensorRecorder.playbackFolderPath = takeRoot;
-            sensorRecorder.Load();
-
-            // Skeleton source for the playback. Normal path: the take carries
-            // bodies_main (v11s-converted, or the k4abt fallback) → merger
-            // consumes it; the live visitor is tracked by the fused source (or
-            // the k4abt LiveSkeletonFeed) for banzai detection. Edge: NO track
-            // has bodies (conversion failed AND nothing recorded) → the merger's
-            // re-run-k4abt-on-playback path stays the only skeleton source.
-            _takeHasBodies = false;
-            foreach (var (serial, _) in PointCloudRecording.EnumerateDevices(takeRoot))
-                if (sensorRecorder.HasRecordedBodies(serial)) { _takeHasBodies = true; break; }
-            if (!_takeHasBodies)
-                Debug.LogWarning($"[{nameof(ExperienceDirector)}] take has no recorded bodies — " +
-                                 "keeping live-k4abt-on-playback as the skeleton source " +
-                                 "(loop fallback will capture).", this);
-            ApplyBodySource(BodySource.VisitorPlayback, _takeHasBodies);
-
-            if (!sensorRecorder.IsPlaying) sensorRecorder.TogglePlay();
-            sensorRecorder.OnPlaybackLooped += HandleVisitorPlaybackLooped;
-            _playbackLoops = 0;
-            _visitorPlaybackActive = true;
-        }
-
-        private void HandleVisitorPlaybackLooped() => _playbackLoops++;
-
-        // Transport teardown only — the body source is (re)applied by whichever
-        // context follows (Attract side effects, or the ExitMode restore).
-        private void StopVisitorPlayback()
-        {
-            if (!_visitorPlaybackActive) return;
-            _visitorPlaybackActive = false;
-            if (sensorRecorder != null)
-            {
-                sensorRecorder.OnPlaybackLooped -= HandleVisitorPlaybackLooped;
-                sensorRecorder.StopAndUnload();
-                sensorRecorder.playbackRenderDelayFrames = _savedRenderDelay;
-                sensorRecorder.loop = _savedLoop;
-            }
-        }
-
-        // ------------------------------------------------ banzai / capture ----
-
-        /// <summary>Debug hook (RunCommand): trigger the banzai capture as if the
-        /// pose was detected. Only honored in BanzaiWait.</summary>
-        public void DebugTriggerBanzai() => _debugBanzaiPulse = true;
-
-        // Live skeleton during LIVE phases (Calibrate): the merged output IS the
-        // live person there — source-agnostic (fused-submitted or k4abt).
-        private bool TryGetLiveSkeleton(out Vector3[] joints, out bool[] valid)
-        {
-            if (merger != null && merger.TryGetPrimarySkeleton(out joints, out valid)) return true;
-            if (_liveFeed != null && _liveFeed.TryGetBestSkeleton(out joints, out valid)) return true;
-            joints = null;
-            valid = null;
-            return false;
-        }
-
-        // Live skeleton during PLAYBACK states (BanzaiWait): the merge carries
-        // the recorded ghost, so read the live pipelines directly — the fused
-        // source (submission gated off but still fusing live frames), else the
-        // k4abt LiveSkeletonFeed.
-        private bool TryGetPlaybackLiveSkeleton(out Vector3[] joints, out bool[] valid)
-        {
-            if (LfbsActive && liveFusedSource.TryGetLatestFusedWorld(out joints, out valid)) return true;
-            if (_liveFeed != null && _liveFeed.TryGetBestSkeleton(out joints, out valid)) return true;
-            joints = null;
-            valid = null;
-            return false;
-        }
-
-        private void UpdateBanzaiDetection()
-        {
-            if (_fsm.State != ExperienceState.BanzaiWait) return;
-            if (_captureRoutine != null || _captureDone) return;
-
-            bool trigger = _debugBanzaiPulse;
-            _debugBanzaiPulse = false;
-
-            bool banzaiNow = false;
-            if (TryGetPlaybackLiveSkeleton(out var joints, out var valid))
-                banzaiNow = PoseClassifiers.IsBanzai(joints, valid, _metrics,
-                    config.banzaiMarginMeters, config.banzaiMarginArmFraction);
-            if (_banzaiHold.Update(banzaiNow, Time.realtimeSinceStartup)) trigger = true;
-
-            if (trigger)
-            {
-                PlaySe(config.banzaiSe);
-                _captureRoutine = StartCoroutine(CaptureAtPlayheadRoutine(seekRandom: false));
-            }
-            else if (_playbackLoops >= 1 + config.timings.banzaiFallbackLoops)
-            {
-                Debug.Log($"[{nameof(ExperienceDirector)}] no banzai after " +
-                          $"{config.timings.banzaiFallbackLoops} loops — capturing at a random point.", this);
-                _captureRoutine = StartCoroutine(CaptureAtPlayheadRoutine(seekRandom: true));
-            }
-        }
-
-        private IEnumerator CaptureAtPlayheadRoutine(bool seekRandom)
-        {
-            if (seekRandom && sensorRecorder != null && sensorRecorder.IsPlaying)
-            {
-                double duration = sensorRecorder.PlaybackDurationSeconds;
-                float target = duration > 3.0
-                    ? UnityEngine.Random.Range(1f, (float)duration - 2f)
-                    : (float)(duration * 0.5);
-                sensorRecorder.SeekToPlayheadSeconds(target);
-                sensorRecorder.ResumePlayback(); // seek auto-pauses
-                float settleEnd = Time.realtimeSinceStartup + config.postSeekSettleSeconds;
-                while (Time.realtimeSinceStartup < settleEnd) yield return null;
-            }
-
-            // Freeze the 15-frame trail window and wait for a full curve rebuild.
-            // Playback keeps running — it FEEDS the rebuild.
-            int saved = poseHistory != null ? poseHistory.historySamples : 0;
-            if (poseHistory != null) poseHistory.historySamples = 15;
+            // ---- stage 3: capture the one-second window ----
+            int trailFrames = Mathf.Clamp(Mathf.RoundToInt(config.captureSeconds * 30f), 2, 32);
+            if (poseHistory != null) poseHistory.historySamples = trailFrames;
             if (motionCurves != null)
             {
                 int target = motionCurves.BuildVersion + 2;
@@ -1191,15 +1117,77 @@ namespace Experience
             }
 
             var snap = TSDFSnapshotBuilder.Capture(tsdfVolume, motionCurves, CaptureOptions(), out string err);
-            if (poseHistory != null) poseHistory.historySamples = saved;
             if (snap == null)
-                Debug.LogWarning($"[{nameof(ExperienceDirector)}] capture failed: {err} — " +
-                                 "Exporting will show the apology.", this);
-            else
-                _snapshot = snap;
+            {
+                Debug.LogError($"[{nameof(ExperienceDirector)}] final capture failed: {err}", this);
+                _processingFailed = true;
+                _ui.ShowMessage(config.exportFailedText);
+                _processingRoutine = null;
+                yield break;
+            }
+            _snapshot = snap;
+            _ui.ShowProgress(1f, config.processingText);
+            // historySamples intentionally stays at the one-second window: the
+            // frozen curves on screen ARE the exported shape. Restored on Idle.
+            _processingDone = true;
+            _processingRoutine = null;
+        }
 
-            _captureDone = true;
-            _captureRoutine = null;
+        // ------------------------------------------------ visitor playback ----
+
+        // Single play-through transport for the converted take (loop OFF — the
+        // recorder stops itself at the end and the scene freezes on the final
+        // state, which ResultShow/QrShow keep on screen).
+        private void StartVisitorPlayback(string takeRoot)
+        {
+            if (sensorRecorder == null) return;
+            if (string.IsNullOrEmpty(takeRoot) || !Directory.Exists(takeRoot))
+            {
+                Debug.LogError($"[{nameof(ExperienceDirector)}] no playable take ('{takeRoot}').", this);
+                return;
+            }
+
+            // The visitor take replaces any playback a dev session left running.
+            if (sensorRecorder.IsPlaying) sensorRecorder.StopAndUnload();
+
+            _savedRenderDelay = sensorRecorder.playbackRenderDelayFrames;
+            sensorRecorder.playbackRenderDelayFrames = config.playbackRenderDelayFrames;
+            _savedLoop = sensorRecorder.loop;
+            sensorRecorder.loop = false;
+            if (HasLiveRenderers()) sensorManager?.SetLiveSuppressedAsSource(true);
+
+            sensorRecorder.playbackFolderPath = takeRoot;
+            sensorRecorder.Load();
+
+            // Skeleton source for the playback. Normal path: the take carries
+            // bodies_main (v11s-converted) → merger consumes it. Edge: NO track
+            // has bodies (conversion failed AND live ran in external mode, so
+            // nothing was recorded) → the merger's re-run-k4abt-on-playback
+            // path stays the only skeleton source.
+            _takeHasBodies = false;
+            foreach (var (serial, _) in PointCloudRecording.EnumerateDevices(takeRoot))
+                if (sensorRecorder.HasRecordedBodies(serial)) { _takeHasBodies = true; break; }
+            if (!_takeHasBodies)
+                Debug.LogWarning($"[{nameof(ExperienceDirector)}] take has no recorded bodies — " +
+                                 "keeping live-k4abt-on-playback as the skeleton source.", this);
+            ApplyBodySource(BodySource.VisitorPlayback, _takeHasBodies);
+
+            if (!sensorRecorder.IsPlaying) sensorRecorder.TogglePlay();
+            _visitorPlaybackActive = true;
+        }
+
+        // Transport teardown only — the body source is (re)applied by whichever
+        // context follows (Idle side effects, or the ExitMode restore).
+        private void StopVisitorPlayback()
+        {
+            if (!_visitorPlaybackActive) return;
+            _visitorPlaybackActive = false;
+            if (sensorRecorder != null)
+            {
+                sensorRecorder.StopAndUnload();
+                sensorRecorder.playbackRenderDelayFrames = _savedRenderDelay;
+                sensorRecorder.loop = _savedLoop;
+            }
         }
 
         private void RestoreHistorySamples()
@@ -1250,8 +1238,8 @@ namespace Experience
             string usdzPath = Path.Combine(dir, $"exp_{stamp}.usdz");
             string usdPython = printExporter != null ? printExporter.usdPythonPath : "";
 
-            // Synchronous local write (atomic tmp+rename; playback keeps looping
-            // visually — one hitch frame during the write is accepted).
+            // Synchronous local write (atomic tmp+rename; the frozen result view
+            // absorbs the hitch frame).
             if (!TSDFSnapshotBuilder.ExportFiles(snap, glbPath, usdzPath, usdPython,
                                                  out _, out string err))
             {
@@ -1344,9 +1332,10 @@ namespace Experience
         {
             if (_fsm == null || _ui == null) return;
             var s = _fsm.State;
-            // Only during the live-interaction stages — playback states read
-            // presence from occupancy where crowd counting is meaningless.
-            bool eligible = s == ExperienceState.Calibrate || s == ExperienceState.Explore;
+            // Only during the live-interaction stages — playback/result states
+            // read presence from occupancy where crowd counting is meaningless.
+            bool eligible = s == ExperienceState.Calibrate || s == ExperienceState.FreeMove
+                || s == ExperienceState.Shoot;
             bool crowd = eligible && _presence != null && _presence.CrowdActive;
             if (crowd && !_crowdShowing)
             {

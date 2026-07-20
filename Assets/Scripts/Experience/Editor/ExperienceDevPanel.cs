@@ -1,5 +1,5 @@
 // Dev panel for running the visitor experience WITHOUT live cameras (Mac):
-// the show starts empty (Attract), and pressing 入場 plays the configured
+// the show starts empty (Idle), and pressing 入場 plays the configured
 // recording — its recorded bodies drive the SkeletonMerger, PresenceDetector
 // sees a pelvis inside the sensing volume and the show advances to Calibrate
 // through the SAME signal path as a real visitor. debugForcePresence is only
@@ -132,7 +132,7 @@ namespace Experience.EditorTools
         // state without running the sequence. Play mode only (canvases + font
         // are runtime-built). With Experience mode ON the director's state
         // side-effects overwrite these, so preview with the mode OFF.
-        private Texture2D _previewStar, _previewBanzai, _previewQr;
+        private Texture2D _previewStar, _previewQr;
         private ExperienceConfig _previewDefaults; // fallback texts when no config assigned
 
         private void DrawPreviewSection()
@@ -160,22 +160,21 @@ namespace Experience.EditorTools
             {
                 using (new EditorGUILayout.HorizontalScope())
                 {
-                    if (GUILayout.Button("アトラクト")) ui.ShowMessage(cfg.attractText);
+                    if (GUILayout.Button("アイドル（全消去）")) ui.ClearAll();
                     if (GUILayout.Button("キャリブ（星ポーズ）"))
                         ui.ShowPoseGuide(StarTex(cfg), cfg.calibrateText);
                     if (GUILayout.Button("カウントダウン")) ui.ShowCountdown(3);
                 }
                 using (new EditorGUILayout.HorizontalScope())
                 {
-                    if (GUILayout.Button("さがして (Explore)")) ui.ShowMessage(cfg.exploreText);
+                    if (GUILayout.Button("じゆうに (FreeMove)")) ui.ShowMessage(cfg.freeMoveText);
+                    if (GUILayout.Button("さつえい (Shoot cue)")) ui.ShowMessage(cfg.shootCueText);
                     if (GUILayout.Button("しょりちゅう (Processing)"))
                         ui.ShowProgress(0.4f, cfg.processingText);
-                    if (GUILayout.Button("バンザイ"))
-                        ui.ShowPoseGuide(BanzaiTex(cfg), cfg.banzaiText);
                 }
                 using (new EditorGUILayout.HorizontalScope())
                 {
-                    if (GUILayout.Button("かきだし (Exporting)")) ui.ShowMessage(cfg.exportingText);
+                    if (GUILayout.Button("できたよ (ResultShow)")) ui.ShowMessage(cfg.resultText);
                     if (GUILayout.Button("QR"))
                     {
                         if (_previewQr == null)
@@ -202,13 +201,6 @@ namespace Experience.EditorTools
             return _previewStar;
         }
 
-        private Texture2D BanzaiTex(ExperienceConfig cfg)
-        {
-            if (cfg.banzaiGuideTexture != null) return cfg.banzaiGuideTexture;
-            if (_previewBanzai == null) _previewBanzai = StickFigureTexture.DrawBanzaiPose();
-            return _previewBanzai;
-        }
-
         // Edits the SHARED ExperienceConfig asset (goes into git) — meant for the
         // Mac dev loop; restore skips before a Windows production run.
         private void DrawConfigSection()
@@ -221,8 +213,8 @@ namespace Experience.EditorTools
             EditorGUI.BeginChangeCheck();
             bool dry = EditorGUILayout.ToggleLeft(
                 "dryRunPublish（実アップロードせずフェイク URL）", cfg.dryRunPublish);
-            bool se = EditorGUILayout.ToggleLeft(
-                "skipExplore（Mac: 実録画の代わりに缶詰テイクを使用）", cfg.timings.skipExplore);
+            bool ss = EditorGUILayout.ToggleLeft(
+                "skipShoot（Mac: 実録画の代わりに缶詰テイクを使用）", cfg.timings.skipShoot);
             bool sp = EditorGUILayout.ToggleLeft(
                 "skipProcessing（v11s 変換を飛ばし録画済み BT で再生）", cfg.timings.skipProcessing);
             bool sq = EditorGUILayout.ToggleLeft("skipQr", cfg.timings.skipQr);
@@ -233,7 +225,7 @@ namespace Experience.EditorTools
             string canned = cfg.devCannedTakeRoot;
             using (new EditorGUILayout.HorizontalScope())
             {
-                canned = EditorGUILayout.TextField("缶詰テイク (skipExplore)", canned);
+                canned = EditorGUILayout.TextField("缶詰テイク (skipShoot)", canned);
                 if (GUILayout.Button("選択…", GUILayout.Width(60)))
                 {
                     string picked = EditorUtility.OpenFolderPanel("缶詰テイクのルート", canned, "");
@@ -245,16 +237,16 @@ namespace Experience.EditorTools
             {
                 Undo.RecordObject(cfg, "Experience config (dev panel)");
                 cfg.dryRunPublish = dry;
-                cfg.timings.skipExplore = se;
+                cfg.timings.skipShoot = ss;
                 cfg.timings.skipProcessing = sp;
                 cfg.timings.skipQr = sq;
                 cfg.timings.timeMultiplier = tm;
                 cfg.devCannedTakeRoot = canned;
                 EditorUtility.SetDirty(cfg);
             }
-            if (cfg.timings.skipExplore && !System.IO.Directory.Exists(cfg.devCannedTakeRoot))
+            if (cfg.timings.skipShoot && !System.IO.Directory.Exists(cfg.devCannedTakeRoot))
                 EditorGUILayout.HelpBox(
-                    "skipExplore ON ですが缶詰テイクのフォルダが存在しません: " +
+                    "skipShoot ON ですが缶詰テイクのフォルダが存在しません: " +
                     cfg.devCannedTakeRoot, MessageType.Warning);
         }
 
@@ -287,23 +279,23 @@ namespace Experience.EditorTools
             if (!Application.isPlaying)
             {
                 EditorGUILayout.HelpBox(
-                    "手順: Play → Experience mode ON（Attract で無人待機）→ 入場ボタン" +
+                    "手順: Play → Experience mode ON（Idle で無人待機）→ 入場ボタン" +
                     "（収録再生の bodies が来場者として検知され Calibrate へ進む）。",
                     MessageType.Info);
                 return;
             }
-            if (_director.IsActive && _director.CurrentState == ExperienceState.Attract
+            if (_director.IsActive && _director.CurrentState == ExperienceState.Idle
                 && _recorder != null
                 && _recorder.CurrentState != SensorRecorder.State.Playing)
             {
                 EditorGUILayout.HelpBox(
-                    "無人（Attract）。「入場」で収録を再生すると Calibrate が始まります。",
+                    "無人（Idle）。「入場」で収録を再生すると Calibrate が始まります。",
                     MessageType.Info);
             }
             var cfg = _director.config;
             if (cfg != null && !cfg.dryRunPublish)
                 EditorGUILayout.HelpBox(
-                    "dryRunPublish が OFF — Exporting で実際に LFKS アップロードが走ります。",
+                    "dryRunPublish が OFF — ResultShow で実際に LFKS アップロードが走ります。",
                     MessageType.Warning);
         }
 

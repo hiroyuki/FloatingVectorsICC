@@ -1,98 +1,70 @@
-# CUDA 13 + cuDNN 9 インストール指示書(Phase 1 / 人手)
+# CUDA 13 + cuDNN 9 (cu13) — ORT cu13 フレーバー移行記録
 
-対象: 開発機(RTX 4070)と本番機(RTX 5080)の両方。**cu13 統一**(2026-07-19 決定)。
+対象: 展示 2 台(開発機 RTX 4070 / 本番機 RTX 5080)。**2 台とも同一構成**にする。
+移行理由: cu12 版 ORT の provider DLL は sm_120(Blackwell)カーネル非搭載で
+RTX 5080 では CUDA EP が立たない(`cudaErrorNoKernelImageForDevice`)。
+cu13 版は sm_75〜sm_120a を搭載し両世代をカバーする。
 
-> 旧 `INSTALL_cuda12.md` からの変更理由: RTX 5080(Blackwell / sm_120)では
-> ORT 公式 cu12 ビルドが sm_120 カーネル未同梱で `cudaErrorInvalidPtx` になる報告あり
-> (microsoft/onnxruntime#26177、未解決)。CUDA 13 系 ORT は Blackwell ネイティブ対応で、
-> 4070(Ada / sm_89)も CUDA 13 のサポート範囲内(切り捨ては Volta 以前)。
-> 両マシン同一バイナリにすることでビルドフレーバー差の骨格ズレ
-> (`eval/PLAN_live_gpu.md` Phase 3 追補 2)も構造的に防ぐ。
+> ドライバ更新不要(591.86 で CUDA 13.1 対応)。CUDA Toolkit のインストールも
+> **不要** — 必要な DLL を NVIDIA 公式 redist から取得して plugin フォルダに
+> 直接配置する方式(toolkit / PATH に依存しない。ビルド配布もこれで解決)。
 
-> ドライバ更新は**不要**(CUDA 13 は r580 以降: 開発機 591.86 ✓ / 本番機 610.62 ✓)。
-> 既存の CUDA 11.6 / 12.x は**残したまま**サイドバイサイドで入れる。
+## 配置先
 
-## 1. CUDA Toolkit 13.x
+`Packages/com.github.asus4.onnxruntime/Plugins/Windows/x64/`
+(DLL は .gitignore 済み — **各マシンで手動配置が必要**。.meta のみ git 管理)
 
-- ダウンロード(NVIDIA 公式のみ): https://developer.nvidia.com/cuda-downloads
-  - 選択: Windows / x86_64 / 11 / exe (local)
-- インストーラで **カスタム(詳細)** を選び、以下だけにチェック:
-  - CUDA > Runtime(必須)
-  - CUDA > Development(必須 — cudart 等のライブラリ)
-  - それ以外(Nsight 系、Driver components 系)は**全部外す**(既存ドライバを上書きさせない)
-- インストーラが `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.x\bin` を
-  PATH に追加する(エディタ実行はこれで足りる)
+## 1. ONNX Runtime 1.26.0 cu13 フレーバー
 
-## 2. cuDNN 9.x for CUDA 13
+- 取得(GitHub 公式リリースのみ):
+  https://github.com/microsoft/onnxruntime/releases/download/v1.26.0/onnxruntime-win-x64-gpu_cuda13-1.26.0.zip
+- SHA-256: `4FA096030EE766B2E590D71FB6676BBD00595C92AB87ACF497FE075E98834D8B`
+- `lib/` から 4 点を配置: `onnxruntime.dll`, `onnxruntime_providers_cuda.dll`,
+  `onnxruntime_providers_shared.dll`, `onnxruntime_providers_tensorrt.dll`
+- managed 側(asus4 0.4.8 の C# バインディング)は変更不要(同じ ORT 1.26.0)
 
-- ダウンロード(NVIDIA 公式のみ): https://developer.nvidia.com/cudnn-downloads
-  - 選択: Windows / x86_64 / **Tarball(zip)** / **CUDA 13** 向けの最新 9.x
-    (cu12 向け zip と間違えないこと — ファイル名末尾 `_cuda13-archive`)
-- **SHA-256 照合**: ダウンロードページ記載の checksum と突き合わせる
-  ```powershell
-  Get-FileHash .\cudnn-windows-x86_64-9.*_cuda13-archive.zip -Algorithm SHA256
-  ```
-  一致した値を下の「チェックサム記録」に書き込む
-- 展開して `bin` の DLL 群(`cudnn64_9.dll` ほか)を PATH の通った場所へ。推奨:
-  CUDA 13 の `bin` にコピー(CUDA の PATH に相乗りでき、環境変数を増やさない)
+## 2. CUDA 13.3.1 コンポーネント(NVIDIA 公式 redist)
 
-## 3. TensorRT(今は入れない)
+`https://developer.download.nvidia.com/compute/cuda/redist/` から。
+版とハッシュの根拠は `redistrib_13.3.1.json`(公式マニフェスト):
 
-CUDA EP が 30Hz 未達だった場合のみ(4070 では CUDA EP で到達済みのため、
-本番機 5080 で未達になった場合に検討)。
+| コンポーネント | 版 | 配置 DLL | zip SHA-256 |
+|---|---|---|---|
+| cuda_cudart | 13.3.29 | cudart64_13.dll | `1feb7dd266813ffe8dbc24e115183a5ac35a4795c8d34aca0df85ab616b64d9c` |
+| libcublas | 13.6.0.2 | cublas64_13.dll, cublasLt64_13.dll | `62e9fa30560c8f0a28e0cdcf9d6fc1fed347bcfab8847239b9ae1fdc1d86408a` |
+| libcufft | 12.3.0.29 | cufft64_12.dll | `83df908ae67e2b3a86201de8463562ab49dd9ee8b3b5efc3fdc2e681b14b5dd9` |
+| cuda_nvrtc | 13.3.33 | nvrtc64_130_0.dll, nvrtc-builtins64_133.dll | `8519f678588610bf380ccaac130729aa1a624c407183e7ad9c319c19ecc63d2f` |
 
-## 4. 確認コマンド
+(zip 内は `bin\x64\` 配下にある)
 
-ORT cu13 1.26.0 の providers_cuda.dll が実際に要求する DLL(バイナリ実測):
-`cublas64_13` / `cublasLt64_13` / `cufft64_12` / `cudnn64_9`
+## 3. cuDNN 9.24.0.43 for CUDA 13
 
-```powershell
-nvidia-smi                   # ドライバが生きていること
-where.exe cublas64_13.dll    # CUDA 13 ランタイムが PATH にあること
-where.exe cufft64_12.dll     # 同上(cuFFT は CUDA 13 でも soname 12)
-where.exe cudnn64_9.dll      # cuDNN 9 (cu13) が PATH にあること
-```
+- 取得: `https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.24.0.43_cuda13-archive.zip`
+- SHA-256(公式 `redistrib_9.24.0.json` 記載): `88f72bd1ce384197cedbc68496c6052d7ff0bd9fd0b3c74470402cf737507e06`
+- `bin\` の DLL 10 点(cudnn64_9.dll + cudnn_*64_9.dll)を全部配置(計 ~542MB)
+- ⚠ **必ず `_cuda13` アーカイブを使うこと**。cu12 用の同版 cuDNN は
+  ファイル名もファイルバージョン(9.24.0.43)も同一で中身だけ違う
 
-全部通ったらエディタで CUDA EP スモーク(`ActiveProvider == Cuda` 確認)に進める。
+## 4. 同名 DLL 取り違えガード(コード)
 
-## チェックサム記録
+このマシンのように PATH 上に CUDA 12.6 の bin(cu12 版 cuDNN 同居)が残っている場合、
+bare-name の DLL 解決が PATH 側を拾い**ビルドフレーバーが黙って混ざる**恐れがある。
+対策として `Assets/Scripts/Eval/Rtmpose/CudaDllPreload.cs` が ORT 初期化前に
+plugin フォルダの全 CUDA/cuDNN DLL を絶対パスで先行ロードして名前解決を固定する
+(`OrtRtmposeBackend` ctor から自動で呼ばれる。ログ: `[rtmpose] CUDA preload ...`)。
 
-| ファイル | SHA-256 | 取得日 |
-|---|---|---|
-| cudnn-windows-x86_64-9.24.0.43_cuda12-archive.zip(旧 cu12 構成、参考) | `b190b5d2c2a1634606ca8f843cde84fdc762ba92ddb8b73bda9fb894c673b767` | 2026-07-17 |
-| cudnn-windows-x86_64-9.24.0.43_cuda13-archive.zip | `88f72bd1ce384197cedbc68496c6052d7ff0bd9fd0b3c74470402cf737507e06`(公式 redistrib_9.24.0.json と一致確認済み) | 2026-07-19 |
-| onnxruntime-win-x64-gpu_cuda13-1.26.0.zip(GitHub 公式リリース) | `4fa096030ee766b2e590d71fb6676bbd00595c92ab87acf497fe075e98834d8b` | 2026-07-19 |
+## 5. 検証結果(開発機 4070、2026-07-19)
 
-## 埋め込みパッケージの native DLL 復元(fresh clone / 本番機セットアップ時)
+- スモーク: `ActiveProvider=Cuda`(要求どおり)、pose 3ms/回(warm)、
+  ロード済みモジュール全てが plugin フォルダの cu13 版であることを実パスで確認
+- 数値 A/B: take 15-50-24 全 1816 フレームを FusedBodiesExport で再出力し
+  `LiveV11sVerify.CompareTakes` で v11s アーカイブと比較
+  → **cu12 時代のレポート(offline_ab_20260717_140621.md)と全指標が完全一致**
+  (offline_ab_20260719_171902.md)。cu13 移行による数値変化はゼロ、
+  v11s リファレンス再生成は不要
 
-埋め込みパッケージのバイナリ(dll / aar / dylib / so / iOS~)は git 管理外。
-C# レイヤと .meta はコミット済み。Windows x64 の復元手順:
+## 6. 本番機(5080)チェックリスト
 
-1. https://github.com/microsoft/onnxruntime/releases/download/v1.26.0/onnxruntime-win-x64-gpu_cuda13-1.26.0.zip
-   を取得し、上表の SHA-256 と照合
-   > **cu13 ビルドを使う**(NuGet の Microsoft.ML.OnnxRuntime.Gpu.Windows 1.26.0 は
-   > cu12 ビルドなので使わない)。版は embed パッケージの managed 層
-   > (asus4 0.4.8 = ORT 1.26.0)と必ず一致させる
-2. `lib/` から以下 4 つを
-   `Packages/com.github.asus4.onnxruntime/Plugins/Windows/x64/` にコピー:
-   - `onnxruntime.dll`(**GPU ビルド本体** — asus4 配布の CPU 版とは別物)
-   - `onnxruntime_providers_shared.dll`
-   - `onnxruntime_providers_cuda.dll`
-   - `onnxruntime_providers_tensorrt.dll`
-3. `.meta` は git 管理下。バイナリ欠落状態で Unity を開くと .meta が削除されるので、
-   その場合は `git restore Packages/com.github.asus4.onnxruntime/Plugins/` で戻す
-
-## cu12 → cu13 移行時の必須検証
-
-ビルドフレーバーが変わると腕の境界フレームで骨格が変わりうる(Phase 3 追補 2 で実証)。
-
-1. オフライン A/B 1 テイク: `FusedBodiesExport` → `LiveV11sVerify.CompareTakes` で
-   現行 v11s リファレンスとの差を計測
-2. ズレていたら v11s リファレンスを cu13 バックエンドで再生成
-   (`FusedBatchConvert`、29 take ≈ 2h 自動)。**再生成はライブ本番と同じ 5080 機で行う**
-   (同一バイナリでも GPU 世代でカーネル選択が変わりうるため)
-
-## 本番機での注意(Phase 4)
-
-- スタンドアロンビルドは PATH に依存させず、CUDA/cuDNN DLL を Assets/Plugins 配置にする
-  (手順は Phase 2 で文書化予定)
+- [ ] 同じ DLL セットを同じ場所に配置(このファイルのハッシュと照合)
+- [ ] `ActiveProvider=Cuda` ログ確認 + `[rtmpose] CUDA preload` の loaded/failed 数確認
+- [ ] FreshFusedHz ベンチ(Phase 3 と同条件)

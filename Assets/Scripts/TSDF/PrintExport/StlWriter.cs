@@ -37,10 +37,14 @@ namespace TSDF
                 {
                     int i0 = tri[t * 3], i1 = tri[t * 3 + 1], i2 = tri[t * 3 + 2];
                     if (i0 == i1 || i1 == i2 || i0 == i2) continue;
-                    if (flip) (i1, i2) = (i2, i1);
-                    Vector3 a = (pos[i0] - center) * scale;
-                    Vector3 b = (pos[i1] - center) * scale;
-                    Vector3 c = (pos[i2] - center) * scale;
+                    // Unity is LEFT-handed; STL viewers/slicers read right-handed.
+                    // Mirror X so the print isn't a mirror image (left/right
+                    // hands swapped — 2026-07-19), and swap the winding to keep
+                    // outward orientation across the reflection.
+                    if (!flip) (i1, i2) = (i2, i1);
+                    Vector3 a = Mirror(pos[i0], center, scale);
+                    Vector3 b = Mirror(pos[i1], center, scale);
+                    Vector3 c = Mirror(pos[i2], center, scale);
                     Vector3 nrm = Vector3.Cross(b - a, c - a);
                     float len = nrm.magnitude;
                     nrm = len > 1e-12f ? nrm / len : Vector3.up;
@@ -52,6 +56,9 @@ namespace TSDF
                     fs.Write(ms.GetBuffer(), 0, (int)ms.Length);
             }
         }
+
+        private static Vector3 Mirror(Vector3 p, Vector3 center, float scale)
+            => new Vector3(-(p.x - center.x), p.y - center.y, p.z - center.z) * scale;
 
         private static void WriteV(BinaryWriter bw, Vector3 v)
         {

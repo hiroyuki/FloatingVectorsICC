@@ -941,6 +941,14 @@ namespace PointCloud
                 if (track.DepthFrames.Count == 0) continue;
                 int clamped = Mathf.Clamp(targetCursor, 0, track.DepthFrames.Count - 1);
                 if (clamped == track.PlaybackCursor) continue;
+                // BodyPlaybackCursor is monotonic — a BACKWARD seek would leave
+                // it ahead of the playhead and body events would never fire
+                // again (trails stayed empty after SeekToFrame, 2026-07-19).
+                // Reset like the loop wrap does (only when the cursor actually
+                // moves — a no-op seek must not wipe the current body state);
+                // the next AdvanceBodyCursor re-resolves from the seeked
+                // playhead and fires only the freshest frame.
+                track.BodyPlaybackCursor = -1;
                 SetCursorAndEmit(track, clamped);
                 moved = true;
                 ulong ts = TimestampNsAt(track.DepthFrames, clamped);
