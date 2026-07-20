@@ -4,7 +4,8 @@
     "references": [
         "PointCloud",
         "Calibration",
-        "Orbbec"
+        "Orbbec",
+        "Shared"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
