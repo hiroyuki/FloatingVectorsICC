@@ -847,7 +847,10 @@ namespace TSDF
             // public doubleBuffered flag out of sync with the physical buffers —
             // CLAMP voxelSize UP until the ACTUAL ceiled dimensions fit the cap,
             // then rebuild normally. Flag and topology therefore stay consistent.
-            const long MaxVoxels = 150_000_000; // ~7 GB with colour + double buffer
+            // Bounded by the 2 GiB-per-ComputeBuffer D3D limit on the largest-stride
+            // buffer (colour float4 = 16 B/voxel → 134,217,728), NOT by total VRAM:
+            // 150M voxels passed the old cap but the colour alloc threw every frame.
+            const long MaxVoxels = (2L * 1024 * 1024 * 1024) / 16;
             float boxVolume = Mathf.Max(1e-9f, size.x * size.y * size.z);
             // Seed from the isotropic estimate, then verify against the real
             // per-axis ceil (an anisotropic/thin box can still overflow the
@@ -861,7 +864,9 @@ namespace TSDF
                 dy = Mathf.Max(1, Mathf.CeilToInt(size.y / v));
                 dz = Mathf.Max(1, Mathf.CeilToInt(size.z / v));
                 totalL = (long)dx * dy * dz;
-                if (totalL <= MaxVoxels || guard >= 64) break;
+                // Strictly less: at exactly MaxVoxels the colour buffer is 2 GiB,
+                // which is already one byte past the D3D per-resource ceiling.
+                if (totalL < MaxVoxels || guard >= 64) break;
                 v *= 1.26f; // ~cbrt(2): roughly halves the voxel count per step
             }
             if (v > voxelSize)

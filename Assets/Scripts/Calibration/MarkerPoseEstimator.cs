@@ -291,6 +291,7 @@ namespace Calibration
                 var cyan    = new Scalar(0,   255, 255);
                 var magenta = new Scalar(255, 0,   255);
                 var yellow  = new Scalar(255, 255, 0);
+                var quads = new List<float[]>(markerCornersList.Count);
                 for (int m = 0; m < markerCornersList.Count; m++)
                 {
                     var corners = markerCornersList[m]; // 1x4 CV_32FC2 typically
@@ -298,6 +299,7 @@ namespace Calibration
                     if (n < 4) continue;
                     float[] pts = new float[n * 2];
                     corners.get(0, 0, pts);
+                    quads.Add(pts);
                     var p0 = new OpenCVForUnity.CoreModule.Point(pts[0], pts[1]);
                     var p1 = new OpenCVForUnity.CoreModule.Point(pts[2], pts[3]);
                     var p2 = new OpenCVForUnity.CoreModule.Point(pts[4], pts[5]);
@@ -315,6 +317,7 @@ namespace Calibration
                     }
                 }
 
+                float[] cornerPts = null;
                 if (interpolated > 0)
                 {
                     float[] cc = new float[interpolated * 2];
@@ -324,6 +327,7 @@ namespace Calibration
                         var pt = new OpenCVForUnity.CoreModule.Point(cc[i * 2], cc[i * 2 + 1]);
                         Imgproc.circle(rgb, pt, 4, yellow, -1);
                     }
+                    cornerPts = cc;
                 }
 
                 byte[] annotated = new byte[rgb8.Length];
@@ -335,6 +339,8 @@ namespace Calibration
                     InterpolatedCornerCount = interpolated,
                     MarkerIds = idsArr ?? Array.Empty<int>(),
                     AnnotatedRgb8 = annotated,
+                    MarkerQuads = quads.ToArray(),
+                    CharucoCornerPoints = cornerPts ?? Array.Empty<float>(),
                 };
             }
             finally
@@ -349,6 +355,10 @@ namespace Calibration
             public int InterpolatedCornerCount;
             public int[] MarkerIds;
             public byte[] AnnotatedRgb8;
+            /// <summary>Per detected marker: 8 floats (x0,y0..x3,y3), image pixels, top-left origin.</summary>
+            public float[][] MarkerQuads;
+            /// <summary>Interpolated ChArUco corners as xy pairs, image pixels, top-left origin.</summary>
+            public float[] CharucoCornerPoints;
         }
 
         public void Dispose()

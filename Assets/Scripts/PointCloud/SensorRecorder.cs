@@ -92,7 +92,9 @@ namespace PointCloud
                  "Needs rigSerialOrder. Off → Dev mode unchanged.")]
         public bool applyWorldRebase = false;
 
-        [Tooltip("The rig's 4 camera serials in order 1..4 (must match SensorManager.rigSerialOrder). " +
+        [Tooltip("FALLBACK ONLY — the playback take's calibration/cameras.yaml wins when it " +
+                 "lists 4 serials (recordings carry their rig's map since Save copies it). " +
+                 "The rig's 4 camera serials in order 1..4 (must match SensorManager.rigSerialOrder). " +
                  "Rebase is skipped with a warning when these don't resolve against extrinsics.yaml.")]
         public string[] rigSerialOrder = new string[0];
 
@@ -1424,6 +1426,23 @@ namespace PointCloud
             PointCloudRecording.WriteDatasetMetadata(root, host, ds, serials);
             if (calibrations.Count > 0)
                 PointCloudRecording.WriteExtrinsicsYaml(root, calibrations);
+
+            // Recordings are self-contained: carry the rig's camera-id map so playback
+            // on the other set ("4070"/"5080") rebases with the recorded rig instead of
+            // the playing machine's local map.
+            if (cameraManager != null)
+            {
+                try
+                {
+                    var camMap = PointCloudRecording.ReadCamerasYaml(cameraManager.ResolveExtrinsicsRoot());
+                    if (camMap != null) PointCloudRecording.WriteCamerasYaml(root, camMap);
+                }
+                catch (Exception mapEx)
+                {
+                    Debug.LogWarning(
+                        $"[{nameof(SensorRecorder)}] could not copy cameras.yaml into recording: {mapEx.Message}", this);
+                }
+            }
         }
 
         [ContextMenu("Read")]
@@ -1615,10 +1634,16 @@ namespace PointCloud
                 Calibration.ExtrinsicsApply.ToUnityLocal(kv.Value.GlobalTrColorCamera.Value, out var pos, out _);
                 cams.Add((kv.Key, pos));
             }
+            // Playback rebases with the RECORDED rig's order: the recording folder's
+            // cameras.yaml (written at Save) beats the scene value, so a take from the
+            // other set still rebases correctly on this machine.
+            var rigOrder = PointCloudRecording.ResolveRigSerialOrder(
+                ResolvePlaybackRoot(), rigSerialOrder, out string rigSource);
             if (!Calibration.WorldFrameRebase.TryComputeFromCalibrations(
-                    cams, rigSerialOrder, out _worldRebase, out string reason, rebaseFloorY))
+                    cams, rigOrder, out _worldRebase, out string reason, rebaseFloorY))
             {
-                Debug.LogWarning($"[{nameof(SensorRecorder)}] world rebase skipped: {reason}", this);
+                Debug.LogWarning($"[{nameof(SensorRecorder)}] world rebase skipped (order from {rigSource}): {reason}",
+                                 this);
                 _worldRebase = Pose.identity;
                 return;
             }
@@ -2862,7 +2887,9 @@ namespace PointCloud
         // playbackFolderPath so replaying an old take never touches the recording
         // destination. Falls back to the recording root when playbackFolderPath is
         // blank, preserving the pre-split single-folder behaviour.
-        private string ResolvePlaybackRoot()
+        // Public so ExperienceSpaceBuilder can read the playback take's cameras.yaml
+        // when the sensing area is built from playback GOs instead of live renderers.
+        public string ResolvePlaybackRoot()
         {
             if (string.IsNullOrWhiteSpace(playbackFolderPath)) return ResolveRoot();
             string macOverride = playbackFolderPathMacOverride;

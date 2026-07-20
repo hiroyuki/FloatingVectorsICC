@@ -172,10 +172,23 @@ namespace Experience
 
         private IReadOnlyList<string> ResolveSerialOrder()
         {
-            if (rigSerialOrder != null && rigSerialOrder.Length == 4) return rigSerialOrder;
-            if (sensorRecorder != null && sensorRecorder.rigSerialOrder is { Length: 4 } rec) return rec;
-            if (sensorManager != null && sensorManager.rigSerialOrder is { Length: 4 } man) return man;
-            return rigSerialOrder;
+            string[] fallback =
+                rigSerialOrder is { Length: 4 } ? rigSerialOrder
+                : sensorRecorder != null && sensorRecorder.rigSerialOrder is { Length: 4 } rec ? rec
+                : sensorManager != null && sensorManager.rigSerialOrder is { Length: 4 } man ? man
+                : rigSerialOrder;
+
+            // cameras.yaml beats every scene/config value (see PointCloudRecording.
+            // ResolveRigSerialOrder). Live rig present → the machine-local map; pure
+            // playback → the take's own map, so cross-set takes keep their rig.
+            bool liveRig = sensorManager != null && sensorManager.Renderers != null
+                           && sensorManager.Renderers.Count > 0;
+            string root = liveRig ? sensorManager.ResolveExtrinsicsRoot()
+                : sensorRecorder != null ? sensorRecorder.ResolvePlaybackRoot()
+                : sensorManager != null ? sensorManager.ResolveExtrinsicsRoot()
+                : null;
+            if (string.IsNullOrEmpty(root)) return fallback;
+            return PointCloudRecording.ResolveRigSerialOrder(root, fallback, out _);
         }
 
         private Transform FindCameraTransform(string serial)
