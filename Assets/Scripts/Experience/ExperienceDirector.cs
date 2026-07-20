@@ -100,6 +100,7 @@ namespace Experience
 
         // spawned per mode session
         private VisitorMessageUI _ui;
+        private bool _uiSpawned; // false = scene-authored instance (kept on exit)
         private PresenceDetector _presence;
         private LiveSkeletonFeed _liveFeed;
         private ExperienceSpaceBuilder _space;
@@ -339,9 +340,18 @@ namespace Experience
             _space.Apply();
 
             // 4) spawned objects.
-            _ui = new GameObject("_ExperienceUI").AddComponent<VisitorMessageUI>();
-            _ui.transform.SetParent(transform, false);
-            _audio = _ui.gameObject.AddComponent<AudioSource>();
+            // Prefer a scene-authored UI (layout tunable + persisted on the GO);
+            // spawn a throwaway one only when the scene has none.
+            _ui = FindFirstObjectByType<VisitorMessageUI>(FindObjectsInactive.Include);
+            _uiSpawned = _ui == null;
+            if (_uiSpawned)
+            {
+                _ui = new GameObject("_ExperienceUI").AddComponent<VisitorMessageUI>();
+                _ui.transform.SetParent(transform, false);
+            }
+            else _ui.gameObject.SetActive(true);
+            _audio = _ui.GetComponent<AudioSource>();
+            if (_audio == null) _audio = _ui.gameObject.AddComponent<AudioSource>();
             _audio.playOnAwake = false;
             _presence = new GameObject("_ExperiencePresence").AddComponent<PresenceDetector>();
             _presence.transform.SetParent(transform, false);
@@ -460,7 +470,12 @@ namespace Experience
 
             if (_fsm != null) { _fsm.Changed -= OnStateChanged; _fsm = null; }
 
-            if (_ui != null) { _ui.ClearEverything(); Destroy(_ui.gameObject); _ui = null; }
+            if (_ui != null)
+            {
+                _ui.ClearEverything();
+                if (_uiSpawned) Destroy(_ui.gameObject);
+                _ui = null;
+            }
             _audio = null; // lived on the UI object
             if (_presence != null) { Destroy(_presence.gameObject); _presence = null; }
             if (_liveFeed != null) { Destroy(_liveFeed.gameObject); _liveFeed = null; }
