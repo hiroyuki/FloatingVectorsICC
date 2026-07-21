@@ -299,6 +299,7 @@ MonoBehaviour:
   decimater: {fileID: 173474409}
   capsuleFilter: {fileID: 0}
   jointMotionField: {fileID: 0}
+  floorMask: {fileID: 0}
   cumulative: {fileID: 18533122}
   folderPath: D:\FloatingVectorsICC\RecordingBase
   folderPathMacOverride: /Volumes/horristicSSD2T/Dropbox/projects/ICC/Recordings/Rec2_jump
@@ -1306,6 +1307,7 @@ MonoBehaviour:
   defaultBoundingBox: {fileID: 1151541767}
   defaultDecimater: {fileID: 173474409}
   defaultCumulative: {fileID: 18533122}
+  defaultFloorMask: {fileID: 1016277181}
   syncTopology: 0
   applySyncConfig: 0
   trigger2ImageDelayStepUs: 160
@@ -1396,6 +1398,53 @@ Transform:
   m_Children:
   - {fileID: 1125715202}
   - {fileID: 7740002}
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!1 &1016277180
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 1016277182}
+  - component: {fileID: 1016277181}
+  m_Layer: 0
+  m_Name: '[FloorMask]'
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!114 &1016277181
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1016277180}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: b62b25738e6dc7940b0e37198e8f8519, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: PointCloud::PointCloud.PointCloudFloorMask
+  mode: 1
+  floorHeight: 0.01
+  keepRadius: 0.5
+--- !u!4 &1016277182
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1016277180}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &1041233441
@@ -2382,6 +2431,7 @@ GameObject:
   - component: {fileID: 1180694595}
   - component: {fileID: 1180694596}
   - component: {fileID: 1180694597}
+  - component: {fileID: 1180694598}
   m_Layer: 0
   m_Name: '[SkeletonMerger]'
   m_TagString: Untagged
@@ -2497,6 +2547,20 @@ MonoBehaviour:
   checkIntervalSeconds: 1
   showAlert: 1
   logAlerts: 1
+--- !u!114 &1180694598
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1180694593}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: bea6ee73f27691b4d8b1f23d39b0b3d2, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: BodyTracking::BodyTracking.BodyFloorMaskFeeder
+  bodyTracking: {fileID: 1180694595}
+  target: {fileID: 1016277181}
 --- !u!1 &1214840952
 GameObject:
   m_ObjectHideFlags: 0
@@ -2726,6 +2790,7 @@ MonoBehaviour:
   useDepthBasis: 1
   latRadius: 1
   tubeRadiusVoxels: 1.2
+  floorMask: {fileID: 1016277181}
   diagnosticLogging: 0
 --- !u!4 &1289138167
 Transform:
@@ -3290,3 +3355,4 @@ SceneRoots:
   - {fileID: 943244991}
   - {fileID: 2064251120}
   - {fileID: 1168916135}
+  - {fileID: 1016277182}

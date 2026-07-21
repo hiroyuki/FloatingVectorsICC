@@ -189,6 +189,12 @@ namespace PointCloud
                  "color modulation, and optional velocity-direction vertex displacement. Issue #24.")]
         public PointCloudJointMotionField jointMotionField;
 
+        [Tooltip("Optional floor mask (typically driven by BodyTracking.BodyFloorMaskFeeder). " +
+                 "When assigned and its Mode is not Disabled, floor points are hidden except " +
+                 "within Keep Radius of a tracked foot — the bare floor's depth-noise shimmer " +
+                 "is the loudest thing on screen and carries no meaning.")]
+        public PointCloudFloorMask floorMask;
+
         [Header("Cumulative")]
         [Tooltip("Optional cumulative snapshotter. When assigned and its No Erase toggle is on, " +
                  "snapshots are captured every 'intervalSeconds' seconds and kept visible until cleared.")]
@@ -465,7 +471,8 @@ namespace PointCloud
         private void UpdateShaderFilterProperties()
         {
             if (_mpb == null) _mpb = new MaterialPropertyBlock();
-            PointCloudShaderFilters.Apply(_meshRenderer, _mpb, transform, boundingBox, decimater, capsuleFilter, jointMotionField);
+            PointCloudShaderFilters.Apply(_meshRenderer, _mpb, transform, boundingBox, decimater,
+                capsuleFilter, jointMotionField, floorMask);
         }
 
         private void UpdateFpsDiagnostics()

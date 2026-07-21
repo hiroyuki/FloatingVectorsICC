@@ -47,6 +47,10 @@ namespace PointCloud
         [Tooltip("Optional shared cumulative snapshotter applied to every spawned renderer.")]
         public PointCloudCumulative defaultCumulative;
 
+        [Tooltip("Optional shared floor mask applied to every spawned renderer — hides the " +
+                 "bare floor except around the visitor's feet.")]
+        public PointCloudFloorMask defaultFloorMask;
+
         [Header("Multi-device sync")]
         [Tooltip("Sync mode applied to every spawned renderer. SyncHubPro: all devices set to " +
                  "Secondary (the hub generates trigger pulses on VSYNC, every camera receives " +
@@ -313,6 +317,7 @@ namespace PointCloud
             pcr.boundingBox = defaultBoundingBox;
             pcr.decimater = defaultDecimater;
             pcr.cumulative = defaultCumulative;
+            pcr.floorMask = defaultFloorMask;
             pcr.syncMode = ResolveSyncMode(index);
             pcr.applySyncConfig = applySyncConfig;
             pcr.trigger2ImageDelayUs = trigger2ImageDelayStepUs * index;

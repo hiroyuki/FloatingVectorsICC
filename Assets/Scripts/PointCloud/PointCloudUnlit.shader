@@ -27,6 +27,13 @@ Shader "Orbbec/PointCloudUnlit"
         _MotionDisplaceScale("Motion Displace Scale",             Float) = 0
         _MotionSpeedMax     ("Motion Speed Max (m/s)",            Float) = 1
         _MotionHotColor     ("Motion Hot Color",                  Color) = (1, 0.2, 0.05, 1)
+        // Default parks the mask below any real geometry: a renderer that never
+        // receives PointCloudShaderFilters.Apply (snapshot objects, material
+        // previews) must draw everything, and 0 is a legitimate live threshold
+        // now that the levelled floor sits at y=0.
+        _FloorMaskY      ("Floor Mask Height (m)",   Float) = -1000000000
+        _FloorMaskRadius ("Floor Keep Radius Around Feet (m)", Float) = 0.5
+        _FloorFootCount  ("Floor Foot Count",                  Float) = 0
     }
     SubShader
     {
@@ -79,6 +86,18 @@ Shader "Orbbec/PointCloudUnlit"
             float4   _MotionHotColor;
             float4   _MotionPos[64];
             float4   _MotionVel[64];
+            // Floor mask: below _FloorMaskY the cloud is hidden EXCEPT within
+            // _FloorMaskRadius of a tracked foot. The bare floor flickers with
+            // depth noise and reads as visual junk; the patch a visitor stands
+            // on is what carries their presence. a _FloorMaskY far below the world disables the
+            // whole test. _FloorFootCount == 0 with the mask on means nobody is
+            // tracked, and the floor is hidden entirely — that is intended, not
+            // a fallback. Array length 8 = 4 people x 2 feet, well past the
+            // single-visitor design.
+            float    _FloorMaskY;
+            float    _FloorMaskRadius;
+            float    _FloorFootCount;
+            float4   _FloorFoot[8];
 
             struct appdata
             {
@@ -151,6 +170,23 @@ Shader "Orbbec/PointCloudUnlit"
                 return (_CapsMode < 1.5) ? insideAny : !insideAny;
             }
 
+            // Keep everything at or above the floor band; below it, keep only
+            // what is near a foot. Horizontal distance only (XZ): a foot sits a
+            // few cm above the floor, so a spherical test would clip the patch
+            // directly under the shoe — the part most worth keeping.
+            bool PassFloor(float3 worldPos)
+            {
+                if (worldPos.y >= _FloorMaskY) return true;
+                int n = (int)_FloorFootCount;
+                float r2 = _FloorMaskRadius * _FloorMaskRadius;
+                for (int i = 0; i < n; i++)
+                {
+                    float2 d = worldPos.xz - _FloorFoot[i].xz;
+                    if (dot(d, d) <= r2) return true;
+                }
+                return false;
+            }
+
             // Locate the closest joint to `worldPos`. Returns the joint index
             // (-1 if no joints), its squared distance, and its velocity / speed.
             // Squared distance avoids a per-iteration sqrt; the caller compares
@@ -182,7 +218,7 @@ Shader "Orbbec/PointCloudUnlit"
             {
                 v2f o;
                 float3 wp = mul(unity_ObjectToWorld, float4(v.vertex.xyz, 1.0)).xyz;
-                bool keep = PassObb(v.vertex.xyz) && PassDecim(v.vid) && PassCapsules(wp);
+                bool keep = PassObb(v.vertex.xyz) && PassDecim(v.vid) && PassCapsules(wp) && PassFloor(wp);
                 float3 outColor = v.color;
                 float3 wpOut = wp;
 
