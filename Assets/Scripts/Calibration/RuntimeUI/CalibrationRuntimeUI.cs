@@ -149,6 +149,9 @@ namespace Calibration.RuntimeUI
         public KeyCode floorTuneKey = KeyCode.G;
         [Tooltip("Floor-tune step per arrow press (m). Hold Shift for a tenth of it.")]
         public float floorTuneStep = 0.01f;
+        [Tooltip("Floor-plane pick: screen-space radius (pixels) around the click " +
+                 "within which the nearest, frontmost point-cloud vertex is picked.")]
+        public float floorPickRadiusPx = 12f;
 
         public enum FloorAnchorMode { BoardSample, CameraPlaneAssumeLevel }
 
@@ -895,8 +898,9 @@ namespace Calibration.RuntimeUI
             {
                 string solo = _soloId >= 0 ? $"id {_soloId}" : "all";
                 keys = _floorTune
-                    ? $"FLOOR TUNE  ↑/↓ move floor ({floorTuneStep * 100f:0.#} cm, Shift 1/10)   " +
-                      $"rebaseFloorY  {(_manager != null ? _manager.rebaseFloorY : 0f):0.####}   " +
+                    ? $"FLOOR TUNE  ↑/↓ height ({floorTuneStep * 100f:0.#} cm, Shift 1/10)   " +
+                      $"click floor ×{_floorPicks.Count}/{kMinFloorPicks}  Enter=level  Bksp=undo  R=reset   " +
+                      $"y {(_manager != null ? _manager.rebaseFloorY : 0f):0.###}   " +
                       $"[{floorTuneKey}]/Esc exit"
                     :
                     $"[{captureKey}] Capture ({_samples.Count})   " +
@@ -1049,6 +1053,13 @@ namespace Calibration.RuntimeUI
         private PointCloudView _tunedView;
         private bool _savedShowPointClouds;
 
+        // Floor-plane pick (3+ points → level the floor). World-space picks and
+        // their runtime marker spheres, torn down on tune exit / reset.
+        private const int kMinFloorPicks = 3;
+        private readonly List<Vector3> _floorPicks = new List<Vector3>();
+        private readonly List<GameObject> _floorPickMarkers = new List<GameObject>();
+        private GameObject _floorPickRoot;
+
         // Shows the live clouds clipped to the sensing box so the operator can park
         // y=0 exactly where the floor points disappear. The lever is
         // SensorManager.rebaseFloorY (the calibration-frame height that becomes the
@@ -1090,8 +1101,9 @@ namespace Calibration.RuntimeUI
                 if (_manager != null && !_manager.applyWorldRebase)
                     SetStatus("Floor tune: SensorManager.applyWorldRebase is OFF — rebaseFloorY has no effect.", warn: true);
                 else
-                    SetStatus($"Floor tune ON: ↑/↓ move the floor ({floorTuneStep * 100f:0.#} cm, Shift = 1/10). " +
-                              $"[{floorTuneKey}] to exit.");
+                    SetStatus($"Floor tune ON: ↑/↓ height ({floorTuneStep * 100f:0.#} cm, Shift 1/10). " +
+                              $"Click ≥{kMinFloorPicks} floor points, Enter = level & zero, Bksp = undo, R = reset tilt. " +
+                              $"[{floorTuneKey}]/Esc exit.");
             }
             else
             {
@@ -1100,6 +1112,7 @@ namespace Calibration.RuntimeUI
                 if (_tunedView != null) { _tunedView.showPointClouds = _savedShowPointClouds; _tunedView = null; }
                 SetExternalCanvasesVisible(true);
                 RestoreHiddenMeshesForTuneExit();
+                ClearFloorPicks();
                 SetStatus($"Floor tune OFF. rebaseFloorY  {(_manager != null ? _manager.rebaseFloorY : 0f):0.####}" +
                           "  (saved in calibration/floor.yaml — reloaded on next start)");
             }
@@ -1128,6 +1141,7 @@ namespace Calibration.RuntimeUI
             _savedFilterModeValid = false;
             if (_tunedView != null) { _tunedView.showPointClouds = _savedShowPointClouds; _tunedView = null; }
             SetExternalCanvasesVisible(true);
+            ClearFloorPicks();
         }
 
         private void SetExternalCanvasesVisible(bool visible)
@@ -1140,6 +1154,14 @@ namespace Calibration.RuntimeUI
         {
             if (Input.GetKeyDown(KeyCode.Escape)) { ToggleFloorTune(); return; }
             if (_manager == null) return;
+
+            // 3-point floor pick: click floor points, then level the world to them.
+            if (Input.GetMouseButtonDown(0)) { TryAddFloorPick(); return; }
+            if (Input.GetKeyDown(KeyCode.Backspace)) { UndoFloorPick(); return; }
+            if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter))
+            { ApplyFloorLeveling(); return; }
+            if (Input.GetKeyDown(KeyCode.R)) { ResetFloorLeveling(); return; }
+
             float step = floorTuneStep *
                          ((Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift)) ? 0.1f : 1f);
             float delta = 0f;
@@ -1148,17 +1170,118 @@ namespace Calibration.RuntimeUI
             if (delta == 0f) return;
             _manager.rebaseFloorY += delta;
             _manager.ApplyExtrinsicsToLive();
-            // Persist every nudge: the Inspector value dies with Play mode, and this
-            // is the number the whole floor-tune session exists to produce.
+            SaveFloor($"rebaseFloorY  {_manager.rebaseFloorY:0.####}");
+        }
+
+        // Persist both the floor height and the levelling Pose together — either
+        // lever writes the whole floor.yaml, so nudging Y never drops the tilt and
+        // levelling never drops Y. The Inspector values die with Play mode, so this
+        // file is the whole point of the tune session.
+        private void SaveFloor(string okPrefix)
+        {
+            var lv = _manager.rebaseFloorLeveling;
             try
             {
-                PointCloudRecording.WriteFloorY(_manager.ResolveExtrinsicsRoot(), _manager.rebaseFloorY);
-                SetStatus($"rebaseFloorY  {_manager.rebaseFloorY:0.####}   (saved to floor.yaml)");
+                PointCloudRecording.WriteFloor(
+                    _manager.ResolveExtrinsicsRoot(), _manager.rebaseFloorY,
+                    new[] { lv.position.x, lv.position.y, lv.position.z },
+                    new[] { lv.rotation.x, lv.rotation.y, lv.rotation.z, lv.rotation.w });
+                SetStatus($"{okPrefix}   (saved to floor.yaml)");
             }
             catch (Exception e)
             {
-                SetStatus($"rebaseFloorY  {_manager.rebaseFloorY:0.####}   ⚠ save failed: {e.Message}", warn: true);
+                SetStatus($"{okPrefix}   ⚠ save failed: {e.Message}", warn: true);
             }
+        }
+
+        private void TryAddFloorPick()
+        {
+            var cam = FloorPointPicker.ResolvePickCamera();
+            if (cam == null) { SetStatus("Floor pick: no camera to pick from.", warn: true); return; }
+            if (FloorPointPicker.TryPick(cam, Input.mousePosition, floorPickRadiusPx, out var world))
+            {
+                _floorPicks.Add(world);
+                SpawnFloorPickMarker(world);
+                SetStatus($"Floor pick #{_floorPicks.Count}: ({world.x:0.00}, {world.y:0.00}, {world.z:0.00})" +
+                          (_floorPicks.Count >= kMinFloorPicks
+                              ? "  — Enter to level & zero the floor."
+                              : $"  — need ≥{kMinFloorPicks}."));
+            }
+            else
+            {
+                SetStatus("Floor pick: no cloud point under the cursor — aim at visible floor points.", warn: true);
+            }
+        }
+
+        private void UndoFloorPick()
+        {
+            if (_floorPicks.Count == 0) { SetStatus("Floor pick: nothing to undo."); return; }
+            _floorPicks.RemoveAt(_floorPicks.Count - 1);
+            int last = _floorPickMarkers.Count - 1;
+            if (last >= 0)
+            {
+                if (_floorPickMarkers[last] != null) Destroy(_floorPickMarkers[last]);
+                _floorPickMarkers.RemoveAt(last);
+            }
+            SetStatus($"Floor pick undone — {_floorPicks.Count} left.");
+        }
+
+        private void ApplyFloorLeveling()
+        {
+            if (_floorPicks.Count < kMinFloorPicks)
+            { SetStatus($"Floor level: need ≥{kMinFloorPicks} picks (have {_floorPicks.Count}).", warn: true); return; }
+            if (_manager != null && !_manager.applyWorldRebase)
+            { SetStatus("Floor level: SensorManager.applyWorldRebase is OFF — levelling has no effect.", warn: true); return; }
+            if (!FloorPlaneMath.TryFitPlane(_floorPicks, out var p, out var n))
+            { SetStatus("Floor level: plane fit failed — picks are collinear, add a spread-out point.", warn: true); return; }
+
+            // The picks were taken in the CURRENT (already-levelled) world, so this
+            // delta refines toward horizontal; compose it onto the stored total so
+            // repeated picks converge instead of fighting each other.
+            float tiltDeg = Vector3.Angle(n.y < 0f ? -n : n, Vector3.up);
+            Pose delta = FloorPlaneMath.ComputeLeveling(p, n);
+            _manager.rebaseFloorLeveling =
+                FloorPlaneMath.ComposeWorld(delta, _manager.rebaseFloorLeveling);
+            _manager.ApplyExtrinsicsToLive();
+            ClearFloorPicks();
+            SaveFloor($"Floor levelled (corrected {tiltDeg:0.0}° tilt)");
+        }
+
+        private void ResetFloorLeveling()
+        {
+            if (_manager == null) return;
+            _manager.rebaseFloorLeveling = Pose.identity;
+            _manager.ApplyExtrinsicsToLive();
+            ClearFloorPicks();
+            SaveFloor("Floor tilt reset to level");
+        }
+
+        private void SpawnFloorPickMarker(Vector3 world)
+        {
+            if (_floorPickRoot == null)
+            {
+                _floorPickRoot = new GameObject("_FloorPickMarkers") { hideFlags = HideFlags.DontSave };
+            }
+            var marker = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+            marker.name = $"_FloorPick_{_floorPicks.Count}";
+            marker.hideFlags = HideFlags.DontSave;
+            var col = marker.GetComponent<Collider>();
+            if (col != null) Destroy(col); // must not block subsequent picks / physics
+            marker.transform.SetParent(_floorPickRoot.transform, worldPositionStays: true);
+            marker.transform.position = world;
+            marker.transform.localScale = Vector3.one * 0.04f;
+            // Left on the default primitive material on purpose: no instanced
+            // material to leak, and a calibration-time marker doesn't need styling.
+            _floorPickMarkers.Add(marker);
+        }
+
+        private void ClearFloorPicks()
+        {
+            _floorPicks.Clear();
+            for (int i = 0; i < _floorPickMarkers.Count; i++)
+                if (_floorPickMarkers[i] != null) Destroy(_floorPickMarkers[i]);
+            _floorPickMarkers.Clear();
+            if (_floorPickRoot != null) { Destroy(_floorPickRoot); _floorPickRoot = null; }
         }
 
         private CaptureSample _floorSample;

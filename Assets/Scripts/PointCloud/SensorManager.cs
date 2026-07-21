@@ -137,6 +137,16 @@ namespace PointCloud
                  "Inspector value always wins.")]
         public bool loadFloorYFromCalibration = true;
 
+        /// <summary>
+        /// World-space floor-levelling correction (tilt + height) produced by the
+        /// interactive 3-point floor pick (CalibrationRuntimeUI floor tune). Applied
+        /// AFTER the camera rebase so the picked floor becomes horizontal at y=0.
+        /// Not serialized: it is a per-room measurement loaded from / saved to
+        /// calibration/floor.yaml, exactly like <see cref="rebaseFloorY"/>.
+        /// </summary>
+        [System.NonSerialized]
+        public Pose rebaseFloorLeveling = Pose.identity;
+
         [Header("Frame rate")]
         [Tooltip("Cap the application frame rate via Application.targetFrameRate. " +
                  "vSync is disabled (QualitySettings.vSyncCount = 0) so the cap takes " +
@@ -205,7 +215,11 @@ namespace PointCloud
         private void LoadFloorYFromCalibration()
         {
             if (!loadFloorYFromCalibration) return;
-            if (!PointCloudRecording.TryReadFloorY(ResolveExtrinsicsRoot(), out float y)) return;
+            if (!PointCloudRecording.TryReadFloor(ResolveExtrinsicsRoot(), out float y,
+                                                  out var lp, out var lr))
+                return;
+            rebaseFloorLeveling = new Pose(new Vector3(lp[0], lp[1], lp[2]),
+                                           new Quaternion(lr[0], lr[1], lr[2], lr[3]));
             if (Mathf.Approximately(y, rebaseFloorY)) return;
             if (verboseLogging)
                 Debug.Log($"[{nameof(SensorManager)}] rebaseFloorY {rebaseFloorY} → {y} from calibration/floor.yaml.",
@@ -354,6 +368,12 @@ namespace PointCloud
             Pose rebase = Pose.identity;
             bool useRebase = applyWorldRebase &&
                              TryResolveWorldRebase(calibrations, out rebase);
+
+            // Fold the interactive floor levelling (3-point pick) onto the camera
+            // rebase: it is a world-space correction applied AFTER the rebase, so it
+            // left-composes just like the rebase left-composes after ToUnityLocal.
+            if (useRebase && !Calibration.FloorPlaneMath.IsApproximatelyIdentity(rebaseFloorLeveling))
+                rebase = Calibration.FloorPlaneMath.ComposeWorld(rebaseFloorLeveling, rebase);
 
             int applied = 0;
             foreach (var c in calibrations)
