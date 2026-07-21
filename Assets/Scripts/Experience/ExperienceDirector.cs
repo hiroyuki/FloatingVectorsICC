@@ -111,7 +111,6 @@ namespace Experience
         private int _savedHistorySamples;
         private bool _savedCurvesVisible, _savedCurvesFreeze;
         private bool _savedMgrRebase, _savedRecRebase;
-        private string[] _savedMgrOrder, _savedRecOrder;
         private bool _savedKeepLive;
         private string _savedPlaybackFolder;
         private bool _savedWasPlaying;
@@ -316,18 +315,19 @@ namespace Experience
             // 2) world rebase on (single reversible hook).
             if (sensorManager != null)
             {
+                // Only the rebase flag is ours to force. rigSerialOrder is left
+                // alone: each component resolves it from the machine-local
+                // calibration/cameras.yaml, and this director used to overwrite
+                // that with a git-synced config value — i.e. the other rig's
+                // serials on one of the two machines.
                 _savedMgrRebase = sensorManager.applyWorldRebase;
-                _savedMgrOrder = sensorManager.rigSerialOrder;
                 sensorManager.applyWorldRebase = true;
-                sensorManager.rigSerialOrder = config.rigSerialOrder;
                 sensorManager.ApplyExtrinsicsToLive();
             }
             if (sensorRecorder != null)
             {
                 _savedRecRebase = sensorRecorder.applyWorldRebase;
-                _savedRecOrder = sensorRecorder.rigSerialOrder;
                 sensorRecorder.applyWorldRebase = true;
-                sensorRecorder.rigSerialOrder = config.rigSerialOrder;
                 sensorRecorder.ReapplyExtrinsics();
             }
 
@@ -337,7 +337,8 @@ namespace Experience
             _space.floorOrigin = floorOrigin;
             _space.sensorManager = sensorManager;
             _space.sensorRecorder = sensorRecorder;
-            _space.rigSerialOrder = config.rigSerialOrder;
+            // rigSerialOrder left empty — ExperienceSpaceBuilder resolves it from
+            // cameras.yaml (see the note on the rebase hook above).
             _space.floorY = config.floorY;
             _space.Apply();
 
@@ -531,13 +532,11 @@ namespace Experience
             if (sensorManager != null)
             {
                 sensorManager.applyWorldRebase = _savedMgrRebase;
-                sensorManager.rigSerialOrder = _savedMgrOrder;
                 sensorManager.ApplyExtrinsicsToLive();
             }
             if (sensorRecorder != null)
             {
                 sensorRecorder.applyWorldRebase = _savedRecRebase;
-                sensorRecorder.rigSerialOrder = _savedRecOrder;
                 sensorRecorder.ReapplyExtrinsics();
             }
 

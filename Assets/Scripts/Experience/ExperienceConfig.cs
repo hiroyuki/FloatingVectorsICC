@@ -14,10 +14,13 @@ namespace Experience
     public class ExperienceConfig : ScriptableObject
     {
         [Header("Rig")]
-        [Tooltip("Camera serials in rig order 1..4 (defines +X = camera1→2). Pushed " +
-                 "into SensorManager/SensorRecorder on mode enter.")]
-        public string[] rigSerialOrder =
-            { "CL8F253004N", "CL8F253004L", "CL8F25300EG", "CL8F253004Z" };
+        // No rigSerialOrder here on purpose: the rig order is machine-local and
+        // comes from calibration/cameras.yaml (PointCloudRecording.ResolveRigSerialOrder,
+        // which SensorManager / SensorRecorder / ExperienceSpaceBuilder each call
+        // themselves). This asset is git-synced between the "4070" and "5080" sets,
+        // so any serial stored here would be the WRONG set's on one of the two
+        // machines — and pushing it on mode enter would overwrite the locally
+        // correct order with it.
 
         [Tooltip("Floor height in the REBASED world. With rebaseFloorY set on " +
                  "SensorManager/SensorRecorder (always-on rebase), the floor IS y=0.")]
