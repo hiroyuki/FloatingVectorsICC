@@ -26,6 +26,25 @@ RWStructuredBuffer<float2> _Voxels;   // x = tsdf (metres), y = weight
 RWStructuredBuffer<float4> _Colors;   // rgb (0..1) + colour weight; parallel to _Voxels
 int3 _Dim;
 float4x4 _WorldFromVoxel;             // voxel index centre -> world metres
+
+// Floor mask — same contract as TSDFIntegrateDepth.compute and
+// PointCloudUnlit.shader's PassFloor. See the comment there.
+float  _FloorMaskY;
+float  _FloorMaskRadius;
+uint   _FloorFootCount;
+float4 _FloorFoot[8];
+
+bool PassFloorMask(float3 pWorld)
+{
+    if (pWorld.y >= _FloorMaskY) return true;
+    float r2 = _FloorMaskRadius * _FloorMaskRadius;
+    for (uint i = 0; i < _FloorFootCount; i++)
+    {
+        float2 d = pWorld.xz - _FloorFoot[i].xz;
+        if (dot(d, d) <= r2) return true;
+    }
+    return false;
+}
 float _Tau;                           // truncation (metres)
 
 // 0 = standard weighted-average; 1 = retain-ghost (abs(sdf)-min wins).
@@ -141,6 +160,7 @@ void Integrate(uint3 id : SV_DispatchThreadID)
     // Voxel centre in world metres.
     float3 voxelIdxCentre = float3((float)i + 0.5, (float)j + 0.5, (float)k + 0.5);
     float3 pWorld = mul(_WorldFromVoxel, float4(voxelIdxCentre, 1.0)).xyz;
+    if (!PassFloorMask(pWorld)) return;
 
     // World -> depth-camera mm.
     float3 pDepthMm = mul(_DepthFromWorld, float4(pWorld, 1.0)).xyz;

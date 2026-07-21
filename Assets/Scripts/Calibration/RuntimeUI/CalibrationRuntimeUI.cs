@@ -93,6 +93,10 @@ namespace Calibration.RuntimeUI
                  "grid/sensing area are all skewed.")]
         public KeyCode floorSampleKey = KeyCode.F;
         public KeyCode toggleUiKey = KeyCode.H;
+        [Tooltip("Re-fit the sensing box to the current camera rig and save it to " +
+                 "calibration/sensing_area.yaml. Solve does this too; this key is for " +
+                 "when the cameras were nudged and a full re-solve is not warranted.")]
+        public KeyCode rebuildSensingAreaKey = KeyCode.B;
         [Tooltip("Enter/exit camera-id assign mode (also Esc to exit). In assign mode the action " +
                  "keys are suspended and the arrow keys reassign ids / pick the world origin.")]
         public KeyCode assignModeKey = KeyCode.I;
@@ -148,22 +152,30 @@ namespace Calibration.RuntimeUI
         public float cameraHeightMeters = 1.0f;
 
         [Tooltip("Floor-tune mode: puts a top-down camera on Display 1 showing the live point " +
-                 "clouds clipped to the sensing box. Click ≥3 floor points and press Enter to " +
-                 "level the floor horizontal at y=0 — that fixes tilt and height together, and " +
-                 "is the lever to reach for. The arrow keys only trim height afterwards.")]
+                 "clouds clipped to the sensing box. Press Enter to fit the floor from the " +
+                 "whole cloud and level it horizontal at y=0 — that fixes tilt and height " +
+                 "together, and is the lever to reach for. The arrow keys only trim height " +
+                 "afterwards. NOBODY may stand in the sensing area during the fit.")]
         public KeyCode floorTuneKey = KeyCode.G;
         [Tooltip("Floor-tune step per arrow press (m). Hold Shift for a tenth of it. " +
                  "This is the raise-the-y=0-plane lever, so its sign is inverted from " +
-                 "what you see: Up moves the FLOOR DOWN by one step, Down moves it up.")]
+                 "what you see: Up moves the FLOOR DOWN by one step, Down moves it up. " +
+                 "Nudges are saved to floor.yaml on Enter, not on every press.")]
         public float floorTuneStep = 0.01f;
-        [Tooltip("Floor-plane pick: screen-space radius (pixels) around the click " +
-                 "within which the nearest, frontmost point-cloud vertex is picked.")]
-        public float floorPickRadiusPx = 12f;
-        [Tooltip("Floor-plane pick: how far down the temporary Display 1 camera looks " +
-                 "(degrees below horizontal). The floor must be seen as a surface, not " +
-                 "edge-on, or the pick lands on a wall. 90 = straight down.")]
+        [Tooltip("Floor fit: half-height of the band around the located floor that is " +
+                 "fed to the plane fit (m). Wide enough to cover the depth noise and a " +
+                 "real slope, tight enough to exclude furniture.")]
+        public float floorFitBandMeters = 0.12f;
+        [Tooltip("Floor fit: how far inside the sensing box the sampled floor patch " +
+                 "stops (m). The box edges collect skirting, stand feet and the " +
+                 "sparsest, noisiest floor returns — and being furthest from the " +
+                 "centroid they have the most leverage on the fitted tilt.")]
+        public float floorFitInsetMeters = 0.4f;
+        [Tooltip("Floor-tune view: how far down the temporary Display 1 camera looks " +
+                 "(degrees below horizontal), so the operator can see the floor as a " +
+                 "surface while judging the fit. 90 = straight down.")]
         [Range(15f, 89f)] public float floorTunePitchDeg = 55f;
-        [Tooltip("Floor-plane pick: refuse to apply a fit whose normal is more than " +
+        [Tooltip("Floor fit: refuse to apply a fit whose normal is more than " +
                  "this far from vertical (degrees) — that plane is a wall, not a floor.")]
         [Range(5f, 80f)] public float floorMaxTiltDeg = 40f;
 
@@ -350,7 +362,7 @@ namespace Calibration.RuntimeUI
             // "calibrate, restart the app, then tune the floor" flow.
             if (_manager == null) _manager = FindFirstObjectByType<SensorManager>();
             if (Input.GetKeyDown(floorTuneKey)) ToggleFloorTune();
-            if (_floorTune) { HandleFloorTuneInput(); if (!_active) return; }
+            if (_floorTune) { HandleFloorTuneInput(); FlushFloorNudgeSave(); if (!_active) return; }
 
             if (!_active) return;
 
@@ -417,6 +429,11 @@ namespace Calibration.RuntimeUI
             // instead of firing Capture/Solve/etc.
             if (_assignMode) { HandleAssignInput(); return; }
             if (Input.GetKeyDown(assignModeKey)) { EnterAssignMode(); return; }
+            if (Input.GetKeyDown(rebuildSensingAreaKey))
+            {
+                SetStatus("Sensing area" + ApplySensingAids());
+                return;
+            }
 
             if (_floorTune) return; // Update already handled the nudge keys
 
@@ -913,7 +930,7 @@ namespace Calibration.RuntimeUI
                 string solo = _soloId >= 0 ? $"id {_soloId}" : "all";
                 keys = _floorTune
                     ? $"FLOOR TUNE  ↑ floor down / ↓ up ({floorTuneStep * 100f:0.#} cm, Shift 1/10)   " +
-                      $"click floor ×{_floorPicks.Count}/{kMinFloorPicks}  Enter=level  Bksp=undo  R=reset   " +
+                      "Enter=fit floor (area must be EMPTY)   " +
                       $"y {(_manager != null ? _manager.rebaseFloorY : 0f):0.###}   " +
                       $"[{floorTuneKey}]/Esc exit"
                     :
@@ -925,6 +942,7 @@ namespace Calibration.RuntimeUI
                     $"[{dumpKey}] Dump   " +
                     $"[{clearSamplesKey}] Clear   " +
                     $"[{assignModeKey}] Assign-ID   " +
+                    $"[{rebuildSensingAreaKey}] Sensing-area   " +
                     $"0-9 Solo:{solo}   " +
                     $"[{toggleUiKey}] Hide UI   " +
                     $"[{toggleActiveKey}] Disable";
@@ -1071,12 +1089,10 @@ namespace Calibration.RuntimeUI
         private GameObject _floorTuneCamGo;
         private readonly List<Canvas> _hiddenPickCanvases = new List<Canvas>();
 
-        // Floor-plane pick (3+ points → level the floor). World-space picks and
-        // their runtime marker spheres, torn down on tune exit / reset.
-        private const int kMinFloorPicks = 3;
-        private readonly List<Vector3> _floorPicks = new List<Vector3>();
-        private readonly List<GameObject> _floorPickMarkers = new List<GameObject>();
-        private GameObject _floorPickRoot;
+        // Arrow-key height nudges coalesce into one floor.yaml write this long
+        // after the last press (0 = nothing pending).
+        private const float kFloorNudgeSaveDelay = 0.75f;
+        private float _floorSaveDueAt;
 
         // Shows the live clouds clipped to the sensing box so the operator can park
         // y=0 exactly where the floor points disappear. The lever is
@@ -1122,8 +1138,9 @@ namespace Calibration.RuntimeUI
                 if (_manager != null && !_manager.applyWorldRebase)
                     SetStatus("Floor tune: SensorManager.applyWorldRebase is OFF — rebaseFloorY has no effect.", warn: true);
                 else
-                    SetStatus($"Floor tune ON: click ≥{kMinFloorPicks} floor points, Enter = level & zero " +
-                              "(fixes tilt AND height — do this first), Bksp = undo, R = reset tilt. " +
+                    SetStatus("Floor tune ON: clear the area of people, then Enter = fit the floor " +
+                              "from the whole cloud & level it (fixes tilt AND height — do this " +
+                              "first). " +
                               $"↑/↓ then trims height only, {floorTuneStep * 100f:0.#} cm a press " +
                               "(Shift 1/10) — ↑ lowers the floor. " +
                               $"[{floorTuneKey}]/Esc exit.");
@@ -1136,7 +1153,7 @@ namespace Calibration.RuntimeUI
                 ReturnOperatorDisplay();
                 SetExternalCanvasesVisible(true);
                 RestoreHiddenMeshesForTuneExit();
-                ClearFloorPicks();
+                FlushFloorNudgeSaveNow();
                 SetStatus($"Floor tune OFF. rebaseFloorY  {(_manager != null ? _manager.rebaseFloorY : 0f):0.####}" +
                           "  (saved in calibration/floor.yaml — reloaded on next start)");
             }
@@ -1166,7 +1183,7 @@ namespace Calibration.RuntimeUI
             if (_tunedView != null) { _tunedView.showPointClouds = _savedShowPointClouds; _tunedView = null; }
             ReturnOperatorDisplay();
             SetExternalCanvasesVisible(true);
-            ClearFloorPicks();
+            FlushFloorNudgeSaveNow();
         }
 
         private void SetExternalCanvasesVisible(bool visible)
@@ -1213,7 +1230,6 @@ namespace Calibration.RuntimeUI
             cam.targetDisplay = kOperatorTargetDisplay;
             cam.depth = 100f;                            // above the Display 1 black backdrop
             AimFloorTuneCamera(cam, src);
-            FloorPointPicker.PickCameraOverride = cam;
 
             // Any screen-space canvas already on Display 1 would cover the cloud.
             var canvases = FindObjectsByType<Canvas>(FindObjectsInactive.Exclude, FindObjectsSortMode.None);
@@ -1263,7 +1279,6 @@ namespace Calibration.RuntimeUI
         {
             Shared.OperatorOverlayGate.FloorTuneActive = false;
 
-            FloorPointPicker.PickCameraOverride = null;
             if (_floorTuneCamGo != null) Destroy(_floorTuneCamGo);
             _floorTuneCamGo = null;
 
@@ -1277,12 +1292,14 @@ namespace Calibration.RuntimeUI
             if (Input.GetKeyDown(KeyCode.Escape)) { ToggleFloorTune(); return; }
             if (_manager == null) return;
 
-            // 3-point floor pick: click floor points, then level the world to them.
-            if (Input.GetMouseButtonDown(0)) { TryAddFloorPick(); return; }
-            if (Input.GetKeyDown(KeyCode.Backspace)) { UndoFloorPick(); return; }
+            // Enter = fit the floor from the whole cloud and level to it, then save.
             if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter))
             { ApplyFloorLeveling(); return; }
-            if (Input.GetKeyDown(KeyCode.R)) { ResetFloorLeveling(); return; }
+            // No "reset tilt" key: the levelling Pose carries the floor HEIGHT as
+            // well as its tilt, so resetting it to identity drops the floor by
+            // whatever height it was holding (1.6 m, in the session that motivated
+            // removing it). Enter always computes an absolute fit, so there is
+            // never a reason to pass through an identity state to get a good floor.
 
             float step = floorTuneStep *
                          ((Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift)) ? 0.1f : 1f);
@@ -1292,6 +1309,27 @@ namespace Calibration.RuntimeUI
             if (delta == 0f) return;
             _manager.rebaseFloorY += delta;
             _manager.ApplyExtrinsicsToLive();
+            // Coalesce the write instead of saving per press: a held arrow key
+            // walked rebaseFloorY 1.4 m in one session and persisted every 1 cm of
+            // it. The nudge still sticks — it is just written once the operator
+            // stops moving.
+            _floorSaveDueAt = Time.unscaledTime + kFloorNudgeSaveDelay;
+            SetStatus($"rebaseFloorY  {_manager.rebaseFloorY:0.####}");
+        }
+
+        // Debounced save for the arrow-key nudges (see HandleFloorTuneInput).
+        private void FlushFloorNudgeSave()
+        {
+            if (_floorSaveDueAt <= 0f || Time.unscaledTime < _floorSaveDueAt) return;
+            FlushFloorNudgeSaveNow();
+        }
+
+        // Write a pending nudge immediately — on tune exit / teardown, so leaving
+        // within the debounce window never loses the height the operator dialled in.
+        private void FlushFloorNudgeSaveNow()
+        {
+            if (_floorSaveDueAt <= 0f || _manager == null) { _floorSaveDueAt = 0f; return; }
+            _floorSaveDueAt = 0f;
             SaveFloor($"rebaseFloorY  {_manager.rebaseFloorY:0.####}");
         }
 
@@ -1316,112 +1354,50 @@ namespace Calibration.RuntimeUI
             }
         }
 
-        private void TryAddFloorPick()
-        {
-            var cam = FloorPointPicker.ResolvePickCamera();
-            if (cam == null) { SetStatus("Floor pick: no camera to pick from.", warn: true); return; }
-            // Restrict to the volume floor tune is clipping the clouds to, so the
-            // pick can only land on something the operator can see.
-            var visible = _manager != null && _manager.defaultBoundingBox != null
-                          && _manager.defaultBoundingBox.filterMode == BoundingVolume.FilterMode.KeepInside
-                ? _manager.defaultBoundingBox
-                : null;
-            if (FloorPointPicker.TryPick(cam, Input.mousePosition, floorPickRadiusPx, out var world, visible))
-            {
-                _floorPicks.Add(world);
-                SpawnFloorPickMarker(world);
-                SetStatus($"Floor pick #{_floorPicks.Count}: ({world.x:0.00}, {world.y:0.00}, {world.z:0.00})" +
-                          (_floorPicks.Count >= kMinFloorPicks
-                              ? "  — Enter to level & zero the floor."
-                              : $"  — need ≥{kMinFloorPicks}."));
-            }
-            else
-            {
-                SetStatus("Floor pick: no cloud point under the cursor — aim at visible floor points.", warn: true);
-            }
-        }
-
-        private void UndoFloorPick()
-        {
-            if (_floorPicks.Count == 0) { SetStatus("Floor pick: nothing to undo."); return; }
-            _floorPicks.RemoveAt(_floorPicks.Count - 1);
-            int last = _floorPickMarkers.Count - 1;
-            if (last >= 0)
-            {
-                if (_floorPickMarkers[last] != null) Destroy(_floorPickMarkers[last]);
-                _floorPickMarkers.RemoveAt(last);
-            }
-            SetStatus($"Floor pick undone — {_floorPicks.Count} left.");
-        }
-
+        // Fit the floor from every visible floor point and level the world to it.
+        // Runs twice: the first pass pulls the floor to horizontal at y=0 from
+        // wherever it was, the second re-fits in the corrected world so the band
+        // now brackets the real floor and the residual tilt is squeezed out.
+        // Assumes an empty sensing area — see FloorCloudFitter's header.
         private void ApplyFloorLeveling()
         {
-            if (_floorPicks.Count < kMinFloorPicks)
-            { SetStatus($"Floor level: need ≥{kMinFloorPicks} picks (have {_floorPicks.Count}).", warn: true); return; }
-            if (_manager != null && !_manager.applyWorldRebase)
-            { SetStatus("Floor level: SensorManager.applyWorldRebase is OFF — levelling has no effect.", warn: true); return; }
-            if (!FloorPlaneMath.TryFitPlane(_floorPicks, out var p, out var n))
-            { SetStatus("Floor level: plane fit failed — picks are collinear, add a spread-out point.", warn: true); return; }
-
-            // The picks were taken in the CURRENT (already-levelled) world, so this
-            // delta refines toward horizontal; compose it onto the stored total so
-            // repeated picks converge instead of fighting each other.
-            float tiltDeg = Vector3.Angle(n.y < 0f ? -n : n, Vector3.up);
-            // A real floor is already near horizontal — the picks refine it by a few
-            // degrees. A steep fit means the picks landed on a vertical surface (a
-            // wall, or the visitor), and applying it would stand the world on its
-            // side. Refuse rather than destroy a good calibration; the picks are
-            // kept so Backspace can drop just the bad one.
-            if (tiltDeg > floorMaxTiltDeg)
-            {
-                SetStatus($"Floor level: fitted plane is {tiltDeg:0.0}° off horizontal (limit " +
-                          $"{floorMaxTiltDeg:0}°) — those picks are on a wall, not the floor. " +
-                          "Not applied. Backspace to drop picks, or aim lower.", warn: true);
-                return;
-            }
-            Pose delta = FloorPlaneMath.ComputeLeveling(p, n);
-            _manager.rebaseFloorLeveling =
-                FloorPlaneMath.ComposeWorld(delta, _manager.rebaseFloorLeveling);
-            _manager.ApplyExtrinsicsToLive();
-            ClearFloorPicks();
-            SaveFloor($"Floor levelled (corrected {tiltDeg:0.0}° tilt)");
-        }
-
-        private void ResetFloorLeveling()
-        {
             if (_manager == null) return;
-            _manager.rebaseFloorLeveling = Pose.identity;
-            _manager.ApplyExtrinsicsToLive();
-            ClearFloorPicks();
-            SaveFloor("Floor tilt reset to level");
-        }
+            if (!_manager.applyWorldRebase)
+            { SetStatus("Floor level: SensorManager.applyWorldRebase is OFF — levelling has no effect.", warn: true); return; }
 
-        private void SpawnFloorPickMarker(Vector3 world)
-        {
-            if (_floorPickRoot == null)
+            var box = _manager.defaultBoundingBox;
+            FloorCloudFitter.Fit fit = default;
+            bool any = false;
+            for (int pass = 0; pass < 2; pass++)
             {
-                _floorPickRoot = new GameObject("_FloorPickMarkers") { hideFlags = HideFlags.DontSave };
+                if (!FloorCloudFitter.TryFit(box, floorFitBandMeters, floorFitInsetMeters, out fit))
+                {
+                    if (any) break;  // pass 1 worked, pass 2 found nothing — keep it
+                    SetStatus("Floor fit: not enough floor points in the sensing area — " +
+                              "is the rig live and the area clear?", warn: true);
+                    return;
+                }
+                // A real floor is near horizontal. A steep fit means the samples are
+                // a wall (or a person filling the area), and applying it would stand
+                // the world on its side — refuse rather than destroy a good calibration.
+                if (fit.TiltDeg > floorMaxTiltDeg)
+                {
+                    SetStatus($"Floor fit: plane is {fit.TiltDeg:0.0}° off horizontal (limit " +
+                              $"{floorMaxTiltDeg:0}°) — that is a wall, not the floor. Not applied.", warn: true);
+                    return;
+                }
+                // The fit is measured in the CURRENT (already-levelled) world, so the
+                // delta refines toward horizontal; compose it onto the stored total.
+                Pose delta = FloorPlaneMath.ComputeLeveling(fit.Point, fit.Normal);
+                _manager.rebaseFloorLeveling =
+                    FloorPlaneMath.ComposeWorld(delta, _manager.rebaseFloorLeveling);
+                _manager.ApplyExtrinsicsToLive();
+                any = true;
             }
-            var marker = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-            marker.name = $"_FloorPick_{_floorPicks.Count}";
-            marker.hideFlags = HideFlags.DontSave;
-            var col = marker.GetComponent<Collider>();
-            if (col != null) Destroy(col); // must not block subsequent picks / physics
-            marker.transform.SetParent(_floorPickRoot.transform, worldPositionStays: true);
-            marker.transform.position = world;
-            marker.transform.localScale = Vector3.one * 0.04f;
-            // Left on the default primitive material on purpose: no instanced
-            // material to leak, and a calibration-time marker doesn't need styling.
-            _floorPickMarkers.Add(marker);
-        }
 
-        private void ClearFloorPicks()
-        {
-            _floorPicks.Clear();
-            for (int i = 0; i < _floorPickMarkers.Count; i++)
-                if (_floorPickMarkers[i] != null) Destroy(_floorPickMarkers[i]);
-            _floorPickMarkers.Clear();
-            if (_floorPickRoot != null) { Destroy(_floorPickRoot); _floorPickRoot = null; }
+            _floorSaveDueAt = 0f;   // this save supersedes any pending nudge write
+            SaveFloor($"Floor fitted: {fit.SampleCount} pts, residual σ {fit.SdY * 1000f:0.0} mm " +
+                      $"(corrected {fit.TiltDeg:0.00}° tilt)");
         }
 
         private CaptureSample _floorSample;

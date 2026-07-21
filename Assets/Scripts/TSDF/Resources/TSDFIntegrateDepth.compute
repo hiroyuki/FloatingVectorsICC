@@ -38,6 +38,35 @@ RWStructuredBuffer<uint>   _Touched;
 int3 _TBDim;
 int3 _Dim;
 float4x4 _WorldFromVoxel;             // voxel index centre -> world metres
+
+// Floor mask (shared contract with PointCloudUnlit.shader's PassFloor and
+// PointCloud.PointCloudFloorMask). Voxels below _FloorMaskY are refused unless
+// they sit within _FloorMaskRadius (horizontal) of a tracked foot. The floor
+// returns a full-density sheet whose depth noise shimmers a couple of cm above
+// y=0; integrated with RetainGhost that shimmer bakes into the volume and comes
+// out as a crawling crust in the mesh. Rejecting it here — before it is ever
+// written — is cheaper and more complete than trying to clean the mesh after.
+// the writer parks _FloorMaskY far below the world when the mask is off, so the height test alone disables it. Count 0 with the mask on means nobody is
+// tracked, so the whole floor is refused; that is intended.
+float  _FloorMaskY;
+float  _FloorMaskRadius;
+uint   _FloorFootCount;
+float4 _FloorFoot[8];
+
+bool PassFloorMask(float3 pWorld)
+{
+    if (pWorld.y >= _FloorMaskY) return true;
+    float r2 = _FloorMaskRadius * _FloorMaskRadius;
+    for (uint i = 0; i < _FloorFootCount; i++)
+    {
+        // Horizontal distance only: a foot joint floats a few cm above the
+        // floor, and a spherical test would cut out the contact patch directly
+        // under the shoe — the one part worth keeping.
+        float2 d = pWorld.xz - _FloorFoot[i].xz;
+        if (dot(d, d) <= r2) return true;
+    }
+    return false;
+}
 float4x4 _VoxelFromWorld;             // world metres -> voxel index space
 float _Tau;                           // truncation (metres)
 float _WObs;                          // base observation weight
@@ -189,6 +218,7 @@ bool VoxelSdfGated(int3 c, uint u, uint v, float zM, out float sdf)
     sdf = 0.0;
     if (!InBounds(c)) return false;
     float3 pWorld = mul(_WorldFromVoxel, float4(float3(c) + 0.5, 1.0)).xyz;
+    if (!PassFloorMask(pWorld)) return false;
     int iu, iv; float zCamMm;
     if (!ProjectVoxelPixel(pWorld, iu, iv, zCamMm)) return false;
     if (iu != (int)u || iv != (int)v) return false;   // not this pixel's voxel

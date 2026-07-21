@@ -114,6 +114,13 @@ namespace TSDF
         // (spec §7). Debug replay via IntegrateRawFrame bypasses this gate.
         // NonSerialized so a frozen state (e.g. left by the fixed-frame bench) can
         // never get saved into the scene — it always starts true on load/play.
+        [Tooltip("Optional floor mask. When assigned and enabled, voxels below its " +
+                 "Floor Height are refused unless within Keep Radius of a tracked foot — " +
+                 "the floor's depth-noise shimmer otherwise bakes into the volume and " +
+                 "surfaces as a crawling crust in the mesh. Leave null to integrate the " +
+                 "floor as before.")]
+        public PointCloud.PointCloudFloorMask floorMask;
+
         [System.NonSerialized] public bool integrationEnabled = true;
 
         // Set of serials that have integrated since the last clear. Once it
@@ -603,6 +610,7 @@ namespace TSDF
             _shader.SetBuffer(_kernel, "_Voxels", targetSdf);
             _shader.SetInts("_Dim", volume.Dim.x, volume.Dim.y, volume.Dim.z);
             _shader.SetMatrix("_WorldFromVoxel", volume.WorldFromVoxel);
+            SetFloorMaskUniforms(_shader);
             _shader.SetFloat("_Tau", volume.Tau);
             _shader.SetInt("_AccumulationMode", modeOverride >= 0 ? modeOverride : (int)volume.accumulationMode);
 
@@ -719,6 +727,7 @@ namespace TSDF
             _depthShader.SetInts("_Dim", volume.Dim.x, volume.Dim.y, volume.Dim.z);
             _depthShader.SetInts("_TBDim", volume.VoxelBlockDim.x, volume.VoxelBlockDim.y, volume.VoxelBlockDim.z);
             _depthShader.SetMatrix("_WorldFromVoxel", volume.WorldFromVoxel);
+            SetFloorMaskUniforms(_depthShader);
             _depthShader.SetMatrix("_VoxelFromWorld", volume.VoxelFromWorld);
             _depthShader.SetFloat("_Tau", volume.Tau);
             _depthShader.SetFloat("_WObs", observationWeight);
@@ -919,5 +928,64 @@ namespace TSDF
             if (string.IsNullOrEmpty(s) || s.Length <= 6) return s;
             return s.Substring(s.Length - 6);
         }
+
+        // Push the floor mask uniforms shared by both integrate kernels. Always
+        // written, never conditionally skipped, so a stale value from an earlier
+        // dispatch cannot survive into a frame where the mask was switched off.
+        private static readonly Vector4[] s_emptyFeet = new Vector4[PointCloud.PointCloudFloorMask.MaxFeet];
+
+        private void SetFloorMaskUniforms(ComputeShader cs)
+        {
+            // See PointCloudShaderFilters: the off state parks the height below the
+            // world rather than using 0, so 0 stays a usable threshold.
+            const float kFloorMaskOff = -1e9f;
+            float maskY = kFloorMaskOff, radius = 0f;
+            int count = 0;
+            if (floorMask != null && floorMask.isActiveAndEnabled
+                && floorMask.Mode != PointCloud.PointCloudFloorMask.FilterMode.Disabled
+                && floorMask.MaskActive)
+            {
+                maskY = floorMask.FloorHeight;
+                radius = floorMask.KeepRadius;
+                count = Mathf.Clamp(floorMask.FootCount, 0, PointCloud.PointCloudFloorMask.MaxFeet);
+            }
+            // Shader array uniforms have a fixed size; push the full array (live or
+            // padding) so the binding always exists, and gate on the count.
+            cs.SetVectorArray("_FloorFoot", count > 0 ? floorMask.Feet : s_emptyFeet);
+            cs.SetFloat("_FloorMaskY", maskY);
+            cs.SetFloat("_FloorMaskRadius", radius);
+            cs.SetInt("_FloorFootCount", count);
+
+            // Masking only refuses NEW samples, so voxels written before the mask
+            // was switched on (or under a taller threshold) would survive into the
+            // mesh and the STL export. Wipe once whenever the mask configuration
+            // itself changes; the live batch re-integrates within a frame. Foot
+            // positions deliberately do NOT count as a configuration change: they
+            // move every frame, and clearing on them would erase the volume
+            // continuously.
+            //
+            // SCOPE: this covers the live-follow path the show runs
+            // (clearVolumeOnNewBatch = true), where every batch wipes the volume
+            // anyway so a floor patch cannot outlive the foot that admitted it.
+            // The accumulate path (clearVolumeOnNewBatch = false, RetainGhost)
+            // would keep the patch after the visitor walks on, and clearing on a
+            // configuration change does not help there — but that path is not part
+            // of the exhibition sequence. If accumulation is ever brought back,
+            // masked-but-already-written voxels need an explicit sweep, and this
+            // clear needs to defer to a batch boundary so it cannot land mid-batch
+            // and publish a partial frame.
+            if (volume != null && (maskY != _lastFloorMaskY || radius != _lastFloorMaskRadius))
+            {
+                if (_floorMaskConfigSeen) volume.Clear();
+                _lastFloorMaskY = maskY;
+                _lastFloorMaskRadius = radius;
+                _floorMaskConfigSeen = true;
+            }
+        }
+
+        private float _lastFloorMaskY;
+        private float _lastFloorMaskRadius;
+        private bool _floorMaskConfigSeen;
+
     }
 }

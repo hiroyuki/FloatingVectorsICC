@@ -55,6 +55,11 @@ namespace PointCloud
                  "the first one found in the scene. Set Mode=Disabled to leave playback colors untouched. Issue #24.")]
         public PointCloudJointMotionField jointMotionField;
 
+        [Tooltip("Optional floor mask applied to playback points (mirrors the live " +
+                 "PointCloudRenderer.floorMask path). If null, the first PointCloudFloorMask " +
+                 "referenced by any live PointCloudRenderer is used, then the first one in the scene.")]
+        public PointCloudFloorMask floorMask;
+
         [Tooltip("Optional cumulative snapshotter for playback. When assigned and its No Erase toggle is on, the playback " +
                  "mesh's vertex buffer is read back from GPU and snapshotted every 'intervalSeconds' seconds. " +
                  "If null, the first PointCloudCumulative in the scene is used. Snapshots include all reconstructed " +
@@ -2616,6 +2621,7 @@ namespace PointCloud
         private PointCloudDecimater ResolveDecimater() => ResolveShared(ref decimater, r => r.decimater);
         private PointCloudCapsuleFilter ResolveCapsuleFilter() => ResolveShared(ref capsuleFilter, r => r.capsuleFilter);
         private PointCloudJointMotionField ResolveJointMotionField() => ResolveShared(ref jointMotionField, r => r.jointMotionField);
+        private PointCloudFloorMask ResolveFloorMask() => ResolveShared(ref floorMask, r => r.floorMask);
         private PointCloudCumulative ResolveCumulative() => ResolveShared(ref cumulative, r => r.cumulative);
 
         private void ApplyBoundingBoxFilter(DeviceTrack track)
@@ -2625,7 +2631,7 @@ namespace PointCloud
             if (_filterMpb == null) _filterMpb = new MaterialPropertyBlock();
             PointCloudShaderFilters.Apply(track.PlaybackRenderer, _filterMpb,
                 track.PlaybackObject.transform, ResolveBoundingBox(), ResolveDecimater(),
-                ResolveCapsuleFilter(), ResolveJointMotionField());
+                ResolveCapsuleFilter(), ResolveJointMotionField(), ResolveFloorMask());
         }
 
         private void EnsurePlaybackObject(DeviceTrack track)

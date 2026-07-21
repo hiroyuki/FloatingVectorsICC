@@ -20,7 +20,7 @@
 
 ③ と ⑤ を**別セッションに分ける**のが確定運用。理由は「既知の問題」参照。
 
-## 生成される 3 ファイル（すべてマシンローカル）
+## 生成される 4 ファイル（すべてマシンローカル）
 
 `<persistentDataPath>/Recordings/recording/calibration/` に置かれる。
 **git 管理外・シーン外**。展示は同一構成セットが 2 つ（4070 / 5080）あり、
@@ -30,7 +30,8 @@
 |---|---|---|
 | `extrinsics.yaml` | 各カメラの intrinsic / distortion / `global_tr_colorCamera` | ソルブ (S) |
 | `cameras.yaml` | camera-id ↔ serial の対応、`origin_serial` | assign mode (Enter) / ソルブの自動導出 |
-| `floor.yaml` | `rebase_floor_y`（床高） | 床微調整 (G の ↑↓、押すたび即保存） |
+| `floor.yaml` | `rebase_floor_y`（床高）+ `floor_leveling_*`（傾き補正） | 床チューン (G → Enter で全点フィット、↑↓ は 0.75 秒デバウンス保存) |
+| `sensing_area.yaml` | BoundingVolume の `center` / `size` | `ExperienceSpaceBuilder.Apply()`（ソルブ / `B` / メニュー） |
 
 `floor.yaml` は `SensorManager.Start` が読んで `rebaseFloorY` を上書きする
 (`loadFloorYFromCalibration` で無効化可)。Inspector 値は Play 停止で消えるため、
@@ -45,8 +46,10 @@
 | **C** | サンプル収集（全カメラ同時 + skew ゲート） |
 | **F** | 床サンプル（ボードを床に平置き。BoardSample モード時のみ意味を持つ） |
 | **S** | ソルブ |
-| **G** | **床微調整モード（キャリブモード非依存 — 単独で使える）** |
-| **↑/↓** | 床微調整中: 床を 1cm 移動（Shift で 1mm）。押すたび `floor.yaml` に保存 |
+| **G** | **床チューンモード（キャリブモード非依存 — 単独で使える）** |
+| **B** | sensing area をカメラ配置から再フィット → `sensing_area.yaml` 保存 |
+| **Enter** | 床チューン中: 見えている床の点を全部使って平面フィット → 傾き＋高さを適用・保存（**無人で実行**） |
+| **↑/↓** | 床チューン中: 床を 1cm 移動（Shift で 1mm）。保存は 0.75 秒デバウンス＋退出時 |
 | **R** / **D** / **Backspace** / **H** / **0-9** | リセット / フレームダンプ / サンプル消去 / UI 隠す / ソロ表示 |
 
 ## ① camera-id 割当
@@ -108,13 +111,44 @@ pairwise の結果は「cam0 のレンズ基準」なので、そのままでは
 ### 後処理（自動）
 
 `applySensingAids` が ON なら、ソルブ成功時に:
-- `ExperienceSpaceBuilder.Apply()` — 4 カメラ位置から 1m 内側に寄せた矩形で
-  BoundingVolume をリシェイプ（sensing area）
+- `ExperienceSpaceBuilder.Apply()` — 4 カメラ位置から 80cm 内側に寄せた矩形で
+  BoundingVolume をリシェイプ（sensing area）。高さは `areaHeight` = 2.5m、
+  rotation は必ず identity（床は世界側で水平化済みなので箱を傾けない）
 - 床グリッド ON（`FloorOrigin.showGrid` / `fitToBoundingBox`）
 - 全カメラの frustum マーカー表示
 
 シーンに `ExperienceSpaceBuilder` が無ければ `ExperienceDirector` の参照を借りて
 ランタイム生成する（本番で director がやるのと同じ組み方）。
+
+### sensing area はマシンローカル（`sensing_area.yaml`）
+
+箱はカメラ位置から算出されるので **セットごとに違う値**になる。シーンは 2 セットで
+共有しているため、`main.unity` に箱を焼き込むと**もう一方のセットで静かに間違った箱**
+になる（見た目が「それらしい」ので気づきにくい）。よって `cameras.yaml` / `floor.yaml`
+と同じ扱いにする。
+
+```
+persistentDataPath/Recordings/recording/calibration/sensing_area.yaml
+  center: [x, y, z]      # ワールド m
+  size:   [x, y, z]      # ワールド m
+  inset_meters: 0.8      # 算出に使った値（再現用）
+  area_height: 2.5
+```
+
+- `ExperienceSpaceBuilder.Apply()` が算出後に保存
+- `SensorManager.Start()` が読み込んで BoundingVolume に適用
+  （`loadSensingAreaFromCalibration`、既定 ON）
+- **yaml が無いマシンではシーンの値がそのまま使われる**。シーンの箱は
+  原点中心 3 x 2.5 x 3 m の中立なフォールバックで、どちらのセットの実測値でもない
+- rotation は常に identity（床は世界側で水平化済み）
+
+**更新方法は 3 つ**、どれも同じ yaml を書く:
+
+| 方法 | いつ使うか |
+|---|---|
+| ソルブ（`S`）に自動で付随 | キャリブをやり直したとき |
+| キャリブ UI の `rebuildSensingAreaKey`（既定 `B`） | カメラを動かしたが再ソルブまでは不要なとき |
+| メニュー `Window > Calibration > Rebuild Sensing Area` | Play していないとき / キャリブセッション外 |
 
 ## rigSerialOrder の解決順（重要）
 

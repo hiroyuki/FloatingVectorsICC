@@ -42,10 +42,11 @@ namespace Experience
         public string[] rigSerialOrder = new string[0];
 
         [Min(0f)]
-        [Tooltip("How far each camera corner is pulled toward the rig centroid (along " +
-                 "the diagonal) before the box is fitted — keeps the sensing area away " +
-                 "from the camera stands.")]
-        public float insetMeters = 1f;
+        [Tooltip("Clearance between each camera and the nearest face of the sensing " +
+                 "box (m). The cameras' XZ bounding rectangle is pulled in by this " +
+                 "much on every side, so it is a true perpendicular distance — not a " +
+                 "diagonal one.")]
+        public float insetMeters = 0.8f;
 
         [Min(0.5f)]
         [Tooltip("Sensing area height (m). The box sits on floorY.")]
@@ -67,6 +68,7 @@ namespace Experience
         [ContextMenu("Apply sensing area")]
         public void Apply()
         {
+            bool saved = false;
             if (boundingVolume == null)
             { Debug.LogWarning($"[{nameof(ExperienceSpaceBuilder)}] no boundingVolume assigned.", this); return; }
             if (!TryGetCameraPositions(out var camPos)) return;
@@ -82,23 +84,22 @@ namespace Experience
                 return;
             }
 
-            Vector3 centroid = (camPos[0] + camPos[1] + camPos[2] + camPos[3]) * 0.25f;
-            centroid.y = 0f;
+            // Footprint = the cameras' XZ bounding rectangle, pulled in by
+            // insetMeters on each of the four sides. The inset is PERPENDICULAR to
+            // each side, i.e. it is the actual clearance between a camera and the
+            // nearest face of the box — that is what "keep the sensing area N metres
+            // off the camera stands" means. (Insetting along the centroid diagonal
+            // instead, as this did originally, spends the distance on both axes at
+            // once and leaves only inset/√2 ≈ 57 % of it as real clearance.)
             Vector3 min = Vector3.positiveInfinity, max = Vector3.negativeInfinity;
             for (int i = 0; i < 4; i++)
             {
                 var p = new Vector3(camPos[i].x, 0f, camPos[i].z);
-                Vector3 toCenter = centroid - p;
-                if (toCenter.magnitude <= insetMeters)
-                {
-                    Debug.LogWarning($"[{nameof(ExperienceSpaceBuilder)}] camera {i + 1} is within " +
-                                     $"{insetMeters} m of the rig centroid — inset would invert the area.", this);
-                    return;
-                }
-                Vector3 inset = p + toCenter.normalized * insetMeters;
-                min = Vector3.Min(min, inset);
-                max = Vector3.Max(max, inset);
+                min = Vector3.Min(min, p);
+                max = Vector3.Max(max, p);
             }
+            min += new Vector3(insetMeters, 0f, insetMeters);
+            max -= new Vector3(insetMeters, 0f, insetMeters);
             var size = max - min;
             if (size.x < 0.1f || size.z < 0.1f)
             {
@@ -122,8 +123,31 @@ namespace Experience
             boundingVolume.transform.localScale = new Vector3(size.x, areaHeight, size.z);
             if (floorOrigin != null) floorOrigin.boundingBox = boundingVolume;
 
+            // Persist next to cameras.yaml / floor.yaml rather than in the scene: the
+            // two sets share main.unity but not their camera positions, so a box
+            // committed to the scene lands wrong on the other machine.
+            var worldCenter = boundingVolume.transform.position;
+            var worldSize = boundingVolume.transform.localScale;
+            try
+            {
+                string root = sensorManager != null ? sensorManager.ResolveExtrinsicsRoot() : null;
+                if (!string.IsNullOrEmpty(root))
+                {
+                    PointCloudRecording.WriteSensingArea(root,
+                        new[] { worldCenter.x, worldCenter.y, worldCenter.z },
+                        new[] { worldSize.x, worldSize.y, worldSize.z },
+                        insetMeters, areaHeight);
+                    saved = true;
+                }
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogWarning($"[{nameof(ExperienceSpaceBuilder)}] sensing area not saved: {e.Message}", this);
+            }
+
             Debug.Log($"[{nameof(ExperienceSpaceBuilder)}] sensing area: center ({center.x:0.00}, {center.z:0.00}), " +
-                      $"size {size.x:0.00} x {areaHeight:0.0} x {size.z:0.00} m, floorY {floorY:0.00}.", this);
+                      $"size {size.x:0.00} x {areaHeight:0.0} x {size.z:0.00} m, floorY {floorY:0.00}" +
+                      (saved ? " (saved to sensing_area.yaml)." : " (NOT saved)."), this);
         }
 
         [ContextMenu("Restore previous volume")]

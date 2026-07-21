@@ -47,6 +47,10 @@ namespace PointCloud
         [Tooltip("Optional shared cumulative snapshotter applied to every spawned renderer.")]
         public PointCloudCumulative defaultCumulative;
 
+        [Tooltip("Optional shared floor mask applied to every spawned renderer — hides the " +
+                 "bare floor except around the visitor's feet.")]
+        public PointCloudFloorMask defaultFloorMask;
+
         [Header("Multi-device sync")]
         [Tooltip("Sync mode applied to every spawned renderer. SyncHubPro: all devices set to " +
                  "Secondary (the hub generates trigger pulses on VSYNC, every camera receives " +
@@ -137,6 +141,14 @@ namespace PointCloud
                  "Inspector value always wins.")]
         public bool loadFloorYFromCalibration = true;
 
+        [Tooltip("Load the sensing box (BoundingVolume centre + size) from " +
+                 "calibration/sensing_area.yaml at startup. The box is fitted to the " +
+                 "camera rig, and the two exhibition sets stand their cameras " +
+                 "differently, so it is machine-local like cameras.yaml — the scene " +
+                 "value is only the fallback for a machine that has never fitted one. " +
+                 "Off = the scene value always wins.")]
+        public bool loadSensingAreaFromCalibration = true;
+
         /// <summary>
         /// World-space floor-levelling correction (tilt + height) produced by the
         /// interactive 3-point floor pick (CalibrationRuntimeUI floor tune). Applied
@@ -199,6 +211,7 @@ namespace PointCloud
         private void Start()
         {
             LoadFloorYFromCalibration();
+            ApplySensingAreaFromCalibration();
             if (playbackOnly)
             {
                 if (verboseLogging)
@@ -225,6 +238,29 @@ namespace PointCloud
                 Debug.Log($"[{nameof(SensorManager)}] rebaseFloorY {rebaseFloorY} → {y} from calibration/floor.yaml.",
                           this);
             rebaseFloorY = y;
+        }
+
+        // The sensing box belongs to the rig, not the scene, for the same reason the
+        // floor does: main.unity is shared between the two exhibition sets but their
+        // cameras stand in different places. A box committed to the scene therefore
+        // arrives at the other set subtly wrong, and a wrong-but-plausible box is
+        // hard to notice. Missing file = keep whatever the scene authored; the
+        // operator fits one with the calibration UI (or a Solve) and it is saved.
+        private void ApplySensingAreaFromCalibration()
+        {
+            if (!loadSensingAreaFromCalibration || defaultBoundingBox == null) return;
+            if (!PointCloudRecording.TryReadSensingArea(ResolveExtrinsicsRoot(),
+                                                        out var c, out var sz))
+                return;
+            var center = new Vector3(c[0], c[1], c[2]);
+            var size = new Vector3(sz[0], sz[1], sz[2]);
+            var t = defaultBoundingBox.transform;
+            t.position = center;
+            t.rotation = Quaternion.identity;   // the fit is always axis-aligned
+            t.localScale = size;
+            if (verboseLogging)
+                Debug.Log($"[{nameof(SensorManager)}] sensing area from calibration/sensing_area.yaml: " +
+                          $"center {center:F3}, size {size:F3}.", this);
         }
 
         /// <summary>
@@ -313,6 +349,7 @@ namespace PointCloud
             pcr.boundingBox = defaultBoundingBox;
             pcr.decimater = defaultDecimater;
             pcr.cumulative = defaultCumulative;
+            pcr.floorMask = defaultFloorMask;
             pcr.syncMode = ResolveSyncMode(index);
             pcr.applySyncConfig = applySyncConfig;
             pcr.trigger2ImageDelayUs = trigger2ImageDelayStepUs * index;
