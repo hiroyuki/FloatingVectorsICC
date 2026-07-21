@@ -21,6 +21,7 @@ namespace Calibration.Tests
             _sm = new ExperienceStateMachine();
             _t = new ExperienceTimings
             {
+                welcomeSeconds = 4f,
                 calibrateSeconds = 10f,
                 freeMoveSeconds = 20f,
                 processingTimeoutSeconds = 60f,
@@ -40,13 +41,20 @@ namespace Calibration.Tests
             Assert.AreEqual(expected, _sm.State);
         }
 
+        /// <summary>Idle → Welcome (presence) → Calibrate (welcome timer).</summary>
+        private void ReachCalibrate()
+        {
+            Tick(); // Present → Welcome
+            Assert.AreEqual(ExperienceState.Welcome, _sm.State);
+            TickUntil(ExperienceState.Calibrate, dt: 1f); // welcomeSeconds timer
+        }
+
         // ---- happy path ----
 
         [Test]
         public void HappyPath_FullSequence()
         {
-            Tick(); // Present → Calibrate
-            Assert.AreEqual(ExperienceState.Calibrate, _sm.State);
+            ReachCalibrate(); // Present → Welcome → (timer) → Calibrate
 
             _in.CalibrationDone = true;
             Tick();
@@ -84,6 +92,37 @@ namespace Calibration.Tests
             Assert.AreEqual(ExperienceState.Idle, _sm.State);
             _in.Present = true;
             Tick();
+            Assert.AreEqual(ExperienceState.Welcome, _sm.State);
+        }
+
+        // ---- Welcome ----
+
+        [Test]
+        public void Welcome_TimerAdvancesToCalibrate()
+        {
+            Tick(); // → Welcome
+            Assert.AreEqual(ExperienceState.Welcome, _sm.State);
+            Tick(2f);
+            Assert.AreEqual(ExperienceState.Welcome, _sm.State); // 2s < 4s
+            for (int i = 0; i < 3; i++) Tick(1f);
+            Assert.AreEqual(ExperienceState.Calibrate, _sm.State);
+        }
+
+        [Test]
+        public void Welcome_LeaveEarly_ReturnsToIdle()
+        {
+            Tick(); // → Welcome
+            _in.Present = false;
+            Tick();
+            Assert.AreEqual(ExperienceState.Idle, _sm.State);
+        }
+
+        [Test]
+        public void Welcome_Skip_AdvancesImmediately()
+        {
+            _t.skipWelcome = true;
+            Tick(); // → Welcome
+            Tick();
             Assert.AreEqual(ExperienceState.Calibrate, _sm.State);
         }
 
@@ -92,7 +131,7 @@ namespace Calibration.Tests
         [Test]
         public void Calibrate_TimeoutAdvancesWithoutDone()
         {
-            Tick(); // → Calibrate
+            ReachCalibrate();
             for (int i = 0; i < 25; i++) Tick(0.5f); // 12.5s > 10s
             Assert.AreEqual(ExperienceState.FreeMove, _sm.State);
         }
@@ -108,7 +147,7 @@ namespace Calibration.Tests
             Assert.AreEqual(ExperienceState.Idle, _sm.State);
             _in.CalibrationDone = false;
             _in.Present = true;
-            Tick(); // → Calibrate
+            ReachCalibrate();
             Tick();
             Assert.AreEqual(ExperienceState.Calibrate, _sm.State);
         }
@@ -118,7 +157,7 @@ namespace Calibration.Tests
         [Test]
         public void FreeMove_TimerAdvances_And_LeaveReturnsToIdle()
         {
-            Tick();
+            ReachCalibrate();
             _in.CalibrationDone = true; Tick(); _in.CalibrationDone = false;
             Assert.AreEqual(ExperienceState.FreeMove, _sm.State);
             Tick(5f);
@@ -128,7 +167,7 @@ namespace Calibration.Tests
             Assert.AreEqual(ExperienceState.Idle, _sm.State);
 
             _in.Present = true;
-            Tick(); // → Calibrate
+            ReachCalibrate();
             _in.CalibrationDone = true; Tick(); _in.CalibrationDone = false;
             TickUntil(ExperienceState.Shoot, dt: 2f);
         }
@@ -137,7 +176,7 @@ namespace Calibration.Tests
 
         private void ReachShoot()
         {
-            Tick();
+            ReachCalibrate();
             _in.CalibrationDone = true; Tick(); _in.CalibrationDone = false;
             TickUntil(ExperienceState.Shoot, dt: 2f);
         }
@@ -156,7 +195,7 @@ namespace Calibration.Tests
         [Test]
         public void Shoot_StaleRecordingFlag_ClearedOnEntry()
         {
-            Tick();
+            ReachCalibrate();
             _in.CalibrationDone = true;
             _in.RecordingDone = true; // stale pulse long before Shoot
             Tick(); // → FreeMove (latch for Shoot must clear on Shoot entry)
@@ -291,6 +330,7 @@ namespace Calibration.Tests
         public void Skips_ReachProcessingThroughEveryState()
         {
             _t.skipIdle = true;
+            _t.skipWelcome = true;
             _t.skipCalibrate = true;
             _t.skipFreeMove = true;
             _t.skipShoot = true;
@@ -298,13 +338,14 @@ namespace Calibration.Tests
             var visited = new System.Collections.Generic.List<ExperienceState>();
             _sm.Changed += (from, to) => visited.Add(to);
 
-            for (int i = 0; i < 5; i++) Tick();
+            for (int i = 0; i < 6; i++) Tick();
             Assert.AreEqual(ExperienceState.Processing, _sm.State);
             CollectionAssert.AreEqual(
                 new[]
                 {
-                    ExperienceState.Calibrate, ExperienceState.FreeMove,
-                    ExperienceState.Shoot, ExperienceState.Processing,
+                    ExperienceState.Welcome, ExperienceState.Calibrate,
+                    ExperienceState.FreeMove, ExperienceState.Shoot,
+                    ExperienceState.Processing,
                 },
                 visited);
 
@@ -322,7 +363,9 @@ namespace Calibration.Tests
         public void TimeMultiplier_ScalesCalibrateTimeout()
         {
             _t.timeMultiplier = 10f;
-            Tick(); // → Calibrate
+            Tick(); // → Welcome
+            Tick(0.5f); // 0.5s * 10 = 5s > 4s welcome → Calibrate
+            Assert.AreEqual(ExperienceState.Calibrate, _sm.State);
             for (int i = 0; i < 3; i++) Tick(0.5f); // 1.5s * 10 = 15s > 10s
             Assert.AreEqual(ExperienceState.FreeMove, _sm.State);
         }

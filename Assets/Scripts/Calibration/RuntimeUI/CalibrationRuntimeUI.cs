@@ -15,9 +15,14 @@
 // Calibration mode is exclusive: on enter it stops recorder playback, disables
 // the recorder components, and hides every point-cloud mesh (live + _Playback_*)
 // — only raw color matters while aiming cameras. The operator HUD/grid stays on
-// display 0; displays 1 and 2 (OS "Display 2/3") get full-rate raw color feeds,
-// cams id0/id1 and id2/id3 stacked vertically. All of it is restored on exit
-// (playback itself stays stopped — press Play again).
+// Display 1; Displays 2 and 3 get full-rate raw color feeds, cams id0/id1 and
+// id2/id3 stacked vertically. All of it is restored on exit (playback itself
+// stays stopped — press Play again).
+//
+// Display numbers are 1-origin throughout this file (project convention,
+// matching the Unity Inspector and the OS). Unity's targetDisplay API is
+// 0-based, so Display N == targetDisplay N-1; the displayCam* fields below hold
+// raw API values and their tooltips spell out both.
 
 using System;
 using System.Collections.Generic;
@@ -114,11 +119,11 @@ namespace Calibration.RuntimeUI
         [Tooltip("Mirror the raw color feeds onto extra displays while calibration mode is " +
                  "active: cams id0/id1 stacked vertically on displayCam01, id2/id3 on " +
                  "displayCam23 (camera-id order = cameras.yaml). The operator HUD stays " +
-                 "on display 0.")]
+                 "on Display 1.")]
         public bool externalColorDisplays = true;
-        [Tooltip("0-based display index for cams 0+1 (1 = the OS's 'Display 2').")]
+        [Tooltip("Raw Unity targetDisplay index (0-based) for cams 0+1. Default 1 = Display 2.")]
         public int displayCam01 = 1;
-        [Tooltip("0-based display index for cams 2+3 (2 = the OS's 'Display 3').")]
+        [Tooltip("Raw Unity targetDisplay index (0-based) for cams 2+3. Default 2 = Display 3.")]
         public int displayCam23 = 2;
 
         [Header("Calibration color resolution")]
@@ -142,20 +147,32 @@ namespace Calibration.RuntimeUI
         [Tooltip("CameraPlaneAssumeLevel only: physical height of the camera plane above the floor (m).")]
         public float cameraHeightMeters = 1.0f;
 
-        [Tooltip("Floor-tune mode: shows the live point clouds clipped to the sensing box and " +
-                 "nudges the world's floor height with the arrow keys, so you can park y=0 " +
-                 "right where the floor points vanish. Only meaningful in a levelled world " +
-                 "(solve with a floor anchor first) — a tilt cannot be fixed by shifting Y.")]
+        [Tooltip("Floor-tune mode: puts a top-down camera on Display 1 showing the live point " +
+                 "clouds clipped to the sensing box. Click ≥3 floor points and press Enter to " +
+                 "level the floor horizontal at y=0 — that fixes tilt and height together, and " +
+                 "is the lever to reach for. The arrow keys only trim height afterwards.")]
         public KeyCode floorTuneKey = KeyCode.G;
-        [Tooltip("Floor-tune step per arrow press (m). Hold Shift for a tenth of it.")]
+        [Tooltip("Floor-tune step per arrow press (m). Hold Shift for a tenth of it. " +
+                 "This is the raise-the-y=0-plane lever, so its sign is inverted from " +
+                 "what you see: Up moves the FLOOR DOWN by one step, Down moves it up.")]
         public float floorTuneStep = 0.01f;
+        [Tooltip("Floor-plane pick: screen-space radius (pixels) around the click " +
+                 "within which the nearest, frontmost point-cloud vertex is picked.")]
+        public float floorPickRadiusPx = 12f;
+        [Tooltip("Floor-plane pick: how far down the temporary Display 1 camera looks " +
+                 "(degrees below horizontal). The floor must be seen as a surface, not " +
+                 "edge-on, or the pick lands on a wall. 90 = straight down.")]
+        [Range(15f, 89f)] public float floorTunePitchDeg = 55f;
+        [Tooltip("Floor-plane pick: refuse to apply a fit whose normal is more than " +
+                 "this far from vertical (degrees) — that plane is a wall, not a floor.")]
+        [Range(5f, 80f)] public float floorMaxTiltDeg = 40f;
 
         public enum FloorAnchorMode { BoardSample, CameraPlaneAssumeLevel }
 
         [Header("After solve")]
         [Tooltip("After a Solve that applied to the live rig: fit the sensing area " +
                  "(ExperienceSpaceBuilder.Apply → BoundingVolume reshaped, floor grid " +
-                 "attached) and turn on every camera's frustum marker, so display 0 " +
+                 "attached) and turn on every camera's frustum marker, so Display 1 " +
                  "immediately shows where the cameras sit in the solved world.")]
         public bool applySensingAidsOnSolve = true;
         [Tooltip("Sensing-area builder to Apply after Solve. Empty → found in scene.")]
@@ -895,8 +912,9 @@ namespace Calibration.RuntimeUI
             {
                 string solo = _soloId >= 0 ? $"id {_soloId}" : "all";
                 keys = _floorTune
-                    ? $"FLOOR TUNE  ↑/↓ move floor ({floorTuneStep * 100f:0.#} cm, Shift 1/10)   " +
-                      $"rebaseFloorY  {(_manager != null ? _manager.rebaseFloorY : 0f):0.####}   " +
+                    ? $"FLOOR TUNE  ↑ floor down / ↓ up ({floorTuneStep * 100f:0.#} cm, Shift 1/10)   " +
+                      $"click floor ×{_floorPicks.Count}/{kMinFloorPicks}  Enter=level  Bksp=undo  R=reset   " +
+                      $"y {(_manager != null ? _manager.rebaseFloorY : 0f):0.###}   " +
                       $"[{floorTuneKey}]/Esc exit"
                     :
                     $"[{captureKey}] Capture ({_samples.Count})   " +
@@ -1049,6 +1067,17 @@ namespace Calibration.RuntimeUI
         private PointCloudView _tunedView;
         private bool _savedShowPointClouds;
 
+        // Display 1 (the operator screen) borrowed for the pick — see BorrowOperatorDisplay.
+        private GameObject _floorTuneCamGo;
+        private readonly List<Canvas> _hiddenPickCanvases = new List<Canvas>();
+
+        // Floor-plane pick (3+ points → level the floor). World-space picks and
+        // their runtime marker spheres, torn down on tune exit / reset.
+        private const int kMinFloorPicks = 3;
+        private readonly List<Vector3> _floorPicks = new List<Vector3>();
+        private readonly List<GameObject> _floorPickMarkers = new List<GameObject>();
+        private GameObject _floorPickRoot;
+
         // Shows the live clouds clipped to the sensing box so the operator can park
         // y=0 exactly where the floor points disappear. The lever is
         // SensorManager.rebaseFloorY (the calibration-frame height that becomes the
@@ -1070,6 +1099,9 @@ namespace Calibration.RuntimeUI
                 // displays the scene cameras render to — leaving them up hides the
                 // point cloud completely, which is the only thing floor tune shows.
                 SetExternalCanvasesVisible(false);
+                // Bring the cloud to the operator's own screen so the click and the
+                // projection share a coordinate space, and clear that screen.
+                BorrowOperatorDisplay();
                 _tunedView = _manager != null ? _manager.view : null;
                 if (_tunedView != null)
                 {
@@ -1090,16 +1122,21 @@ namespace Calibration.RuntimeUI
                 if (_manager != null && !_manager.applyWorldRebase)
                     SetStatus("Floor tune: SensorManager.applyWorldRebase is OFF — rebaseFloorY has no effect.", warn: true);
                 else
-                    SetStatus($"Floor tune ON: ↑/↓ move the floor ({floorTuneStep * 100f:0.#} cm, Shift = 1/10). " +
-                              $"[{floorTuneKey}] to exit.");
+                    SetStatus($"Floor tune ON: click ≥{kMinFloorPicks} floor points, Enter = level & zero " +
+                              "(fixes tilt AND height — do this first), Bksp = undo, R = reset tilt. " +
+                              $"↑/↓ then trims height only, {floorTuneStep * 100f:0.#} cm a press " +
+                              "(Shift 1/10) — ↑ lowers the floor. " +
+                              $"[{floorTuneKey}]/Esc exit.");
             }
             else
             {
                 if (box != null && _savedFilterModeValid) box.filterMode = _savedFilterMode;
                 _savedFilterModeValid = false;
                 if (_tunedView != null) { _tunedView.showPointClouds = _savedShowPointClouds; _tunedView = null; }
+                ReturnOperatorDisplay();
                 SetExternalCanvasesVisible(true);
                 RestoreHiddenMeshesForTuneExit();
+                ClearFloorPicks();
                 SetStatus($"Floor tune OFF. rebaseFloorY  {(_manager != null ? _manager.rebaseFloorY : 0f):0.####}" +
                           "  (saved in calibration/floor.yaml — reloaded on next start)");
             }
@@ -1127,7 +1164,9 @@ namespace Calibration.RuntimeUI
             if (box != null && _savedFilterModeValid) box.filterMode = _savedFilterMode;
             _savedFilterModeValid = false;
             if (_tunedView != null) { _tunedView.showPointClouds = _savedShowPointClouds; _tunedView = null; }
+            ReturnOperatorDisplay();
             SetExternalCanvasesVisible(true);
+            ClearFloorPicks();
         }
 
         private void SetExternalCanvasesVisible(bool visible)
@@ -1136,10 +1175,115 @@ namespace Calibration.RuntimeUI
                 if (go != null) go.SetActive(visible);
         }
 
+        // Floor picking turns a 2D mouse position into a world point by projecting
+        // the cloud through a camera, so two things must hold at once:
+        //
+        //  1. The view the operator clicks in and the camera used to project must
+        //     be the SAME camera. Input.mousePosition only ever speaks one
+        //     display's coordinates (the primary, Display 1), while the stage
+        //     camera renders to Display 2.
+        //  2. That camera must LOOK DOWN at the floor. TryPick keeps the frontmost
+        //     vertex under the cursor; from the stage camera's horizontal eye-level
+        //     view the floor is edge-on and every ray hits a wall or the visitor
+        //     first, so the "floor" picks come off a vertical surface and the fit
+        //     levels the world to a wall (observed: an 82-degree roll).
+        //
+        // Both are satisfied by standing up a throwaway camera on Display 1 —
+        // the operator's own screen, where the HUD already is — framed looking
+        // down at the sensing box. Deliberately a NEW camera rather than
+        // re-aiming the stage one: Main Camera carries a CameraOrbitController
+        // whose idle auto-orbit rewrites the pose every frame, so a borrowed
+        // camera would drift out from under the operator mid-pick. Leaving the
+        // stage camera alone also means Display 2 and the visitor canvases
+        // riding it never need touching.
+        //
+        // Display numbers below are 1-origin (project convention); Unity's
+        // targetDisplay API is 0-based, hence kOperatorTargetDisplay.
+        private const int kOperatorTargetDisplay = 0;   // Display 1
+
+        private void BorrowOperatorDisplay()
+        {
+            Shared.OperatorOverlayGate.FloorTuneActive = true;
+
+            var src = Camera.main;
+            var go = new GameObject("_FloorTuneCamera");
+            _floorTuneCamGo = go;
+            var cam = go.AddComponent<Camera>();
+            if (src != null) cam.CopyFrom(src);          // clear flags, mask, clip planes, URP data
+            cam.targetDisplay = kOperatorTargetDisplay;
+            cam.depth = 100f;                            // above the Display 1 black backdrop
+            AimFloorTuneCamera(cam, src);
+            FloorPointPicker.PickCameraOverride = cam;
+
+            // Any screen-space canvas already on Display 1 would cover the cloud.
+            var canvases = FindObjectsByType<Canvas>(FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+            for (int i = 0; i < canvases.Length; i++)
+            {
+                var c = canvases[i];
+                if (c == null || !c.enabled) continue;
+                bool onOperatorDisplay = c.renderMode == RenderMode.ScreenSpaceCamera
+                    ? c.worldCamera != null && c.worldCamera.targetDisplay == kOperatorTargetDisplay
+                    : c.renderMode == RenderMode.ScreenSpaceOverlay && c.targetDisplay == kOperatorTargetDisplay;
+                if (!onOperatorDisplay) continue;
+                c.enabled = false;
+                _hiddenPickCanvases.Add(c);
+            }
+        }
+
+        // Look down at the floor of the sensing box from floorTunePitchDeg, far
+        // enough back that the box's footprint fits the frame. Yaw is inherited
+        // from the stage camera so left/right still means what the operator just
+        // saw. Falls back to a fixed 4 m framing of the world origin when there is
+        // no bounding box to aim at.
+        private void AimFloorTuneCamera(Camera cam, Camera src)
+        {
+            var box = _manager != null ? _manager.defaultBoundingBox : null;
+            Vector3 target = Vector3.zero;
+            float radius = 2f;
+            if (box != null)
+            {
+                var s = box.transform.lossyScale;
+                target = new Vector3(box.transform.position.x, 0f, box.transform.position.z);
+                radius = new Vector2(s.x, s.z).magnitude * 0.5f;
+            }
+            float yaw = src != null ? src.transform.eulerAngles.y : 0f;
+            float pitch = Mathf.Clamp(floorTunePitchDeg, 15f, 89f);
+            // Distance that fits `radius` in the narrower of the two half-FOVs,
+            // with margin so the floor is not jammed against the frame edge.
+            float halfV = cam.fieldOfView * 0.5f * Mathf.Deg2Rad;
+            float halfH = Mathf.Atan(Mathf.Tan(halfV) * Mathf.Max(0.1f, cam.aspect));
+            float dist = radius / Mathf.Tan(Mathf.Max(0.05f, Mathf.Min(halfV, halfH))) * 1.25f;
+            var rot = Quaternion.Euler(pitch, yaw, 0f);
+            cam.transform.SetPositionAndRotation(target - rot * Vector3.forward * dist, rot);
+        }
+
+        // Hand Display 1 back exactly as it was. Safe to call when nothing was
+        // borrowed — both tune exits and the teardown path funnel through here.
+        private void ReturnOperatorDisplay()
+        {
+            Shared.OperatorOverlayGate.FloorTuneActive = false;
+
+            FloorPointPicker.PickCameraOverride = null;
+            if (_floorTuneCamGo != null) Destroy(_floorTuneCamGo);
+            _floorTuneCamGo = null;
+
+            foreach (var c in _hiddenPickCanvases)
+                if (c != null) c.enabled = true;
+            _hiddenPickCanvases.Clear();
+        }
+
         private void HandleFloorTuneInput()
         {
             if (Input.GetKeyDown(KeyCode.Escape)) { ToggleFloorTune(); return; }
             if (_manager == null) return;
+
+            // 3-point floor pick: click floor points, then level the world to them.
+            if (Input.GetMouseButtonDown(0)) { TryAddFloorPick(); return; }
+            if (Input.GetKeyDown(KeyCode.Backspace)) { UndoFloorPick(); return; }
+            if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter))
+            { ApplyFloorLeveling(); return; }
+            if (Input.GetKeyDown(KeyCode.R)) { ResetFloorLeveling(); return; }
+
             float step = floorTuneStep *
                          ((Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift)) ? 0.1f : 1f);
             float delta = 0f;
@@ -1148,17 +1292,136 @@ namespace Calibration.RuntimeUI
             if (delta == 0f) return;
             _manager.rebaseFloorY += delta;
             _manager.ApplyExtrinsicsToLive();
-            // Persist every nudge: the Inspector value dies with Play mode, and this
-            // is the number the whole floor-tune session exists to produce.
+            SaveFloor($"rebaseFloorY  {_manager.rebaseFloorY:0.####}");
+        }
+
+        // Persist both the floor height and the levelling Pose together — either
+        // lever writes the whole floor.yaml, so nudging Y never drops the tilt and
+        // levelling never drops Y. The Inspector values die with Play mode, so this
+        // file is the whole point of the tune session.
+        private void SaveFloor(string okPrefix)
+        {
+            var lv = _manager.rebaseFloorLeveling;
             try
             {
-                PointCloudRecording.WriteFloorY(_manager.ResolveExtrinsicsRoot(), _manager.rebaseFloorY);
-                SetStatus($"rebaseFloorY  {_manager.rebaseFloorY:0.####}   (saved to floor.yaml)");
+                PointCloudRecording.WriteFloor(
+                    _manager.ResolveExtrinsicsRoot(), _manager.rebaseFloorY,
+                    new[] { lv.position.x, lv.position.y, lv.position.z },
+                    new[] { lv.rotation.x, lv.rotation.y, lv.rotation.z, lv.rotation.w });
+                SetStatus($"{okPrefix}   (saved to floor.yaml)");
             }
             catch (Exception e)
             {
-                SetStatus($"rebaseFloorY  {_manager.rebaseFloorY:0.####}   ⚠ save failed: {e.Message}", warn: true);
+                SetStatus($"{okPrefix}   ⚠ save failed: {e.Message}", warn: true);
             }
+        }
+
+        private void TryAddFloorPick()
+        {
+            var cam = FloorPointPicker.ResolvePickCamera();
+            if (cam == null) { SetStatus("Floor pick: no camera to pick from.", warn: true); return; }
+            // Restrict to the volume floor tune is clipping the clouds to, so the
+            // pick can only land on something the operator can see.
+            var visible = _manager != null && _manager.defaultBoundingBox != null
+                          && _manager.defaultBoundingBox.filterMode == BoundingVolume.FilterMode.KeepInside
+                ? _manager.defaultBoundingBox
+                : null;
+            if (FloorPointPicker.TryPick(cam, Input.mousePosition, floorPickRadiusPx, out var world, visible))
+            {
+                _floorPicks.Add(world);
+                SpawnFloorPickMarker(world);
+                SetStatus($"Floor pick #{_floorPicks.Count}: ({world.x:0.00}, {world.y:0.00}, {world.z:0.00})" +
+                          (_floorPicks.Count >= kMinFloorPicks
+                              ? "  — Enter to level & zero the floor."
+                              : $"  — need ≥{kMinFloorPicks}."));
+            }
+            else
+            {
+                SetStatus("Floor pick: no cloud point under the cursor — aim at visible floor points.", warn: true);
+            }
+        }
+
+        private void UndoFloorPick()
+        {
+            if (_floorPicks.Count == 0) { SetStatus("Floor pick: nothing to undo."); return; }
+            _floorPicks.RemoveAt(_floorPicks.Count - 1);
+            int last = _floorPickMarkers.Count - 1;
+            if (last >= 0)
+            {
+                if (_floorPickMarkers[last] != null) Destroy(_floorPickMarkers[last]);
+                _floorPickMarkers.RemoveAt(last);
+            }
+            SetStatus($"Floor pick undone — {_floorPicks.Count} left.");
+        }
+
+        private void ApplyFloorLeveling()
+        {
+            if (_floorPicks.Count < kMinFloorPicks)
+            { SetStatus($"Floor level: need ≥{kMinFloorPicks} picks (have {_floorPicks.Count}).", warn: true); return; }
+            if (_manager != null && !_manager.applyWorldRebase)
+            { SetStatus("Floor level: SensorManager.applyWorldRebase is OFF — levelling has no effect.", warn: true); return; }
+            if (!FloorPlaneMath.TryFitPlane(_floorPicks, out var p, out var n))
+            { SetStatus("Floor level: plane fit failed — picks are collinear, add a spread-out point.", warn: true); return; }
+
+            // The picks were taken in the CURRENT (already-levelled) world, so this
+            // delta refines toward horizontal; compose it onto the stored total so
+            // repeated picks converge instead of fighting each other.
+            float tiltDeg = Vector3.Angle(n.y < 0f ? -n : n, Vector3.up);
+            // A real floor is already near horizontal — the picks refine it by a few
+            // degrees. A steep fit means the picks landed on a vertical surface (a
+            // wall, or the visitor), and applying it would stand the world on its
+            // side. Refuse rather than destroy a good calibration; the picks are
+            // kept so Backspace can drop just the bad one.
+            if (tiltDeg > floorMaxTiltDeg)
+            {
+                SetStatus($"Floor level: fitted plane is {tiltDeg:0.0}° off horizontal (limit " +
+                          $"{floorMaxTiltDeg:0}°) — those picks are on a wall, not the floor. " +
+                          "Not applied. Backspace to drop picks, or aim lower.", warn: true);
+                return;
+            }
+            Pose delta = FloorPlaneMath.ComputeLeveling(p, n);
+            _manager.rebaseFloorLeveling =
+                FloorPlaneMath.ComposeWorld(delta, _manager.rebaseFloorLeveling);
+            _manager.ApplyExtrinsicsToLive();
+            ClearFloorPicks();
+            SaveFloor($"Floor levelled (corrected {tiltDeg:0.0}° tilt)");
+        }
+
+        private void ResetFloorLeveling()
+        {
+            if (_manager == null) return;
+            _manager.rebaseFloorLeveling = Pose.identity;
+            _manager.ApplyExtrinsicsToLive();
+            ClearFloorPicks();
+            SaveFloor("Floor tilt reset to level");
+        }
+
+        private void SpawnFloorPickMarker(Vector3 world)
+        {
+            if (_floorPickRoot == null)
+            {
+                _floorPickRoot = new GameObject("_FloorPickMarkers") { hideFlags = HideFlags.DontSave };
+            }
+            var marker = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+            marker.name = $"_FloorPick_{_floorPicks.Count}";
+            marker.hideFlags = HideFlags.DontSave;
+            var col = marker.GetComponent<Collider>();
+            if (col != null) Destroy(col); // must not block subsequent picks / physics
+            marker.transform.SetParent(_floorPickRoot.transform, worldPositionStays: true);
+            marker.transform.position = world;
+            marker.transform.localScale = Vector3.one * 0.04f;
+            // Left on the default primitive material on purpose: no instanced
+            // material to leak, and a calibration-time marker doesn't need styling.
+            _floorPickMarkers.Add(marker);
+        }
+
+        private void ClearFloorPicks()
+        {
+            _floorPicks.Clear();
+            for (int i = 0; i < _floorPickMarkers.Count; i++)
+                if (_floorPickMarkers[i] != null) Destroy(_floorPickMarkers[i]);
+            _floorPickMarkers.Clear();
+            if (_floorPickRoot != null) { Destroy(_floorPickRoot); _floorPickRoot = null; }
         }
 
         private CaptureSample _floorSample;
@@ -1499,7 +1762,7 @@ namespace Calibration.RuntimeUI
             return null;
         }
 
-        // Post-solve scene aids on display 0: sensing-area box + floor grid via
+        // Post-solve scene aids on Display 1: sensing-area box + floor grid via
         // ExperienceSpaceBuilder, camera frustum markers via SensorManager (the
         // point clouds stay hidden in calibration mode, so the frustums + grid
         // are what shows the solved rig). Returns a note for the status line.
@@ -1976,7 +2239,7 @@ namespace Calibration.RuntimeUI
             if (_externalViews == null) return;
             // Sample tallies for the wall labels: global count + skew-ok (same
             // numbers as the HUD status bar) plus per-camera detected count, so
-            // the operator sees capture coverage without walking back to display 0.
+            // the operator sees capture coverage without walking back to Display 1.
             int sampleTotal = _samples.Count, sampleSkewOk = 0;
             foreach (var s in _samples) if (s.SkewOk) sampleSkewOk++;
             for (int id = 0; id < _externalViews.Length; id++)

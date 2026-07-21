@@ -109,8 +109,8 @@ namespace CameraControl
         private void OnGUI()
         {
             if (!visible) return;
-            // Full-screen operator alert owns the display — stand down.
-            if (Shared.OperatorOverlayGate.AlertActive) return;
+            // A full-screen alert or floor tune owns the display — stand down.
+            if (Shared.OperatorOverlayGate.Suppressed) return;
             if (history == null)
             {
                 history = FindFirstObjectByType<BonePoseHistory>();

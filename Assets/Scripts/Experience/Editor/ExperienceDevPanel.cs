@@ -161,6 +161,7 @@ namespace Experience.EditorTools
                 using (new EditorGUILayout.HorizontalScope())
                 {
                     if (GUILayout.Button("アイドル（全消去）")) ui.ClearAll();
+                    if (GUILayout.Button("ようこそ")) ui.ShowMessage(cfg.welcomeText);
                     if (GUILayout.Button("キャリブ（星ポーズ）"))
                         ui.ShowPoseGuide(StarTex(cfg), cfg.calibrateText);
                     if (GUILayout.Button("カウントダウン")) ui.ShowCountdown(3);
@@ -174,13 +175,14 @@ namespace Experience.EditorTools
                 }
                 using (new EditorGUILayout.HorizontalScope())
                 {
-                    if (GUILayout.Button("できたよ (ResultShow)")) ui.ShowMessage(cfg.resultText);
+                    if (GUILayout.Button("できたよ (ResultShow)")) ui.ShowResult(cfg.resultText);
                     if (GUILayout.Button("QR"))
                     {
                         if (_previewQr == null)
                             _previewQr = new Publishing.QrUrlPresenter()
                                 .Present("https://example.com/preview");
-                        ui.ShowQr(_previewQr, cfg.qrCaption);
+                        ui.ShowQr(_previewQr, !string.IsNullOrEmpty(cfg.qrScanText)
+                            ? cfg.qrScanText : cfg.qrCaption, cfg.resultText);
                     }
                     if (GUILayout.Button("アラート")) ui.ShowAlert("カメラ（ID 1）が　いじょうです");
                     if (GUILayout.Button("全消去")) ui.ClearEverything();

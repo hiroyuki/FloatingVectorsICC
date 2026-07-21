@@ -216,9 +216,9 @@ namespace PointCloud
         private void OnGUI()
         {
             if (!_visible) return;
-            // Full-screen operator alert owns the display — stand down (IMGUI
-            // would draw over the alert otherwise).
-            if (Shared.OperatorOverlayGate.AlertActive) return;
+            // A full-screen alert or floor tune owns the display — stand down
+            // (IMGUI would draw over the owner otherwise).
+            if (Shared.OperatorOverlayGate.Suppressed) return;
 
             if (_labelStyle == null)
             {

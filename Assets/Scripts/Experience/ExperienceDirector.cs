@@ -241,6 +241,7 @@ namespace Experience
             switch (s)
             {
                 case ExperienceState.Idle:
+                case ExperienceState.Welcome:
                 case ExperienceState.Calibrate:
                 case ExperienceState.FreeMove:
                 case ExperienceState.Shoot:
@@ -610,7 +611,7 @@ namespace Experience
             // Idle → visitor handoff (k4abt pipeline only): restart the workers
             // across the clock jump left by the previous run's playback. The
             // fused source has no workers to restart.
-            if (from == ExperienceState.Idle && to == ExperienceState.Calibrate)
+            if (from == ExperienceState.Idle && to == ExperienceState.Welcome)
             {
                 if (merger != null && !LfbsActive && HasLiveRenderers()) merger.RestartWorkers();
             }
@@ -647,8 +648,10 @@ namespace Experience
                     ApplyBodySource(BodySource.Live);
                     if (HasLiveRenderers()) sensorManager?.SetLiveSuppressedAsSource(false);
                     break;
+                case ExperienceState.Welcome:
+                    PlaySe(config.startSe); // greeting chime moves with the entry state
+                    break;
                 case ExperienceState.Calibrate:
-                    PlaySe(config.startSe);
                     if (!t.skipCalibrate)
                         _calibrateRoutine = StartCoroutine(CalibrateRoutine());
                     break;
@@ -739,6 +742,7 @@ namespace Experience
             switch (state)
             {
                 case ExperienceState.Idle: _ui.ClearAll(); break; // floor grid only
+                case ExperienceState.Welcome: _ui.ShowMessage(config.welcomeText); break;
                 case ExperienceState.Calibrate:
                     if (_calibrationDone) _ui.ShowMessage(config.calibrateMatchedText);
                     else _ui.ShowPoseGuide(StarGuide(), config.calibrateText);
@@ -753,7 +757,10 @@ namespace Experience
                     _ui.ShowProgress(_converter?.Progress ?? 0f, config.processingText);
                     break;
                 case ExperienceState.ResultShow:
-                    _ui.ShowMessage(_exportFailed ? config.exportFailedText : config.resultText);
+                    // Same layout as the QR screen (headline already in place) so
+                    // ResultShow→QrShow reads as ONE scene that gains the QR.
+                    if (_exportFailed) _ui.ShowMessage(config.exportFailedText);
+                    else _ui.ShowResult(config.resultText);
                     break;
                 case ExperienceState.QrShow: ShowQr(); break;
                 case ExperienceState.Fault: break; // the alert owns the screen
@@ -793,8 +800,11 @@ namespace Experience
 
             while (_active && _fsm.State == ExperienceState.Calibrate)
             {
+                // Digits only over the last countdownSeconds of the window; until
+                // then the pose guide stands alone. A detected pose ends the
+                // state early (FSM latch), skipping whatever countdown is left.
                 int remain = Mathf.CeilToInt(t.calibrateSeconds - _fsm.TimeInState);
-                if (remain > 0 && remain != shown)
+                if (remain > 0 && remain <= config.countdownSeconds && remain != shown)
                 {
                     _ui.ShowCountdown(remain);
                     shown = remain;
@@ -1324,7 +1334,9 @@ namespace Experience
             var tex = new QrUrlPresenter().Present(_qrUrl);
             string caption = !string.IsNullOrEmpty(config.qrScanText) ? config.qrScanText
                            : (config.qrCaption ?? "");
-            if (tex != null) _ui.ShowQr(tex, caption);
+            // The result cheer and the QR share one screen (headline above the code).
+            string headline = _exportFailed ? null : config.resultText;
+            if (tex != null) _ui.ShowQr(tex, caption, headline);
             else _ui.ShowMessage(_qrUrl ?? "");
         }
 
@@ -1334,8 +1346,8 @@ namespace Experience
             var s = _fsm.State;
             // Only during the live-interaction stages — playback/result states
             // read presence from occupancy where crowd counting is meaningless.
-            bool eligible = s == ExperienceState.Calibrate || s == ExperienceState.FreeMove
-                || s == ExperienceState.Shoot;
+            bool eligible = s == ExperienceState.Welcome || s == ExperienceState.Calibrate
+                || s == ExperienceState.FreeMove || s == ExperienceState.Shoot;
             bool crowd = eligible && _presence != null && _presence.CrowdActive;
             if (crowd && !_crowdShowing)
             {
