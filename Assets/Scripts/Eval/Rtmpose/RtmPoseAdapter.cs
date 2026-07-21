@@ -93,6 +93,7 @@ namespace BodyTracking.Eval.Rtmpose
         private readonly DetBox[] _asyncBoxes = new DetBox[MaxDet];
         private volatile int _asyncState;
         private int _asyncCount, _asyncW, _asyncH;
+        private volatile bool _detectFailLogged;
 
         private void KickAsyncDetect(byte[] rgb, int w, int h)
         {
@@ -107,7 +108,24 @@ namespace BodyTracking.Eval.Rtmpose
             {
                 long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
                 try { _asyncCount = _backend.Detect(_detColorCopy, _asyncW, _asyncH, _asyncBoxes); }
-                catch { _asyncCount = 0; }
+                catch (Exception e)
+                {
+                    _asyncCount = 0;
+                    // A swallowed detect failure is indistinguishable from "nobody is
+                    // in frame": both just bump StatNoDetect, and fusion silently
+                    // emits nothing forever. That cost a whole debugging session
+                    // once (a CUDA arena cap made EVERY Detect throw on the input
+                    // tensor while the counters read like an empty room), so failures
+                    // are now visible. Logged ONCE per adapter: this runs per frame
+                    // per camera, and a repeating native error would flood the
+                    // console faster than it could be read.
+                    if (!_detectFailLogged)
+                    {
+                        _detectFailLogged = true;
+                        Debug.LogError($"[rtmpose] async detect failed (further failures on this " +
+                                       $"camera are silent; StatNoDetect keeps counting them): {e}");
+                    }
+                }
                 finally
                 {
                     DetectMs[DetectN++ % TimingCap] = MsSince(t0);

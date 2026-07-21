@@ -113,10 +113,30 @@ namespace BodyTracking.Eval.Rtmpose
                                 //    HEURISTIC keeps the deterministic GEMM-class
                                 //    choice at full speed (verify parity via
                                 //    LiveV11sVerify.CompareTakes after ORT bumps).
+                                //  - arena_extend_strategy=kSameAsRequested and
+                                //    cudnn_conv_use_max_workspace=0: BOUND THE ARENA.
+                                //    ORT's default (kNextPowerOfTwo + max conv
+                                //    workspace) grew these two small sessions to
+                                //    ~7.1 GB on the 5080 — measured live as VRAM
+                                //    7.8 GB free -> 0.7 GB free the moment fusion
+                                //    started. Below ~1 GB free WDDM pages and the
+                                //    WHOLE app stalls: the editor dropped 27 fps ->
+                                //    1.7 fps and YOLOX detect inflated 40 ms ->
+                                //    1300 ms. Growth strategy only — do NOT add
+                                //    gpu_mem_limit: a hard cap makes the arena THROW
+                                //    mid-inference instead of stalling (tried 2 GB;
+                                //    the four cameras infer concurrently, so the
+                                //    ~800 MB single-session footprint lands over the
+                                //    cap and every Detect died on the input tensor).
+                                //    Neither knob touches numerics — unlike use_tf32
+                                //    / cudnn_conv_algo_search above, which the
+                                //    offline A/B pinned for accuracy. Leave those.
                                 cudaOpts.UpdateOptions(new Dictionary<string, string>
                                 {
                                     { "use_tf32", "0" },
                                     { "cudnn_conv_algo_search", "HEURISTIC" },
+                                    { "arena_extend_strategy", "kSameAsRequested" },
+                                    { "cudnn_conv_use_max_workspace", "0" },
                                 });
                                 opt.AppendExecutionProvider_CUDA(cudaOpts);
                             }

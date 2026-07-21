@@ -86,10 +86,18 @@ namespace BodyTracking.Eval.Rtmpose
         [Tooltip("RTMPose keypoint confidence threshold (person selection & joints).")]
         public float confThreshold = 0.3f;
 
-        [Tooltip("Capture volume center (mm, origin-camera world frame) handed to " +
-                 "the person selector — same convention as FusedBodiesExport.")]
+        [Tooltip("Derive the person-selection volume from the camera rig in " +
+                 "extrinsics.yaml (RigCaptureVolume) instead of the fields below. " +
+                 "On by default: the fields are in the extrinsics world frame, whose " +
+                 "origin moved from 'the origin camera' to 'the room centre' — a " +
+                 "hand-set volume silently rejects every detection after a re-solve.")]
+        public bool captureVolumeFromRig = true;
+
+        [Tooltip("Fallback capture volume center (mm, extrinsics world frame) handed " +
+                 "to the person selector. Used when captureVolumeFromRig is off or " +
+                 "the rig has too few cameras to derive a box.")]
         public Vector3 captureVolumeCenterMm = new Vector3(0, 200, 3000);
-        [Tooltip("Capture volume half extents (mm).")]
+        [Tooltip("Fallback capture volume half extents (mm).")]
         public Vector3 captureVolumeHalfMm = new Vector3(1100, 1500, 1100);
 
         [Tooltip("Emit a heartbeat (temporal-hold frame) when no camera frame arrived " +
@@ -333,6 +341,10 @@ namespace BodyTracking.Eval.Rtmpose
             public readonly object ResultLock = new object();
             public readonly Queue<FusedResult> Results = new Queue<FusedResult>();
             public readonly Dictionary<string, CamXform> Xform = new Dictionary<string, CamXform>();
+            /// <summary>Capture volume actually in force — the rig-derived box once
+            /// LoadCalibration has run, else the Inspector fallback. RebuildAdapter
+            /// (playback loop) reuses it so a rebuilt adapter keeps the same volume.</summary>
+            public Vector3 VolCenterMm, VolHalfMm;
             public BodySnapshot Snap;
             public byte[] EncodeScratch;
             public int FusedEmitted;
@@ -392,7 +404,10 @@ namespace BodyTracking.Eval.Rtmpose
                 string profile = Path.Combine(root, bodyProfilePath);
                 if (!string.IsNullOrEmpty(bodyProfilePath) && File.Exists(profile))
                     s.Fused.Profile = BodyProfile.Load(profile);
-                s.Fused.SetCaptureVolume(captureVolumeCenterMm, captureVolumeHalfMm);
+                // Provisional: LoadCalibration replaces this with the rig-derived
+                // box (it is the first place the extrinsics are known).
+                s.VolCenterMm = captureVolumeCenterMm; s.VolHalfMm = captureVolumeHalfMm;
+                s.Fused.SetCaptureVolume(s.VolCenterMm, s.VolHalfMm);
                 s.Fused.OnSkeletons += f => OnFusedSkeletons(s, f); // worker thread!
                 s.Fused.OnPerCameraSkeletons += OnPerCameraSkeletonsForProfile; // worker thread!
             }
@@ -906,7 +921,7 @@ namespace BodyTracking.Eval.Rtmpose
             {
                 var next = new FusedRtmposeAdapter(s.Backend) { ConfThreshold = confThreshold, medianLagFilter = medianLagFilter, AsyncDetect = true };
                 next.Profile = s.Fused?.Profile;
-                next.SetCaptureVolume(captureVolumeCenterMm, captureVolumeHalfMm);
+                next.SetCaptureVolume(s.VolCenterMm, s.VolHalfMm);
                 foreach (var kv in s.Xform) next.SetWorldTransform(kv.Key, kv.Value.G);
                 next.OnSkeletons += f => OnFusedSkeletons(s, f);
                 next.OnPerCameraSkeletons += OnPerCameraSkeletonsForProfile;
@@ -1041,6 +1056,30 @@ namespace BodyTracking.Eval.Rtmpose
             }
             // live projector-flare mask uses the same rig geometry
             ProjectorMask.Configure(rig);
+
+            // The person-selection volume lives in THIS calibration's world frame,
+            // so it can only be resolved now. Deriving it from the rig keeps it
+            // correct across a re-solve that moves the world origin (which is what
+            // silently killed fusion: every detection fell outside a volume still
+            // aimed at the old origin-camera frame).
+            if (captureVolumeFromRig
+                && RigCaptureVolume.TryDerive(calib, out var rigCenter, out var rigHalf))
+            {
+                s.VolCenterMm = rigCenter; s.VolHalfMm = rigHalf;
+                Debug.Log($"[{nameof(LiveFusedBodySource)}] capture volume from rig: " +
+                          $"center {rigCenter:F0} half {rigHalf:F0} (mm, extrinsics world frame)", this);
+            }
+            else
+            {
+                s.VolCenterMm = captureVolumeCenterMm; s.VolHalfMm = captureVolumeHalfMm;
+                if (captureVolumeFromRig)
+                    Debug.LogWarning($"[{nameof(LiveFusedBodySource)}] could not derive a capture " +
+                                     $"volume from the rig — falling back to the Inspector values " +
+                                     $"({captureVolumeCenterMm:F0} ± {captureVolumeHalfMm:F0}). Verify " +
+                                     "they match this calibration's world frame.", this);
+            }
+            s.Fused.SetCaptureVolume(s.VolCenterMm, s.VolHalfMm);
+
             Debug.Log($"[{nameof(LiveFusedBodySource)}] calibration loaded from {root}: {s.Xform.Count} camera(s)", this);
             return true;
         }

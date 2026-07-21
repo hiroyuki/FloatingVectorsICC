@@ -54,8 +54,14 @@ namespace BodyTracking.Eval.Rtmpose
             public float ConfThreshold = 0.3f;
             /// <summary>Run the catch-up smoothing post-pass (the "s" in v11s).</summary>
             public bool RunCatchupSmooth = true;
-            /// <summary>Same person-selection volume convention as FusedBodiesExport
-            /// (mm, origin-camera world frame).</summary>
+            /// <summary>Derive the person-selection volume from the take's own camera
+            /// rig (RigCaptureVolume) instead of the fields below. On by default: the
+            /// fields are in the extrinsics world frame, and a take solved with a
+            /// different world origin would reject every detection.</summary>
+            public bool CaptureVolumeFromRig = true;
+            /// <summary>Fallback person-selection volume (mm, extrinsics world frame) —
+            /// used when CaptureVolumeFromRig is off or the rig is too small to derive
+            /// a box from.</summary>
             public Vector3 CaptureVolumeCenterMm = new Vector3(0, 200, 3000);
             public Vector3 CaptureVolumeHalfMm = new Vector3(1100, 1500, 1100);
             /// <summary>Optional pre-built backend to reuse (NOT disposed by the
@@ -244,7 +250,19 @@ namespace BodyTracking.Eval.Rtmpose
                     fused.Profile = options.ProfileOverride;
                 else if (profilePath != null && File.Exists(profilePath))
                     fused.Profile = BodyProfile.Load(profilePath);
-                fused.SetCaptureVolume(options.CaptureVolumeCenterMm, options.CaptureVolumeHalfMm);
+                Vector3 volCenter = options.CaptureVolumeCenterMm, volHalf = options.CaptureVolumeHalfMm;
+                if (options.CaptureVolumeFromRig
+                    && RigCaptureVolume.TryDerive(calib, out var rigCenter, out var rigHalf))
+                {
+                    volCenter = rigCenter; volHalf = rigHalf;
+                }
+                else if (options.CaptureVolumeFromRig)
+                {
+                    Debug.LogWarning($"[{nameof(FusedTakeConverter)}] could not derive a capture volume " +
+                                     $"from the take's rig — falling back to {volCenter:F0} ± {volHalf:F0}, " +
+                                     "which must match this take's extrinsics world frame.");
+                }
+                fused.SetCaptureVolume(volCenter, volHalf);
                 foreach (var t in tracks)
                 {
                     fused.Configure(new EvalCameraContext(t.Serial, t.DW, t.DH, t.CW, t.CH, t.Cam));

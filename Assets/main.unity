@@ -145,7 +145,7 @@ Transform:
   m_GameObject: {fileID: 7740001}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: -0.38268343, z: 0, w: 0.92387956}
-  m_LocalPosition: {x: 9, y: 4.5, z: -9}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -339,7 +339,8 @@ Transform:
   m_LocalPosition: {x: 0, y: 0, z: 0}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
-  m_Children: []
+  m_Children:
+  - {fileID: 1041233442}
   m_Father: {fileID: 894098144}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &100997490
@@ -1331,7 +1332,7 @@ MeshRenderer:
   m_RenderingLayerMask: 1
   m_RendererPriority: 0
   m_Materials:
-  - {fileID: 400699126}
+  - {fileID: 0}
   m_StaticBatchInfo:
     firstSubMesh: 0
     subMeshCount: 0
@@ -1363,47 +1364,6 @@ MeshFilter:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1041233441}
   m_Mesh: {fileID: 0}
---- !u!21 &1050907785
-Material:
-  serializedVersion: 8
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_Name: PointCloudUnlit (playback)
-  m_Shader: {fileID: 4800000, guid: 31f573c94038a6d4b8ee33eb3bcc254e, type: 3}
-  m_Parent: {fileID: 0}
-  m_ModifiedSerializedProperties: 0
-  m_ValidKeywords: []
-  m_InvalidKeywords: []
-  m_LightmapFlags: 4
-  m_EnableInstancingVariants: 0
-  m_DoubleSidedGI: 0
-  m_CustomRenderQueue: -1
-  stringTagMap: {}
-  disabledShaderPasses: []
-  m_LockedProperties: 
-  m_SavedProperties:
-    serializedVersion: 3
-    m_TexEnvs: []
-    m_Ints: []
-    m_Floats:
-    - _CapsCount: 0
-    - _CapsMode: 0
-    - _DecimFrame: 0
-    - _DecimKeep: 1
-    - _MotionColorMode: 0
-    - _MotionCount: 0
-    - _MotionDisplace: 0
-    - _MotionDisplaceScale: 0
-    - _MotionMaxDist: 0
-    - _MotionMode: 0
-    - _MotionSpeedMax: 1
-    - _ObbMode: 0
-    m_Colors:
-    - _MotionHotColor: {r: 1, g: 0.19999996, b: 0.049999982, a: 1}
-  m_BuildTextureStacks: []
-  m_AllowLocking: 1
 --- !u!1 &1097749073
 GameObject:
   m_ObjectHideFlags: 0
@@ -1811,6 +1771,7 @@ MonoBehaviour:
   bodyProfilePath: eval/body_profile.json
   provider: 2
   confThreshold: 0.3
+  captureVolumeFromRig: 1
   captureVolumeCenterMm: {x: 0, y: 200, z: 3000}
   captureVolumeHalfMm: {x: 1100, y: 1500, z: 1100}
   heartbeatMs: 40
