@@ -20,7 +20,9 @@ namespace BodyTracking
     public static class BodyTrackingBootstrap
     {
         // Re-exported for any caller that still wants a direct reference to the path.
-        public const string K4AWrapperBin = WorkerBootstrap.K4AWrapperBinDefault;
+        // The wrapper has no constant to re-export — its folder name is per-machine,
+        // so it is resolved at call time (WorkerBootstrap.ResolveK4AWrapperBin).
+        public static string K4AWrapperBin => WorkerBootstrap.ResolveK4AWrapperBin();
         public const string BodyTrackingBin = WorkerBootstrap.BodyTrackingBinDefault;
 
         private static bool _initialized;
