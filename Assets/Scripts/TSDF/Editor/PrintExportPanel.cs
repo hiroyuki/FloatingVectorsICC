@@ -180,6 +180,17 @@ namespace TSDF.EditorTools
                 new GUIContent("STL Floor Thickness (m)", "床プレートの厚み（実寸 m）。" +
                     "0.02m は 1/8 スケール出力でおよそ 2.5mm。"),
                 pe.stlFloorThickness, 0.005f, 0.1f);
+            float stlFloorRaise = EditorGUILayout.Slider(
+                new GUIContent("STL Floor Raise / Cut (m)", "床面を最下点からこの高さだけ上げ、" +
+                    "その下のジオメトリはプリントしない（床下の頂点を面まで引き上げてクリップ）。" +
+                    "足元・床ノイズ・トレイル底を切り落として、プレートは上げた面に立つ。0=OFF。"),
+                pe.stlFloorRaise, 0f, 0.3f);
+            bool buryHeads = EditorGUILayout.ToggleLeft(
+                new GUIContent("STL: Bury Tube Heads (突き出し防止 SDF)",
+                    "各チューブの最新側先端を、体表を突き抜けさせず SDF で Print Radius ぶん" +
+                    "体内へ埋める。突き出るチューブだけ正確に処理し、宙に浮くトレイルはそのまま。" +
+                    "Body 同梱＋Auto Close Holes が必要。OFF/未対応時は Tube Head Trim にフォールバック。"),
+                pe.stlBuryTubeHeads);
 
             EditorGUILayout.Space(4);
             EditorGUILayout.LabelField("Web export (GLB + USDZ)", EditorStyles.miniBoldLabel);
@@ -232,6 +243,8 @@ namespace TSDF.EditorTools
                 pe.stlSupportRadius = supRadius;
                 pe.stlFloorSize = stlFloorSz;
                 pe.stlFloorThickness = stlFloorTh;
+                pe.stlFloorRaise = stlFloorRaise;
+                pe.stlBuryTubeHeads = buryHeads;
                 pe.webIncludeCurves = webCurves;
                 pe.webCurveStride = webStride;
                 pe.webCurveSides = webSides;
@@ -248,6 +261,31 @@ namespace TSDF.EditorTools
             EditorGUILayout.LabelField("3. Operations", EditorStyles.boldLabel);
 
             bool ready = Application.isPlaying && pe.VolumeReady;
+
+            // ---- two-pose print: capture a PAST body (curve-tail end) ----
+            using (new EditorGUI.DisabledScope(!ready))
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                if (GUILayout.Button(new GUIContent(
+                        pe.HasPastBody ? $"最古ボディ 再取込 (保存済 {pe.PastBodyTris} tris)"
+                                       : "最古ボディを取込 (現在フレーム)",
+                        "二ポーズ彫刻: 再生を軌跡の最古フレームまで戻して Pause → これで今の体を" +
+                        "『過去ポーズ』として保存する。その後 最新フレームへ進めて Export すると、" +
+                        "2 体の TSDF ボディをモーションカーブが繋いだ形で書き出される" +
+                        "（過去ボディは最新と同じ人体色）。"),
+                        GUILayout.Height(22)))
+                    pe.CapturePastBody();
+                using (new EditorGUI.DisabledScope(!pe.HasPastBody))
+                    if (GUILayout.Button("クリア", GUILayout.Width(70), GUILayout.Height(22)))
+                        pe.ClearPastBody();
+            }
+            if (pe.HasPastBody)
+                EditorGUILayout.HelpBox(
+                    $"二ポーズ: 過去ボディ {pe.PastBodyTris} tris" +
+                    (pe.PastBodyFrame >= 0 ? $" (frame {pe.PastBodyFrame})" : "") +
+                    " を保存済み。最新フレームで Export すると人体色で同梱されます。",
+                    MessageType.Info);
+
             using (new EditorGUILayout.HorizontalScope())
             {
                 using (new EditorGUI.DisabledScope(!ready || pe.curves == null))

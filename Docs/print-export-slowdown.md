@@ -5,20 +5,27 @@
 Mac で 3MF 書き出しが極端に遅い・巨大になる件を追った結果、**Mac 固有の問題ではなく
 コミット済みシーンの設定が原因**と判明した。Windows でも同じ設定なら同じだけ遅い。
 
+> **解決済み (2026-07-21, Mac セッション)**: 下記 3 機能のうち O(n²) だった 2 つ
+> (`stlContactBeads` / `stlCullInteriorFaces`) は**コード自体から削除**、残る
+> `stlCurveSupportPillars` はコード既定を `false` にした（機能は温存）。
+> `main.unity` 作業ツリーも 3 フラグ `0`。もう「フラグを戻し忘れる」再発経路は無い。
+> 詳細は末尾「## 解決」。
+
 ---
 
 ## TL;DR
 
-`main.unity` にコミットされている以下 3 フラグを **`0` にする**。
+高密度 (stride 2) で書き出しがハングする原因は、点密度に対して固定セルの空間ハッシュを
+使う 3 機能が**実質 O(n²)** になること。恒久対処として:
 
-| フラグ | コミット値 | あるべき値 | 位置づけ |
-|---|---|---|---|
-| `stlContactBeads` | `1` | **`0`** | 「コブだらけ」で却下済み。コード既定 `false` |
-| `stlCullInteriorFaces` | `1` | **`0`** | `8188b13` の実験フラグ。コード既定 `false` |
-| `stlCurveSupportPillars` | `1` | **`0`** | 「ストラット案は全没」。コード既定 `false` |
+| 機能 | 旧コミット値 | 対処 (2026-07-21) |
+|---|---|---|
+| `stlContactBeads` | `1` | **コードごと削除**（`AppendContactBeads` 撤去）。「コブだらけ」で却下済み |
+| `stlCullInteriorFaces` | `1` | **コードごと削除**（`CullInteriorChainTris` 撤去）。`8188b13` の実験フラグ |
+| `stlCurveSupportPillars` | `1` | **コード既定 `false`**（機能は温存・`AppendBranchStrut` 共有のため）。「ストラット案は全没」|
 
 `printSeedStride` が 40 のうちは ON でも実害が出ないため、今まで表面化しなかった。
-**stride を 2 に下げた瞬間に破綻する。**
+**stride を 2 に下げた瞬間に破綻していた。**
 
 ---
 
@@ -164,21 +171,13 @@ pymeshfix は **pyenv 3.11.1** に入っている（Windows 機）:
 
 ---
 
-## 切り分け用ログ
+## 切り分け用ログ（旧）
 
-`TSDFPrintExporter.cs` に段別タイマーを追加してある（別途コミット）。
-遅い時はこれを見れば犯人が一目で分かる。
-
-```
-[TSDFPrintExporter] TIMING body shell: … [ms]
-[TSDFPrintExporter] stage: tubes emitted — N tubes, M tris, linkPts=… (stride=… tol=… sides=…)
-[TSDFPrintExporter] interior cull: … [ms]
-[TSDFPrintExporter] beads: N pts, M chains, cell=… , K buckets (mean …, max …) — est. … pair tests
-[TSDFPrintExporter] beads: scanned i/n pts … (… ms elapsed)     ← 5%刻み。完走を待たず外挿できる
-[TSDFPrintExporter] stage: contact beads done [ms]
-[TSDFPrintExporter] TIMING supports [ms]
-[TSDFPrintExporter] TIMING curve tubes: … [ms] (body was … ms)
-```
+> **注 (2026-07-21)**: 調査中に足していた段別タイマー（`beads:` / `interior cull:` など）は
+> `AppendContactBeads` / `CullInteriorChainTris` ごと削除したため、現行コードには無い。
+> 書き出し末尾のサマリ（tris 内訳・所要 ms・出力 MB）だけが残っている。
+> 将来また段別に切り分けたくなったら、`AssembleShells` の各ステージに
+> `Stopwatch` を一時的に挿すこと。
 
 Mac 側のログ: `~/Library/Logs/Unity/Editor.log`
 
@@ -208,9 +207,25 @@ tube 本数になる。`printSeeds = seedCount / stride` が上限。
 
 ---
 
+## 解決 (2026-07-21, Mac セッション)
+
+恒久対処としてフラグ運用ではなくコードから断った（Unity 再コンパイル・エラー 0 確認済み）。
+
+- `stlContactBeads` フィールドと `AppendContactBeads` メソッドを**削除**
+  （呼び出し・`wantLinkData` 条件も撤去）。
+- `stlCullInteriorFaces` フィールドと `CullInteriorChainTris` メソッドを**削除**
+  （`chainTriRanges` / 不要になった `triBefore` も撤去）。
+- `stlCurveSupportPillars` は温存しコード既定を `true → false` に変更
+  （`AppendBranchStrut` をサポート柱側で共有しているため機能自体は残す）。
+- 撤去した 2 機能と `stlLinkIsolatedChains` が共有していた `linkPts` 生成は、
+  まだ使う `stlLinkIsolatedChains` 用に残置。
+- `main.unity` 作業ツリーは 3 フラグとも既に `0`
+  （`stlContactBeads` / `stlCullInteriorFaces` は orphan キーとして次のシーン保存で自動的に落ちる）。
+
+Mac の書き出し実測（改良・床カット込み）: `ExportObj` 18.4s → `fix_body.py` →
+`_final.3mf` 約 37 MB / 約 53 s。
+
 ## 未対応
 
-- [ ] `main.unity` の 3 フラグを `0` にして保存・コミット（**これをやらないと再発する**）
-- [ ] `TSDFPrintExporter.cs` の計測ログをコミットするか判断
 - [ ] スライサ（Bambu Studio）での目視確認
-- [ ] Mac 側 540 MB の原因特定
+- [ ] Mac 側 540 MB の原因特定（撤去済み機能が原因だった可能性が高い＝再現しないはず）

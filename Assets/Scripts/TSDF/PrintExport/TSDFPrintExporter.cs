@@ -102,8 +102,19 @@ namespace TSDF
                  "With the body mesh included, raw tips pierce outward through " +
                  "the skin ('新しい側の先っぽが突き出る'); trimming ends the tube " +
                  "short of the surface and the bridge (re-anchored to the " +
-                 "trimmed tip) carries the attachment into the body. 0 = off.")]
+                 "trimmed tip) carries the attachment into the body. 0 = off. " +
+                 "Superseded by Stl Bury Tube Heads when that is on and a body " +
+                 "SDF is available; this stays the fallback.")]
         public float tubeHeadTrim = 0f;
+
+        [Tooltip("SDF-accurate poke-through fix: end each tube's NEWEST tip buried " +
+                 "~Print Radius INSIDE the body instead of piercing the skin. Uses " +
+                 "the (hole-closed) TSDF signed-distance field to march the tip back " +
+                 "to the depth where it is fully covered, per tube — so tubes that " +
+                 "poke get buried while free-floating trail heads (no body nearby) " +
+                 "are left untouched. Needs the body mesh + Stl Auto Close Holes for " +
+                 "a clean interior; falls back to Tube Head Trim when unavailable.")]
+        public bool stlBuryTubeHeads = true;
 
         [Tooltip("Align the cross-section to WORLD UP instead of the twisting " +
                  "parallel-transport frame: with 4 sides one vertex always points " +
@@ -111,24 +122,12 @@ namespace TSDF
                  "roofs instead of flat overhangs (FDM).")]
         public bool tubeAlignUp = true;
 
-        [Tooltip("Weld bead at the closest approach of every touching chain " +
-                 "pair: a short fat strut buried in the joint, so graze contacts " +
-                 "print as a real bond instead of a knife-edge seam. White span.")]
-        public bool stlContactBeads = false;
-
         [Range(0f, 1f)]
         [Tooltip("Fraction of curve tubes printed in the BODY (black) colour, " +
                  "assigned per line by a stable seed hash. Black lines recede " +
                  "visually while carrying the structure; the white lines read " +
                  "as a sparse artwork inside a dense, printable cloud.")]
         public float stlBlackLineRatio = 0.5f;
-
-        [Tooltip("Drop chain triangles whose centroid lies clearly INSIDE " +
-                 "another line (deeper than its inradius - 0.8 mm) — the buried " +
-                 "faces of overlapping bars are pure waste ('重なり部分の無駄な" +
-                 "頂点'). The union's outer surface is untouched; the open rims " +
-                 "left behind are hidden inside solid material.")]
-        public bool stlCullInteriorFaces = false;
 
         [Tooltip("MC contact fillets: every GRAZING line pair gets a small local " +
                  "smin-blended Marching Cubes membrane hugging both bars — " +
@@ -233,7 +232,7 @@ namespace TSDF
                  "downward cone — struts hide inside the curve cloud instead of " +
                  "forming a pillar forest. Only points with nothing below them " +
                  "drop a pillar to the floor plate.")]
-        public bool stlCurveSupportPillars = true;
+        public bool stlCurveSupportPillars = false;
 
         [Range(0.05f, 0.5f)]
         [Tooltip("Horizontal search radius (m) for the strut target below. Wider " +
@@ -335,6 +334,15 @@ namespace TSDF
                  "scale ≈ 2.5 mm plate.")]
         public float stlFloorThickness = 0.02f;
 
+        [Range(0f, 0.3f)]
+        [Tooltip("Raise the floor plane this far (m) above the sculpture's lowest " +
+                 "point and CLIP everything below it — nothing prints under the floor " +
+                 "('床下はプリントしない'). Sub-floor vertices are pulled up onto the " +
+                 "plane and triangles fully below are dropped, so the feet / floor-" +
+                 "noise / trail bottoms are cut off flush and the plate stands on the " +
+                 "raised plane. 0 = off (plate sits at the lowest point as before).")]
+        public float stlFloorRaise = 0.05f;
+
         [Header("Web export (GLB + USDZ)")]
         [Tooltip("Include the curved lines in the web files as real tube meshes tessellated " +
                  "from the drawn polylines (full display resolution). Unlike the print path " +
@@ -388,6 +396,28 @@ namespace TSDF
         // pose over the current one. Print ops retake it; Restore refuses.
         private int _snapVersion;
 
+        // ---- stored PAST body (two-pose print) ----
+        // A second body mesh captured at an EARLIER playback moment (the curve-
+        // tail end), in WORLD space. Assembled alongside the current body as a
+        // second human-colour shell, so the motion curves read as lines bridging
+        // the two poses. Captured manually: the operator scrubs playback back to
+        // the trail's oldest moment, pauses, and clicks Capture past body; world
+        // coords stay put across the later seek to the export (newest) moment.
+        // Null = ordinary single-body export (default).
+        private Vector3[] _pastBodyPos;
+        private int[] _pastBodyTri;
+        private int _pastBodyFrame = -1;
+
+        // ---- body SDF snapshot for tube-head burial (stlBuryTubeHeads) ----
+        // CPU copy of the (hole-closed) front SDF taken while the body is captured,
+        // float2 per voxel (x=sdf metres, y=weight). Sampled trilinearly in world
+        // space to push each tube's newest tip below the skin. Freed at the end of
+        // AssembleShells — it is large (float2 per voxel).
+        private float[] _burySdf;
+        private Vector3Int _buryDim;
+        private Matrix4x4 _buryVoxelFromWorld;
+        private bool _buryValid;
+
         private string _status = "";
 
         private ComputeShader _bakeShader;   // Resources/TSDFTrailBake
@@ -402,6 +432,8 @@ namespace TSDF
         /// <summary>One-line state readout for the panel: last op result, prefixed
         /// while the displayed volume carries print modifications.</summary>
         public string StatusText =>
+            (HasPastBody ? $"[2-pose: past body {PastBodyTris} tris" +
+                           (PastBodyFrame >= 0 ? $" @f{PastBodyFrame}" : "") + "] " : "") +
             (HasSnapshot ? "print-modified (Restore available) — " : "") + _status;
 
         // ---------------- lifecycle ----------------
@@ -416,12 +448,21 @@ namespace TSDF
             // Snapshot is CPU-side and cheap to keep, but it describes a Play-mode
             // volume that no longer exists after Stop — drop it.
             _snapSdf = null; _snapColor = null; _snapBlocks = null; _snapTotal = 0;
+            _pastBodyPos = null; _pastBodyTri = null; _pastBodyFrame = -1;
         }
 
         public bool VolumeReady =>
             volume != null && volume.Dim.x > 0 && volume.FrontBuffer != null;
 
         public bool HasSnapshot => _snapSdf != null;
+
+        /// <summary>A past-pose body mesh is stored for a two-pose print.</summary>
+        public bool HasPastBody => _pastBodyPos != null && _pastBodyPos.Length > 0
+                                   && _pastBodyTri != null && _pastBodyTri.Length >= 3;
+
+        public int PastBodyTris => _pastBodyTri != null ? _pastBodyTri.Length / 3 : 0;
+
+        public int PastBodyFrame => _pastBodyFrame;
 
         private bool SnapshotFresh => HasSnapshot && _snapVersion == volume.PublishVersion;
 
@@ -490,6 +531,50 @@ namespace TSDF
             volume.MarkFrontDirty();
             _snapVersion = volume.PublishVersion; // our own bump — snapshot still matches this moment
             _status = "restored pre-print volume";
+            Debug.Log("[TSDFPrintExporter] " + _status, this);
+        }
+
+        // ---------------- two-pose print: past body ----------------
+        /// <summary>Capture the CURRENTLY displayed body as the PAST pose of a
+        /// two-pose print (the curve-tail end). Same MC + close-holes pipeline as
+        /// the export body, stored in WORLD space so it stays put when playback
+        /// later seeks to the newest moment. Operator flow: scrub playback back to
+        /// the trail's oldest moment, Pause, click this; then scrub forward to the
+        /// newest moment and Export — AssembleShells adds this as a second human-
+        /// colour body shell, with the motion curves bridging the two poses.</summary>
+        public void CapturePastBody()
+        {
+            if (!Guard(needCurves: false)) return;
+
+            // Same watertight capture the export uses for the current body: close
+            // holes so the mesh carries no phantom tau-band / open-rim inverted
+            // normals, capture, then restore the live volume.
+            bool closed = false;
+            if (stlAutoCloseHoles) { CloseHoles(); closed = true; }
+            var opt = WebCaptureOptions();
+            opt.meshTargetTris = 0;     // print wants full resolution
+            opt.includeCurves = false;  // body only
+            var snap = TSDFSnapshotBuilder.Capture(volume, null, opt, out string err);
+            if (closed) RestoreSnapshot();
+            if (snap == null) { Fail("past body capture: " + err); return; }
+            if (snap.pos == null || snap.pos.Length == 0 || snap.tri == null || snap.tri.Length < 3)
+            { Fail("past body capture produced an empty mesh (no body on screen?)"); return; }
+
+            _pastBodyPos = snap.pos;
+            _pastBodyTri = snap.tri;
+            var rec = FindFirstObjectByType<PointCloud.SensorRecorder>();
+            _pastBodyFrame = rec != null ? rec.CurrentPlaybackFrame : -1;
+            _status = $"past body stored: {_pastBodyTri.Length / 3} tris" +
+                      (_pastBodyFrame >= 0 ? $" @ frame {_pastBodyFrame}" : "") +
+                      " — now scrub to the NEWEST moment and Export";
+            Debug.Log("[TSDFPrintExporter] " + _status, this);
+        }
+
+        /// <summary>Discard the stored past body — back to a single-body export.</summary>
+        public void ClearPastBody()
+        {
+            _pastBodyPos = null; _pastBodyTri = null; _pastBodyFrame = -1;
+            _status = "past body cleared (single-body export)";
             Debug.Log("[TSDFPrintExporter] " + _status, this);
         }
 
@@ -759,6 +844,7 @@ namespace TSDF
         {
             var asm = new ShellAssembly();
             var pos = asm.Pos; var tri = asm.Tri;
+            _buryValid = false; // set only if a body SDF is captured below
 
             // Body shell: drop weld-collapsed slivers, then wind outward (MC
             // emits inside = sdf < iso, so a negative volume means inward).
@@ -771,6 +857,9 @@ namespace TSDF
                 // the capture so the live display stays untouched.
                 bool closed = false;
                 if (stlAutoCloseHoles) { CloseHoles(); closed = true; }
+                // Snapshot the (now hole-closed) SDF for tube-head burial — interior
+                // reads solid, so tips can be pushed a full radius under the skin.
+                if (stlBuryTubeHeads) CaptureBurySdf();
                 var opt = WebCaptureOptions();
                 opt.meshTargetTris = 0;     // print wants full resolution
                 opt.includeCurves = false;  // STL curves come from the CSEmitSegs readback below,
@@ -801,8 +890,28 @@ namespace TSDF
                 }
                 asm.BodyVol = OrientOutward(pos, tri, 0, tri.Count);
             }
+            int bodyVerts = pos.Count; // floor-plate contact band scans the NEWEST body pos[0..this)
+
+            // Second (PAST) body shell for a two-pose print: appended into the same
+            // human-colour span as the current body, already in world space at the
+            // trail's oldest moment (CapturePastBody). The motion curves then read
+            // as lines bridging the two poses. Floor contact still scans only the
+            // newest body (bodyVerts above), so the plate stays under the current
+            // pose. Tubes-only exports (no body) get none — it would be a lone
+            // floating shell with no curves anchored to it.
+            if (stlIncludeBody && HasPastBody)
+            {
+                int vOff = pos.Count, iBase = tri.Count;
+                pos.AddRange(_pastBodyPos);
+                for (int t = 0; t + 2 < _pastBodyTri.Length; t += 3)
+                {
+                    int i0 = _pastBodyTri[t], i1 = _pastBodyTri[t + 1], i2 = _pastBodyTri[t + 2];
+                    if (i0 == i1 || i1 == i2 || i0 == i2) continue;
+                    tri.Add(i0 + vOff); tri.Add(i1 + vOff); tri.Add(i2 + vOff);
+                }
+                OrientOutward(pos, tri, iBase, tri.Count - iBase);
+            }
             asm.BodyTris = tri.Count / 3;
-            int bodyVerts = pos.Count; // floor-plate contact band scans pos[0..this)
             asm.CurveTriStart = tri.Count;
 
             // Curve tubes + body bridges as their own outward-wound shells. Both
@@ -992,13 +1101,20 @@ namespace TSDF
                     }
                 }
             }
-            if (tri.Count == 0) { Fail("nothing to export (body and tubes both off/empty)"); return null; }
+            if (tri.Count == 0) { Fail("nothing to export (body and tubes both off/empty)"); ReleaseBurySdf(); return null; }
             if (!stlIncludeCurveTubes)
             {
                 asm.TubeBlackTriStart = tri.Count; asm.WireTriStart = tri.Count;
                 asm.PatchTriStart = tri.Count;
                 asm.SupportTriStart = tri.Count; asm.FloorPillarTriStart = tri.Count;
             }
+
+            // Floor cut: raise the plane and pull everything below it up (clip),
+            // BEFORE the plate is added — so the plate lands on the raised plane and
+            // nothing prints underneath. Vertex-only (indices intact, spans valid).
+            ApplyFloorCut(pos);
+            ReleaseBurySdf(); // tubes are built; free the large SDF snapshot
+
             asm.FloorTriStart = tri.Count;
 
             // Floor plate: after the tubes so its top can sink into the lowest
@@ -1329,26 +1445,22 @@ namespace TSDF
                 var line = new List<Vector3[]> { null };
                 var col = new List<Vector3> { Vector3.one };
                 var pts = new List<Vector3>(64);
-                bool wantLinkData = stlLinkIsolatedChains || stlContactBeads || outContactPts != null
-                                    || stlCullInteriorFaces;
+                bool wantLinkData = stlLinkIsolatedChains || outContactPts != null;
                 var linkPts = outContactPts ?? (wantLinkData ? new List<(Vector3 p, float r, Vector3 tan)>() : null);
                 var linkRanges = outContactRanges ?? (wantLinkData ? new List<(int start, int count)>() : null);
                 int emittedChains = 0, tubesOut = 0;
-                var chainTriRanges = stlCullInteriorFaces ? new List<(int startTri, int triCount)>() : null;
 
                 // one emitted tube — a whole chain, or one in-crop run of it
                 void EmitChain(List<Vector3> cp, Vector3 colour)
                 {
                     if (cp.Count < 2) return;
                     int chainId = emittedChains++;
-                    int triBefore = ti.Count;
                     line[0] = cp.ToArray();
                     col[0] = colour;
                     tubesOut += CurveTubeBuilder.AppendCurveTubes(line, col, 1f, printRadius,
                         stlCurveSides, webCurveTolerance, Vector3.zero, 0f, tp, tn, tc, ti,
                         tipTaper: Mathf.Clamp01(tubeTailTaper), exportSpace: false,
                         raindrop: tubeRaindrop, alignUp: tubeAlignUp);
-                    chainTriRanges?.Add((triBefore / 3, (ti.Count - triBefore) / 3));
 
                     if (chainLows != null)
                     {
@@ -1434,7 +1546,7 @@ namespace TSDF
                 // chain's newest end, the bridge must anchor at the newest point
                 // that was ACTUALLY emitted — or be suppressed entirely when the
                 // chain produced no tube (an orphan bridge is a floating shell).
-                bool trackTips = tubeHeadTrim > 1e-4f || cropEnabled;
+                bool trackTips = tubeHeadTrim > 1e-4f || cropEnabled || (stlBuryTubeHeads && _buryValid);
                 var bridgeTips = trackTips ? new Dictionary<uint, Vector3>() : null;
                 var bridgeSuppressed = trackTips ? new HashSet<uint>() : null;
                 void EmitWhole(uint seed, List<int> idxs)
@@ -1444,9 +1556,16 @@ namespace TSDF
                     foreach (int i in idxs) pts.Add(segs[i].b);
                     if (pts.Count < 2) { bridgeSuppressed?.Add(seed); return; }
 
-                    // head trim: cut arc length off the NEWEST end so the tip
-                    // ends short of the body surface instead of piercing it
-                    if (tubeHeadTrim > 1e-4f)
+                    // head end: end the newest tip UNDER the skin instead of
+                    // piercing it. Preferred path is the SDF burial (accurate, per
+                    // tube, leaves free trails alone); the manual arc trim is the
+                    // fallback when no body SDF is available.
+                    if (stlBuryTubeHeads && _buryValid)
+                    {
+                        BuryHeadWithSdf(pts);
+                        if (pts.Count < 2) { bridgeSuppressed?.Add(seed); return; }
+                    }
+                    else if (tubeHeadTrim > 1e-4f)
                     {
                         float remain = tubeHeadTrim;
                         int last = pts.Count - 1;
@@ -1462,7 +1581,7 @@ namespace TSDF
                             pts.RemoveAt(last);
                             last--;
                         }
-                        if (pts.Count < 2) { bridgeSuppressed.Add(seed); return; } // fully trimmed away
+                        if (pts.Count < 2) { bridgeSuppressed?.Add(seed); return; } // fully trimmed away
                     }
                     Vector3 colour = segs[idxs[0]].color;
                     if (!cropEnabled)
@@ -1508,23 +1627,6 @@ namespace TSDF
                 tubeBlackTriStartLocal = ti.Count;
                 foreach (var kv in chains) if (BlackSeed(kv.Key)) EmitWhole(kv.Key, kv.Value);
                 tubeCount = tubesOut;
-
-                if (stlCullInteriorFaces && linkPts != null && linkRanges != null && linkRanges.Count > 1)
-                {
-                    int beforeCull = ti.Count / 3;
-                    CullInteriorChainTris(linkPts, linkRanges, chainTriRanges, tp, ti,
-                                          ref tubeBlackTriStartLocal);
-                    Debug.Log($"[TSDFPrintExporter] interior cull: {beforeCull - ti.Count / 3} of " +
-                              $"{beforeCull} chain tris removed (buried in other lines).", this);
-                }
-
-                // KNOWN LIMITATION: beads need the full point cloud, so they
-                // append after the black-line pass and land in the BLACK span,
-                // not the white one their tooltip claims. The feature is
-                // rejected/default-off; fix the span boundary if it ever
-                // returns (codex round-1 NON_BLOCKING).
-                if (stlContactBeads)
-                    AppendContactBeads(linkPts, linkRanges, line, col, tp, tn, tc, ti);
 
                 if (includeBridges)
                 {
@@ -1616,191 +1718,6 @@ namespace TSDF
             CurveTubeBuilder.AppendCurveTubes(line, col, 1f, radii[0], 8, 0f,
                 Vector3.zero, 0f, tp, tn, tc, ti, tipTaper: 1f, exportSpace: false,
                 ringRadii: radii);
-        }
-
-        /// <summary>Interior-face culling: removes every chain triangle whose
-        /// centroid lies clearly INSIDE another chain's bar — the buried faces
-        /// of overlapping lines are pure vertex waste. Inside test: distance to
-        /// a neighbouring chain's centreline segment &lt; that bar's INRADIUS
-        /// (square section: 0.707 × ring radius) minus 0.8 mm, so a bar's own
-        /// surface (exactly at its inradius) and mere touches survive.
-        /// Parallelised over triangles; compacts the index list in place and
-        /// shifts the black-lines span boundary by the triangles removed before
-        /// it.</summary>
-        private static void CullInteriorChainTris(List<(Vector3 p, float r, Vector3 tan)> pts,
-                                                  List<(int start, int count)> ranges,
-                                                  List<(int startTri, int triCount)> triRanges,
-                                                  List<Vector3> tp, List<int> ti,
-                                                  ref int blackBoundary)
-        {
-            int n = pts.Count;
-            var chainOf = new int[n];
-            var idxInChain = new int[n];
-            for (int c = 0; c < ranges.Count; c++)
-                for (int i = 0; i < ranges[c].count; i++)
-                { chainOf[ranges[c].start + i] = c; idxInChain[ranges[c].start + i] = i; }
-
-            // triangle -> owning chain, so a tube can NEVER cull its own faces
-            // (cap fans sit near the axis and would count as "inside" themselves)
-            var triChain = new int[ti.Count / 3];
-            for (int c = 0; c < triRanges.Count; c++)
-                for (int t = 0; t < triRanges[c].triCount; t++)
-                    triChain[triRanges[c].startTri + t] = c;
-
-            float cell = 0.03f;
-            var grid = new Dictionary<long, List<int>>(n / 2 + 1);
-            long Key(int kx, int ky, int kz) => (kx * 73856093L) ^ (ky * 19349663L) ^ (kz * 83492791L);
-            int C(float v) => Mathf.FloorToInt(v / cell);
-            for (int i = 0; i < n; i++)
-            {
-                long k = Key(C(pts[i].p.x), C(pts[i].p.y), C(pts[i].p.z));
-                if (!grid.TryGetValue(k, out var l)) grid[k] = l = new List<int>(8);
-                l.Add(i);
-            }
-
-            const float kInradius = 0.70710678f, kMargin = 0.0008f;
-            int triCount = ti.Count / 3;
-            var drop = new bool[triCount];
-            System.Threading.Tasks.Parallel.For(0, triCount, t =>
-            {
-                Vector3 cen = (tp[ti[t * 3]] + tp[ti[t * 3 + 1]] + tp[ti[t * 3 + 2]]) / 3f;
-                int cx = C(cen.x), cy = C(cen.y), cz = C(cen.z);
-                for (int gx = cx - 1; gx <= cx + 1; gx++)
-                    for (int gy = cy - 1; gy <= cy + 1; gy++)
-                        for (int gz = cz - 1; gz <= cz + 1; gz++)
-                        {
-                            if (!grid.TryGetValue(Key(gx, gy, gz), out var l)) continue;
-                            foreach (int qi in l)
-                            {
-                                // test against the segment STARTING at qi
-                                var (a, ra, _) = pts[qi];
-                                int ci = chainOf[qi];
-                                if (ci == triChain[t]) continue; // never self-cull
-                                if (idxInChain[qi] + 1 >= ranges[ci].count) continue;
-                                var (b, rb, _) = pts[qi + 1];
-                                Vector3 ab = b - a;
-                                float len2 = ab.sqrMagnitude;
-                                float h = len2 > 1e-12f
-                                    ? Mathf.Clamp01(Vector3.Dot(cen - a, ab) / len2) : 0f;
-                                float inr = Mathf.Lerp(ra, rb, h) * kInradius - kMargin;
-                                if (inr <= 0f) continue;
-                                if ((cen - (a + ab * h)).sqrMagnitude < inr * inr)
-                                { drop[t] = true; return; }
-                            }
-                        }
-            });
-
-            // Fragment cleanup: culling can leave orphaned scraps — a lone cap
-            // fan poking past the neighbour that swallowed its tube, sliver
-            // runs, etc. Union-find surviving triangles by shared vertex
-            // (vertices are shared only within a tube) and drop components
-            // smaller than 8 triangles.
-            var parent = new int[triCount];
-            for (int t = 0; t < triCount; t++) parent[t] = t;
-            int Find(int x) { while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
-            void Union(int a, int b) { a = Find(a); b = Find(b); if (a != b) parent[a] = b; }
-            var vertOwner = new Dictionary<int, int>(triCount);
-            for (int t = 0; t < triCount; t++)
-            {
-                if (drop[t]) continue;
-                for (int e = 0; e < 3; e++)
-                {
-                    int v = ti[t * 3 + e];
-                    if (vertOwner.TryGetValue(v, out int prev)) Union(t, prev);
-                    else vertOwner[v] = t;
-                }
-            }
-            var compSize = new Dictionary<int, int>(1024);
-            for (int t = 0; t < triCount; t++)
-            {
-                if (drop[t]) continue;
-                int root = Find(t);
-                compSize.TryGetValue(root, out int s);
-                compSize[root] = s + 1;
-            }
-            for (int t = 0; t < triCount; t++)
-                if (!drop[t] && compSize[Find(t)] < 8) drop[t] = true;
-
-            int blackTri = blackBoundary >= 0 ? blackBoundary / 3 : -1;
-            int w = 0, keptBeforeBlack = 0;
-            for (int t = 0; t < triCount; t++)
-            {
-                if (drop[t]) continue;
-                if (blackTri >= 0 && t < blackTri) keptBeforeBlack++;
-                ti[w * 3] = ti[t * 3]; ti[w * 3 + 1] = ti[t * 3 + 1]; ti[w * 3 + 2] = ti[t * 3 + 2];
-                w++;
-            }
-            ti.RemoveRange(w * 3, ti.Count - w * 3);
-            if (blackTri >= 0) blackBoundary = keptBeforeBlack * 3;
-        }
-
-        /// <summary>Weld beads: ONE short fat strut at the closest approach of
-        /// every touching (or just-grazing) chain pair. A graze prints as a
-        /// knife-edge seam that snaps in handling; the bead buries real material
-        /// in the joint. Appended before the wire span, so it stays in the
-        /// artwork (Curve) colour.</summary>
-        private void AppendContactBeads(List<(Vector3 p, float r, Vector3 tan)> pts, List<(int start, int count)> ranges,
-                                        List<Vector3[]> line, List<Vector3> col,
-                                        List<Vector3> tp, List<Vector3> tn, List<Vector3> tc, List<int> ti)
-        {
-            if (pts == null || ranges == null || ranges.Count < 2) return;
-            int n = pts.Count;
-            var chainOf = new int[n];
-            for (int c = 0; c < ranges.Count; c++)
-                for (int i = 0; i < ranges[c].count; i++)
-                    chainOf[ranges[c].start + i] = c;
-
-            float cell = Mathf.Max(0.03f, printRadius * 4f);
-            var grid = new Dictionary<long, List<int>>(n / 2 + 1);
-            long Key(int kx, int ky, int kz) => (kx * 73856093L) ^ (ky * 19349663L) ^ (kz * 83492791L);
-            int C(float v) => Mathf.FloorToInt(v / cell);
-            for (int i = 0; i < n; i++)
-            {
-                long k = Key(C(pts[i].p.x), C(pts[i].p.y), C(pts[i].p.z));
-                if (!grid.TryGetValue(k, out var l)) grid[k] = l = new List<int>(8);
-                l.Add(i);
-            }
-
-            // closest approach per touching pair (visit each pair once: a < b)
-            var best = new Dictionary<long, (float dSq, Vector3 a, Vector3 b, float r, Vector3 tanA, Vector3 tanB)>();
-            for (int i = 0; i < n; i++)
-            {
-                var (p, r, ptan) = pts[i];
-                int cx = C(p.x), cy = C(p.y), cz = C(p.z);
-                for (int gx = cx - 1; gx <= cx + 1; gx++)
-                    for (int gy = cy - 1; gy <= cy + 1; gy++)
-                        for (int gz = cz - 1; gz <= cz + 1; gz++)
-                        {
-                            if (!grid.TryGetValue(Key(gx, gy, gz), out var l)) continue;
-                            foreach (int qi in l)
-                            {
-                                if (chainOf[qi] <= chainOf[i]) continue;
-                                var (q, qr, qtan) = pts[qi];
-                                float lim = (r + qr) * 1.1f; // touching or just grazing
-                                float dSq = (q - p).sqrMagnitude;
-                                if (dSq > lim * lim) continue;
-                                long pairKey = ((long)chainOf[i] << 32) | (uint)chainOf[qi];
-                                if (!best.TryGetValue(pairKey, out var cur) || dSq < cur.dSq)
-                                    best[pairKey] = (dSq, p, q, Mathf.Max(r, qr), ptan, qtan);
-                            }
-                        }
-            }
-
-            int beads = 0;
-            foreach (var kvp in best)
-            {
-                var (dSq, a, b, r, tanA, tanB) = kvp.Value;
-                float d = Mathf.Sqrt(dSq);
-                // weld ONLY true grazes: solid overlaps (centrelines closer than
-                // 75% of the touch distance) bond fine on their own, and beading
-                // every contact reads as lumps all over the artwork
-                if (d < r * 1.5f) continue;
-                // smooth branch web between the two lines
-                AppendBranchStrut(a, tanA, r, b, tanB, r, line, col, tp, tn, tc, ti);
-                beads++;
-            }
-            if (beads > 0)
-                Debug.Log($"[TSDFPrintExporter] contact beads: {beads} welds.", this);
         }
 
         /// <summary>Struts for chains that touch nothing: neither another chain
@@ -2011,6 +1928,136 @@ namespace TSDF
         /// shells overlap; wound outward like every other shell. Returns the
         /// triangle count added; <paramref name="floorAt"/> gets the plate
         /// centre (grid-frame XZ, for the status line).</summary>
+        // ---------------- tube-head SDF burial ----------------
+        /// <summary>Read the current front SDF into <see cref="_burySdf"/> for
+        /// tube-head burial. Call while the body volume is hole-closed so the
+        /// interior reads as solid (sdf &lt; 0) everywhere, not just in the ±tau
+        /// surface band.</summary>
+        private void CaptureBurySdf()
+        {
+            _buryValid = false;
+            if (volume == null || volume.FrontBuffer == null) return;
+            var dim = volume.Dim;
+            int total = dim.x * dim.y * dim.z;
+            if (volume.FrontBuffer.count != total) return;
+            if (_burySdf == null || _burySdf.Length != total * 2) _burySdf = new float[total * 2];
+            volume.FrontBuffer.GetData(_burySdf);
+            _buryDim = dim;
+            _buryVoxelFromWorld = volume.VoxelFromWorld;
+            _buryValid = true;
+        }
+
+        private void ReleaseBurySdf()
+        {
+            _burySdf = null; _buryValid = false;
+        }
+
+        /// <summary>Trilinear SDF (metres) at a world point over observed voxels
+        /// (weight &gt; 0). False when the point is outside the grid or all eight
+        /// corners are unobserved.</summary>
+        private bool TrySampleBurySdf(Vector3 world, out float sdf)
+        {
+            sdf = 0f;
+            if (!_buryValid) return false;
+            Vector3 v = _buryVoxelFromWorld.MultiplyPoint3x4(world);
+            int x0 = Mathf.FloorToInt(v.x), y0 = Mathf.FloorToInt(v.y), z0 = Mathf.FloorToInt(v.z);
+            if (x0 < 0 || y0 < 0 || z0 < 0 ||
+                x0 + 1 >= _buryDim.x || y0 + 1 >= _buryDim.y || z0 + 1 >= _buryDim.z) return false;
+            float fx = v.x - x0, fy = v.y - y0, fz = v.z - z0;
+            int sx = _buryDim.x, sxy = _buryDim.x * _buryDim.y;
+            float acc = 0f, wsum = 0f;
+            for (int dz = 0; dz < 2; dz++)
+                for (int dy = 0; dy < 2; dy++)
+                    for (int dx = 0; dx < 2; dx++)
+                    {
+                        int idx = ((x0 + dx) + sx * (y0 + dy) + sxy * (z0 + dz)) * 2;
+                        float w = _burySdf[idx + 1];
+                        if (w <= 0f) continue;
+                        float tw = (dx == 0 ? 1f - fx : fx) * (dy == 0 ? 1f - fy : fy) * (dz == 0 ? 1f - fz : fz);
+                        acc += _burySdf[idx] * tw; wsum += tw;
+                    }
+            if (wsum < 1e-4f) return false;
+            sdf = acc / wsum;
+            return true;
+        }
+
+        /// <summary>Bury a tube chain's NEWEST tip ~printRadius inside the body:
+        /// march back from the tip to the point where the SDF reaches -printRadius
+        /// and end the tube there, so the fat cap sits under the skin instead of
+        /// piercing it. Chains whose head is not near any body surface (free-
+        /// floating trails) are left untouched. Mutates <paramref name="pts"/>
+        /// (oldest→newest).</summary>
+        private void BuryHeadWithSdf(List<Vector3> pts)
+        {
+            int last = pts.Count - 1;
+            if (last < 1) return;
+            float target = -printRadius; // tip should sit a full radius deep
+            // already buried enough? leave it.
+            if (TrySampleBurySdf(pts[last], out float tipS) && tipS <= target) return;
+
+            const float maxBack = 0.30f; // don't hunt a "head poke" more than 30 cm back
+            float arc = 0f;
+            for (int i = last; i > 0; i--)
+            {
+                arc += (pts[i] - pts[i - 1]).magnitude;
+                if (arc > maxBack) return; // no burial found near the head -> free trail, leave it
+                bool kNew = TrySampleBurySdf(pts[i], out float sNew);
+                bool kOld = TrySampleBurySdf(pts[i - 1], out float sOld);
+                if (kOld && sOld <= target)
+                {
+                    // crossing where sdf == target between pts[i] (shallower) and pts[i-1] (buried)
+                    float sHi = kNew ? sNew : 0f;              // unknown newer end ≈ surface
+                    float denom = sHi - sOld;
+                    float t = Mathf.Abs(denom) < 1e-6f ? 1f : Mathf.Clamp01((sHi - target) / denom);
+                    Vector3 tip = Vector3.Lerp(pts[i], pts[i - 1], t);
+                    pts.RemoveRange(i, last - i + 1);          // drop pts[i..last]
+                    pts.Add(tip);
+                    return;
+                }
+                // newer point clearly inside but older unobserved => we crossed past the
+                // ±tau band into deep interior; ending at pts[i] is already buried.
+                if (!kOld && kNew && sNew <= target)
+                {
+                    if (i < last) pts.RemoveRange(i + 1, last - i);
+                    return;
+                }
+            }
+        }
+
+        /// <summary>Raise the floor plane <see cref="stlFloorRaise"/> above the
+        /// lowest point of the assembled geometry and clip everything below it by
+        /// pulling every sub-floor vertex UP onto the plane. Triangle indices are
+        /// left intact (the 3MF colour spans depend on them), so fully-below
+        /// triangles collapse to flat patches ON the plane and are buried inside
+        /// the floor plate; crossing triangles keep their lowered edge flush on the
+        /// plane. Works in the volume's tilt frame so the cut stays parallel to the
+        /// plate. Nothing prints under the floor.</summary>
+        private void ApplyFloorCut(List<Vector3> pos)
+        {
+            if (stlFloorRaise <= 1e-4f || pos.Count == 0) return;
+            Quaternion rot = volume != null && volume.boundingBox != null
+                ? volume.boundingBox.transform.rotation : Quaternion.identity;
+            Quaternion inv = Quaternion.Inverse(rot);
+
+            float minY = float.PositiveInfinity;
+            var localY = new float[pos.Count];
+            for (int i = 0; i < pos.Count; i++)
+            {
+                float y = (inv * pos[i]).y;
+                localY[i] = y;
+                if (y < minY) minY = y;
+            }
+            float cutY = minY + stlFloorRaise;
+
+            for (int i = 0; i < pos.Count; i++)
+            {
+                if (localY[i] >= cutY) continue;
+                var l = inv * pos[i];
+                l.y = cutY;
+                pos[i] = rot * l;
+            }
+        }
+
         private int AppendFloorPlane(List<Vector3> pos, List<int> tri, int bodyVerts,
                                      out Vector2 floorAt)
         {
