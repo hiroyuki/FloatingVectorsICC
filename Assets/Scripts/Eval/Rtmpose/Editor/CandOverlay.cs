@@ -38,7 +38,15 @@ namespace BodyTracking.Eval.Rtmpose
             var adapter = new RtmPoseAdapter(backend) { confThreshold = 0.3f };
             foreach (var dc0 in calib)
                 if (dc0.GlobalTrColorCamera.HasValue) adapter.SetWorldTransform(dc0.Serial, dc0.GlobalTrColorCamera.Value);
-            adapter.SetCaptureVolume(new Vector3(0, 200, 3000), new Vector3(1000, 1400, 900));
+            // Derive the person-selection volume from THIS take's rig. The old
+            // constant (0,200,3000)+-(1000,1400,900) meant "3 m in front of the
+            // origin camera" and only held while extrinsics put a camera at the
+            // origin; on a room-centred solve it points outside the room and every
+            // frame reports NO SKEL. See RigCaptureVolume.
+            if (RigCaptureVolume.TryDerive(calib, out var volC, out var volH))
+                adapter.SetCaptureVolume(volC, volH);
+            else
+                adapter.SetCaptureVolume(new Vector3(0, 200, 3000), new Vector3(1000, 1400, 900));
             EvalSkeleton lastSkel = null;
             adapter.OnSkeletons += f => lastSkel = f.Primary();
 

@@ -100,6 +100,26 @@ namespace BodyTracking.Eval.Rtmpose
         [Tooltip("Fallback capture volume half extents (mm).")]
         public Vector3 captureVolumeHalfMm = new Vector3(1100, 1500, 1100);
 
+        [Header("Body-profile calibration (star pose)")]
+        [Range(0f, 1f)]
+        [Tooltip("A bone-length sample is only taken when BOTH endpoint joints are " +
+                 "at least this confident in that camera. Filters the cameras seeing " +
+                 "the visitor edge-on, where an occluded joint is a guess and the " +
+                 "'bone length' it produces is fiction.")]
+        public float profileMinJointConfidence = 0.5f;
+
+        [Tooltip("Reject a measured bone whose interquartile spread exceeds " +
+                 "max(profileMaxIqrFrac x median, profileMaxIqrMm). A rejected bone " +
+                 "is left UNCONSTRAINED rather than falling back to the session " +
+                 "default — the default is one specific person's skeleton, and bone " +
+                 "length is a hard output constraint, so a wrong value deforms the " +
+                 "visitor toward that other body. For scale: the reference profile's " +
+                 "thighs have a 6% spread, its forearms 47%.")]
+        public float profileMaxIqrFrac = 0.15f;
+        [Tooltip("Absolute floor for the spread gate (mm) — keeps short bones " +
+                 "(pelvis-hip is ~110mm) from being rejected on the relative term alone.")]
+        public float profileMaxIqrMm = 40f;
+
         [Tooltip("Emit a heartbeat (temporal-hold frame) when no camera frame arrived " +
                  "for this many ms — covers sensor hiccups so curves never bridge a " +
                  "hole with a straight kink.")]
@@ -181,10 +201,31 @@ namespace BodyTracking.Eval.Rtmpose
             _profileSampling = true;
         }
 
-        /// <summary>Stop sampling and build a per-visitor profile. False when any
-        /// bone has fewer than <paramref name="minSamplesPerBone"/> plausible
-        /// samples — caller keeps the default profile then.</summary>
-        public bool EndBodyProfileSampling(int minSamplesPerBone, out BodyProfile profile, out string summary)
+        /// <summary>Stop sampling and build a per-visitor profile.
+        ///
+        /// PER-BONE, not all-or-nothing. A bone is accepted when it has enough
+        /// samples AND a tight interquartile spread. The spread gate matters because
+        /// the sampler pools every camera equally, including ones seeing the visitor
+        /// edge-on where a joint is occluded and the model is guessing; the shipped
+        /// reference profile shows the failure mode, carrying an IQR of 106 mm on a
+        /// 223 mm forearm (47%) against 22 mm on the thighs (6%).
+        ///
+        /// A rejected bone is NOT left unconstrained. Measured offline on
+        /// 2026-07-21_16-18-29, dropping the priors entirely sent shoulder/elbow
+        /// acceleration RMS from 41k to 109k with a 4048 mm single-joint excursion:
+        /// the profile is not merely a shape prior, it is the ONLY sanity check on
+        /// single-camera candidates (PassesParentLength returns true outright when
+        /// Profile is null, and TryRayRelift cannot run), so without it a blown-up
+        /// depth lift reaches the output unchallenged.
+        ///
+        /// Instead a rejected bone falls back to <paramref name="proportions"/>
+        /// SCALED to this visitor — the reference is one specific person's absolute
+        /// skeleton, but their proportions are a reasonable prior, and the scale
+        /// comes from whichever bones this visitor measured cleanly. So the guard
+        /// stays armed at roughly the right size instead of at a stranger's.
+        /// Returns false only when too little survived to be worth applying.</summary>
+        public bool EndBodyProfileSampling(int minSamplesPerBone, out BodyProfile profile,
+                                           out string summary, BodyProfile proportions = null)
         {
             _profileSampling = false;
             profile = null;
@@ -192,24 +233,62 @@ namespace BodyTracking.Eval.Rtmpose
             lock (_profileLock) { samples = _profileSamples; _profileSamples = null; }
             if (samples == null) { summary = "sampling was never started"; return false; }
 
+            proportions ??= CurrentBodyProfile;
             var p = new BodyProfile();
             var sb = new System.Text.StringBuilder();
+            var accepted = new bool[samples.Length];
+            int nAccepted = 0;
+            // scale = measured / reference, averaged over the bones that measured
+            // cleanly AND have a reference length to compare against
+            float scaleSum = 0f; int scaleN = 0;
+
             for (int b = 0; b < samples.Length; b++)
             {
                 var list = samples[b];
+                string name = $"{FusedRtmposeAdapter.Bones[b].a}-{FusedRtmposeAdapter.Bones[b].b}";
                 if (list.Count < minSamplesPerBone)
                 {
-                    summary = $"bone {FusedRtmposeAdapter.Bones[b].a}-{FusedRtmposeAdapter.Bones[b].b}: " +
-                              $"{list.Count}/{minSamplesPerBone} samples";
-                    return false;
+                    sb.Append($"{name}=WEAK({list.Count}/{minSamplesPerBone} samples) ");
+                    continue;
                 }
                 list.Sort();
-                p.LengthMm[b] = list[list.Count / 2];
-                sb.Append($"{FusedRtmposeAdapter.Bones[b].a}-{FusedRtmposeAdapter.Bones[b].b}=" +
-                          $"{p.LengthMm[b]:0}mm({list.Count}) ");
+                float med = list[list.Count / 2];
+                float q1 = list[list.Count / 4];
+                float q3 = list[Mathf.Min(list.Count - 1, (3 * list.Count) / 4)];
+                float iqr = q3 - q1;
+                float allowed = Mathf.Max(profileMaxIqrFrac * med, profileMaxIqrMm);
+                if (med <= 0f || iqr > allowed)
+                {
+                    sb.Append($"{name}=SPREAD({med:0}mm iqr {iqr:0}>{allowed:0} n={list.Count}) ");
+                    continue;
+                }
+                p.LengthMm[b] = med;
+                accepted[b] = true;
+                nAccepted++;
+                sb.Append($"{name}={med:0}mm(iqr {iqr:0} n={list.Count}) ");
+                if (proportions != null && proportions.LengthMm[b] > 0f)
+                { scaleSum += med / proportions.LengthMm[b]; scaleN++; }
             }
+
+            if (nAccepted * 2 < samples.Length)
+            {
+                summary = $"only {nAccepted}/{samples.Length} bones measured — " + sb;
+                return false;
+            }
+
+            float scale = scaleN > 0 ? scaleSum / scaleN : 1f;
+            for (int b = 0; b < samples.Length; b++)
+            {
+                if (accepted[b]) continue;
+                float refLen = proportions != null ? proportions.LengthMm[b] : 0f;
+                if (refLen <= 0f) continue; // nothing to scale — genuinely unconstrained
+                p.LengthMm[b] = refLen * scale;
+                sb.Append($"[{FusedRtmposeAdapter.Bones[b].a}-{FusedRtmposeAdapter.Bones[b].b}" +
+                          $"<-ref x{scale:0.00}={p.LengthMm[b]:0}mm] ");
+            }
+
+            summary = $"measured {nAccepted}/{samples.Length} bones, rest scaled x{scale:0.00} — " + sb;
             profile = p;
-            summary = sb.ToString();
             return true;
         }
 
@@ -242,6 +321,17 @@ namespace BodyTracking.Eval.Rtmpose
                 {
                     var (a, c) = FusedRtmposeAdapter.Bones[b];
                     if (!p.Joints[(int)a].Valid || !p.Joints[(int)c].Valid) continue;
+                    // Both endpoints must be CONFIDENTLY seen by this camera. Every
+                    // camera votes with equal weight here, including one looking at
+                    // the visitor edge-on with an arm behind the torso — there the
+                    // model hallucinates the hidden joint onto the silhouette and
+                    // the resulting "bone length" is fiction. Confidence is the
+                    // model's own 2D score, which is exactly what collapses on a
+                    // guessed joint, so it is the right gate. (Verified visually
+                    // with CandOverlay: the front camera's skeleton sits on the
+                    // body, the side camera's has an orphaned joint floating off it.)
+                    if (p.Joints[(int)a].Confidence < profileMinJointConfidence ||
+                        p.Joints[(int)c].Confidence < profileMinJointConfidence) continue;
                     float len = Vector3.Distance(p.Joints[(int)a].PositionMm, p.Joints[(int)c].PositionMm);
                     // Rigid-invariant same-camera length; drop implausible outliers so a
                     // partial detection can't poison the median.

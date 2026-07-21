@@ -180,7 +180,12 @@ namespace BodyTracking.Eval.Rtmpose
         {
             if (_writers != null) foreach (var kv in _writers) { try { kv.Value.Dispose(); } catch { } }
             _writers = null;
-            // FusedRtmposeAdapter.Dispose is a deliberate no-op (shared backend).
+            // Dispose is NO LONGER a no-op: it parks the adapter's dedicated
+            // inference threads, each of which pins an ORT per-thread CUDA context
+            // worth hundreds of MB. Dropping the adapter without it leaks those for
+            // the editor's lifetime, and this tool is re-run repeatedly. The shared
+            // backend still survives — Dispose only stops threads.
+            try { _fused?.Dispose(); } catch (Exception e) { Debug.LogException(e); }
             if (_go != null) UnityEngine.Object.DestroyImmediate(_go);
             _go = null; _driver = null; _fused = null; _order = null; _cursor = 0; _written = 0;
         }
