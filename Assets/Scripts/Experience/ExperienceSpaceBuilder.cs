@@ -68,6 +68,7 @@ namespace Experience
         [ContextMenu("Apply sensing area")]
         public void Apply()
         {
+            bool saved = false;
             if (boundingVolume == null)
             { Debug.LogWarning($"[{nameof(ExperienceSpaceBuilder)}] no boundingVolume assigned.", this); return; }
             if (!TryGetCameraPositions(out var camPos)) return;
@@ -122,8 +123,31 @@ namespace Experience
             boundingVolume.transform.localScale = new Vector3(size.x, areaHeight, size.z);
             if (floorOrigin != null) floorOrigin.boundingBox = boundingVolume;
 
+            // Persist next to cameras.yaml / floor.yaml rather than in the scene: the
+            // two sets share main.unity but not their camera positions, so a box
+            // committed to the scene lands wrong on the other machine.
+            var worldCenter = boundingVolume.transform.position;
+            var worldSize = boundingVolume.transform.localScale;
+            try
+            {
+                string root = sensorManager != null ? sensorManager.ResolveExtrinsicsRoot() : null;
+                if (!string.IsNullOrEmpty(root))
+                {
+                    PointCloudRecording.WriteSensingArea(root,
+                        new[] { worldCenter.x, worldCenter.y, worldCenter.z },
+                        new[] { worldSize.x, worldSize.y, worldSize.z },
+                        insetMeters, areaHeight);
+                    saved = true;
+                }
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogWarning($"[{nameof(ExperienceSpaceBuilder)}] sensing area not saved: {e.Message}", this);
+            }
+
             Debug.Log($"[{nameof(ExperienceSpaceBuilder)}] sensing area: center ({center.x:0.00}, {center.z:0.00}), " +
-                      $"size {size.x:0.00} x {areaHeight:0.0} x {size.z:0.00} m, floorY {floorY:0.00}.", this);
+                      $"size {size.x:0.00} x {areaHeight:0.0} x {size.z:0.00} m, floorY {floorY:0.00}" +
+                      (saved ? " (saved to sensing_area.yaml)." : " (NOT saved)."), this);
         }
 
         [ContextMenu("Restore previous volume")]

@@ -145,7 +145,7 @@ Transform:
   m_GameObject: {fileID: 7740001}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: -0.38268343, z: 0, w: 0.92387956}
-  m_LocalPosition: {x: 0.001, y: 0, z: 0.014}
+  m_LocalPosition: {x: 9, y: 4.5, z: -9}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -1098,6 +1098,7 @@ MonoBehaviour:
   clearSamplesKey: 8
   floorSampleKey: 102
   toggleUiKey: 104
+  rebuildSensingAreaKey: 98
   assignModeKey: 105
   setOriginKey: 111
   hidePointClouds: 1
@@ -1329,6 +1330,7 @@ MonoBehaviour:
   - CL8F253004Z
   rebaseFloorY: -0.9
   loadFloorYFromCalibration: 1
+  loadSensingAreaFromCalibration: 1
   targetFrameRate: 30
   verboseLogging: 0
 --- !u!4 &925702424
@@ -2335,8 +2337,8 @@ Transform:
   m_GameObject: {fileID: 1151541766}
   serializedVersion: 2
   m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
-  m_LocalPosition: {x: 0.001, y: 1.25, z: 0.014}
-  m_LocalScale: {x: 3.094, y: 2.5, z: 3.029}
+  m_LocalPosition: {x: 0, y: 1.25, z: 0}
+  m_LocalScale: {x: 3, y: 2.5, z: 3}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 894098144}
@@ -2561,6 +2563,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: BodyTracking::BodyTracking.BodyFloorMaskFeeder
   bodyTracking: {fileID: 1180694595}
   target: {fileID: 1016277181}
+  footHoldSeconds: 0.5
 --- !u!1 &1214840952
 GameObject:
   m_ObjectHideFlags: 0

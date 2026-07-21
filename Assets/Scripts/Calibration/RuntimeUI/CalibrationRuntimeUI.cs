@@ -93,6 +93,10 @@ namespace Calibration.RuntimeUI
                  "grid/sensing area are all skewed.")]
         public KeyCode floorSampleKey = KeyCode.F;
         public KeyCode toggleUiKey = KeyCode.H;
+        [Tooltip("Re-fit the sensing box to the current camera rig and save it to " +
+                 "calibration/sensing_area.yaml. Solve does this too; this key is for " +
+                 "when the cameras were nudged and a full re-solve is not warranted.")]
+        public KeyCode rebuildSensingAreaKey = KeyCode.B;
         [Tooltip("Enter/exit camera-id assign mode (also Esc to exit). In assign mode the action " +
                  "keys are suspended and the arrow keys reassign ids / pick the world origin.")]
         public KeyCode assignModeKey = KeyCode.I;
@@ -425,6 +429,11 @@ namespace Calibration.RuntimeUI
             // instead of firing Capture/Solve/etc.
             if (_assignMode) { HandleAssignInput(); return; }
             if (Input.GetKeyDown(assignModeKey)) { EnterAssignMode(); return; }
+            if (Input.GetKeyDown(rebuildSensingAreaKey))
+            {
+                SetStatus("Sensing area" + ApplySensingAids());
+                return;
+            }
 
             if (_floorTune) return; // Update already handled the nudge keys
 
@@ -933,6 +942,7 @@ namespace Calibration.RuntimeUI
                     $"[{dumpKey}] Dump   " +
                     $"[{clearSamplesKey}] Clear   " +
                     $"[{assignModeKey}] Assign-ID   " +
+                    $"[{rebuildSensingAreaKey}] Sensing-area   " +
                     $"0-9 Solo:{solo}   " +
                     $"[{toggleUiKey}] Hide UI   " +
                     $"[{toggleActiveKey}] Disable";
