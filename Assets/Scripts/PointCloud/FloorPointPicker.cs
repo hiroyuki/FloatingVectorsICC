@@ -32,11 +32,20 @@ namespace PointCloud
         private const float kMaxWorldMagnitudeSqr = 100f * 100f;
 
         /// <summary>
-        /// Resolve the camera the operator is looking at (display 0 / main). Falls
-        /// back through Camera.main → first active camera on display 0 → any camera.
+        /// Camera the pick must project through, when the caller owns one. Floor
+        /// tune sets this to the temporary top-down camera it puts on Display 1 —
+        /// the view the operator is actually clicking in. Cleared on tune exit.
+        /// </summary>
+        public static Camera PickCameraOverride;
+
+        /// <summary>
+        /// Resolve the camera the operator is looking at. The override wins; then
+        /// Camera.main → first active camera on Display 1 → any camera.
         /// </summary>
         public static Camera ResolvePickCamera()
         {
+            if (PickCameraOverride != null && PickCameraOverride.isActiveAndEnabled)
+                return PickCameraOverride;
             if (Camera.main != null && Camera.main.isActiveAndEnabled) return Camera.main;
             var all = Camera.allCameras;
             for (int i = 0; i < all.Length; i++)
@@ -50,11 +59,22 @@ namespace PointCloud
         /// within <paramref name="radiusPx"/> of <paramref name="screenPos"/> and
         /// is frontmost. Returns false when no cloud vertex falls under the cursor
         /// (e.g. the operator clicked empty space) or no readable mesh is active.
+        ///
+        /// <paramref name="restrictTo"/> confines candidates to that volume's OBB.
+        /// Pass the volume the clouds are being clipped to on screen: the meshes
+        /// keep their full vertex buffer regardless of the filter, so without this
+        /// the pick can land on a wall or the ceiling that the operator cannot see
+        /// — and a "floor" fitted to a wall stands the world on its side.
         /// </summary>
-        public static bool TryPick(Camera cam, Vector2 screenPos, float radiusPx, out Vector3 world)
+        public static bool TryPick(Camera cam, Vector2 screenPos, float radiusPx, out Vector3 world,
+                                   BoundingVolume restrictTo = null)
         {
             world = Vector3.zero;
             if (cam == null) return false;
+
+            // Cache the OBB test as a world→unit-cube matrix; inside is |axis| <= 0.5.
+            bool clip = restrictTo != null;
+            Matrix4x4 toBox = clip ? restrictTo.transform.worldToLocalMatrix : Matrix4x4.identity;
 
             float bestScreenDist2 = radiusPx * radiusPx;
             float bestDepth = float.PositiveInfinity;
@@ -87,6 +107,13 @@ namespace PointCloud
                         Vector3 wp = l2w.MultiplyPoint3x4(local);
                         // Drop invalid-depth sentinels / garbage before projecting.
                         if (!IsFinite(wp) || wp.sqrMagnitude > kMaxWorldMagnitudeSqr) continue;
+                        // Only what the operator can actually see is pickable.
+                        if (clip)
+                        {
+                            Vector3 bp = toBox.MultiplyPoint3x4(wp);
+                            if (Mathf.Abs(bp.x) > 0.5f || Mathf.Abs(bp.y) > 0.5f || Mathf.Abs(bp.z) > 0.5f)
+                                continue;
+                        }
 
                         Vector3 sp = cam.WorldToScreenPoint(wp);
                         if (sp.z <= 0f) continue; // behind the camera

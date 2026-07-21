@@ -859,7 +859,7 @@ MonoBehaviour:
   poseGuideSizePixels: 420
   poseImagePosition: {x: 0, y: -250}
   poseLabelPosition: {x: 0, y: 70}
-  countdownPosition: {x: 0, y: 350}
+  countdownPosition: {x: 0, y: 0}
   messagePosition: {x: 0, y: 0}
   qrHeadlinePosition: {x: 0, y: 420}
   progressBarWidth: 800
@@ -877,7 +877,7 @@ GameObject:
   - component: {fileID: 814255264}
   - component: {fileID: 814255267}
   m_Layer: 0
-  m_Name: Display2 Camera
+  m_Name: Display3 Camera
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -1098,6 +1098,7 @@ MonoBehaviour:
   cameraHeightMeters: 1
   floorTuneKey: 103
   floorTuneStep: 0.01
+  floorPickRadiusPx: 12
   applySensingAidsOnSolve: 1
   spaceBuilder: {fileID: 0}
   suspendInterferingComponents: 1
@@ -2767,9 +2768,7 @@ MonoBehaviour:
   tubeHeadTrim: 0.04
   stlBuryTubeHeads: 1
   tubeAlignUp: 1
-  stlContactBeads: 0
   stlBlackLineRatio: 0
-  stlCullInteriorFaces: 0
   stlContactFillets: 0
   stlFilletVoxel: 0.002
   stlFilletBlend: 0.012

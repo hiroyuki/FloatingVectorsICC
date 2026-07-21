@@ -9,10 +9,10 @@
 // per-display camera routes the UI to its physical display in builds AND an
 // explicit cam.Render() captures the UI in Editor verification.
 //
-// The red fault alert must also cover the OPERATOR display (display 0), where
+// The red fault alert must also cover the OPERATOR display (Display 1), where
 // the HUD and the 4-camera tiles are IMGUI — and IMGUI draws over uGUI. So
 // the operator alert is drawn in IMGUI here (primary display only, which IS
-// display 0), and Shared.OperatorOverlayGate.AlertActive tells the other
+// Display 1), and Shared.OperatorOverlayGate.AlertActive tells the other
 // IMGUI overlays to stand down while it is up.
 //
 // Priority inside the visitor canvases is sibling order: message < QR < alert
@@ -28,7 +28,7 @@ namespace Experience
     public class VisitorMessageUI : MonoBehaviour
     {
         [Tooltip("Display indices that get a visitor overlay canvas (a camera with " +
-                 "this targetDisplay must exist). Operator display 0 is IMGUI-only.")]
+                 "this targetDisplay must exist). Operator Display 1 is IMGUI-only.")]
         public int[] visitorDisplays = { 1, 2 };
 
         [Tooltip("OS font names tried in order for the visitor text (kids-friendly " +
@@ -361,7 +361,7 @@ namespace Experience
             ClearAlert();
         }
 
-        // ---------------- operator-side alert (IMGUI, display 0) ----------------
+        // ---------------- operator-side alert (IMGUI, Display 1) ----------------
 
         private void OnGUI()
         {
@@ -469,7 +469,10 @@ namespace Experience
 
         private DisplayUi BuildDisplayUi(int display, Camera cam)
         {
-            var root = new GameObject($"_VisitorUI_Display{display}");
+            // `display` is Unity's 0-based targetDisplay; the name is 1-origin
+            // (project convention) so the hierarchy reads the same as the
+            // Inspector, the OS and the physical screens.
+            var root = new GameObject($"_VisitorUI_Display{display + 1}");
             root.transform.SetParent(transform, false);
 
             var canvas = root.AddComponent<Canvas>();
