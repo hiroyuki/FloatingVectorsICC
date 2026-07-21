@@ -151,6 +151,12 @@ namespace Experience
         [TextArea] public string crowdText = "じゅうたんのうえは　ひとりだけ　にしてね";
 
         [Header("Visitor texts — sequence (hiragana)")]
+        [TextArea]
+        [Tooltip("Privacy consent shown FIRST on entry (Consent state). A visitor who " +
+                 "does not want their sculpture published leaves the carpet here.")]
+        public string consentText =
+            "このさくひんは　インターネットで　みられるように　なります。\n" +
+            "それが　いやなひとは　たいけんが　できないので　そとに　でてね。";
         [TextArea] public string welcomeText = "ようこそ、からだをつかって　おもしろいかたちが　つくれるよ";
         [TextArea] public string calibrateText = "この　ポーズを　とってね";
         [TextArea] public string calibrateMatchedText = "はかれたよ！";

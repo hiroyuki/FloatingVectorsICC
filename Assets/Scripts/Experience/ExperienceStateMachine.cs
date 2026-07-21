@@ -35,7 +35,7 @@ namespace Experience
 {
     public enum ExperienceState
     {
-        Idle, Welcome, Calibrate, FreeMove, Shoot, Processing, ResultShow, QrShow, Fault
+        Idle, Consent, Welcome, Calibrate, FreeMove, Shoot, Processing, ResultShow, QrShow, Fault
     }
 
     /// <summary>Per-tick inputs from the director (already debounced where
@@ -59,6 +59,12 @@ namespace Experience
     public class ExperienceTimings
     {
         [Min(0f)]
+        [Tooltip("Privacy-consent notice shown on area entry, BEFORE the greeting: the " +
+                 "sculpture will be published online, so a visitor who objects opts out " +
+                 "by simply leaving the carpet while it shows. Auto-advances to Welcome " +
+                 "when the window elapses.")]
+        public float consentSeconds = 8f;
+        [Min(0f)]
         [Tooltip("Welcome greeting duration on area entry, before the star-pose window.")]
         public float welcomeSeconds = 4f;
         [Min(0f)]
@@ -78,9 +84,17 @@ namespace Experience
         [Min(0f)] public float exportFailNoticeSeconds = 5f;
         [Min(0f)] public float qrShowSeconds = 30f;
 
+        [Min(0f)]
+        [Tooltip("Grace period after the visitor leaves the sensing area before the run " +
+                 "resets to Idle. Absorbs presence chattering and momentary occlusion / " +
+                 "brief step-outs — the visitor must stay outside this long for the reset " +
+                 "to fire. Applies to every interactive stage (Consent..Processing).")]
+        public float leaveGraceSeconds = 5f;
+
         [Header("Dev stage skipping (enter, then advance immediately)")]
         [UnityEngine.Serialization.FormerlySerializedAs("skipAttract")]
         public bool skipIdle;
+        public bool skipConsent;
         public bool skipWelcome;
         public bool skipCalibrate;   // default bone profile
         public bool skipFreeMove;
@@ -107,6 +121,10 @@ namespace Experience
         private float _processingFailElapsed;
         private bool _exportFailLatched;
         private float _exportFailElapsed;
+        // How long the visitor has been continuously absent in an interactive
+        // stage. The reset to Idle waits until this passes leaveGraceSeconds so
+        // presence chattering / a brief step-out never drops the run.
+        private float _absentElapsed;
 
         public void Tick(float dt, in ExperienceInputs inputs, ExperienceTimings t)
         {
@@ -124,7 +142,16 @@ namespace Experience
                     break;
 
                 case ExperienceState.Idle:
-                    if (t.skipIdle || inputs.Present) Go(ExperienceState.Welcome);
+                    if (t.skipIdle || inputs.Present) Go(ExperienceState.Consent);
+                    break;
+
+                case ExperienceState.Consent:
+                    // Privacy gate: the visitor reads that the sculpture goes online
+                    // and opts out by leaving (LeftEarly → Idle). Staying through the
+                    // window is the consent — advance to the greeting.
+                    if (LeftEarly(inputs)) break;
+                    if (t.skipConsent || TimeInState >= t.consentSeconds)
+                        Go(ExperienceState.Welcome);
                     break;
 
                 case ExperienceState.Welcome:
@@ -189,10 +216,24 @@ namespace Experience
                     break;
             }
 
+            // Absence in an interactive stage only resets the run after the
+            // visitor has been continuously gone for leaveGraceSeconds — a
+            // chattering signal or a momentary step-out holds the state instead
+            // of dropping it. Returns true whenever the visitor is absent (hold
+            // or reset), so the caller skips this tick's normal progression.
             bool LeftEarly(in ExperienceInputs i)
             {
-                if (i.Present) return false;
-                Go(ExperienceState.Idle);
+                if (i.Present) { _absentElapsed = 0f; return false; }
+                // Freeze the state's own clock while absent: undo this tick's
+                // TimeInState advance so every dwell (above all the consent
+                // window, and the director-owned Shoot cue/countdown/capture
+                // which reads TimeInState) measures REAL presence, never
+                // wall-clock that elapsed while the visitor was gone. Without
+                // this a sub-grace step-out could expire the consent timer or
+                // fire recording start / RecordingDone with nobody present.
+                TimeInState -= dt;
+                _absentElapsed += dt;
+                if (_absentElapsed >= t.leaveGraceSeconds) Go(ExperienceState.Idle);
                 return true;
             }
         }
@@ -216,6 +257,7 @@ namespace Experience
             _processingFailElapsed = 0f;
             _exportFailLatched = false;
             _exportFailElapsed = 0f;
+            _absentElapsed = 0f;
         }
 
         private void Go(ExperienceState to)
@@ -223,6 +265,7 @@ namespace Experience
             var from = State;
             State = to;
             TimeInState = 0f;
+            _absentElapsed = 0f; // every state starts its own leave-grace clock
             // Clear each state's OWN latches on entry — stale director flags
             // must never fast-forward the next visitor's run.
             switch (to)

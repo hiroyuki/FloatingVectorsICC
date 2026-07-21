@@ -241,6 +241,7 @@ namespace Experience
             switch (s)
             {
                 case ExperienceState.Idle:
+                case ExperienceState.Consent:
                 case ExperienceState.Welcome:
                 case ExperienceState.Calibrate:
                 case ExperienceState.FreeMove:
@@ -610,8 +611,9 @@ namespace Experience
 
             // Idle → visitor handoff (k4abt pipeline only): restart the workers
             // across the clock jump left by the previous run's playback. The
-            // fused source has no workers to restart.
-            if (from == ExperienceState.Idle && to == ExperienceState.Welcome)
+            // fused source has no workers to restart. Consent is the first
+            // interactive state now, so the restart happens on entering it.
+            if (from == ExperienceState.Idle && to == ExperienceState.Consent)
             {
                 if (merger != null && !LfbsActive && HasLiveRenderers()) merger.RestartWorkers();
             }
@@ -648,6 +650,8 @@ namespace Experience
                     ApplyBodySource(BodySource.Live);
                     if (HasLiveRenderers()) sensorManager?.SetLiveSuppressedAsSource(false);
                     break;
+                case ExperienceState.Consent:
+                    break; // silent privacy notice — message only (ShowStateMessage)
                 case ExperienceState.Welcome:
                     PlaySe(config.startSe); // greeting chime moves with the entry state
                     break;
@@ -742,6 +746,7 @@ namespace Experience
             switch (state)
             {
                 case ExperienceState.Idle: _ui.ClearAll(); break; // floor grid only
+                case ExperienceState.Consent: _ui.ShowMessage(config.consentText); break;
                 case ExperienceState.Welcome: _ui.ShowMessage(config.welcomeText); break;
                 case ExperienceState.Calibrate:
                     if (_calibrationDone) _ui.ShowMessage(config.calibrateMatchedText);
