@@ -1098,7 +1098,10 @@ MonoBehaviour:
   cameraHeightMeters: 1
   floorTuneKey: 103
   floorTuneStep: 0.01
-  floorPickRadiusPx: 12
+  floorFitBandMeters: 0.12
+  floorFitInsetMeters: 0.4
+  floorTunePitchDeg: 55
+  floorMaxTiltDeg: 40
   applySensingAidsOnSolve: 1
   spaceBuilder: {fileID: 0}
   suspendInterferingComponents: 1
@@ -2254,9 +2257,9 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1151541766}
   serializedVersion: 2
-  m_LocalRotation: {x: 0.013694445, y: -0, z: 0.0090963105, w: 0.9998649}
-  m_LocalPosition: {x: -0.023101505, y: 1.2006135, z: 0.034779187}
-  m_LocalScale: {x: 3.2, y: 2.5, z: 3.2}
+  m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
+  m_LocalPosition: {x: 0.001, y: 1.25, z: 0.014}
+  m_LocalScale: {x: 3.094, y: 2.5, z: 3.029}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 894098144}

@@ -108,8 +108,9 @@ pairwise の結果は「cam0 のレンズ基準」なので、そのままでは
 ### 後処理（自動）
 
 `applySensingAids` が ON なら、ソルブ成功時に:
-- `ExperienceSpaceBuilder.Apply()` — 4 カメラ位置から 1m 内側に寄せた矩形で
-  BoundingVolume をリシェイプ（sensing area）
+- `ExperienceSpaceBuilder.Apply()` — 4 カメラ位置から 80cm 内側に寄せた矩形で
+  BoundingVolume をリシェイプ（sensing area）。高さは `areaHeight` = 2.5m、
+  rotation は必ず identity（床は世界側で水平化済みなので箱を傾けない）
 - 床グリッド ON（`FloorOrigin.showGrid` / `fitToBoundingBox`）
 - 全カメラの frustum マーカー表示
 
