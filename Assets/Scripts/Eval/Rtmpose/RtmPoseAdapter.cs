@@ -85,15 +85,29 @@ namespace BodyTracking.Eval.Rtmpose
         public int StatAsyncKicks, StatAsyncSkippedFrames; // async-detect diagnostics
 
         // ---- async detect state ----
-        // Owner thread = the adapter's single submit thread; the detect job runs
-        // on the thread pool and touches ONLY its own copies. Handoff via
-        // _asyncState (volatile): 0=idle (worker owns), 1=running (pool owns),
-        // 2=done (worker adopts, then resets to 0).
+        // Owner thread = the adapter's single submit thread; the detect job runs on
+        // THIS ADAPTER'S OWN long-lived thread and touches ONLY its own copies.
+        // Handoff via _asyncState (volatile): 0=idle (submitter owns),
+        // 1=running (detect thread owns), 2=done (submitter adopts, then resets to 0).
+        //
+        // The detect thread is dedicated, NOT a thread-pool task, and that is a
+        // memory requirement rather than a style choice: ORT's CUDA EP keeps a
+        // per-thread context (cuBLAS/cuDNN handles + workspace) for every thread
+        // that ever calls Run, and never releases it. Dispatching detects through
+        // Task.Run walks the whole thread pool over time, so the device arena grows
+        // without bound. Measured offline (4 cameras, 360 bursts, no Play/TSDF):
+        // thread pool 2.4 GB -> 11.4 GB and still climbing, one dedicated thread per
+        // camera a FLAT 3.2 GB for the same work. See
+        // Plans/handoff-rtmpose-vram-paging.md.
         private byte[] _detColorCopy = System.Array.Empty<byte>();
         private readonly DetBox[] _asyncBoxes = new DetBox[MaxDet];
         private volatile int _asyncState;
         private int _asyncCount, _asyncW, _asyncH;
         private volatile bool _detectFailLogged;
+
+        private System.Threading.Thread _detectThread;
+        private readonly System.Threading.AutoResetEvent _detectGo = new System.Threading.AutoResetEvent(false);
+        private volatile bool _detectStop;
 
         private void KickAsyncDetect(byte[] rgb, int w, int h)
         {
@@ -103,9 +117,28 @@ namespace BodyTracking.Eval.Rtmpose
             Buffer.BlockCopy(rgb, 0, _detColorCopy, 0, bytes);
             _asyncW = w; _asyncH = h;
             StatAsyncKicks++;
+            EnsureDetectThread();
             _asyncState = 1;
-            System.Threading.Tasks.Task.Run(() =>
+            _detectGo.Set();
+        }
+
+        private void EnsureDetectThread()
+        {
+            if (_detectThread != null) return;
+            _detectThread = new System.Threading.Thread(DetectLoop)
             {
+                IsBackground = true,
+                Name = "rtmpose-detect",
+            };
+            _detectThread.Start();
+        }
+
+        private void DetectLoop()
+        {
+            while (true)
+            {
+                _detectGo.WaitOne();
+                if (_detectStop) return;
                 long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
                 try { _asyncCount = _backend.Detect(_detColorCopy, _asyncW, _asyncH, _asyncBoxes); }
                 catch (Exception e)
@@ -131,8 +164,44 @@ namespace BodyTracking.Eval.Rtmpose
                     DetectMs[DetectN++ % TimingCap] = MsSince(t0);
                     _asyncState = 2;
                 }
-            });
+            }
         }
+
+        /// <summary>Stop this adapter's detect thread WITHOUT disposing the backend.
+        /// FusedRtmposeAdapter owns a shared backend and must be able to retire its
+        /// inner adapters (playback loop rebuild) without killing it — Dispose()
+        /// would take the sessions down for every other camera.
+        ///
+        /// Returns FALSE when the thread had to be abandoned. The caller must then
+        /// NOT dispose the backend: an abandoned detect is still inside
+        /// OrtRtmposeBackend.Detect holding _detectLock, and Dispose() blocks on
+        /// that same lock — so "abandoning" would silently turn into an unbounded
+        /// stall on whatever thread called Dispose (the main thread, via
+        /// OnDisable). Leak the backend instead; process teardown reclaims it.
+        ///
+        /// The verdict LATCHES. This clears _detectThread, so a second call (or a
+        /// second Dispose) would otherwise find no thread, report success, and
+        /// dispose the backend under the still-running detect — reopening exactly
+        /// the stall this returns false to prevent.</summary>
+        public bool StopDetectThread()
+        {
+            var t = _detectThread;
+            if (t != null)
+            {
+                _detectStop = true;
+                _detectGo.Set();
+                // A detect in flight is bounded (one inference); if it somehow is
+                // not, abandon the thread rather than stalling the caller — it is a
+                // background thread and touches only its own buffers.
+                if (!t.Join(2000)) _backendDisposeUnsafe = true;
+                _detectThread = null;
+            }
+            return !_backendDisposeUnsafe;
+        }
+
+        // Latched: once a detect thread has been abandoned inside ORT, this
+        // adapter's backend can never be safely disposed again.
+        private bool _backendDisposeUnsafe;
 
         static float MsSince(long t0) => (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000f / System.Diagnostics.Stopwatch.Frequency;
 
@@ -386,6 +455,18 @@ namespace BodyTracking.Eval.Rtmpose
         }
 
         public void Pump() { }
-        public void Dispose() => _backend.Dispose();
+
+        public void Dispose()
+        {
+            // Only tear the sessions down once the detect thread is provably out of
+            // them. An abandoned detect still holds the backend's _detectLock, which
+            // Dispose() itself takes — disposing anyway converts a bounded
+            // abandonment into an unbounded stall on the caller's thread.
+            if (StopDetectThread()) _backend.Dispose();
+            else
+                Debug.LogError("[rtmpose] detect thread did not stop within 2s — abandoning the " +
+                               "backend (deliberate leak) instead of disposing ONNX sessions under " +
+                               "a running inference");
+        }
     }
 }

@@ -469,8 +469,27 @@ namespace BodyTracking.Eval.Rtmpose
             s.Reader?.Join(1000);
             if (s.Worker == null || s.Worker.Join(5000))
             {
-                // clean exit: the worker is gone, the session is ours to dispose
-                s.Backend?.Dispose();
+                // clean exit: the worker is gone, the session is ours to dispose.
+                // Adapter first — it parks its dedicated inference threads, and
+                // none of them may be inside a Run when the sessions go away.
+                bool abandoned = false;
+                try
+                {
+                    s.Fused?.Dispose();
+                    abandoned = s.Fused != null && s.Fused.InferenceThreadsAbandoned;
+                }
+                catch (Exception e) { Debug.LogException(e); abandoned = true; }
+
+                // Same contract as the stuck-worker branch below: a thread still
+                // inside ORT means the backend is NOT ours to dispose. Disposing
+                // would block on the backend's _detectLock (held for the whole
+                // native Detect) and hang the main thread here instead of merely
+                // leaking. Leak it; process teardown reclaims it.
+                if (!abandoned) s.Backend?.Dispose();
+                else
+                    Debug.LogError($"[{nameof(LiveFusedBodySource)}] an inference thread did not stop — " +
+                                   "abandoning the ONNX backend (deliberate leak) instead of disposing " +
+                                   "sessions under a running inference", this);
                 s.Wake.Dispose();
             }
             else
@@ -919,8 +938,40 @@ namespace BodyTracking.Eval.Rtmpose
         {
             try
             {
+                // Retire the old adapter's dedicated inference threads BEFORE
+                // building the replacement: each parks an ORT per-thread CUDA
+                // context worth hundreds of MB, and a looping playback rebuilds
+                // this often. Dispose() only stops threads — the shared backend
+                // normally survives.
+                var prev = s.Fused;
+                var profile = prev?.Profile;
+                bool abandoned = false;
+                if (prev != null)
+                {
+                    try { prev.Dispose(); abandoned = prev.InferenceThreadsAbandoned; }
+                    catch (Exception e) { Debug.LogException(e); abandoned = true; }
+                }
+                if (abandoned)
+                {
+                    // An abandoned thread can sit inside ORT holding the backend's
+                    // _detectLock forever, which makes every LATER Detect on that
+                    // backend block too — the camera would simply stop detecting,
+                    // silently, with the counters reading like an empty room. So a
+                    // poisoned backend is not merely undisposable, it is unusable:
+                    // end the session instead of fusing on it. s.Fused stays on the
+                    // (disposed) prev so OnDisable reads its latched
+                    // InferenceThreadsAbandoned and leaks the backend rather than
+                    // blocking on Dispose.
+                    Debug.LogError($"[{nameof(LiveFusedBodySource)}] an inference thread did not stop " +
+                                   "while rebuilding the fusion adapter — the shared ONNX backend may " +
+                                   "still be held by it, so the session is stopping instead of reusing " +
+                                   "it. Re-enable the component to start a fresh backend.", this);
+                    s.Stop = true;
+                    return;
+                }
+
                 var next = new FusedRtmposeAdapter(s.Backend) { ConfThreshold = confThreshold, medianLagFilter = medianLagFilter, AsyncDetect = true };
-                next.Profile = s.Fused?.Profile;
+                next.Profile = profile;
                 next.SetCaptureVolume(s.VolCenterMm, s.VolHalfMm);
                 foreach (var kv in s.Xform) next.SetWorldTransform(kv.Key, kv.Value.G);
                 next.OnSkeletons += f => OnFusedSkeletons(s, f);

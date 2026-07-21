@@ -30,6 +30,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Text.RegularExpressions;
+using System.Threading;
 using Orbbec;
 using PointCloud;
 using UnityEngine;
@@ -359,13 +360,7 @@ namespace BodyTracking.Eval.Rtmpose
                 if (_pendingBurstTs != 0 && items[start].TsNs > _pendingBurstTs + BurstGapNs)
                     FusePendingBurst();
 
-                var group = items; // capture list, not the loop range vars, in the lambda
-                System.Threading.Tasks.Parallel.For(start, end, i =>
-                {
-                    var it = group[i];
-                    try { PerSerial(it.Serial).SubmitFrame(it.Serial, it.Frame, it.TsNs); }
-                    catch (Exception e) { Debug.LogException(e); }
-                });
+                RunGroupOnDedicatedThreads(items, start, end);
 
                 for (int i = start; i < end; i++)
                 {
@@ -374,6 +369,82 @@ namespace BodyTracking.Eval.Rtmpose
                 }
                 start = end;
             }
+        }
+
+        // ---- dedicated inference threads ----
+        // These replace a Parallel.For over the burst. The parallelism is the same
+        // (one camera per thread, barrier at the end); what changes is that the
+        // threads are LONG-LIVED and reused, instead of whatever thread-pool threads
+        // happen to be free.
+        //
+        // That is a memory requirement. ORT's CUDA EP keeps a per-thread context
+        // (cuBLAS/cuDNN handles + workspace) for every thread that ever calls Run and
+        // never releases it, so cycling inference across the thread pool grows the
+        // device arena without bound. Measured offline (4 cameras, 360 bursts, no
+        // Play, no TSDF, no cameras): Parallel.For + Task.Run climbed 2.4 GB -> 11.4 GB
+        // and was still rising; the same work on a fixed thread per camera sat FLAT at
+        // 3.2 GB. On the 16 GB card that difference is the whole paging stall (27 fps
+        // -> 1.7 fps). See Plans/handoff-rtmpose-vram-paging.md.
+        sealed class BurstWorker
+        {
+            public Thread Thread;
+            public readonly AutoResetEvent Go = new AutoResetEvent(false);
+            public readonly ManualResetEventSlim Done = new ManualResetEventSlim(true);
+            public volatile bool Stop;
+            public FusedRtmposeAdapter Owner;
+            public string Serial;
+            public RawFrameData Frame;
+            public ulong TsNs;
+        }
+        readonly List<BurstWorker> _burstWorkers = new();
+
+        void RunGroupOnDedicatedThreads(List<BurstItem> items, int start, int end)
+        {
+            int n = end - start;
+            while (_burstWorkers.Count < n)
+            {
+                var w = new BurstWorker { Owner = this };
+                w.Thread = new Thread(() => BurstLoop(w)) { IsBackground = true, Name = "rtmpose-pose" };
+                _burstWorkers.Add(w);
+                w.Thread.Start();
+            }
+            for (int i = 0; i < n; i++)
+            {
+                var w = _burstWorkers[i];
+                var it = items[start + i];
+                w.Serial = it.Serial; w.Frame = it.Frame; w.TsNs = it.TsNs;
+                w.Done.Reset();
+                w.Go.Set();
+            }
+            for (int i = 0; i < n; i++) _burstWorkers[i].Done.Wait();
+        }
+
+        static void BurstLoop(BurstWorker w)
+        {
+            while (true)
+            {
+                w.Go.WaitOne();
+                if (w.Stop) return;
+                try { w.Owner.PerSerial(w.Serial).SubmitFrame(w.Serial, w.Frame, w.TsNs); }
+                catch (Exception e) { Debug.LogException(e); }
+                finally { w.Done.Set(); }
+            }
+        }
+
+        /// <summary>Returns false when any worker had to be abandoned — see
+        /// InferenceThreadsAbandoned.</summary>
+        bool StopBurstWorkers()
+        {
+            bool allStopped = true;
+            foreach (var w in _burstWorkers)
+            {
+                w.Stop = true;
+                w.Go.Set();
+                // bounded work (one camera's inference); abandon rather than stall
+                if (w.Thread != null && !w.Thread.Join(2000)) allStopped = false;
+            }
+            _burstWorkers.Clear();
+            return allStopped;
         }
 
         void FusePendingBurst()
@@ -454,7 +525,32 @@ namespace BodyTracking.Eval.Rtmpose
         // The inner adapter runs on the shared cached backend (see
         // BtFrameInspectorWindow.SharedBackend) — disposing it here would kill
         // the backend for every other user and crash later inference natively.
-        public void Dispose() { }
+        // The dedicated inference threads ARE ours, though, and a retired adapter
+        // (playback-loop rebuild) must not leave them parked forever: each one
+        // holds an ORT per-thread CUDA context worth hundreds of MB.
+        public void Dispose()
+        {
+            bool stopped = StopBurstWorkers();
+            lock (_adapterLock)
+                foreach (var a in _perSerial.Values)
+                    if (!a.StopDetectThread()) stopped = false;
+            // LATCHES: Dispose can run twice (retired by RebuildAdapter, then again
+            // from OnDisable). The second pass sees no threads left and would
+            // otherwise clear the flag, telling the caller the backend is safe to
+            // dispose when a thread is still inside ORT.
+            InferenceThreadsAbandoned |= !stopped;
+            if (!stopped)
+                Debug.LogError($"[{nameof(FusedRtmposeAdapter)}] an inference thread did not stop " +
+                               "within 2s — the caller must NOT dispose the shared backend now " +
+                               "(a thread is still inside ONNX Runtime)");
+        }
+
+        /// <summary>True when Dispose() had to abandon a thread that is still inside
+        /// an ORT Run. The backend MUST then be leaked rather than disposed:
+        /// OrtRtmposeBackend.Dispose takes the same _detectLock a running Detect
+        /// holds, so disposing would stall the calling (main) thread indefinitely —
+        /// exactly the unbounded wait the abandonment exists to avoid.</summary>
+        public bool InferenceThreadsAbandoned { get; private set; }
 
         void OnInnerSkeletons(EvalSkeletonFrame f)
         {

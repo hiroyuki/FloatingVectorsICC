@@ -223,7 +223,14 @@ namespace BodyTracking.Eval.Rtmpose
         /// <summary>A/B probe: serialize concurrent Pose calls. Live fusion runs the
         /// four cameras' Pose concurrently on ONE session; if the CUDA EP's shared
         /// per-session scratch corrupts overlapping runs, serializing restores the
-        /// offline (sequential) numerics at ~4x pose latency per burst.</summary>
+        /// offline (sequential) numerics at ~4x pose latency per burst.
+        ///
+        /// Do NOT reach for this to cut VRAM — measured live on the 5080 (clean
+        /// session, visitor standing) it did not move the CUDA arena at all and made
+        /// throughput worse: 12.4 fps / 9.5 Hz fused with concurrent Pose vs
+        /// 5.7 fps / 1.8 Hz serialized. The ~7.4 GB the two sessions hold is not
+        /// per-in-flight-Run activation memory. See
+        /// Plans/handoff-rtmpose-vram-paging.md.</summary>
         public static bool SerializePose = false;
         private readonly object _poseLock = new object();
 
