@@ -76,15 +76,60 @@ namespace Calibration.Tests
         }
 
         [Test]
-        public void StarPose_ArmsForward_Rejected()
+        public void StarPose_ArmsForward_Accepted()
         {
             MakeStar(out var joints, out var valid);
-            // Both arms pointing forward (+z), straight and level — must fail
-            // the along-shoulder-axis requirement.
+            // Both arms pointing forward (+z) at shoulder height. The predicate is
+            // four independent limb angles against Y, so this passes on purpose:
+            // the pose exists to MEASURE limb lengths, and with four cameras an arm
+            // that foreshortens for one of them is lateral for another.
             joints[J(k4abt_joint_id_t.K4ABT_JOINT_ELBOW_LEFT)] = new Vector3(-0.18f, 1.42f, 0.28f);
             joints[J(k4abt_joint_id_t.K4ABT_JOINT_ELBOW_RIGHT)] = new Vector3(0.18f, 1.42f, 0.28f);
             joints[J(k4abt_joint_id_t.K4ABT_JOINT_WRIST_LEFT)] = new Vector3(-0.18f, 1.44f, 0.54f);
             joints[J(k4abt_joint_id_t.K4ABT_JOINT_WRIST_RIGHT)] = new Vector3(0.18f, 1.44f, 0.54f);
+            Assert.IsTrue(PoseClassifiers.IsStarPose(joints, valid));
+        }
+
+        [Test]
+        public void StarPose_BentElbow_Accepted()
+        {
+            MakeStar(out var joints, out var valid);
+            // Elbow dropped so the arm is a wide V — shoulder→wrist still points
+            // sideways, which is all the measurement needs.
+            joints[J(k4abt_joint_id_t.K4ABT_JOINT_ELBOW_LEFT)] = new Vector3(-0.46f, 1.20f, 0f);
+            joints[J(k4abt_joint_id_t.K4ABT_JOINT_ELBOW_RIGHT)] = new Vector3(0.46f, 1.20f, 0f);
+            Assert.IsTrue(PoseClassifiers.IsStarPose(joints, valid));
+        }
+
+        [Test]
+        public void StarPose_ArmsRaisedHigh_Accepted()
+        {
+            MakeStar(out var joints, out var valid);
+            // Banzai with the feet still spread: the arms are clear of the torso,
+            // so their lengths measure fine. Only hanging arms are rejected.
+            joints[J(k4abt_joint_id_t.K4ABT_JOINT_WRIST_LEFT)] = new Vector3(-0.30f, 2.05f, 0f);
+            joints[J(k4abt_joint_id_t.K4ABT_JOINT_WRIST_RIGHT)] = new Vector3(0.30f, 2.05f, 0f);
+            Assert.IsTrue(PoseClassifiers.IsStarPose(joints, valid));
+        }
+
+        [Test]
+        public void StarPose_ArmsHangingWithFeetSpread_Rejected()
+        {
+            MakeStar(out var joints, out var valid);
+            // Feet spread but arms dropped to the sides — they overlap the torso,
+            // which is the one case the arm angle exists to reject.
+            joints[J(k4abt_joint_id_t.K4ABT_JOINT_ELBOW_LEFT)] = new Vector3(-0.20f, 1.12f, 0f);
+            joints[J(k4abt_joint_id_t.K4ABT_JOINT_ELBOW_RIGHT)] = new Vector3(0.20f, 1.12f, 0f);
+            joints[J(k4abt_joint_id_t.K4ABT_JOINT_WRIST_LEFT)] = new Vector3(-0.21f, 0.86f, 0f);
+            joints[J(k4abt_joint_id_t.K4ABT_JOINT_WRIST_RIGHT)] = new Vector3(0.21f, 0.86f, 0f);
+            Assert.IsFalse(PoseClassifiers.IsStarPose(joints, valid));
+        }
+
+        [Test]
+        public void StarPose_MissingPelvis_Rejected()
+        {
+            MakeStar(out var joints, out var valid);
+            valid[J(k4abt_joint_id_t.K4ABT_JOINT_PELVIS)] = false;
             Assert.IsFalse(PoseClassifiers.IsStarPose(joints, valid));
         }
 

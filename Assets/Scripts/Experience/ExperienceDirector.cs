@@ -78,6 +78,11 @@ namespace Experience
                  "health monitor.")]
         public bool debugForceFault;
 
+        [Tooltip("Log the star-pose conditions and their measured values twice a " +
+                 "second while Calibrate has not matched — for tuning the star* " +
+                 "thresholds against a real visitor. A '!' marks the failing term.")]
+        public bool debugPoseDiagnostics;
+
         // ---- IViewToggle ("Experience mode" in the Views panel) ----
         public string ViewLabel => "Experience mode";
         public bool Visible
@@ -111,6 +116,7 @@ namespace Experience
         private int _savedHistorySamples;
         private bool _savedCurvesVisible, _savedCurvesFreeze;
         private bool _savedMgrRebase, _savedRecRebase;
+        private float _lastPoseDiagAt;
         private bool _savedKeepLive;
         private string _savedPlaybackFolder;
         private bool _savedWasPlaying;
@@ -306,9 +312,10 @@ namespace Experience
             {
                 _savedCurvesVisible = motionCurves.visible;
                 _savedCurvesFreeze = motionCurves.freeze;
-                // Either flag would stall the capture-readiness wait (curves
-                // Update early-returns) — force them sane for the session.
-                motionCurves.visible = true;
+                // freeze would stall the capture-readiness wait (curves Update
+                // early-returns) — force it sane for the session. `visible` is
+                // owned per-state by ApplyCurvesVisibility (off until Calibrate
+                // is done), which the first state entry applies.
                 motionCurves.freeze = false;
             }
 
@@ -685,7 +692,31 @@ namespace Experience
                     break;
             }
             if (state != ExperienceState.Fault) _ui.ClearAlert();
+            ApplyCurvesVisibility(state);
             ShowStateMessage(state);
+        }
+
+        /// <summary>
+        /// The ribbons stay OFF until the star pose is done. Idle..Calibrate are
+        /// read-the-screen stages (notice, greeting, pose guide) and curves drawn
+        /// from the approach walk are noise the visitor has no way to read; the
+        /// sculpture should appear the moment it becomes theirs to move. From
+        /// FreeMove on they are the content, and Processing/ResultShow need them
+        /// visible because the capture builds from them.
+        /// </summary>
+        private void ApplyCurvesVisibility(ExperienceState state)
+        {
+            if (motionCurves == null) return;
+            // The moment the star pose lands, the sculpture is theirs — show the
+            // ribbons on the はかれたよ！ beat rather than one state later, so the
+            // reveal is tied to the visitor's own action.
+            if (state == ExperienceState.Calibrate && _calibrationDone)
+            { motionCurves.visible = true; return; }
+            motionCurves.visible = state is ExperienceState.FreeMove
+                                        or ExperienceState.Shoot
+                                        or ExperienceState.Processing
+                                        or ExperienceState.ResultShow
+                                        or ExperienceState.QrShow;
         }
 
         // ---------------- body-source switching ----------------
@@ -745,7 +776,8 @@ namespace Experience
             switch (state)
             {
                 case ExperienceState.Idle: _ui.ClearAll(); break; // floor grid only
-                case ExperienceState.Consent: _ui.ShowMessage(config.consentText); break;
+                // Framed box, small body text: this one is READ, not glanced at.
+                case ExperienceState.Consent: _ui.ShowNotice(config.consentText); break;
                 case ExperienceState.Welcome: _ui.ShowMessage(config.welcomeText); break;
                 case ExperienceState.Calibrate:
                     if (_calibrationDone) _ui.ShowMessage(config.calibrateMatchedText);
@@ -818,9 +850,15 @@ namespace Experience
                 if (TryGetLiveSkeleton(out var joints, out var valid))
                 {
                     star = PoseClassifiers.IsStarPose(joints, valid,
-                        config.starArmStraightnessMin, config.starArmLevelFactor,
-                        config.starArmLateralFactor, config.starAnkleSpreadFactor,
-                        config.starAnkleSpreadMinMeters);
+                        config.starArmAngleFromUpMaxDeg, config.starLegAngleFromDownMinDeg);
+                    if (debugPoseDiagnostics && !star
+                        && Time.realtimeSinceStartup - _lastPoseDiagAt > 0.5f)
+                    {
+                        _lastPoseDiagAt = Time.realtimeSinceStartup;
+                        Debug.Log("[star] " + PoseClassifiers.DescribeStarPose(joints, valid,
+                            config.starArmAngleFromUpMaxDeg,
+                            config.starLegAngleFromDownMinDeg), this);
+                    }
                     if (star && PoseClassifiers.TryMeasureMetrics(joints, valid, out var m))
                     {
                         armSum += m.ArmLengthMeters;
@@ -861,6 +899,7 @@ namespace Experience
                     }
 
                     _calibrationDone = true;
+                    ApplyCurvesVisibility(_fsm.State); // ribbons appear on the match
                     PlaySe(config.poseMatchedSe);
                     _ui.ShowMessage(config.calibrateMatchedText);
                     Debug.Log($"[{nameof(ExperienceDirector)}] star pose matched: arm " +
@@ -937,25 +976,38 @@ namespace Experience
             }
         }
 
-        // Cue text → countdown (recording starts WITH the countdown so the
-        // fusion has ~countdownSeconds of warm-up before the second that
-        // counts) → zero → captureSeconds of the actual take → stop.
+        // Cue text → countdown → zero → captureSeconds of the actual take → stop.
+        //
+        // Recording covers the CAPTURE WINDOW ONLY (plus recordPreRollSeconds).
+        // It used to start with the countdown, to warm the fusion up before the
+        // second that counts — but the live RTMPose fusion runs continuously
+        // through FreeMove, so it is already warm when Shoot begins. Recording
+        // the countdown only produced ~3 extra seconds per camera that the
+        // v11s conversion then paid full inference on and the capture threw
+        // away (the pose history keeps the capture window).
         private IEnumerator ShootRoutine()
         {
             var t = config.timings;
             float cueEnd = config.shootCueSeconds;
             float zeroAt = cueEnd + config.countdownSeconds;
             float shootEnd = zeroAt + config.captureSeconds;
+            // Opening four RCSV writers is not instant; start that much early so
+            // the first frames OF THE WINDOW are on disk. 0 = start exactly at zero.
+            float recStart = Mathf.Max(cueEnd, zeroAt - config.recordPreRollSeconds);
 
             while (_active && _fsm.State == ExperienceState.Shoot && _fsm.TimeInState < cueEnd)
                 yield return null;
             if (!_active || _fsm.State != ExperienceState.Shoot) yield break;
 
-            StartVisitorRecording();
-
             int shown = -1;
+            bool recStarted = false;
             while (_active && _fsm.State == ExperienceState.Shoot && _fsm.TimeInState < zeroAt)
             {
+                if (!recStarted && _fsm.TimeInState >= recStart)
+                {
+                    StartVisitorRecording();
+                    recStarted = true;
+                }
                 int remain = Mathf.Max(1, Mathf.CeilToInt(zeroAt - _fsm.TimeInState));
                 if (remain != shown)
                 {
@@ -966,6 +1018,10 @@ namespace Experience
                 yield return null;
             }
             if (!_active || _fsm.State != ExperienceState.Shoot) yield break; // exit cleanup aborts
+
+            // recordPreRollSeconds 0 (or a countdown short enough that the loop
+            // never ticked past recStart): start exactly at zero.
+            if (!recStarted) StartVisitorRecording();
 
             PlaySe(config.recordEndSe); // shutter at zero
             _ui.ShowMessage(config.shootingText);
@@ -1130,7 +1186,9 @@ namespace Experience
                                      "capturing anyway (mesh-only capture is valid).", this);
             }
 
-            var snap = TSDFSnapshotBuilder.Capture(tsdfVolume, motionCurves, CaptureOptions(), out string err);
+            var capOpt = CaptureOptions();
+            capOpt.deferDecimation = true; // longest phase — off the main thread, below
+            var snap = TSDFSnapshotBuilder.Capture(tsdfVolume, motionCurves, capOpt, out string err);
             if (snap == null)
             {
                 Debug.LogError($"[{nameof(ExperienceDirector)}] final capture failed: {err}", this);
@@ -1139,6 +1197,28 @@ namespace Experience
                 _processingRoutine = null;
                 yield break;
             }
+
+            // Decimation is seconds of single-threaded array math. Run it on a
+            // worker thread and keep ticking here, so the sculpture stays live
+            // and the progress bar keeps moving instead of the whole view
+            // freezing between the bar filling and できたよ！ appearing.
+            int targetTris = capOpt.meshTargetTris;
+            var decimateTask = System.Threading.Tasks.Task.Run(
+                () => TSDFSnapshotBuilder.Decimate(snap, targetTris));
+            while (!decimateTask.IsCompleted)
+            {
+                _ui.ShowProgress(0.98f, config.processingText);
+                yield return null;
+            }
+            if (decimateTask.IsFaulted)
+            {
+                // The undecimated mesh is still a valid capture — heavier to
+                // export, but the visitor gets their sculpture.
+                Debug.LogWarning($"[{nameof(ExperienceDirector)}] decimation failed " +
+                                 $"({decimateTask.Exception?.GetBaseException().Message}) — " +
+                                 "exporting the full-resolution mesh.", this);
+            }
+
             _snapshot = snap;
             _ui.ShowProgress(1f, config.processingText);
             // historySamples intentionally stays at the one-second window: the
@@ -1284,7 +1364,7 @@ namespace Experience
                 publisher = new LfksUploadPublisher(
                     Path.Combine(Application.streamingAssetsPath, "lfks", "upload.ps1"),
                     config.uploadScriptSha256, token,
-                    config.lfksRemoteDirectory, config.publishTimeoutSeconds);
+                    config.lfksRemoteDirectory, config.publishTimeoutSeconds, config.lfksApiUrl);
             }
             _cts = new CancellationTokenSource();
             _publishTask = publisher.PublishAsync(glbPath, usdzPath, _cts.Token);

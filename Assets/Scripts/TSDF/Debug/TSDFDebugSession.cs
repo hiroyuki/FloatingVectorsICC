@@ -858,6 +858,10 @@ namespace TSDF.DebugTools
             var list = new List<string>(tracks.Count);
             foreach (var t in tracks)
                 if (!string.IsNullOrEmpty(t.Serial)) list.Add(t.Serial);
+            // Nothing loaded yet: leave cameraKeys empty and stay quiet. The
+            // readout calls this every frame while it is empty, so assigning an
+            // empty array here would log once per frame until a take is Read.
+            if (list.Count == 0) return;
             cameraKeys = list.ToArray();
             Debug.Log($"[TSDFDebugSession] Auto-populated cameraKeys: [{string.Join(", ", cameraKeys)}]", this);
         }

@@ -69,6 +69,33 @@ namespace Experience
         [Tooltip("Message text anchored position (reference px from canvas center).")]
         public Vector2 messagePosition = Vector2.zero;
 
+        [Header("Notice panel (framed box — the privacy consent)")]
+        [Min(10)]
+        [Tooltip("Notice body size. Deliberately about half messageFontSize: the " +
+                 "consent notice is READ, not glanced at from across the room, and " +
+                 "at message size it fills the screen.")]
+        public int noticeFontSize = 36;
+
+        [Tooltip("Framed box size (reference px).")]
+        public Vector2 noticeBoxSize = new Vector2(1120f, 400f);
+
+        [Tooltip("Framed box anchored position (reference px from canvas center).")]
+        public Vector2 noticePosition = Vector2.zero;
+
+        [Min(0f)]
+        [Tooltip("Frame line thickness (reference px).")]
+        public float noticeBorderWidth = 4f;
+
+        [Min(0f)]
+        [Tooltip("Gap between the frame and the text (reference px).")]
+        public float noticePadding = 56f;
+
+        // No fill colour on purpose: the box is an outline, the middle stays
+        // transparent so the scene behind it reads through.
+
+        [Tooltip("Frame line colour.")]
+        public Color noticeFrameColor = Color.white;
+
         [Tooltip("Headline above the QR (e.g. できたよ！) anchored position " +
                  "(reference px from canvas center).")]
         public Vector2 qrHeadlinePosition = new Vector2(0f, 420f);
@@ -92,6 +119,10 @@ namespace Experience
             public GameObject progressGroup;
             public Text progressCaption;
             public RectTransform progressFill;
+            public GameObject noticeGroup;
+            public RectTransform noticeFrame;      // the box; itself draws nothing
+            public Image[] noticeEdges;            // top, bottom, left, right
+            public Text noticeText;
             public GameObject alertGroup;
             public Text alertText;
         }
@@ -167,6 +198,7 @@ namespace Experience
                 ui.qrGroup.SetActive(false);
                 ui.poseGroup.SetActive(false);
                 ui.progressGroup.SetActive(false);
+                ui.noticeGroup.SetActive(false);
             }
         }
 
@@ -210,10 +242,65 @@ namespace Experience
                 ui.poseGroup.SetActive(shown);
                 ui.qrGroup.SetActive(false);
                 ui.progressGroup.SetActive(false);
+                ui.noticeGroup.SetActive(false);
                 // Drop any previous state's message; ShowCountdown re-activates
                 // the slot when digits need to overlay the guide.
                 ui.message.gameObject.SetActive(false);
             }
+        }
+
+        /// <summary>Framed notice box with small body text (Consent state). Put
+        /// the line breaks in the text itself — the box is sized by
+        /// noticeBoxSize, not by the content.</summary>
+        public void ShowNotice(string text)
+        {
+            EnsureBuilt();
+            _replayBase = () => ShowNotice(text);
+            _countdownOverlay = -1;
+            _countdownMode = false;
+            foreach (var ui in _uis)
+            {
+                ui.noticeText.text = text ?? "";
+                ApplyNoticeLayout(ui);
+                ui.noticeGroup.SetActive(true);
+                ui.message.gameObject.SetActive(false);
+                ui.qrGroup.SetActive(false);
+                ui.poseGroup.SetActive(false);
+                ui.progressGroup.SetActive(false);
+            }
+        }
+
+        // Re-applied every frame while the notice is up so the box can be tuned
+        // live in Play mode (same contract as ApplyPoseLayout).
+        private void ApplyNoticeLayout(DisplayUi ui)
+        {
+            if (ui.noticeFrame == null) return;
+            ui.noticeFrame.sizeDelta = noticeBoxSize;
+            ui.noticeFrame.anchoredPosition = noticePosition;
+
+            float b = noticeBorderWidth;
+            float w = noticeBoxSize.x, h = noticeBoxSize.y;
+            // top, bottom, left, right — the horizontals span the full width so
+            // the corners are covered exactly once.
+            SetEdge(ui.noticeEdges[0], new Vector2(w, b), new Vector2(0f, (h - b) * 0.5f));
+            SetEdge(ui.noticeEdges[1], new Vector2(w, b), new Vector2(0f, -(h - b) * 0.5f));
+            SetEdge(ui.noticeEdges[2], new Vector2(b, h - b * 2f), new Vector2(-(w - b) * 0.5f, 0f));
+            SetEdge(ui.noticeEdges[3], new Vector2(b, h - b * 2f), new Vector2((w - b) * 0.5f, 0f));
+
+            float p = noticePadding;
+            ui.noticeText.rectTransform.offsetMin = new Vector2(p, p);
+            ui.noticeText.rectTransform.offsetMax = new Vector2(-p, -p);
+            ui.noticeText.fontSize = noticeFontSize;
+        }
+
+        private void SetEdge(Image edge, Vector2 size, Vector2 pos)
+        {
+            var r = edge.rectTransform;
+            r.anchorMin = r.anchorMax = new Vector2(0.5f, 0.5f);
+            r.pivot = new Vector2(0.5f, 0.5f);
+            r.sizeDelta = size;
+            r.anchoredPosition = pos;
+            edge.color = noticeFrameColor;
         }
 
         private bool PoseGuideShownOn(int display)
@@ -240,6 +327,7 @@ namespace Experience
             foreach (var ui in _uis)
             {
                 if (ui.poseGroup != null && ui.poseGroup.activeSelf) ApplyPoseLayout(ui);
+                if (ui.noticeGroup != null && ui.noticeGroup.activeSelf) ApplyNoticeLayout(ui);
                 // live-apply countdown/message position (Inspector tuning in Play mode)
                 if (ui.message != null && ui.message.gameObject.activeSelf)
                     ui.message.rectTransform.anchoredPosition =
@@ -264,6 +352,7 @@ namespace Experience
                 ui.qrGroup.SetActive(false);
                 ui.poseGroup.SetActive(false);
                 ui.message.gameObject.SetActive(false);
+                ui.noticeGroup.SetActive(false);
             }
         }
 
@@ -287,6 +376,7 @@ namespace Experience
                 ui.message.gameObject.SetActive(false);
                 ui.poseGroup.SetActive(false);
                 ui.progressGroup.SetActive(false);
+                ui.noticeGroup.SetActive(false);
             }
         }
 
@@ -300,6 +390,7 @@ namespace Experience
             _countdownOverlay = -1;
             foreach (var ui in _uis)
             {
+                ui.noticeGroup.SetActive(false);
                 ui.qrImage.texture = qr;
                 ui.qrImage.gameObject.SetActive(true);
                 ui.qrCaption.text = caption ?? "";
@@ -352,6 +443,7 @@ namespace Experience
                 if (ui.qrGroup != null) ui.qrGroup.SetActive(false);
                 if (ui.poseGroup != null) ui.poseGroup.SetActive(false);
                 if (ui.progressGroup != null) ui.progressGroup.SetActive(false);
+                if (ui.noticeGroup != null) ui.noticeGroup.SetActive(false);
             }
         }
 
@@ -570,6 +662,37 @@ namespace Experience
             fill.color = Color.white;
             fill.raycastTarget = false;
             ui.progressGroup.SetActive(false);
+
+            // -- notice group: a framed box with small body text. Built from two
+            //    nested Images (outer = frame colour, inner inset by the border
+            //    width = fill) so no 9-sliced sprite asset is needed. --
+            ui.noticeGroup = new GameObject("NoticeGroup", typeof(RectTransform));
+            ui.noticeGroup.transform.SetParent(root.transform, false);
+            Stretch(ui.noticeGroup.GetComponent<RectTransform>());
+
+            var frameGo = new GameObject("NoticeFrame", typeof(RectTransform));
+            frameGo.transform.SetParent(ui.noticeGroup.transform, false);
+            ui.noticeFrame = frameGo.GetComponent<RectTransform>();
+
+            // Four edge bars, NOT a filled rect behind a smaller one: the box is
+            // an outline only, so whatever is behind it (the floor grid, the
+            // sculpture) stays visible through the middle.
+            ui.noticeEdges = new Image[4];
+            string[] edgeNames = { "EdgeTop", "EdgeBottom", "EdgeLeft", "EdgeRight" };
+            for (int e = 0; e < 4; e++)
+            {
+                var edgeGo = new GameObject(edgeNames[e], typeof(RectTransform));
+                edgeGo.transform.SetParent(frameGo.transform, false);
+                var img = edgeGo.AddComponent<Image>();
+                img.raycastTarget = false;
+                ui.noticeEdges[e] = img;
+            }
+
+            ui.noticeText = MakeText(frameGo.transform, "NoticeText", noticeFontSize,
+                                     Color.white, Vector2.zero);
+            Stretch(ui.noticeText.rectTransform); // inset per-frame by noticePadding
+            ApplyNoticeLayout(ui);
+            ui.noticeGroup.SetActive(false);
 
             // Countdown digits must draw OVER the pose guide (Calibrate overlays
             // both) — push the message slot above the content groups; the alert

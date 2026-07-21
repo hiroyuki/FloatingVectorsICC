@@ -54,57 +54,89 @@ namespace Experience
         const int AnL = (int)k4abt_joint_id_t.K4ABT_JOINT_ANKLE_LEFT;
         const int AnR = (int)k4abt_joint_id_t.K4ABT_JOINT_ANKLE_RIGHT;
         const int Head = (int)k4abt_joint_id_t.K4ABT_JOINT_HEAD;
+        const int Pelvis = (int)k4abt_joint_id_t.K4ABT_JOINT_PELVIS;
 
         /// <summary>
-        /// Star pose (大の字): both arms straight, roughly level, extended along the
-        /// shoulder axis; feet spread wider than the shoulders. All thresholds scale
-        /// with the frame's own bone lengths — no prior metrics needed.
+        /// Star pose, as FOUR INDEPENDENT LIMB ANGLES: each arm's shoulder→wrist
+        /// line against +Y, each leg's pelvis→ankle line against −Y. Nothing is
+        /// measured against the shoulder axis or in absolute metres, so the test is
+        /// free of body orientation and of body size alike.
+        ///
+        /// What this pose is FOR is measuring the visitor's limb lengths, so the
+        /// only thing it has to guarantee is that every limb is held CLEAR OF THE
+        /// TORSO and of the other limbs — nothing about the direction it points.
+        /// Hence a single upper bound on the arm angle: banzai (0°), arms forward
+        /// or out to the side (90°) and arms low-and-out all measure fine; only an
+        /// arm hanging at the side (≈180°), where it overlaps the torso, does not.
+        /// A bent elbow is fine for the same reason.
         /// </summary>
         /// <param name="jointsWorld">World-space joints, K4ABT order, length ≥ 32.</param>
         /// <param name="jointValid">Per-joint validity (confidence != NONE).</param>
-        /// <param name="armStraightnessMin">Min (wrist-shoulder distance)/(arm path length): 1 = fully straight.</param>
-        /// <param name="armLevelFactor">Max |wrist.y − shoulder.y| as a fraction of arm length.</param>
-        /// <param name="armLateralFactor">Min wrist displacement along the shoulder axis, as a fraction of arm length (rejects arms-forward).</param>
-        /// <param name="ankleSpreadFactor">Min ankle separation as a multiple of shoulder width.</param>
-        /// <param name="ankleSpreadMinMeters">Absolute floor on the ankle-separation requirement.</param>
+        /// <param name="armAngleFromUpMaxDeg">Max angle of shoulder→wrist from +Y. 0 = straight up, 90 = horizontal, 180 = hanging.</param>
+        /// <param name="legAngleFromDownMinDeg">Min angle of pelvis→ankle from −Y (0 = standing straight).</param>
         public static bool IsStarPose(Vector3[] jointsWorld, bool[] jointValid,
-                                      float armStraightnessMin = 0.85f,
-                                      float armLevelFactor = 0.35f,
-                                      float armLateralFactor = 0.6f,
-                                      float ankleSpreadFactor = 1.3f,
-                                      float ankleSpreadMinMeters = 0.35f)
+                                      float armAngleFromUpMaxDeg = 135f,
+                                      float legAngleFromDownMinDeg = 12f)
         {
-            if (!AllValid(jointValid, ShL, ShR, ElL, ElR, WrL, WrR, AnL, AnR)) return false;
+            // Elbows and knees are not part of the predicate but ARE part of what
+            // the pose exists to measure — an unseen elbow means no arm length.
+            if (!AllValid(jointValid, Pelvis, ShL, ShR, ElL, ElR, WrL, WrR, AnL, AnR)) return false;
 
-            Vector3 shoulderAxis = jointsWorld[ShR] - jointsWorld[ShL];
-            float shoulderWidth = shoulderAxis.magnitude;
-            if (shoulderWidth < 0.1f) return false; // degenerate / collapsed skeleton
-            Vector3 axisN = shoulderAxis / shoulderWidth;
-
-            if (!ArmIsSpread(jointsWorld, ShL, ElL, WrL, axisN,
-                             armStraightnessMin, armLevelFactor, armLateralFactor)) return false;
-            if (!ArmIsSpread(jointsWorld, ShR, ElR, WrR, axisN,
-                             armStraightnessMin, armLevelFactor, armLateralFactor)) return false;
-
-            Vector3 ankleDelta = jointsWorld[AnR] - jointsWorld[AnL];
-            float ankleSpread = new Vector2(ankleDelta.x, ankleDelta.z).magnitude;
-            float required = Mathf.Max(ankleSpreadMinMeters, ankleSpreadFactor * shoulderWidth);
-            return ankleSpread >= required;
+            if (!ArmAngleOk(jointsWorld, ShL, WrL, armAngleFromUpMaxDeg)) return false;
+            if (!ArmAngleOk(jointsWorld, ShR, WrR, armAngleFromUpMaxDeg)) return false;
+            if (!LegAngleOk(jointsWorld, AnL, legAngleFromDownMinDeg)) return false;
+            if (!LegAngleOk(jointsWorld, AnR, legAngleFromDownMinDeg)) return false;
+            return true;
         }
 
-        static bool ArmIsSpread(Vector3[] j, int sh, int el, int wr, Vector3 shoulderAxisN,
-                                float straightnessMin, float levelFactor, float lateralFactor)
+        // Angle of the limb line against an axis, or NaN when the limb is too
+        // short to have a meaningful direction (collapsed / mis-tracked joints).
+        static float LimbAngle(Vector3 from, Vector3 to, Vector3 axis)
         {
-            float pathLen = Vector3.Distance(j[sh], j[el]) + Vector3.Distance(j[el], j[wr]);
-            if (pathLen < 0.2f) return false; // degenerate
-            Vector3 toWrist = j[wr] - j[sh];
-            bool straight = toWrist.magnitude / pathLen >= straightnessMin;
-            bool level = Mathf.Abs(toWrist.y) <= levelFactor * pathLen;
-            // Along the shoulder axis (either sign — orientation-independent), so an
-            // arm pointing forward at shoulder height doesn't pass.
-            bool lateral = Mathf.Abs(Vector3.Dot(toWrist, shoulderAxisN)) >= lateralFactor * pathLen;
-            return straight && level && lateral;
+            Vector3 v = to - from;
+            return v.magnitude < 0.1f ? float.NaN : Vector3.Angle(v, axis);
         }
+
+        static bool ArmAngleOk(Vector3[] j, int sh, int wr, float maxDeg)
+        {
+            float a = LimbAngle(j[sh], j[wr], Vector3.up);
+            return !float.IsNaN(a) && a <= maxDeg;
+        }
+
+        static bool LegAngleOk(Vector3[] j, int ankle, float minDeg)
+        {
+            float a = LimbAngle(j[Pelvis], j[ankle], Vector3.down);
+            return !float.IsNaN(a) && a >= minDeg;
+        }
+
+        /// <summary>
+        /// Human-readable breakdown of every star-pose condition and the measured
+        /// value behind it, for tuning the thresholds against a real visitor. Same
+        /// maths as <see cref="IsStarPose"/> — kept adjacent so they stay in step.
+        /// </summary>
+        public static string DescribeStarPose(Vector3[] jointsWorld, bool[] jointValid,
+                                              float armAngleFromUpMaxDeg = 135f,
+                                              float legAngleFromDownMinDeg = 12f)
+        {
+            if (!AllValid(jointValid, Pelvis, ShL, ShR, ElL, ElR, WrL, WrR, AnL, AnR))
+            {
+                var missing = new System.Text.StringBuilder("invalid joints:");
+                void Chk(int idx, string name) { if (!jointValid[idx]) missing.Append(' ').Append(name); }
+                Chk(Pelvis, "pelvis");
+                Chk(ShL, "shL"); Chk(ShR, "shR"); Chk(ElL, "elL"); Chk(ElR, "elR");
+                Chk(WrL, "wrL"); Chk(WrR, "wrR"); Chk(AnL, "anL"); Chk(AnR, "anR");
+                return missing.ToString();
+            }
+
+            return $"armL {Fmt(LimbAngle(jointsWorld[ShL], jointsWorld[WrL], Vector3.up), 0f, armAngleFromUpMaxDeg)} " +
+                   $"armR {Fmt(LimbAngle(jointsWorld[ShR], jointsWorld[WrR], Vector3.up), 0f, armAngleFromUpMaxDeg)} " +
+                   $"legL {Fmt(LimbAngle(jointsWorld[Pelvis], jointsWorld[AnL], Vector3.down), legAngleFromDownMinDeg, 180f)} " +
+                   $"legR {Fmt(LimbAngle(jointsWorld[Pelvis], jointsWorld[AnR], Vector3.down), legAngleFromDownMinDeg, 180f)} " +
+                   $"(arm ≤{armAngleFromUpMaxDeg:0}°, leg ≥{legAngleFromDownMinDeg:0}°)";
+        }
+
+        static string Fmt(float deg, float lo, float hi) =>
+            float.IsNaN(deg) ? "short!" : $"{deg:0}°{(deg >= lo && deg <= hi ? "" : "!")}";
 
         /// <summary>
         /// Banzai: both wrists above the head by a margin. The margin scales with the

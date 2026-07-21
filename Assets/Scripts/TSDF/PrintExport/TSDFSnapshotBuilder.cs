@@ -70,6 +70,10 @@ namespace TSDF
             public int smoothIterations;      // Taubin iterations (0 = off)
             public int triangleBudgetPerSlab; // per-slab MC readback capacity
             public int meshTargetTris;        // decimation target (0 = off)
+            // True = Capture returns the UNDECIMATED mesh and the caller runs
+            // Decimate(snap, meshTargetTris) itself, typically on a worker thread
+            // so the main thread keeps rendering. Bounds are refreshed there.
+            public bool deferDecimation;
             public bool includeCurves;
             public int curveStride;           // every Nth drawn curve
             public int curveSides;            // tube cross-section sides
@@ -97,6 +101,38 @@ namespace TSDF
         /// Non-destructive (front buffer reads only). Returns null with
         /// <paramref name="error"/> set on failure. Curves failing to read is
         /// NOT an error: the capture proceeds mesh-only with a warning.</summary>
+        /// <summary>
+        /// Reduce the surface mesh to <paramref name="targetTris"/> and refresh the
+        /// export bounds. Touches nothing but the snapshot's plain arrays, so it is
+        /// safe to call from a worker thread — which is the point: at show sizes
+        /// this is seconds of single-threaded work, and running it inline freezes
+        /// rendering between the progress bar filling and the result appearing.
+        /// No-op when the mesh is already at or under the target.
+        /// </summary>
+        public static void Decimate(TSDFSnapshot snap, int targetTris)
+        {
+            if (snap == null || targetTris <= 0) return;
+            if (snap.tri.Length / 3 <= targetTris) return;
+            var phase = System.Diagnostics.Stopwatch.StartNew();
+            int before = snap.tri.Length / 3;
+            MeshDecimator.Simplify(ref snap.pos, ref snap.col, ref snap.tri, targetTris);
+            snap.decimateMs = phase.ElapsedMilliseconds;
+            ComputeBounds(snap); // decimation moves vertices; bounds follow
+            Debug.Log($"[TSDFSnapshotBuilder] decimated {before} -> {snap.tri.Length / 3} tris " +
+                      $"({snap.pos.Length} verts) in {snap.decimateMs} ms");
+        }
+
+        // False when the mesh is flat enough to be unusable for export.
+        static bool ComputeBounds(TSDFSnapshot snap)
+        {
+            Vector3 min = Vector3.positiveInfinity, max = Vector3.negativeInfinity;
+            foreach (var p in snap.pos) { min = Vector3.Min(min, p); max = Vector3.Max(max, p); }
+            if ((max - min).y < 1e-4f) return false;
+            snap.center = (min + max) * 0.5f;
+            snap.minY = min.y;
+            return true;
+        }
+
         public static TSDFSnapshot Capture(TSDFVolume volume, PointCloudMotionCurves curves,
                                            CaptureOptions opt, out string error)
         {
@@ -124,22 +160,16 @@ namespace TSDF
             snap.smoothMs = phase.ElapsedMilliseconds;
 
             snap.trisBeforeDecimate = snap.tri.Length / 3;
-            if (opt.meshTargetTris > 0 && snap.trisBeforeDecimate > opt.meshTargetTris)
-            {
-                phase.Restart();
-                MeshDecimator.Simplify(ref snap.pos, ref snap.col, ref snap.tri, opt.meshTargetTris);
-                snap.decimateMs = phase.ElapsedMilliseconds;
-                Debug.Log($"[TSDFSnapshotBuilder] decimated {snap.trisBeforeDecimate} -> {snap.tri.Length / 3} tris " +
-                          $"({snap.pos.Length} verts) in {snap.decimateMs} ms");
-            }
+            // Decimation is by far the longest phase (seconds at show sizes) and
+            // it is pure array math — callers that must keep rendering hand it to
+            // a worker thread via Decimate() instead of paying it here.
+            if (!opt.deferDecimation)
+                Decimate(snap, opt.meshTargetTris);
 
             // Export metadata off the SURFACE mesh, once — the curve tubes use
-            // the same values so mesh and curves stay registered.
-            Vector3 min = Vector3.positiveInfinity, max = Vector3.negativeInfinity;
-            foreach (var p in snap.pos) { min = Vector3.Min(min, p); max = Vector3.Max(max, p); }
-            if ((max - min).y < 1e-4f) { error = "degenerate mesh bounds"; return null; }
-            snap.center = (min + max) * 0.5f;
-            snap.minY = min.y;
+            // the same values so mesh and curves stay registered. Recomputed by
+            // Decimate() when the caller deferred it.
+            if (!ComputeBounds(snap)) { error = "degenerate mesh bounds"; return null; }
 
             // Curve polylines at display resolution, world space. A paused pose
             // or hidden curves is a mesh-only capture, not a failure.

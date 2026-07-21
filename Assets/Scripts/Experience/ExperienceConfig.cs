@@ -55,6 +55,15 @@ namespace Experience
                  "before the countdown starts.")]
         public float shootCueSeconds = 2.5f;
 
+        [Range(0f, 1f)]
+        [Tooltip("How far BEFORE the countdown zero the recorder starts — just enough " +
+                 "that opening the four RCSV writers does not eat the first frames of " +
+                 "the capture window. 0 = start exactly at zero. The countdown itself " +
+                 "is deliberately NOT recorded: every recorded frame is a frame the " +
+                 "v11s conversion pays full RTMPose inference on, and only the capture " +
+                 "window survives into the sculpture.")]
+        public float recordPreRollSeconds = 0.3f;
+
         [Tooltip("Dev: pre-recorded take used when timings.skipShoot is on (no " +
                  "cameras needed). Point at a full RCSV take root.")]
         public string devCannedTakeRoot =
@@ -74,20 +83,22 @@ namespace Experience
 
         [Header("Pose detection")]
         [Min(0f)] public float starHoldSeconds = 0.5f;
-        [Range(0.5f, 1f)]
-        [Tooltip("Min (wrist-shoulder)/(arm path) ratio for a straight arm.")]
-        public float starArmStraightnessMin = 0.85f;
-        [Range(0.05f, 1f)]
-        [Tooltip("Max |wrist.y − shoulder.y| as a fraction of arm length (arms level).")]
-        public float starArmLevelFactor = 0.35f;
-        [Range(0.1f, 1f)]
-        [Tooltip("Min wrist displacement along the shoulder axis as a fraction of arm " +
-                 "length (rejects arms-forward).")]
-        public float starArmLateralFactor = 0.6f;
-        [Range(0.5f, 3f)]
-        [Tooltip("Min ankle separation as a multiple of shoulder width (legs spread).")]
-        public float starAnkleSpreadFactor = 1.3f;
-        [Min(0f)] public float starAnkleSpreadMinMeters = 0.35f;
+
+        // The star pose is judged as four independent limb angles — see
+        // PoseClassifiers.IsStarPose. Nothing here is in metres or relative to the
+        // shoulder axis, so the same numbers fit a child and an adult, facing
+        // any direction.
+        [Range(45f, 180f)]
+        [Tooltip("Max angle of each shoulder→wrist line from +Y. 0 = straight up " +
+                 "(banzai), 90 = out to the side or forward, 180 = hanging at the " +
+                 "side. Only the hanging case is rejected — every other direction " +
+                 "holds the arm clear of the torso, which is all the measurement " +
+                 "needs.")]
+        public float starArmAngleFromUpMaxDeg = 135f;
+        [Range(0f, 60f)]
+        [Tooltip("Min angle of each pelvis→ankle line from −Y (0 = standing " +
+                 "straight, larger = feet further apart).")]
+        public float starLegAngleFromDownMinDeg = 12f;
         [Min(0f)]
         [Tooltip("Pose-hold dropout forgiveness (s) — BT confidence flickers.")]
         public float poseHoldDropoutSeconds = 0.2f;
@@ -139,6 +150,16 @@ namespace Experience
 
         [Tooltip("Remote subfolder in the LFKS directory the sculptures land in.")]
         public string lfksRemoteDirectory = "sculptures";
+
+        [Tooltip("LFKS API origin override. Empty = the origin baked into the pinned " +
+                 "upload.ps1 (https://ntticc.lfks.app, production). A token is issued " +
+                 "PER ORIGIN: presenting a staging token to production fails with a " +
+                 "misleading \"invalid or expired token\" 404, so this must match " +
+                 "whichever deployment lfks-token.txt belongs to. Only origins on " +
+                 "LfksUploadPublisher.AllowedApiOrigins are accepted — the token is " +
+                 "never sent anywhere else. Example: " +
+                 "https://lfks-staging.circuit-lab.workers.dev")]
+        public string lfksApiUrl = "";
 
         [Min(5f)]
         [Tooltip("Per-file upload timeout (s); one retry after a failure.")]

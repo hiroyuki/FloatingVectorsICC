@@ -40,15 +40,18 @@ namespace Experience.Publishing
         private readonly string _expectedSha256;
         private readonly string _token;
         private readonly string _remoteDirectory;
+        private readonly string _apiUrl;
         private readonly float _timeoutSeconds;
 
         public LfksUploadPublisher(string uploadScriptPath, string expectedScriptSha256,
-                                   string token, string remoteDirectory, float timeoutSeconds = 60f)
+                                   string token, string remoteDirectory, float timeoutSeconds = 60f,
+                                   string apiUrl = "")
         {
             _scriptPath = uploadScriptPath;
             _expectedSha256 = (expectedScriptSha256 ?? "").Trim();
             _token = (token ?? "").Trim();
             _remoteDirectory = remoteDirectory ?? "";
+            _apiUrl = (apiUrl ?? "").Trim();
             _timeoutSeconds = timeoutSeconds > 0f && float.IsFinite(timeoutSeconds) ? timeoutSeconds : 60f;
         }
 
@@ -56,6 +59,11 @@ namespace Experience.Publishing
         {
             if (_token.Length == 0)
                 return Fail("no LFKS token (persistentDataPath/lfks-token.txt or LFKS_TOKEN env)");
+            // Before the token leaves the process, not per-file: an unknown origin is
+            // a configuration mistake, and failing the whole publish makes it visible.
+            if (!IsAllowedApiOrigin(_apiUrl))
+                return Fail($"lfksApiUrl '{_apiUrl}' is not an allow-listed LFKS origin " +
+                            $"({string.Join(", ", AllowedApiOrigins)}) — refusing to send the token");
             if (!VerifyScript(out string why))
                 return Fail(why);
 
@@ -106,15 +114,21 @@ namespace Experience.Publishing
             // would terminate the outer Windows -Command argument itself, and
             // control characters have no business in a path. Our values never
             // contain any of these — a hostile config must not build a shell.
-            if (!IsSafeArgument(_scriptPath) || !IsSafeArgument(filePath) || !IsSafeArgument(_remoteDirectory))
-                return (null, "path or remote directory contains a quote/control character");
+            if (!IsSafeArgument(_scriptPath) || !IsSafeArgument(filePath) || !IsSafeArgument(_remoteDirectory)
+                || !IsSafeArgument(_apiUrl))
+                return (null, "path, remote directory or api url contains a quote/control character");
 
             string dirArg = _remoteDirectory.Length > 0 ? $" -Directory '{_remoteDirectory}'" : "";
+            // Empty = the script's own baked-in origin (the domain it was pinned
+            // from). Set it when the token belongs to a different deployment —
+            // a token issued for one origin is rejected by the other with a
+            // misleading "invalid or expired token".
+            string urlArg = _apiUrl.Length > 0 ? $" -Url '{_apiUrl}'" : "";
             var psi = new ProcessStartInfo
             {
                 FileName = "powershell.exe",
                 Arguments = "-NoProfile -ExecutionPolicy Bypass -Command " +
-                            $"\"& '{_scriptPath}' -Token $env:LFKS_TOKEN -File '{filePath}'{dirArg} -Json\"",
+                            $"\"& '{_scriptPath}' -Token $env:LFKS_TOKEN -File '{filePath}'{dirArg}{urlArg} -Json\"",
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
@@ -166,6 +180,30 @@ namespace Experience.Publishing
             if (result == null || string.IsNullOrEmpty(result.downloadUrl))
                 return (null, $"no downloadUrl in result: {json}");
             return (result.downloadUrl, null);
+        }
+
+        /// <summary>
+        /// The only origins the token may ever be sent to. `-Url` overrides where the
+        /// SHA-pinned script POSTs `?token=...`, so without this an edit to a config
+        /// asset — which changes no hashed bytes and passes the quote guard — would
+        /// hand the upload token to any HTTPS host. Adding a deployment here is a
+        /// deliberate, reviewable code change; pointing at one is not.
+        /// </summary>
+        private static readonly string[] AllowedApiOrigins =
+        {
+            "https://ntticc.lfks.app",                        // production
+            "https://lfks-staging.circuit-lab.workers.dev",   // staging
+        };
+
+        /// <summary>Empty (= the script's own baked origin) or an exact allow-listed
+        /// origin. Case-insensitive, trailing slash tolerated, nothing else.</summary>
+        private static bool IsAllowedApiOrigin(string url)
+        {
+            if (string.IsNullOrEmpty(url)) return true;
+            string trimmed = url.TrimEnd('/');
+            foreach (string allowed in AllowedApiOrigins)
+                if (string.Equals(trimmed, allowed, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
         }
 
         private static bool IsSafeArgument(string s)

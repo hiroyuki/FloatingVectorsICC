@@ -140,13 +140,12 @@ namespace PointCloud
         }
 
         // Yields (mesh, localToWorld, activePointCount) for every active LIVE
-        // PointCloudRenderer. Deliberately live-only: the floor levelling this
-        // picker feeds is applied through SensorManager (the live path). Playback
-        // (`_Playback_<serial>`) rebases via SensorRecorder, which does not compose
-        // the levelling — so picking on playback would save a pose that never gets
-        // applied. Matching the picker's scope to the apply scope avoids that false
-        // affordance (playback floor levelling is out of scope, exactly as playback
-        // already ignores rebaseFloorY / floor.yaml).
+        // PointCloudRenderer. Deliberately live-only: the floor is MEASURED against
+        // the live rig, which is the one actually pointed at the physical room.
+        // SensorRecorder now consumes the same floor.yaml (loadFloorFromCalibration)
+        // and composes the levelling into its own rebase, so a pick taken here does
+        // reach playback — but picking ON playback would measure a recorded floor
+        // and write it back as if it were the room's.
         private static IEnumerable<(Mesh mesh, Matrix4x4 l2w, int count)> EnumerateClouds()
         {
             var live = Object.FindObjectsByType<PointCloudRenderer>(FindObjectsSortMode.None);

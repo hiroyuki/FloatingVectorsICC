@@ -1,5 +1,13 @@
 # LFKS ファイルアップロード
 
+> **オリジンとトークンは対で管理する。** ピン留めした `Assets/StreamingAssets/lfks/upload.ps1`
+> は本番 `https://ntticc.lfks.app` を既定の API オリジンにしている（コミット `c2b69a4` の
+> 本番移行）。このガイドに載っているトークンは**ステージング
+> `lfks-staging.circuit-lab.workers.dev` 用**で、本番に出すと期限に関係なく
+> `HTTP 404 invalid or expired token` で落ちる。
+> オリジンを切り替えるには `ExperienceConfig.lfksApiUrl` を設定する（空 = スクリプト既定の本番）。
+> 本番で動かすには**本番オリジン用のトークン**をサーバーチームから受け取ること。
+
 ## 《みちのからだ》専用ディレクトリとトークン
 
 - ディレクトリ: <https://lfks-staging.circuit-lab.workers.dev/browse?token=tkd9Ik8hGZpVmKuLqvUEQhF0SULp8eD8VwgIMQS9>

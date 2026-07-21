@@ -307,6 +307,8 @@ MonoBehaviour:
   applyWorldRebase: 1
   rigSerialOrder: []
   rebaseFloorY: -0.9
+  loadFloorFromCalibration: 1
+  floorCalibrationRoot: 
   keepLiveRenderersOnLoad: 0
   deliverAllPlaybackFrames: 0
   playbackRenderDelayFrames: 4
@@ -771,6 +773,12 @@ MonoBehaviour:
   poseLabelPosition: {x: 0, y: 70}
   countdownPosition: {x: 0, y: 0}
   messagePosition: {x: 0, y: 0}
+  noticeFontSize: 36
+  noticeBoxSize: {x: 1120, y: 400}
+  noticePosition: {x: 0, y: 0}
+  noticeBorderWidth: 4
+  noticePadding: 56
+  noticeFrameColor: {r: 1, g: 1, b: 1, a: 1}
   qrHeadlinePosition: {x: 0, y: 420}
   progressBarWidth: 800
 --- !u!1 &814255262
@@ -1593,7 +1601,7 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1144015526}
-  m_Enabled: 0
+  m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 4a49c8cec0f4b2e418979e7f88248b5d, type: 3}
   m_Name: 
@@ -2440,6 +2448,7 @@ MonoBehaviour:
   healthMonitor: {fileID: 0}
   liveFusedSource: {fileID: 0}
   debugForceFault: 0
+  debugPoseDiagnostics: 1
 --- !u!1 &1574009486
 GameObject:
   m_ObjectHideFlags: 0

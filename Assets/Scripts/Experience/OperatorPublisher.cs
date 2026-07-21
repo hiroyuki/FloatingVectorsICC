@@ -291,7 +291,7 @@ namespace Experience
                 publisher = new LfksUploadPublisher(
                     Path.Combine(Application.streamingAssetsPath, "lfks", "upload.ps1"),
                     cfg.uploadScriptSha256, token,
-                    cfg.lfksRemoteDirectory, cfg.publishTimeoutSeconds);
+                    cfg.lfksRemoteDirectory, cfg.publishTimeoutSeconds, cfg.lfksApiUrl);
                 SetStatus("upload…");
             }
             _cts = new CancellationTokenSource();

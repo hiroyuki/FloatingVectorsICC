@@ -99,8 +99,34 @@ namespace PointCloud
         public string[] rigSerialOrder = new string[0];
 
         [Tooltip("Physical floor height in the CALIBRATION frame (m) — must match " +
-                 "SensorManager.rebaseFloorY. The rebase shifts Y so this becomes y=0.")]
+                 "SensorManager.rebaseFloorY. The rebase shifts Y so this becomes y=0. " +
+                 "OVERWRITTEN before each rebase by calibration/floor.yaml while " +
+                 "loadFloorFromCalibration is on.")]
         public float rebaseFloorY = 0f;
+
+        [Tooltip("Read rebaseFloorY AND the floor levelling from calibration/floor.yaml " +
+                 "before each rebase, exactly like SensorManager does for the live rig. " +
+                 "The floor is a property of the ROOM, not of the take, so it is read " +
+                 "from floorCalibrationRoot (the live calibration) and NOT from the " +
+                 "recording folder — otherwise the experience flow's result playback " +
+                 "reproduces whatever floor was current when the take was recorded, and " +
+                 "the sculpture steps off the floor the moment playback replaces the " +
+                 "live rig. Off = use the serialized value below.")]
+        public bool loadFloorFromCalibration = true;
+
+        [Tooltip("Calibration root the FLOOR is read from (NOT the take's folder). Empty " +
+                 "= <persistentDataPath>/Recordings/recording, i.e. the same default as " +
+                 "SensorManager.extrinsicsRoot. Keep these two in sync.")]
+        public string floorCalibrationRoot = "";
+
+        /// <summary>
+        /// World-space floor-levelling correction (tilt + height) from the interactive
+        /// 3-point floor pick, composed AFTER the camera rebase — the playback mirror of
+        /// <see cref="SensorManager.rebaseFloorLeveling"/>. Not serialized: a per-room
+        /// measurement loaded from calibration/floor.yaml.
+        /// </summary>
+        [System.NonSerialized]
+        public Pose rebaseFloorLeveling = Pose.identity;
 
         [Tooltip("Skip destroying the live renderers when a recording is loaded. The " +
                  "experience flow's attract playback coexists with the live rig (device " +
@@ -1641,11 +1667,32 @@ namespace PointCloud
         private Pose _worldRebase = Pose.identity;
         private bool _worldRebaseValid;
 
+        /// <summary>
+        /// Pull the room's floor (height + 3-point levelling) from the LIVE
+        /// calibration, so the playback rig lands on the same floor as the live
+        /// rig. Deliberately not <see cref="ResolvePlaybackRoot"/>: the take's own
+        /// folder carries the floor that was current when it was recorded.
+        /// </summary>
+        private void LoadFloorFromCalibration()
+        {
+            if (!loadFloorFromCalibration) return;
+            if (!PointCloudRecording.TryReadFloor(
+                    PointCloudRecording.ResolveRecordingRoot(floorCalibrationRoot),
+                    out float y, out var lp, out var lr))
+                return;
+            rebaseFloorLeveling = new Pose(new Vector3(lp[0], lp[1], lp[2]),
+                                           new Quaternion(lr[0], lr[1], lr[2], lr[3]));
+            rebaseFloorY = y;
+        }
+
         private void RecomputeWorldRebase()
         {
             _worldRebase = Pose.identity;
             _worldRebaseValid = false;
             if (!applyWorldRebase) return;
+            // Before the rebase, not at Start: the operator can tune the floor
+            // mid-session and the next playback load must pick it up.
+            LoadFloorFromCalibration();
             // localPosition/localRotation composition equals a world rebase only
             // under an identity parent (playback GOs sit directly under us).
             if (!Calibration.WorldFrameRebase.ParentIsIdentity(transform))
@@ -1675,6 +1722,11 @@ namespace PointCloud
                 _worldRebase = Pose.identity;
                 return;
             }
+            // Fold the 3-point floor levelling on top, same composition order as
+            // SensorManager.ApplyExtrinsics — without this the playback rig keeps
+            // the room's tilt and the sculpture leans off the floor grid.
+            if (!Calibration.FloorPlaneMath.IsApproximatelyIdentity(rebaseFloorLeveling))
+                _worldRebase = Calibration.FloorPlaneMath.ComposeWorld(rebaseFloorLeveling, _worldRebase);
             _worldRebaseValid = true;
         }
 
