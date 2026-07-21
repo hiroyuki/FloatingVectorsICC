@@ -568,9 +568,13 @@ namespace Experience
             root.transform.SetParent(transform, false);
 
             var canvas = root.AddComponent<Canvas>();
-            canvas.renderMode = RenderMode.ScreenSpaceCamera;
-            canvas.worldCamera = cam;
-            canvas.planeDistance = 1f;
+            // Overlay, NOT ScreenSpaceCamera: the visitor displays are mirrored by
+            // CameraControl.MirrorDisplayCamera, which negates the camera's
+            // projection X. A camera-space canvas goes through that projection and
+            // every glyph comes out reversed. Overlay bypasses the camera entirely,
+            // which is exactly the assumption MirrorDisplayCamera documents.
+            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            canvas.targetDisplay = display;
             canvas.sortingOrder = 5000; // stay above any future scene canvases
 
             var scaler = root.AddComponent<CanvasScaler>();

@@ -34,6 +34,7 @@
 
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -83,6 +84,17 @@ namespace Experience
                  "thresholds against a real visitor. A '!' marks the failing term.")]
         public bool debugPoseDiagnostics;
 
+        [Tooltip("Snapshot the LIVE curve the instant Processing begins, then compare " +
+                 "it against the v11s curve the capture actually exports, and log the " +
+                 "difference. The two are built from the same second of movement — the " +
+                 "live one from the fusion as it ran, the exported one from replaying " +
+                 "the take through the re-converted bodies — so they should differ only " +
+                 "in precision. They visibly do not, and this is how that gets pinned " +
+                 "down. OFF by default because it is not free: TryReadCurvePolylines " +
+                 "does a synchronous GPU readback per sampled seed, i.e. hundreds of " +
+                 "blocking readbacks right at the start of Processing.")]
+        public bool compareCurveSources;
+
         // ---- IViewToggle ("Experience mode" in the Views panel) ----
         public string ViewLabel => "Experience mode";
         public bool Visible
@@ -117,6 +129,12 @@ namespace Experience
         private bool _savedCurvesVisible, _savedCurvesFreeze;
         private bool _savedMgrRebase, _savedRecRebase;
         private float _lastPoseDiagAt;
+        // The visitor-facing curve as it stood the instant Processing began — i.e.
+        // the ribbons they were actually watching. Stage 2 replays the take and
+        // rebuilds the ring from the v11s bodies, so this is the only chance to
+        // keep the live one. Kept purely to compare the two (compareCurveSources).
+        private readonly List<Vector3[]> _liveCurveLines = new List<Vector3[]>();
+        private readonly List<Vector3> _liveCurveColors = new List<Vector3>();
         private bool _savedKeepLive;
         private string _savedPlaybackFolder;
         private bool _savedWasPlaying;
@@ -582,6 +600,9 @@ namespace Experience
             _qrUrl = null;
             _crowdShowing = false;
             _starHold?.Reset();
+            // Release AND clear the frozen ribbons: the next visitor must draw their
+            // own, not append to the previous one's curve.
+            if (poseHistory != null) poseHistory.ReleaseHoldAndClear();
         }
 
         // ------------------------------------------------ state side effects ----
@@ -990,7 +1011,11 @@ namespace Experience
             var t = config.timings;
             float cueEnd = config.shootCueSeconds;
             float zeroAt = cueEnd + config.countdownSeconds;
-            float shootEnd = zeroAt + config.captureSeconds;
+            // Recording runs past the kept second by the reaction offset, because
+            // the capture takes the LAST captureSeconds of the take — extending the
+            // tail is what slides the kept window off the shutter and onto the
+            // movement the visitor actually performs.
+            float shootEnd = zeroAt + config.captureStartOffsetSeconds + config.captureSeconds;
             // Opening four RCSV writers is not instant; start that much early so
             // the first frames OF THE WINDOW are on disk. 0 = start exactly at zero.
             float recStart = Mathf.Max(cueEnd, zeroAt - config.recordPreRollSeconds);
@@ -1072,6 +1097,17 @@ namespace Experience
                 _ui.ShowMessage(config.exportFailedText);
                 _processingRoutine = null;
                 yield break;
+            }
+
+            // Grab the live ribbons BEFORE anything replays over them — from here
+            // on the pose ring belongs to the take play-through.
+            _liveCurveLines.Clear();
+            _liveCurveColors.Clear();
+            if (compareCurveSources && motionCurves != null)
+            {
+                if (!motionCurves.TryReadCurvePolylines(CaptureOptions().curveStride,
+                                                        _liveCurveLines, _liveCurveColors, out string curveWhy))
+                    Debug.LogWarning($"[{nameof(ExperienceDirector)}] live curve snapshot skipped: {curveWhy}", this);
             }
 
             // ---- stage 1: v11s conversion (skippable) ----
@@ -1186,6 +1222,13 @@ namespace Experience
                                      "capturing anyway (mesh-only capture is valid).", this);
             }
 
+            // Freeze BEFORE the capture, not after the decimation wait: the take has
+            // already stopped (stopped, not paused), so every frame from here on is
+            // one where the staleness clear could empty the ring — and the wait below
+            // yields for seconds. What the capture reads and what ResultShow shows
+            // must be the same ribbons, so the hold has to start earlier than both.
+            if (poseHistory != null) poseHistory.hold = true;
+
             var capOpt = CaptureOptions();
             capOpt.deferDecimation = true; // longest phase — off the main thread, below
             var snap = TSDFSnapshotBuilder.Capture(tsdfVolume, motionCurves, capOpt, out string err);
@@ -1197,6 +1240,17 @@ namespace Experience
                 _processingRoutine = null;
                 yield break;
             }
+
+            // Everything above ran on the main thread — the frame is frozen for
+            // exactly this long. Reported because "it freezes at the end of the
+            // progress bar" is only actionable with the per-phase split (the
+            // Marching Cubes slab readbacks and the weld are the parts that
+            // cannot simply move to a worker).
+            Debug.Log($"[{nameof(ExperienceDirector)}] capture blocked the main thread for " +
+                      $"{snap.mcMs + snap.weldMs + snap.smoothMs} ms " +
+                      $"(MC {snap.mcMs} ms / {snap.mcTris} tris, weld {snap.weldMs} ms, " +
+                      $"smooth {snap.smoothMs} ms) — decimating {snap.trisBeforeDecimate} tris " +
+                      "off-thread next.", this);
 
             // Decimation is seconds of single-threaded array math. Run it on a
             // worker thread and keep ticking here, so the sculpture stays live
@@ -1219,12 +1273,69 @@ namespace Experience
                                  "exporting the full-resolution mesh.", this);
             }
 
+            if (compareCurveSources) LogCurveComparison(snap);
+
             _snapshot = snap;
             _ui.ShowProgress(1f, config.processingText);
             // historySamples intentionally stays at the one-second window: the
             // frozen curves on screen ARE the exported shape. Restored on Idle.
             _processingDone = true;
             _processingRoutine = null;
+        }
+
+        /// <summary>
+        /// Report how far the exported (v11s, replayed) curve sits from the live one
+        /// the visitor was watching when Processing began. Both describe the same
+        /// second of the same movement, so a small spread is precision and a large
+        /// one means they are not the same motion at all. Deliberately reports shape
+        /// AND placement separately: a curve that is the right shape in the wrong
+        /// place is a frame/timing bug, while a different shape is a tracking one.
+        /// </summary>
+        private void LogCurveComparison(TSDFSnapshot snap)
+        {
+            int liveN = _liveCurveLines.Count, expN = snap.curveLines.Count;
+            if (liveN == 0 || expN == 0)
+            {
+                Debug.Log($"[{nameof(ExperienceDirector)}] curve compare: nothing to compare " +
+                          $"(live {liveN} polylines, exported {expN}).", this);
+                return;
+            }
+
+            Vector3 liveC, expC; float liveLen, expLen;
+            Bounds liveB = CurveStats(_liveCurveLines, out liveC, out liveLen);
+            Bounds expB = CurveStats(snap.curveLines, out expC, out expLen);
+
+            Debug.Log($"[{nameof(ExperienceDirector)}] curve compare — " +
+                      $"live: {liveN} lines, total length {liveLen:0.00} m, centroid {liveC:F3}, " +
+                      $"size {liveB.size:F3} | " +
+                      $"exported(v11s): {expN} lines, total length {expLen:0.00} m, centroid {expC:F3}, " +
+                      $"size {expB.size:F3} | " +
+                      $"centroid offset {Vector3.Distance(liveC, expC):0.000} m, " +
+                      $"length ratio {(liveLen > 1e-4f ? expLen / liveLen : 0f):0.00}", this);
+        }
+
+        // Bounds + centroid + summed polyline length over a curve set.
+        private static Bounds CurveStats(List<Vector3[]> lines, out Vector3 centroid, out float totalLength)
+        {
+            var b = new Bounds();
+            bool first = true;
+            Vector3 sum = Vector3.zero;
+            int n = 0;
+            totalLength = 0f;
+            foreach (var line in lines)
+            {
+                if (line == null) continue;
+                for (int i = 0; i < line.Length; i++)
+                {
+                    if (first) { b = new Bounds(line[i], Vector3.zero); first = false; }
+                    else b.Encapsulate(line[i]);
+                    sum += line[i];
+                    n++;
+                    if (i > 0) totalLength += Vector3.Distance(line[i - 1], line[i]);
+                }
+            }
+            centroid = n > 0 ? sum / n : Vector3.zero;
+            return b;
         }
 
         // ------------------------------------------------ visitor playback ----

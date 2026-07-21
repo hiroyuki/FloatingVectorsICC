@@ -56,6 +56,15 @@ namespace Experience
         public float shootCueSeconds = 2.5f;
 
         [Range(0f, 1f)]
+        [Tooltip("How long AFTER the countdown zero the captured second begins. The " +
+                 "visitor starts moving when they hear the shutter, and a person takes " +
+                 "0.2-0.3 s to react — with no offset the front of the window is still " +
+                 "them standing still and the tail of the movement falls outside it. " +
+                 "The recording is extended by the same amount, so the kept second is " +
+                 "still exactly captureSeconds long; only where it sits moves.")]
+        public float captureStartOffsetSeconds = 0.25f;
+
+        [Range(0f, 1f)]
         [Tooltip("How far BEFORE the countdown zero the recorder starts — just enough " +
                  "that opening the four RCSV writers does not eat the first frames of " +
                  "the capture window. 0 = start exactly at zero. The countdown itself " +

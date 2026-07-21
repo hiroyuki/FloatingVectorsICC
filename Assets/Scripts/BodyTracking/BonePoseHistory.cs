@@ -35,10 +35,45 @@ namespace BodyTracking
         [Tooltip("Ring-buffer length K: how many past frames form each bone's curve.")]
         public int historySamples = 12;
 
+        [Tooltip("Freeze the ring: stop ingesting AND stop the staleness clear, so the " +
+                 "curves stay exactly as they are. Set by the experience flow once the " +
+                 "take play-through is over and the curve on screen is the finished " +
+                 "result — otherwise the bones age out and the sculpture's ribbons " +
+                 "vanish a few frames later.")]
+        [System.NonSerialized]
+        public bool hold;
+
+        /// <summary>
+        /// Drop every bone's history and publish the empty result. Use this to END a
+        /// held result: clearing `hold` alone leaves the previous visitor's frozen
+        /// ribbons in the ring, and the next visitor's first samples APPEND to them.
+        /// The discontinuity gate does not save you there — <see cref="Push"/> clamps
+        /// the gap to 0.3 s, so someone standing where the last visitor stood stays
+        /// under maxEndpointSpeed and their curve grows out of a stranger's.
+        /// </summary>
+        public void ReleaseHoldAndClear()
+        {
+            hold = false;
+            EnsureBuffers();
+            ResetAll();
+            PublishGpu();
+        }
+
         [Min(1)]
         [Tooltip("An endpoint is treated as stale (bone history reset) if its last fresh BT " +
                  "frame is older than this many frames. Guards against dragging held/predicted joints.")]
         public int freshWindowFrames = 12;
+
+        [Min(0f)]
+        [Tooltip("Discontinuity gate (m/s). A tracked endpoint that appears to move faster " +
+                 "than this did not move — the skeleton jumped (a limb snapped to the wrong " +
+                 "side, the tracker re-acquired, a frame came from a different person). " +
+                 "Without a gate both samples still land in the ring and the curve draws one " +
+                 "long straight streak between them, which is what 'correct lines with wrong " +
+                 "long lines mixed in' looks like. The ring is cut instead, so the curve " +
+                 "restarts at the new position. A hard human swing peaks near 10 m/s, so the " +
+                 "default leaves real motion alone. 0 disables the gate.")]
+        public float maxEndpointSpeed = 15f;
 
         [Range(0f, 0.4f)]
         [Tooltip("Length (m) of the virtual hand bone appended past each wrist. k4abt's hand " +
@@ -287,7 +322,17 @@ namespace BodyTracking
                 _havePoseVersion = true;
             }
 
-            if (newFrame)
+            if (hold)
+            {
+                // Explicit hold: the run is finished and this ring IS the result, so
+                // neither ingest nor stale-clear may touch it. Checked before
+                // `newFrame` because live frames keep arriving after the take ends.
+                // Same intent as the paused branch below, minus the dependency on the
+                // transport: a loop=false play-through STOPS rather than pauses, so
+                // IsPaused is false and the finished curve used to age out of
+                // existence a few frames after the take ended.
+            }
+            else if (newFrame)
             {
                 // New pose (play / frame-step): push fresh samples, reset bones that went invalid/stale.
                 UpdateHistory();
@@ -452,7 +497,20 @@ namespace BodyTracking
                 float dt = Mathf.Clamp(now - _lastPushRealtime[bone], 0.01f, 0.3f);
                 Sample prev = _ring[bone][_head[bone]];
                 float moved = Mathf.Max(Vector3.Distance(s.A, prev.A), Vector3.Distance(s.B, prev.B));
-                _tipSpeed[bone] = moved / dt;
+                float speed = moved / dt;
+                if (maxEndpointSpeed > 0f && speed > maxEndpointSpeed)
+                {
+                    // Teleport, not movement. Drop the history so the curve is CUT
+                    // here rather than drawing a straight streak across the jump,
+                    // and start a fresh trail from the new position.
+                    ResetBone(bone);
+                    _ring[bone][0] = s;
+                    _head[bone] = 0;
+                    _count[bone] = 1;
+                    _lastPushRealtime[bone] = now;
+                    return;
+                }
+                _tipSpeed[bone] = speed;
             }
             else
             {

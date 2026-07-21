@@ -40,6 +40,7 @@ MonoBehaviour:
   visitorRecordingRoot: 
   captureSeconds: 1
   shootCueSeconds: 2.5
+  captureStartOffsetSeconds: 0.25
   recordPreRollSeconds: 0.3
   devCannedTakeRoot: D:\Dropbox\projects\ICC\Recordings\RecordingBase\2026-07-14_15-50-24
   allowCannedTakeConversion: 0
