@@ -1,8 +1,8 @@
 // EditMode tests for the one-second-take experience state machine: full happy
-// path, per-state latch clearing, calibrate-timeout default path, FreeMove
-// timer, processing fail path, ResultShow minimum dwell + no-early-leave,
-// one-frame failure pulses, leave/fault interruptions, skip flags,
-// timeMultiplier.
+// path, the privacy-consent gate, per-state latch clearing, calibrate-timeout
+// default path, FreeMove timer, processing fail path, ResultShow minimum dwell +
+// no-early-leave, one-frame failure pulses, the debounced leave grace
+// (chattering / brief step-outs never drop the run), skip flags, timeMultiplier.
 
 using Experience;
 using NUnit.Framework;
@@ -21,6 +21,7 @@ namespace Calibration.Tests
             _sm = new ExperienceStateMachine();
             _t = new ExperienceTimings
             {
+                consentSeconds = 6f,
                 welcomeSeconds = 4f,
                 calibrateSeconds = 10f,
                 freeMoveSeconds = 20f,
@@ -28,6 +29,7 @@ namespace Calibration.Tests
                 resultMinSeconds = 4f,
                 exportFailNoticeSeconds = 5f,
                 qrShowSeconds = 30f,
+                leaveGraceSeconds = 5f,
             };
             _in = new ExperienceInputs { Present = true };
             _sm.ResetTo(ExperienceState.Idle);
@@ -41,11 +43,23 @@ namespace Calibration.Tests
             Assert.AreEqual(expected, _sm.State);
         }
 
-        /// <summary>Idle → Welcome (presence) → Calibrate (welcome timer).</summary>
+        // ---- entry-stage helpers (Idle → Consent → Welcome → Calibrate) ----
+
+        private void ReachConsent()
+        {
+            Tick(); // Present → Consent
+            Assert.AreEqual(ExperienceState.Consent, _sm.State);
+        }
+
+        private void ReachWelcome()
+        {
+            ReachConsent();
+            TickUntil(ExperienceState.Welcome, dt: 1f); // consentSeconds timer
+        }
+
         private void ReachCalibrate()
         {
-            Tick(); // Present → Welcome
-            Assert.AreEqual(ExperienceState.Welcome, _sm.State);
+            ReachWelcome();
             TickUntil(ExperienceState.Calibrate, dt: 1f); // welcomeSeconds timer
         }
 
@@ -54,7 +68,7 @@ namespace Calibration.Tests
         [Test]
         public void HappyPath_FullSequence()
         {
-            ReachCalibrate(); // Present → Welcome → (timer) → Calibrate
+            ReachCalibrate(); // Present → Consent → Welcome → Calibrate
 
             _in.CalibrationDone = true;
             Tick();
@@ -92,6 +106,36 @@ namespace Calibration.Tests
             Assert.AreEqual(ExperienceState.Idle, _sm.State);
             _in.Present = true;
             Tick();
+            Assert.AreEqual(ExperienceState.Consent, _sm.State);
+        }
+
+        // ---- Consent (privacy gate) ----
+
+        [Test]
+        public void Consent_ShownFirst_ThenAdvancesToWelcome()
+        {
+            ReachConsent();
+            Tick(3f);
+            Assert.AreEqual(ExperienceState.Consent, _sm.State); // 3s < 6s
+            TickUntil(ExperienceState.Welcome, dt: 1f);
+        }
+
+        [Test]
+        public void Consent_LeaveEarly_OptsOutToIdle()
+        {
+            ReachConsent();
+            _in.Present = false;
+            Tick(1f);
+            Assert.AreEqual(ExperienceState.Consent, _sm.State); // 1s < 5s grace
+            TickUntil(ExperienceState.Idle, dt: 1f);             // grace elapses
+        }
+
+        [Test]
+        public void Consent_Skip_AdvancesImmediately()
+        {
+            _t.skipConsent = true;
+            ReachConsent();
+            Tick();
             Assert.AreEqual(ExperienceState.Welcome, _sm.State);
         }
 
@@ -100,8 +144,7 @@ namespace Calibration.Tests
         [Test]
         public void Welcome_TimerAdvancesToCalibrate()
         {
-            Tick(); // → Welcome
-            Assert.AreEqual(ExperienceState.Welcome, _sm.State);
+            ReachWelcome();
             Tick(2f);
             Assert.AreEqual(ExperienceState.Welcome, _sm.State); // 2s < 4s
             for (int i = 0; i < 3; i++) Tick(1f);
@@ -109,19 +152,20 @@ namespace Calibration.Tests
         }
 
         [Test]
-        public void Welcome_LeaveEarly_ReturnsToIdle()
+        public void Welcome_LeaveEarly_ReturnsToIdleAfterGrace()
         {
-            Tick(); // → Welcome
+            ReachWelcome();
             _in.Present = false;
-            Tick();
-            Assert.AreEqual(ExperienceState.Idle, _sm.State);
+            Tick(1f);
+            Assert.AreEqual(ExperienceState.Welcome, _sm.State); // grace holds
+            TickUntil(ExperienceState.Idle, dt: 1f);
         }
 
         [Test]
         public void Welcome_Skip_AdvancesImmediately()
         {
             _t.skipWelcome = true;
-            Tick(); // → Welcome
+            ReachWelcome();
             Tick();
             Assert.AreEqual(ExperienceState.Calibrate, _sm.State);
         }
@@ -163,13 +207,74 @@ namespace Calibration.Tests
             Tick(5f);
             Assert.AreEqual(ExperienceState.FreeMove, _sm.State); // 5s < 20s
             _in.Present = false;
-            Tick();
-            Assert.AreEqual(ExperienceState.Idle, _sm.State);
+            TickUntil(ExperienceState.Idle, dt: 1f); // leave grace elapses
 
             _in.Present = true;
             ReachCalibrate();
             _in.CalibrationDone = true; Tick(); _in.CalibrationDone = false;
             TickUntil(ExperienceState.Shoot, dt: 2f);
+        }
+
+        // ---- leave grace (chattering / brief step-outs) ----
+
+        [Test]
+        public void LeaveGrace_ChatteringDoesNotReset()
+        {
+            ReachCalibrate();
+            // Presence flickers off/on, always returning before the grace window.
+            for (int i = 0; i < 8; i++)
+            {
+                _in.Present = false; Tick(0.4f);
+                Assert.AreEqual(ExperienceState.Calibrate, _sm.State);
+                _in.Present = true; Tick(0.1f); // back inside → grace clock resets
+            }
+            Assert.AreEqual(ExperienceState.Calibrate, _sm.State);
+        }
+
+        [Test]
+        public void LeaveGrace_ResetsOnlyAfterContinuousAbsence()
+        {
+            ReachCalibrate();
+            _in.Present = false;
+            Tick(2f);
+            Assert.AreEqual(ExperienceState.Calibrate, _sm.State); // 2s < 5s
+            Tick(2f);
+            Assert.AreEqual(ExperienceState.Calibrate, _sm.State); // 4s < 5s
+            Tick(2f);
+            Assert.AreEqual(ExperienceState.Idle, _sm.State);      // 6s >= 5s
+        }
+
+        [Test]
+        public void LeaveGrace_AbsenceDoesNotConsumeStateDwell()
+        {
+            // The consent window must count only real presence: a sub-grace
+            // step-out pauses the clock instead of advancing it, so returning
+            // does NOT let a barely-attended consent fast-forward to Welcome.
+            ReachConsent();
+            Tick(3f); // 3s present in Consent (< 6s)
+            Assert.AreEqual(ExperienceState.Consent, _sm.State);
+            _in.Present = false;
+            Tick(4f); // 4s absent (< 5s grace) — must not consume the window
+            Assert.AreEqual(ExperienceState.Consent, _sm.State);
+            _in.Present = true;
+            Tick(2f); // 3+2 = 5s present (< 6s) — still short (absence didn't count)
+            Assert.AreEqual(ExperienceState.Consent, _sm.State);
+            Tick(2f); // 7s present (>= 6s) → Welcome
+            Assert.AreEqual(ExperienceState.Welcome, _sm.State);
+        }
+
+        [Test]
+        public void LeaveGrace_ReturningResetsTheClock()
+        {
+            ReachCalibrate();
+            _in.Present = false;
+            Tick(4f); // 4s absent (< 5s)
+            Assert.AreEqual(ExperienceState.Calibrate, _sm.State);
+            _in.Present = true;
+            Tick(0.1f); // back inside → clock resets
+            _in.Present = false;
+            Tick(4f); // 4s absent again — cumulative would be 8s, but the clock reset
+            Assert.AreEqual(ExperienceState.Calibrate, _sm.State);
         }
 
         // ---- Shoot ----
@@ -234,12 +339,13 @@ namespace Calibration.Tests
         }
 
         [Test]
-        public void Processing_LeaveEarly_ReturnsToIdle()
+        public void Processing_LeaveEarly_ReturnsToIdleAfterGrace()
         {
             ReachProcessing();
             _in.Present = false;
-            Tick();
-            Assert.AreEqual(ExperienceState.Idle, _sm.State);
+            Tick(1f);
+            Assert.AreEqual(ExperienceState.Processing, _sm.State); // grace holds
+            TickUntil(ExperienceState.Idle, dt: 1f);
         }
 
         // ---- ResultShow ----
@@ -330,6 +436,7 @@ namespace Calibration.Tests
         public void Skips_ReachProcessingThroughEveryState()
         {
             _t.skipIdle = true;
+            _t.skipConsent = true;
             _t.skipWelcome = true;
             _t.skipCalibrate = true;
             _t.skipFreeMove = true;
@@ -338,14 +445,14 @@ namespace Calibration.Tests
             var visited = new System.Collections.Generic.List<ExperienceState>();
             _sm.Changed += (from, to) => visited.Add(to);
 
-            for (int i = 0; i < 6; i++) Tick();
+            for (int i = 0; i < 7; i++) Tick();
             Assert.AreEqual(ExperienceState.Processing, _sm.State);
             CollectionAssert.AreEqual(
                 new[]
                 {
-                    ExperienceState.Welcome, ExperienceState.Calibrate,
-                    ExperienceState.FreeMove, ExperienceState.Shoot,
-                    ExperienceState.Processing,
+                    ExperienceState.Consent, ExperienceState.Welcome,
+                    ExperienceState.Calibrate, ExperienceState.FreeMove,
+                    ExperienceState.Shoot, ExperienceState.Processing,
                 },
                 visited);
 
@@ -360,10 +467,13 @@ namespace Calibration.Tests
         // ---- time multiplier ----
 
         [Test]
-        public void TimeMultiplier_ScalesCalibrateTimeout()
+        public void TimeMultiplier_ScalesConsentAndWelcomeTimeouts()
         {
             _t.timeMultiplier = 10f;
-            Tick(); // → Welcome
+            Tick(); // Idle → Consent (presence)
+            Assert.AreEqual(ExperienceState.Consent, _sm.State);
+            Tick(0.7f); // 0.7s * 10 = 7s > 6s consent → Welcome
+            Assert.AreEqual(ExperienceState.Welcome, _sm.State);
             Tick(0.5f); // 0.5s * 10 = 5s > 4s welcome → Calibrate
             Assert.AreEqual(ExperienceState.Calibrate, _sm.State);
             for (int i = 0; i < 3; i++) Tick(0.5f); // 1.5s * 10 = 15s > 10s
