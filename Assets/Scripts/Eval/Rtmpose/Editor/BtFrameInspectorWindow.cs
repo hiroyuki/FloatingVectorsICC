@@ -202,8 +202,14 @@ namespace BodyTracking.Eval.Rtmpose
                         ExtrinsicsApply.ToUnityLocal(c.GlobalTrColorCamera.Value, out var pos, out _);
                         cams.Add((c.Serial, pos));
                     }
+                    // Same resolution as the production path: the machine-local
+                    // cameras.yaml owns the rig order, the scene array is only a
+                    // fallback (it is git-synced, so it can hold the other rig's
+                    // serials).
+                    var rigOrder = PointCloudRecording.ResolveRigSerialOrder(
+                        sm[0].ResolveExtrinsicsRoot(), sm[0].rigSerialOrder, out _);
                     useRebase = WorldFrameRebase.TryComputeFromCalibrations(
-                        cams, sm[0].rigSerialOrder, out rebase, out string reason, sm[0].rebaseFloorY);
+                        cams, rigOrder, out rebase, out string reason, sm[0].rebaseFloorY);
                     if (!useRebase) sb.AppendLine($"world rebase skipped: {reason}");
                 }
                 sb.AppendLine($"frame={_frame} ts={targetTs} rebase={useRebase}");

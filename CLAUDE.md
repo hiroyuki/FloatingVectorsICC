@@ -43,9 +43,17 @@ Unity上でリアルタイムにポイントクラウドとして描画する。
 3. Game ビューで **I** → assign mode。カメラの前で手を振って個体を特定し、
    矢印で選択 → 数字キーで id 割当 → **O** で origin 指定 → **Enter** で保存
 4. 外部ディスプレイ（display2 に cam0/1、display3 に cam2/3）で並びを確認
-- シーンにシリアルを直接シリアライズしている箇所（例: `SensorRecorder.rigSerialOrder`）は
-  セット間で git 同期すると別セットの serial が入ってくるので注意。
-  シリアル依存の設定は極力マシンローカルなファイルに置く
+- **git 管理下（シーン / asset / スクリプト既定値）に serial を書かない**。セット間で
+  同期され、片方のマシンでは必ず別セットの serial になる。リグ順は
+  `PointCloudRecording.ResolveRigSerialOrder` が `cameras.yaml`（マシンローカル）から
+  解決する — `SensorManager` / `SensorRecorder` / `ExperienceSpaceBuilder` /
+  `BtFrameInspectorWindow` はすべてこれを通る。
+  各コンポーネントの `rigSerialOrder` は**空のまま**が正しい状態（cameras.yaml の id 順が
+  perimeter walk になっていない場合に限り、そのマシンでだけ手で埋めるフォールバック。
+  埋めたらコミットしない）
+- serial を持つマシンローカルファイルは
+  `persistentDataPath/Recordings/recording/calibration/` に集約: `cameras.yaml`（id 割当）、
+  `extrinsics.yaml`（外部パラメータ）、`floor.yaml`（床高さ）。いずれも git 管理外
 
 ## 技術スタック
 - Unity 6 LTS (URP - Universal 3D)
