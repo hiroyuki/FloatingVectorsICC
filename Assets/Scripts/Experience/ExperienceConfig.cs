@@ -39,6 +39,38 @@ namespace Experience
         public float yBandMax = 100f;
         [Min(1)] public int occupancyThreshold = 1500;
 
+        [Header("Camera auto-recovery (Fault only)")]
+        [Tooltip("While the show sits in Fault because a camera stopped streaming, " +
+                 "tear the live rig down and bring it straight back up instead of " +
+                 "waiting for an operator. Docs/camera-dropout-investigation.md pins " +
+                 "the dropout on a start-up race, not a USB fault: every time a " +
+                 "DIFFERENT camera drops, the OS logs no USB error, and re-entering " +
+                 "Play fixes it — so a re-init is the real remedy. Only ever runs in " +
+                 "Fault, where the run has already been aborted, so it can never " +
+                 "interrupt a visitor mid-experience.")]
+        public bool autoRecoverCameras = true;
+
+        [Min(0.5f)]
+        [Tooltip("Pause between destroying the renderers and re-opening them, so the " +
+                 "OrbbecSDK pipelines finish releasing the USB devices. Re-opening " +
+                 "before the previous session let go is the suspected cause of the " +
+                 "dropout in the first place — do not shorten this without testing.")]
+        public float cameraReleaseSeconds = 3f;
+
+        [Min(5f)]
+        [Tooltip("How long to keep WAITING for the re-opened rig to report healthy " +
+                 "before calling the attempt a failure. Polled, so a fast recovery " +
+                 "returns immediately — this is the ceiling, not a fixed delay. " +
+                 "Measured on the rig: StartLive returns as soon as the renderers " +
+                 "exist, but frames only start flowing ~10 s later, so a ceiling under " +
+                 "that tears the cameras down mid-startup and can never succeed.")]
+        public float cameraSettleSeconds = 25f;
+
+        [Min(1)]
+        [Tooltip("Re-init attempts before giving up and leaving the red alert for the " +
+                 "operator.")]
+        public int cameraRecoverAttempts = 3;
+
         [Header("Visitor take (Shoot recording)")]
         [Tooltip("Root folder visitor takes are recorded under (each take gets a " +
                  "timestamped subfolder). Keep on a fast disk.")]

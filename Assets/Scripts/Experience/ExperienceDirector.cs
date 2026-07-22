@@ -202,6 +202,8 @@ namespace Experience
         private string _qrUrl;
         private bool _crowdShowing;
         private bool _autoActivated; // activateOnPlay latch (once per Play)
+        private Coroutine _recoveryRoutine; // camera auto-recovery, Fault only
+        private bool _savedHadLiveRig;      // live renderers existed when the show began
 
         // ------------------------------------------------ lifecycle ----
 
@@ -353,6 +355,12 @@ namespace Experience
                 Debug.LogWarning($"[{nameof(ExperienceDirector)}] no config assigned — using defaults.", this);
             }
 
+            // Start each session with the recovery slot free. Unity stops coroutines on
+            // disable without running their cleanup, so a handle left non-null there
+            // would fail the `_recoveryRoutine == null` start guard forever and
+            // silently disable camera recovery for the rest of the run.
+            _recoveryRoutine = null;
+
             // 0) tear down the bone-verify diagnostic (F7/F8) if it is still up — it
             // forces showBones, curve visibility, a colour-grid overlay on a visitor
             // display and camera suppression, none of which may bleed into the
@@ -473,6 +481,10 @@ namespace Experience
             }
             _savedLiveVisible.Clear();
             _savedLiveSuppress.Clear();
+            // Did the operator have a live rig before the show? Only then may an
+            // interrupted camera recovery put one back on exit — entering from a
+            // playback-only dev session must come out of the show still playback-only.
+            _savedHadLiveRig = sensorManager != null && sensorManager.Renderers.Count > 0;
             if (sensorManager != null)
             {
                 foreach (var r in sensorManager.Renderers)
@@ -508,6 +520,34 @@ namespace Experience
             StopRoutine(ref _shootRoutine);
             StopRoutine(ref _processingRoutine);
             StopRoutine(ref _exportRoutine);
+            // Camera recovery must not outlive the mode: left running it would call
+            // StartLive() partway through the dev/playback restore below.
+            if (_recoveryRoutine != null)
+            {
+                StopRoutine(ref _recoveryRoutine);
+                // It may have been stopped between DestroyAllRenderers() and its own
+                // StartLive(), which would strand the rig with no cameras. Re-opening
+                // HERE is not safe though: DestroyAllRenderers clears the list at once
+                // while Unity defers the actual Destroy() (and the OnDestroy that joins
+                // the capture thread and disposes the Orbbec pipeline) to end of frame,
+                // so a same-frame StartLive would re-open devices whose old pipelines
+                // still hold them — the exact start-up race this recovery exists to
+                // undo. Re-open on a delay instead.
+                // ...and only when the operator actually had a live rig before the show:
+                // entering from a playback-only dev session restores keepLiveRenderersOnLoad
+                // =false and reloads the take below, which deliberately leaves live
+                // renderers absent. Re-opening there would fight that restore and drag
+                // CameraHealthMonitor out of its playback suppression path.
+                if (_savedHadLiveRig && sensorManager != null && sensorManager.Renderers.Count == 0)
+                {
+                    if (isActiveAndEnabled) StartCoroutine(ReopenLiveAfterReleaseRoutine());
+                    else
+                        Debug.LogError($"[{nameof(ExperienceDirector)}] mode exited via disable " +
+                                       "while camera recovery was mid-teardown — the live rig is " +
+                                       "down and cannot be re-opened from OnDisable. Re-enter " +
+                                       "experience mode (or restart Play) to bring it back.", this);
+                }
+            }
             CancelPublish();
             CancelProfileSampling();
             _converter?.Abort();
@@ -757,6 +797,10 @@ namespace Experience
                 case ExperienceState.Fault:
                     string fault = healthMonitor != null ? healthMonitor.FaultAlertText : "";
                     _ui.ShowAlert(string.IsNullOrEmpty(fault) ? "カメラが異常です" : fault);
+                    // Try to bring the rig back by ourselves. Skipped when the operator
+                    // forced the fault (debugForceFault) — there is no camera to fix.
+                    if (config.autoRecoverCameras && !debugForceFault && _recoveryRoutine == null)
+                        _recoveryRoutine = StartCoroutine(RecoverCamerasRoutine());
                     break;
             }
             if (state != ExperienceState.Fault)
@@ -1504,6 +1548,90 @@ namespace Experience
                 sensorRecorder.playbackRenderDelayFrames = _savedRenderDelay;
                 sensorRecorder.loop = _savedLoop;
             }
+        }
+
+        // ---- camera auto-recovery (Fault only) ----
+
+        /// <summary>
+        /// Re-open the live rig that a stopped recovery left torn down, honouring the
+        /// same release delay the recovery uses. Frame yield first: DestroyAllRenderers
+        /// clears the list immediately but Unity runs the actual Destroy() — and the
+        /// PointCloudRenderer.OnDestroy that joins the capture thread and disposes the
+        /// Orbbec pipeline — at end of frame, so the device is not free until after it.
+        /// Deliberately NOT gated on _active: it exists to clean up after mode exit.
+        /// </summary>
+        private IEnumerator ReopenLiveAfterReleaseRoutine()
+        {
+            yield return null; // let the deferred Destroy()/OnDestroy actually run
+            yield return new WaitForSecondsRealtime(config.cameraReleaseSeconds);
+            sensorManager?.StartLive();
+            Debug.Log($"[{nameof(ExperienceDirector)}] re-opened the live rig that an " +
+                      "interrupted camera recovery had torn down.", this);
+        }
+
+        /// <summary>
+        /// Re-init the live rig while the show is stuck in Fault. The dropout this
+        /// answers is a start-up race, not a USB fault (Docs/camera-dropout-
+        /// investigation.md: a different camera each time, no OS-level USB error,
+        /// fixed by re-entering Play), so tearing the renderers down and re-opening
+        /// them is the actual remedy. Every consumer re-binds on its own —
+        /// TSDFIntegrator.Update re-scans via BindAllSources, LiveFusedBodySource
+        /// re-subscribes for late-joining renderers, CameraHealthMonitor re-hooks —
+        /// so nothing else needs poking.
+        ///
+        /// Runs ONLY in Fault, where the FSM has already aborted the run, so it can
+        /// never interrupt a visitor. A teardown is always followed by its StartLive
+        /// in the same iteration — the loop only re-checks state before tearing down,
+        /// never between, so we can't leave the rig destroyed.
+        /// </summary>
+        private IEnumerator RecoverCamerasRoutine()
+        {
+            int attempts = Mathf.Max(1, config.cameraRecoverAttempts);
+            for (int attempt = 1; attempt <= attempts; attempt++)
+            {
+                // Left Fault between attempts (recovered, or the operator took over):
+                // done, and NOT a give-up — fall out quietly rather than logging an error.
+                if (!_active || _fsm == null || _fsm.State != ExperienceState.Fault)
+                {
+                    _recoveryRoutine = null;
+                    yield break;
+                }
+
+                Debug.LogWarning($"[{nameof(ExperienceDirector)}] camera auto-recovery: " +
+                                 $"re-init attempt {attempt}/{attempts} " +
+                                 $"({healthMonitor?.FaultAlertText})", this);
+
+                sensorManager?.DestroyAllRenderers();
+                yield return new WaitForSecondsRealtime(config.cameraReleaseSeconds);
+                sensorManager?.StartLive();
+
+                // POLL for health rather than judging after a flat wait. StartLive
+                // returns as soon as the renderers are spawned, but the devices need
+                // roughly ten more seconds before frames actually flow — and until they
+                // do, CameraHealthMonitor still reports stalled (staleFrameSeconds=3).
+                // A fixed wait that expires first tears the rig down again MID-STARTUP,
+                // which is strictly worse than doing nothing: measured on the rig, the
+                // renderers came back 4/4 every attempt and were killed each time.
+                // Polling exits the moment the rig is healthy and otherwise gives it
+                // the whole window.
+                float deadline = Time.realtimeSinceStartup + config.cameraSettleSeconds;
+                while (Time.realtimeSinceStartup < deadline
+                       && healthMonitor != null && !healthMonitor.IsHealthy)
+                    yield return new WaitForSecondsRealtime(0.5f);
+
+                if (healthMonitor == null || healthMonitor.IsHealthy)
+                {
+                    Debug.Log($"[{nameof(ExperienceDirector)}] camera auto-recovery: rig healthy " +
+                              $"again after attempt {attempt} — the show resumes from Idle.", this);
+                    _recoveryRoutine = null;
+                    yield break;
+                }
+            }
+
+            Debug.LogError($"[{nameof(ExperienceDirector)}] camera auto-recovery gave up after " +
+                           $"{attempts} attempt(s) — the alert stays up for the operator. " +
+                           $"({healthMonitor?.FaultAlertText})", this);
+            _recoveryRoutine = null;
         }
 
         private void RestoreHistorySamples()
