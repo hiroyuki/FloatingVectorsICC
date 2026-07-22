@@ -62,6 +62,7 @@ namespace Experience
         public FloorOrigin floorOrigin;
         public TSDFVolume tsdfVolume;
         public TSDFIntegrator tsdfIntegrator; // frozen at capture so the result stops recomputing
+        public TSDFView tsdfView;             // hidden during Processing (see SetSculptureVisible)
         public PointCloudMotionCurves motionCurves;
         public BonePoseHistory poseHistory;
         public TSDFPrintExporter printExporter; // capture/export settings source
@@ -213,6 +214,7 @@ namespace Experience
             if (floorOrigin == null) floorOrigin = FindFirstObjectByType<FloorOrigin>();
             if (tsdfVolume == null) tsdfVolume = FindFirstObjectByType<TSDFVolume>();
             if (tsdfIntegrator == null) tsdfIntegrator = FindFirstObjectByType<TSDFIntegrator>();
+            if (tsdfView == null) tsdfView = FindFirstObjectByType<TSDFView>();
             if (motionCurves == null) motionCurves = FindFirstObjectByType<PointCloudMotionCurves>();
             if (poseHistory == null) poseHistory = FindFirstObjectByType<BonePoseHistory>();
             if (printExporter == null) printExporter = FindFirstObjectByType<TSDFPrintExporter>();
@@ -615,6 +617,8 @@ namespace Experience
                 _sculptureFrozen = false;
             }
             if (poseHistory != null) poseHistory.historySamples = _savedHistorySamples;
+            // Leaving mode mid-Processing must not strand the sculpture hidden.
+            SetSculptureVisible(true);
 
             Debug.Log($"[{nameof(ExperienceDirector)}] experience mode OFF (dev values restored).", this);
         }
@@ -761,6 +765,10 @@ namespace Experience
                 PlayStateEnterSe(state); // one cue per screen, on entry only
             }
             ApplyCurvesVisibility(state);
+            // Sculpture hidden for the whole of Processing, revealed on entering
+            // ResultShow. Driven off the state (not the routine) so every exit path —
+            // fault, visitor walked off, processing failure — brings it back.
+            SetSculptureVisible(state != ExperienceState.Processing);
             ShowStateMessage(state);
         }
 
@@ -805,6 +813,34 @@ namespace Experience
                                         or ExperienceState.Processing
                                         or ExperienceState.ResultShow
                                         or ExperienceState.QrShow;
+        }
+
+        /// <summary>
+        /// Hide the sculpture itself (TSDF mesh + ribbons) for the whole of Processing,
+        /// so the finished piece is a REVEAL at ResultShow instead of something the
+        /// visitor watched being rebuilt. Processing replays the take to rebuild the
+        /// sculpture from the v11s bodies, and that replay is visibly noisy — measured
+        /// on the rig, the TSDF swings 664k..825k vertices (~20% of the mesh, 31
+        /// distinct values) over the ~2 s play-through. Only the progress bar shows
+        /// during that.
+        ///
+        /// Draw-only on both halves, via each component's suppressDraw — the visible/
+        /// showMesh flags are deliberately NOT used, because both gate production, not
+        /// just drawing, and the capture consumes what they produce:
+        ///   - curves.visible early-outs before the BUILD, and the capture reads the
+        ///     built curves.
+        ///   - tsdfView.showMesh gates TrianglesReady, which is what
+        ///     PointCloudMotionCurves.CollectSeeds uses to seed ribbons off the TSDF
+        ///     surface — dropping it would change which curves exist, and so change
+        ///     what gets exported.
+        /// suppressDraw on both leaves every buffer being produced exactly as normal
+        /// and only skips the draw calls, so the export is bit-for-bit what it would
+        /// have been with the sculpture on screen.
+        /// </summary>
+        private void SetSculptureVisible(bool shown)
+        {
+            if (tsdfView != null) tsdfView.suppressDraw = !shown;
+            if (motionCurves != null) motionCurves.suppressDraw = !shown;
         }
 
         // ---------------- body-source switching ----------------
@@ -1558,6 +1594,32 @@ namespace Experience
             string glbPath = Path.Combine(dir, $"exp_{stamp}.glb");
             string usdzPath = Path.Combine(dir, $"exp_{stamp}.usdz");
             string usdPython = printExporter != null ? printExporter.usdPythonPath : "";
+
+            // Let the ResultShow frame finish before blocking on the write.
+            // StartCoroutine runs a coroutine synchronously up to its first yield, and
+            // ResultShow's own side effects — revealing the sculpture, painting
+            // できたよ！ — are applied later in the SAME ApplyStateSideEffects call.
+            // uGUI only renders at end of frame, so without this yield the export
+            // (measured ~3 s with the USDZ step) stalls the frame that was supposed to
+            // present the reveal: the visitor keeps staring at the blank Processing
+            // stage for the whole write and the result appears only after it. Yielding
+            // once lets that frame present first, which is exactly the "frozen result
+            // view absorbs the hitch" the write below assumes.
+            yield return null;
+
+            // A frame passed — re-check that the show still wants this write. Fault
+            // preempts everything (ExperienceStateMachine.Tick) and mode exit can land
+            // here too; either way the state that replaced ResultShow has already
+            // painted, and blocking ~3 s now would stall the very frame meant to
+            // present it — the red alert would stay off-screen for the whole write.
+            // Skip the export instead: the run is being torn down regardless.
+            if (!_active || _fsm == null || _fsm.State != ExperienceState.ResultShow)
+            {
+                Debug.LogWarning($"[{nameof(ExperienceDirector)}] left ResultShow before the " +
+                                 "export began — skipping export/upload for this run.", this);
+                _exportRoutine = null;
+                yield break;
+            }
 
             // Synchronous local write (atomic tmp+rename; the frozen result view
             // absorbs the hitch frame).

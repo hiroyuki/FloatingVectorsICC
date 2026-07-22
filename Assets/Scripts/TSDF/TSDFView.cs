@@ -48,6 +48,15 @@ namespace TSDF
                  "PointCloudView.showPointClouds; toggle at runtime (TSDFDebugSession's M key).")]
         public bool showMesh = true;
 
+        [Tooltip("Hide the mesh WITHOUT gating TrianglesReady (runtime only). showMesh " +
+                 "cannot be used to merely hide it: TrianglesReady requires showMesh, and " +
+                 "PointCloudMotionCurves.CollectSeeds seeds the ribbons off this view's " +
+                 "triangle buffer through that flag — dropping showMesh would silently " +
+                 "change which curves get built, and therefore what the capture exports. " +
+                 "This suppresses only the draw call; Marching Cubes still runs. " +
+                 "Not serialized: a stray true in a scene would blank the sculpture.")]
+        [System.NonSerialized] public bool suppressDraw;
+
         // ---- Shared.IViewToggle (unified Views panel) ----
         public string ViewLabel => "TSDF mesh";
         public bool Visible { get => showMesh; set => showMesh = value; }
@@ -456,6 +465,14 @@ namespace TSDF
                 DispatchMarchCubes();
                 _lastPublishVersion = published;
             }
+
+            // Draw-only suppression, deliberately placed AFTER the extraction: the
+            // ribbons seed from _meshTrianglesBuffer via TrianglesReady, so the
+            // triangles must keep being produced even while the sculpture is hidden
+            // (the experience hides it through Processing, where the capture still
+            // reads those seeds). Returning before DispatchMarchCubes — or using
+            // showMesh — would change what the capture exports.
+            if (suppressDraw) return;
 
             meshMaterial.SetBuffer("_Triangles", _meshTrianglesBuffer);
             meshMaterial.SetFloat("_Saturation", meshSaturation);

@@ -28,6 +28,13 @@ namespace BodyTracking
                  "independent of the BT skeleton toggle.")]
         public bool visible = true;
 
+        [Tooltip("Hide the ribbons WITHOUT stopping the build (runtime only). `visible` " +
+                 "gates build and draw together, so it cannot hide curves that something " +
+                 "else still needs built — the experience's Processing state is exactly " +
+                 "that case. Not serialized: a stray true in a scene would silently " +
+                 "blank the ribbons.")]
+        [System.NonSerialized] public bool suppressDraw;
+
         // ---- Shared.IViewToggle (unified Views panel) ----
         public string ViewLabel => "Motion lines";
         public bool Visible { get => visible; set => visible = value; }
@@ -655,6 +662,13 @@ namespace BodyTracking
 
         private void DrawCurves()
         {
+            // Draw-only suppression. `visible` cannot be used for this: it early-returns
+            // out of Update BEFORE the build, and the experience's Processing state still
+            // needs the curves BUILT (the capture reads them) while they must not be seen
+            // — the take replays there and the ribbons visibly churn as it rebuilds.
+            // Every DrawCurves call site (normal, freeze-hold, auto-hold) funnels here.
+            if (suppressDraw) return;
+
             _mat.SetBuffer(kVerts, _outBuf);
             _mat.SetFloat(kBrightness, brightness);
             _mat.SetFloat(kWidth, ribbonWidth);
