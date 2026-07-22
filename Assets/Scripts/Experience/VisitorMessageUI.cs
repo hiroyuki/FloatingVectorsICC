@@ -31,6 +31,13 @@ namespace Experience
                  "this targetDisplay must exist). Operator Display 1 is IMGUI-only.")]
         public int[] visitorDisplays = { 1, 2 };
 
+        [Tooltip("Subset of visitorDisplays that show the visitor TEXT/content " +
+                 "(message, countdown, QR, pose guide, progress, notice). Empty = all. " +
+                 "The red fault ALERT deliberately ignores this and covers every " +
+                 "visitorDisplay — a fault must be visible on every screen even though " +
+                 "the wording lives on one. Default {1} = display2 only.")]
+        public int[] messageDisplays = { 1 };
+
         [Tooltip("OS font names tried in order for the visitor text (kids-friendly " +
                  "Japanese). First installed one wins; none → LegacyRuntime.ttf + log.")]
         public string[] fontCandidates =
@@ -191,6 +198,7 @@ namespace Experience
             _countdownMode = false;
             foreach (var ui in _uis)
             {
+                if (!MessageShownOn(ui.display)) { HideContentGroups(ui); continue; }
                 ui.message.fontSize = messageFontSize;
                 ui.message.text = text ?? "";
                 ui.message.rectTransform.anchoredPosition = messagePosition;
@@ -212,6 +220,7 @@ namespace Experience
             _countdownMode = true;
             foreach (var ui in _uis)
             {
+                if (!MessageShownOn(ui.display)) { HideContentGroups(ui); continue; }
                 ui.message.fontSize = countdownFontSize;
                 ui.message.text = seconds.ToString();
                 ui.message.rectTransform.anchoredPosition = countdownPosition;
@@ -235,6 +244,7 @@ namespace Experience
             _countdownOverlay = -1; // director re-issues ShowCountdown each second
             foreach (var ui in _uis)
             {
+                if (!MessageShownOn(ui.display)) { HideContentGroups(ui); continue; }
                 bool shown = PoseGuideShownOn(ui.display);
                 ui.poseImage.texture = guide;
                 ui.poseLabel.text = text ?? "";
@@ -260,6 +270,7 @@ namespace Experience
             _countdownMode = false;
             foreach (var ui in _uis)
             {
+                if (!MessageShownOn(ui.display)) { HideContentGroups(ui); continue; }
                 ui.noticeText.text = text ?? "";
                 ApplyNoticeLayout(ui);
                 ui.noticeGroup.SetActive(true);
@@ -310,6 +321,26 @@ namespace Experience
             return false;
         }
 
+        // Which displays show the visitor text/content. The alert path never calls
+        // this — a fault covers every visitorDisplay regardless.
+        private bool MessageShownOn(int display)
+        {
+            if (messageDisplays == null || messageDisplays.Length == 0) return true;
+            foreach (int d in messageDisplays) if (d == display) return true;
+            return false;
+        }
+
+        // Blank every non-alert group on a canvas that is not a message display, so
+        // that display shows only the scene (and the alert, when one is up).
+        private static void HideContentGroups(DisplayUi ui)
+        {
+            if (ui.message != null) ui.message.gameObject.SetActive(false);
+            if (ui.qrGroup != null) ui.qrGroup.SetActive(false);
+            if (ui.poseGroup != null) ui.poseGroup.SetActive(false);
+            if (ui.progressGroup != null) ui.progressGroup.SetActive(false);
+            if (ui.noticeGroup != null) ui.noticeGroup.SetActive(false);
+        }
+
         // Re-applied every frame while a guide is up so the scene GO's Inspector
         // values can be tuned live in Play mode (copy component values to keep).
         private void ApplyPoseLayout(DisplayUi ui)
@@ -346,6 +377,7 @@ namespace Experience
             float v = Mathf.Clamp01(value01);
             foreach (var ui in _uis)
             {
+                if (!MessageShownOn(ui.display)) { HideContentGroups(ui); continue; }
                 ui.progressCaption.text = caption ?? "";
                 ui.progressFill.sizeDelta = new Vector2(progressBarWidth * v, 0f);
                 ui.progressGroup.SetActive(true);
@@ -367,6 +399,7 @@ namespace Experience
             _countdownOverlay = -1;
             foreach (var ui in _uis)
             {
+                if (!MessageShownOn(ui.display)) { HideContentGroups(ui); continue; }
                 ui.qrImage.gameObject.SetActive(false);
                 ui.qrCaption.text = "";
                 ui.qrHeadline.text = headline ?? "";
@@ -390,6 +423,7 @@ namespace Experience
             _countdownOverlay = -1;
             foreach (var ui in _uis)
             {
+                if (!MessageShownOn(ui.display)) { HideContentGroups(ui); continue; }
                 ui.noticeGroup.SetActive(false);
                 ui.qrImage.texture = qr;
                 ui.qrImage.gameObject.SetActive(true);
