@@ -24,6 +24,7 @@ namespace Calibration.Tests
                 consentSeconds = 6f,
                 welcomeSeconds = 4f,
                 calibrateSeconds = 10f,
+                calibrateMatchedSeconds = 1.5f,
                 freeMoveSeconds = 20f,
                 processingTimeoutSeconds = 60f,
                 resultMinSeconds = 4f,
@@ -63,6 +64,14 @@ namespace Calibration.Tests
             TickUntil(ExperienceState.Calibrate, dt: 1f); // welcomeSeconds timer
         }
 
+        // Star pose matched, then tick through the はかれたよ！ hold beat to FreeMove.
+        private void MatchStarPose()
+        {
+            _in.CalibrationDone = true;
+            TickUntil(ExperienceState.FreeMove, dt: 1f); // calibrateMatchedSeconds beat
+            _in.CalibrationDone = false;
+        }
+
         // ---- happy path ----
 
         [Test]
@@ -70,10 +79,8 @@ namespace Calibration.Tests
         {
             ReachCalibrate(); // Present → Consent → Welcome → Calibrate
 
-            _in.CalibrationDone = true;
-            Tick();
+            MatchStarPose();
             Assert.AreEqual(ExperienceState.FreeMove, _sm.State);
-            _in.CalibrationDone = false;
 
             TickUntil(ExperienceState.Shoot, dt: 2f); // freeMoveSeconds timer
 
@@ -181,6 +188,51 @@ namespace Calibration.Tests
         }
 
         [Test]
+        public void Calibrate_MatchedPose_HeldForBeatBeforeFreeMove()
+        {
+            // The star match must linger so はかれたよ！ + the revealed ribbons are
+            // readable — the FSM holds Calibrate calibrateMatchedSeconds after the
+            // match instead of advancing on the very next tick.
+            ReachCalibrate();
+            _in.CalibrationDone = true;
+            Tick(0.5f); // matched, but within the 1.5s beat
+            Assert.AreEqual(ExperienceState.Calibrate, _sm.State);
+            Tick(0.5f); // 1.0s < 1.5s
+            Assert.AreEqual(ExperienceState.Calibrate, _sm.State);
+            Tick(0.6f); // 1.6s >= 1.5s → beat done
+            Assert.AreEqual(ExperienceState.FreeMove, _sm.State);
+        }
+
+        [Test]
+        public void Calibrate_MatchNearWindowEnd_StillGetsFullBeat()
+        {
+            // A star pose that lands right as the window closes must still get its
+            // full matched beat — the timeout must never preempt a latched match.
+            ReachCalibrate();
+            for (int i = 0; i < 19; i++) Tick(0.5f); // 9.5s < 10s window
+            Assert.AreEqual(ExperienceState.Calibrate, _sm.State);
+            _in.CalibrationDone = true;
+            Tick(0.5f); // TimeInState now 10.0s (>= window) but latched → hold, not timeout
+            Assert.AreEqual(ExperienceState.Calibrate, _sm.State);
+            Tick(1.2f); // matched beat 1.7s >= 1.5s
+            Assert.AreEqual(ExperienceState.FreeMove, _sm.State);
+        }
+
+        [Test]
+        public void Calibrate_MatchLatched_HoldsBeatEvenIfDoneFlagDrops()
+        {
+            // The match latches: even if CalibrationDone falls back to false during
+            // the beat (BT confidence flicker), the hold still completes.
+            ReachCalibrate();
+            _in.CalibrationDone = true;
+            Tick(0.5f);
+            _in.CalibrationDone = false; // flicker off mid-beat
+            Assert.AreEqual(ExperienceState.Calibrate, _sm.State);
+            Tick(1.2f); // 1.7s total >= 1.5s
+            Assert.AreEqual(ExperienceState.FreeMove, _sm.State);
+        }
+
+        [Test]
         public void Calibrate_StaleDoneFlagFromPreviousRun_DoesNotSkip()
         {
             // CalibrationDone pulses while still in Idle (stale director
@@ -202,7 +254,7 @@ namespace Calibration.Tests
         public void FreeMove_TimerAdvances_And_LeaveReturnsToIdle()
         {
             ReachCalibrate();
-            _in.CalibrationDone = true; Tick(); _in.CalibrationDone = false;
+            MatchStarPose();
             Assert.AreEqual(ExperienceState.FreeMove, _sm.State);
             Tick(5f);
             Assert.AreEqual(ExperienceState.FreeMove, _sm.State); // 5s < 20s
@@ -211,7 +263,7 @@ namespace Calibration.Tests
 
             _in.Present = true;
             ReachCalibrate();
-            _in.CalibrationDone = true; Tick(); _in.CalibrationDone = false;
+            MatchStarPose();
             TickUntil(ExperienceState.Shoot, dt: 2f);
         }
 
@@ -282,7 +334,7 @@ namespace Calibration.Tests
         private void ReachShoot()
         {
             ReachCalibrate();
-            _in.CalibrationDone = true; Tick(); _in.CalibrationDone = false;
+            MatchStarPose();
             TickUntil(ExperienceState.Shoot, dt: 2f);
         }
 
@@ -301,11 +353,9 @@ namespace Calibration.Tests
         public void Shoot_StaleRecordingFlag_ClearedOnEntry()
         {
             ReachCalibrate();
-            _in.CalibrationDone = true;
             _in.RecordingDone = true; // stale pulse long before Shoot
-            Tick(); // → FreeMove (latch for Shoot must clear on Shoot entry)
-            _in.CalibrationDone = false;
-            _in.RecordingDone = false;
+            MatchStarPose();          // through the Calibrate beat → FreeMove
+            _in.RecordingDone = false; // cleared before Shoot (latch clears on entry)
             TickUntil(ExperienceState.Shoot, dt: 2f);
             Tick();
             Assert.AreEqual(ExperienceState.Shoot, _sm.State); // did not skip ahead

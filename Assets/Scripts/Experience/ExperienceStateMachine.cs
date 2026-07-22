@@ -70,6 +70,14 @@ namespace Experience
         [Min(0f)]
         [Tooltip("Star-pose window. Expiry advances with the DEFAULT bone profile.")]
         public float calibrateSeconds = 10f;
+        [Min(0f)]
+        [Tooltip("How long はかれたよ！ (pose matched) stays on screen after the star " +
+                 "pose is held, before FreeMove replaces it. Without this the match is " +
+                 "a single frame: the FSM latches CalibrationDone and advances on the " +
+                 "very next tick. The ribbons also appear on this beat, so it doubles " +
+                 "as the sculpture reveal. Only the HELD-pose path waits — window " +
+                 "expiry (shy visitor) and skipCalibrate still advance immediately.")]
+        public float calibrateMatchedSeconds = 1.5f;
         [Min(1f)]
         [Tooltip("Free-movement time with the live sculpture before the shoot.")]
         public float freeMoveSeconds = 25f;
@@ -115,6 +123,7 @@ namespace Experience
         public event Action<ExperienceState, ExperienceState> Changed;
 
         private bool _calibLatched;
+        private float _matchedElapsed; // time held in Calibrate AFTER the star match
         private bool _recordingLatched;
         private bool _processingLatched;
         private bool _processingFailLatched;
@@ -163,10 +172,27 @@ namespace Experience
                 case ExperienceState.Calibrate:
                     if (LeftEarly(inputs)) break;
                     if (inputs.CalibrationDone) _calibLatched = true;
-                    // Window expiry advances too — the director keeps the default
-                    // bone profile; the show must never stall on a shy visitor.
-                    if (t.skipCalibrate || _calibLatched || TimeInState >= t.calibrateSeconds)
+                    // skipCalibrate is always immediate. Window expiry advances ONLY
+                    // a visitor who has not matched — a star pose that lands near the
+                    // end of the window still earns its full はかれたよ！ beat below and
+                    // is never cut short by the timeout firing on the next tick (the
+                    // director keeps the default bone profile; the show must never
+                    // stall on a shy visitor, but a real match is not "shy").
+                    if (t.skipCalibrate || (!_calibLatched && TimeInState >= t.calibrateSeconds))
+                    {
                         Go(ExperienceState.FreeMove);
+                        break;
+                    }
+                    // A HELD star pose earns はかれたよ！ its own beat: hold Calibrate
+                    // calibrateMatchedSeconds after the match so the matched text and
+                    // the freshly-revealed ribbons are readable before FreeMove's
+                    // message replaces them.
+                    if (_calibLatched)
+                    {
+                        _matchedElapsed += dt;
+                        if (_matchedElapsed >= t.calibrateMatchedSeconds)
+                            Go(ExperienceState.FreeMove);
+                    }
                     break;
 
                 case ExperienceState.FreeMove:
@@ -251,6 +277,7 @@ namespace Experience
             State = state;
             TimeInState = 0f;
             _calibLatched = false;
+            _matchedElapsed = 0f;
             _recordingLatched = false;
             _processingLatched = false;
             _processingFailLatched = false;
@@ -272,6 +299,7 @@ namespace Experience
             {
                 case ExperienceState.Calibrate:
                     _calibLatched = false;
+                    _matchedElapsed = 0f;
                     break;
                 case ExperienceState.Shoot:
                     _recordingLatched = false;
