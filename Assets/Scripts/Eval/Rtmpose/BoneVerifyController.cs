@@ -51,6 +51,20 @@ namespace BodyTracking.Eval.Rtmpose
                  "the newest take under the recorder's folderPath.")]
         public string reviewTakePath = "";
 
+        [Header("Live sync (display3 timestamp-matched cloud delay)")]
+        [Tooltip("Delay the live point cloud so it lines up with the ~130ms-delayed " +
+                 "skeleton + curves (measured cloud-skel lag). Display-only: BT and " +
+                 "recording keep getting the newest frame. Off = cloud stays real-time " +
+                 "(skeleton visibly trails the body during motion).")]
+        public bool enableLiveRenderSync = true;
+
+        [Tooltip("Extra delay (ms) ADDED on top of the automatic timestamp match. The " +
+                 "auto-match aligns the cloud to the skeleton's frame timestamp (~130-166ms " +
+                 "measured); this nudges it further to compensate the drawn skeleton's " +
+                 "smoothing lag. Tune by eye while moving: raise until the cloud sits on " +
+                 "the body. 0 = pure timestamp match.")]
+        [Range(0f, 120f)] public float extraDelayMs = 0f;
+
         [Header("References (auto-resolve when empty)")]
         public SensorManager sensorManager;
         public SensorRecorder recorder;
@@ -102,7 +116,40 @@ namespace BodyTracking.Eval.Rtmpose
                 if (Input.GetKeyDown(stepForwardKey)) Step(+1);
                 if (Input.GetKeyDown(stepBackwardKey)) Step(-1);
             }
+            if (CurrentMode == Mode.Live && enableLiveRenderSync) UpdateLiveRenderSync();
             UpdateOperatorStatus();
+        }
+
+        // Feed every live renderer the source timestamp of the currently-shown
+        // skeleton so its timestamp-matched render delay draws the matching cloud
+        // frame. TryGetLatestSkeletonTimestampNs holds through brief tracking gaps
+        // (its freshness window) and reports false on a sustained absence — then we
+        // target 0 so the cloud returns to real-time instead of freezing at the
+        // stale target once it falls behind the whole delay ring.
+        private void UpdateLiveRenderSync()
+        {
+            ulong tsUs = 0UL; // 0 = show newest (real-time) — no fresh skeleton to sync to
+            if (merger != null && merger.TryGetLatestSkeletonTimestampNs(out ulong tsNs))
+            {
+                tsUs = tsNs / 1000UL;
+                if (extraDelayMs > 0f)
+                {
+                    ulong off = (ulong)(extraDelayMs * 1000f); // ms -> µs, shift target earlier = more delay
+                    tsUs = tsUs > off ? tsUs - off : 0UL;
+                }
+            }
+            foreach (var r in FindObjectsByType<PointCloudRenderer>(FindObjectsSortMode.None))
+                if (r != null) r.targetDisplayTimestampUs = tsUs;
+        }
+
+        private void SetLiveRenderDelay(bool on)
+        {
+            foreach (var r in FindObjectsByType<PointCloudRenderer>(FindObjectsSortMode.None))
+            {
+                if (r == null) continue;
+                r.renderDelayEnabled = on;
+                if (!on) r.targetDisplayTimestampUs = 0;
+            }
         }
 
         // ---------------- public API (reflection / UI / hotkey) ----------------
@@ -134,6 +181,7 @@ namespace BodyTracking.Eval.Rtmpose
             }
 
             RecreateOverlay(review: false);
+            SetLiveRenderDelay(enableLiveRenderSync);
             CurrentMode = Mode.Live;
             Debug.Log($"[{nameof(BoneVerifyController)}] LIVE verify — grid on display{gridDisplay + 1}, 3D+bones+curves on display{sceneDisplay + 1}.", this);
         }
@@ -162,6 +210,7 @@ namespace BodyTracking.Eval.Rtmpose
                 sensorManager.SetLiveVisualsVisible(false);
                 sensorManager.SetLiveSuppressedAsSource(true);
             }
+            SetLiveRenderDelay(false); // review is frame-locked already; no live delay
             // per-camera 2D must track the RECORDED frames, and must NOT submit to the
             // merger (recorded v11 bodies_v11s own the merge)
             if (fused != null)
@@ -205,6 +254,7 @@ namespace BodyTracking.Eval.Rtmpose
         {
             if (recorder != null && recorder.IsPlaying) recorder.TogglePlay(); // stop playback
 
+            SetLiveRenderDelay(false);
             if (_overlayGo != null) { Destroy(_overlayGo); _overlayGo = null; _overlay = null; }
 
             RestoreState();

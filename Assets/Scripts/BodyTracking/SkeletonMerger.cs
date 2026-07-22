@@ -746,6 +746,35 @@ namespace BodyTracking
             return false;
         }
 
+        /// <summary>Device-clock (ns) source timestamp of the freshest ingested
+        /// skeleton across cameras — the frame the currently-shown pose was tracked
+        /// from. The bone-verify live sync feeds this to the point-cloud renderers'
+        /// timestamp-matched render delay so the cloud lines up with the pose.
+        /// Only counts a slot updated within <see cref="kSkeletonTsFreshSeconds"/>:
+        /// when the visitor leaves, the fused path stops submitting (OnFusedSkeletons
+        /// returns on a null Primary), so BodyCount / CapturedTsNs linger. Without the
+        /// freshness gate that stale target eventually falls behind the whole render-
+        /// delay ring and freezes the live cloud at max delay. Returns false (→ the
+        /// caller shows the newest frame) once no camera has a fresh body.</summary>
+        public bool TryGetLatestSkeletonTimestampNs(out ulong tsNs)
+        {
+            tsNs = 0;
+            float now = Time.realtimeSinceStartup;
+            foreach (var kv in _latestBySerial)
+            {
+                var slot = kv.Value;
+                if (slot.BodyCount <= 0) continue;
+                if (now - slot.CapturedAtRealtime > kSkeletonTsFreshSeconds) continue;
+                if (slot.CapturedTsNs > tsNs) tsNs = slot.CapturedTsNs;
+            }
+            return tsNs > 0;
+        }
+
+        // Hold-through window for the render-delay target: brief tracking gaps (a few
+        // dropped frames) keep the last skeleton timestamp so the delayed cloud does
+        // not flicker; a sustained absence past this returns the cloud to real-time.
+        private const float kSkeletonTsFreshSeconds = 0.25f;
+
         /// <summary>Latest ingested skeleton for <paramref name="serial"/>, mapped into
         /// that camera's COLOR frame (mm, OpenCV) — for the bone-verify colour overlay,
         /// which reprojects it through the camera's colour intrinsics. In playback review
@@ -754,21 +783,6 @@ namespace BodyTracking
         /// (length ≥ K4ABT_JOINT_COUNT) in raw k4abt joint order. Returns false when there
         /// is no body for the serial. Main-thread read (slots are written on the main
         /// thread by IngestBodies / OnWorkerSkeletons).</summary>
-        /// <summary>Device-clock (ns) source timestamp of the freshest ingested
-        /// skeleton across cameras — the frame the currently-shown pose was tracked
-        /// from. The bone-verify live sync feeds this to the point-cloud renderers'
-        /// timestamp-matched render delay so the cloud lines up with the pose.
-        /// Returns false when no body is present.</summary>
-        public bool TryGetLatestSkeletonTimestampNs(out ulong tsNs)
-        {
-            tsNs = 0;
-            foreach (var kv in _latestBySerial)
-            {
-                var slot = kv.Value;
-                if (slot.BodyCount > 0 && slot.CapturedTsNs > tsNs) tsNs = slot.CapturedTsNs;
-            }
-            return tsNs > 0;
-        }
 
         public bool TryGetIngestedCameraFramePose(string serial, UnityEngine.Vector3[] posMm, bool[] valid)
         {

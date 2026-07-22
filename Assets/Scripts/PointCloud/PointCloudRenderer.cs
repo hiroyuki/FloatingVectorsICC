@@ -270,21 +270,96 @@ namespace PointCloud
         private PointCloudReconstructor _reconstructor;
 
         private int DispatchGpuReconstruction(SlotPool.Slot slot)
+            => DispatchGpuReconstructionRaw(
+                slot.DepthBytes, slot.DepthByteCount, slot.DepthWidth, slot.DepthHeight,
+                slot.ColorBytes, slot.ColorByteCount, slot.ColorWidth, slot.ColorHeight);
+
+        private int DispatchGpuReconstructionRaw(
+            byte[] depthBytes, int depthByteCount, int depthW, int depthH,
+            byte[] colorBytes, int colorByteCount, int colorW, int colorH)
         {
             if (!CameraParam.HasValue) return 0;
-            int dw = slot.DepthWidth > 0 ? slot.DepthWidth : (int)depthWidth;
-            int dh = slot.DepthHeight > 0 ? slot.DepthHeight : (int)depthHeight;
-            int cw = slot.ColorWidth;
-            int ch = slot.ColorHeight;
+            int dw = depthW > 0 ? depthW : (int)depthWidth;
+            int dh = depthH > 0 ? depthH : (int)depthHeight;
             if (!_reconstructor.Dispatch(
-                    slot.DepthBytes, slot.DepthByteCount, dw, dh,
-                    slot.ColorBytes, slot.ColorByteCount, cw, ch,
+                    depthBytes, depthByteCount, dw, dh,
+                    colorBytes, colorByteCount, colorW, colorH,
                     CameraParam.Value))
             {
                 Debug.LogError($"[{nameof(PointCloudRenderer)}] PointCloudReconstruct compute shader not found in Resources/", this);
                 return 0;
             }
             return dw * dh;
+        }
+
+        // --- Timestamp-matched render delay (display-only; opt-in) ---
+        // The displayed cloud lags the newest frame so it lines up with the
+        // ~130ms-delayed skeleton/curves (bone-verify live sync). BT + recording
+        // keep getting the NEWEST frame via OnRawFramesReady — only the MESH the
+        // renderer draws (and thus the curves that seed from it) is delayed.
+        // Default off → the normal path reconstructs the newest frame unchanged.
+        // GPU-reconstruction mode only: a CPU-mode renderer (useGpuReconstruction
+        // false) ignores this and always draws the newest frame. The live rig runs
+        // GPU reconstruction, so bone-verify sync is unaffected.
+        [System.NonSerialized] public bool renderDelayEnabled;
+        // Device-clock (µs) of the frame to DISPLAY — set each frame to the source
+        // timestamp of the currently-shown skeleton. 0 = show newest (no delay).
+        [System.NonSerialized] public ulong targetDisplayTimestampUs;
+        /// <summary>Device-clock (µs) of the frame currently DRAWN (delayed under
+        /// renderDelayEnabled, else == LastTimestampUs).</summary>
+        public ulong DisplayedTimestampUs { get; private set; }
+
+        private sealed class DelayFrame
+        {
+            public byte[] Depth = Array.Empty<byte>(); public int DepthCount, DW, DH;
+            public byte[] Color = Array.Empty<byte>(); public int ColorCount, CW, CH;
+            public ulong TsUs;
+        }
+        private DelayFrame[] _delayRing;
+        private int _delayHead;   // next write index
+        private int _delayCount;  // filled entries
+        private const int kDelayRingDepth = 12; // ~400ms at 30fps — covers the lag + jitter
+
+        private void BufferDelayFrame(SlotPool.Slot slot)
+        {
+            if (_delayRing == null)
+            {
+                _delayRing = new DelayFrame[kDelayRingDepth];
+                for (int i = 0; i < _delayRing.Length; i++) _delayRing[i] = new DelayFrame();
+                _delayHead = 0; _delayCount = 0;
+            }
+            var df = _delayRing[_delayHead];
+            CopyDelay(ref df.Depth, slot.DepthBytes, slot.DepthByteCount); df.DepthCount = slot.DepthByteCount;
+            CopyDelay(ref df.Color, slot.ColorBytes, slot.ColorByteCount); df.ColorCount = slot.ColorByteCount;
+            df.DW = slot.DepthWidth; df.DH = slot.DepthHeight;
+            df.CW = slot.ColorWidth; df.CH = slot.ColorHeight;
+            df.TsUs = slot.TimestampUs;
+            _delayHead = (_delayHead + 1) % _delayRing.Length;
+            if (_delayCount < _delayRing.Length) _delayCount++;
+        }
+
+        private static void CopyDelay(ref byte[] dst, byte[] src, int count)
+        {
+            if (src == null || count <= 0) return;
+            if (dst.Length < count) dst = new byte[count];
+            Buffer.BlockCopy(src, 0, dst, 0, count);
+        }
+
+        // The buffered frame whose timestamp is nearest the target (0 = newest).
+        private DelayFrame PickDelayFrame(ulong targetUs)
+        {
+            if (_delayRing == null || _delayCount == 0) return null;
+            int newest = (_delayHead - 1 + _delayRing.Length) % _delayRing.Length;
+            if (targetUs == 0) return _delayRing[newest];
+            DelayFrame best = null; ulong bestDiff = ulong.MaxValue;
+            for (int k = 0; k < _delayCount; k++)
+            {
+                int idx = (newest - k + _delayRing.Length) % _delayRing.Length;
+                var df = _delayRing[idx];
+                ulong diff = df.TsUs > targetUs ? df.TsUs - targetUs : targetUs - df.TsUs;
+                if (diff < bestDiff) { bestDiff = diff; best = df; }
+            }
+            return best;
         }
 
         // --- Public state ---
@@ -376,7 +451,32 @@ namespace PointCloud
                         if (useGpuReconstruction)
                         {
                             _stageSw.Restart();
-                            n = DispatchGpuReconstruction(slot);
+                            if (renderDelayEnabled)
+                            {
+                                // Display-only timestamp-matched delay: keep the newest
+                                // frame in the ring, but reconstruct+draw the one whose
+                                // timestamp matches the currently-shown skeleton so the
+                                // cloud, bones and curves line up during motion. The BT/
+                                // recording tap below still fires with the NEWEST slot.
+                                BufferDelayFrame(slot);
+                                var df = PickDelayFrame(targetDisplayTimestampUs);
+                                if (df != null)
+                                {
+                                    n = DispatchGpuReconstructionRaw(df.Depth, df.DepthCount, df.DW, df.DH,
+                                                                     df.Color, df.ColorCount, df.CW, df.CH);
+                                    DisplayedTimestampUs = df.TsUs;
+                                }
+                                else
+                                {
+                                    n = DispatchGpuReconstruction(slot);
+                                    DisplayedTimestampUs = slot.TimestampUs;
+                                }
+                            }
+                            else
+                            {
+                                n = DispatchGpuReconstruction(slot);
+                                DisplayedTimestampUs = slot.TimestampUs;
+                            }
                             _stageSw.Stop();
                             if (logFps) _meshTicks += _stageSw.ElapsedTicks;
                         }
