@@ -75,6 +75,15 @@ namespace Experience
                  "k4abt live pipeline (no per-visitor profile).")]
         public LiveFusedBodySource liveFusedSource;
 
+        [Header("Startup")]
+        [Tooltip("Enter experience mode automatically, one frame into Play, so the " +
+                 "exhibition machine comes up showing the visitor experience with no " +
+                 "operator action. Deliberately waits a frame: every other component's " +
+                 "Start() (SensorManager going live, recorder, fusion) must have run " +
+                 "before EnterMode snapshots their state. Turning the mode off by hand " +
+                 "afterwards sticks — this only ever fires once per Play.")]
+        public bool activateOnPlay;
+
         [Header("Debug")]
         [Tooltip("Force the Fault state (full-screen red alert) regardless of the " +
                  "health monitor.")]
@@ -191,6 +200,7 @@ namespace Experience
         private Task<PublishResult> _publishTask;
         private string _qrUrl;
         private bool _crowdShowing;
+        private bool _autoActivated; // activateOnPlay latch (once per Play)
 
         // ------------------------------------------------ lifecycle ----
 
@@ -228,6 +238,16 @@ namespace Experience
 
         private void Update()
         {
+            // Exhibition auto-start: fires on the first Update (not Start) so every
+            // other component's Start() has already run — EnterMode snapshots their
+            // state, and a snapshot taken mid-startup restores the wrong values on
+            // exit. Latched: an operator who turns the mode off keeps it off.
+            if (activateOnPlay && !_autoActivated)
+            {
+                _autoActivated = true;
+                if (!_active) Visible = true;
+            }
+
             if (!_active) return;
 
             var inputs = new ExperienceInputs
@@ -330,6 +350,15 @@ namespace Experience
                 config = ScriptableObject.CreateInstance<ExperienceConfig>();
                 Debug.LogWarning($"[{nameof(ExperienceDirector)}] no config assigned — using defaults.", this);
             }
+
+            // 0) tear down the bone-verify diagnostic (F7/F8) if it is still up — it
+            // forces showBones, curve visibility, a colour-grid overlay on a visitor
+            // display and camera suppression, none of which may bleed into the
+            // experience. Exit() restores all of that BEFORE we snapshot below, so the
+            // experience takes over from the clean baseline, not the diagnostic's.
+            var boneVerify = FindFirstObjectByType<BodyTracking.Eval.Rtmpose.BoneVerifyController>();
+            if (boneVerify != null && boneVerify.CurrentMode != BodyTracking.Eval.Rtmpose.BoneVerifyController.Mode.Off)
+                boneVerify.Exit();
 
             // 1) snapshot dev values.
             if (poseHistory != null) _savedHistorySamples = poseHistory.historySamples;
@@ -696,8 +725,7 @@ namespace Experience
                 case ExperienceState.Consent:
                     break; // silent privacy notice — message only (ShowStateMessage)
                 case ExperienceState.Welcome:
-                    PlaySe(config.startSe); // greeting chime moves with the entry state
-                    break;
+                    break; // greeting cue handled by PlayStateEnterSe below
                 case ExperienceState.Calibrate:
                     if (!t.skipCalibrate)
                         _calibrateRoutine = StartCoroutine(CalibrateRoutine());
@@ -721,16 +749,39 @@ namespace Experience
                     _exportRoutine = StartCoroutine(ExportAndPublish());
                     break;
                 case ExperienceState.QrShow:
-                    PlaySe(config.qrSe);
-                    break;
+                    break; // QR cue handled by PlayStateEnterSe below
                 case ExperienceState.Fault:
                     string fault = healthMonitor != null ? healthMonitor.FaultAlertText : "";
                     _ui.ShowAlert(string.IsNullOrEmpty(fault) ? "カメラが異常です" : fault);
                     break;
             }
-            if (state != ExperienceState.Fault) _ui.ClearAlert();
+            if (state != ExperienceState.Fault)
+            {
+                _ui.ClearAlert();
+                PlayStateEnterSe(state); // one cue per screen, on entry only
+            }
             ApplyCurvesVisibility(state);
             ShowStateMessage(state);
+        }
+
+        // The per-screen audio cue. Fires once as each state is entered (from
+        // ApplyStateSideEffects, NOT the crowd-notice repaint), so a clip plays
+        // exactly when its screen appears. Idle is silent by design. The pose-
+        // matched / countdown / shutter cues are sub-state events fired from the
+        // routines, not here.
+        private void PlayStateEnterSe(ExperienceState state)
+        {
+            switch (state)
+            {
+                case ExperienceState.Consent: PlaySe(config.consentSe); break;
+                case ExperienceState.Welcome: PlaySe(config.welcomeSe); break;
+                case ExperienceState.Calibrate: PlaySe(config.calibrateSe); break;
+                case ExperienceState.FreeMove: PlaySe(config.freeMoveSe); break;
+                case ExperienceState.Shoot: PlaySe(config.shootCueSe); break;
+                case ExperienceState.Processing: PlaySe(config.processingSe); break;
+                case ExperienceState.ResultShow: PlaySe(config.resultSe); break;
+                case ExperienceState.QrShow: PlaySe(config.qrShowSe); break;
+            }
         }
 
         /// <summary>

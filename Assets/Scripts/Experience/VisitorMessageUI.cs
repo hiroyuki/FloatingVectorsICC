@@ -43,10 +43,17 @@ namespace Experience
         public string[] fontCandidates =
             { "Yu Gothic Medium", "游ゴシック Medium", "Yu Gothic", "Hiragino Kaku Gothic ProN" };
 
-        [Min(10)] public int messageFontSize = 72;
-        [Min(10)] public int countdownFontSize = 260;
+        // Visitor-flow text sizes. Scaled to 2/3 of the original (72/260/36)
+        // after reading them on the real screens — at the old size the message
+        // and the countdown crowded the sculpture they are supposed to caption.
+        // noticeFontSize is deliberately NOT scaled with them (see below).
+        [Min(10)] public int messageFontSize = 48;
+        [Min(10)] public int countdownFontSize = 173;
+        [Tooltip("Fault-alert text. Intentionally left at full size — the red " +
+                 "alert is an operator-facing emergency, not part of the visitor " +
+                 "flow, so it does not shrink with the flow text.")]
         [Min(10)] public int alertFontSize = 80;
-        [Min(10)] public int captionFontSize = 36;
+        [Min(10)] public int captionFontSize = 24;
         [Min(64f)] public float qrSizePixels = 480f;
 
         [Range(0f, 1f)]
@@ -78,9 +85,9 @@ namespace Experience
 
         [Header("Notice panel (framed box — the privacy consent)")]
         [Min(10)]
-        [Tooltip("Notice body size. Deliberately about half messageFontSize: the " +
-                 "consent notice is READ, not glanced at from across the room, and " +
-                 "at message size it fills the screen.")]
+        [Tooltip("Notice body size. Set independently of messageFontSize on purpose: " +
+                 "the consent notice is READ up close, not glanced at from across the " +
+                 "room, so it kept its size when the flow text was scaled to 2/3.")]
         public int noticeFontSize = 36;
 
         [Tooltip("Framed box size (reference px).")]

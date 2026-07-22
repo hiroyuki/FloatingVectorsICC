@@ -56,11 +56,17 @@ MonoBehaviour:
   conversionProvider: 2
   conversionConfThreshold: 0.3
   runCatchupSmooth: 1
-  startSe: {fileID: 0}
+  consentSe: {fileID: 8300000, guid: ca382a7857cee9943980c5caecd94050, type: 3}
+  welcomeSe: {fileID: 8300000, guid: 5fdde94a6f475e845824dd446a167473, type: 3}
+  calibrateSe: {fileID: 8300000, guid: 38e147a450fe57c4abc082e7a83d6ccf, type: 3}
+  poseMatchedSe: {fileID: 8300000, guid: f39da98e60f4f564b97f068f16f4f421, type: 3}
+  freeMoveSe: {fileID: 0}
+  shootCueSe: {fileID: 8300000, guid: f39da98e60f4f564b97f068f16f4f421, type: 3}
+  processingSe: {fileID: 0}
+  resultSe: {fileID: 8300000, guid: f39da98e60f4f564b97f068f16f4f421, type: 3}
+  qrShowSe: {fileID: 8300000, guid: ca382a7857cee9943980c5caecd94050, type: 3}
   countdownTickSe: {fileID: 0}
   recordEndSe: {fileID: 0}
-  poseMatchedSe: {fileID: 0}
-  qrSe: {fileID: 0}
   poseGuideTexture: {fileID: 0}
   dryRunPublish: 0
   dryRunDelaySeconds: 1
@@ -81,4 +87,4 @@ MonoBehaviour:
   shootingText: "\u3055\u3064\u3048\u3044\u3061\u3085\u3046\uFF01"
   processingText: "\u304D\u308D\u304F\u3092\u3000\u3058\u3085\u3093\u3073\u3057\u3066\u3044\u308B\u3088\u3000\u307E\u3063\u3066\u306D"
   resultText: "\u3067\u304D\u305F\u3088\uFF01"
-  qrScanText: "\u3044\u308A\u3050\u3061\u306E\u3000\u306B\u3058\u3052\u3093\u30B3\u30FC\u30C9\u3092\u3000\u30B9\u30AD\u30E3\u30F3\u3057\u3066\u306D"
+  qrScanText: 

@@ -763,16 +763,16 @@ MonoBehaviour:
   - "\u6E38\u30B4\u30B7\u30C3\u30AF Medium"
   - Yu Gothic
   - Hiragino Kaku Gothic ProN
-  messageFontSize: 72
-  countdownFontSize: 260
+  messageFontSize: 48
+  countdownFontSize: 173
   alertFontSize: 80
-  captionFontSize: 36
+  captionFontSize: 24
   qrSizePixels: 480
   alertBackdropAlpha: 0.75
   poseGuideDisplays: 01000000
   poseGuideSizePixels: 420
-  poseImagePosition: {x: 0, y: -250}
-  poseLabelPosition: {x: 0, y: 70}
+  poseImagePosition: {x: 0, y: -150}
+  poseLabelPosition: {x: 0, y: 250}
   countdownPosition: {x: 0, y: 0}
   messagePosition: {x: 0, y: 0}
   noticeFontSize: 36
@@ -1124,7 +1124,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 96892899ec43f7246a88f0b3f63d9e67, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::PointCloud.PointCloudCameraManager
-  playbackOnly: 1
+  playbackOnly: 0
   defaultPointMaterial: {fileID: 0}
   depthWidth: 320
   depthHeight: 288
@@ -1678,6 +1678,7 @@ MonoBehaviour:
   submitToMerger: 1
   liveFramesOnly: 0
   playbackFramesOnly: 0
+  syncReviewFusion: 0
   modelsDir: eval/models
   bodyProfilePath: eval/body_profile.json
   provider: 2
@@ -2546,11 +2547,13 @@ MonoBehaviour:
   boundingVolume: {fileID: 0}
   floorOrigin: {fileID: 0}
   tsdfVolume: {fileID: 0}
+  tsdfIntegrator: {fileID: 0}
   motionCurves: {fileID: 0}
   poseHistory: {fileID: 0}
   printExporter: {fileID: 0}
   healthMonitor: {fileID: 0}
   liveFusedSource: {fileID: 0}
+  activateOnPlay: 1
   debugForceFault: 0
   debugPoseDiagnostics: 1
   compareCurveSources: 0
@@ -2859,6 +2862,8 @@ MonoBehaviour:
   stepForwardKey: 275
   stepBackwardKey: 276
   reviewTakePath: 
+  enableLiveRenderSync: 1
+  extraDelayMs: 0
   sensorManager: {fileID: 0}
   recorder: {fileID: 0}
   merger: {fileID: 0}

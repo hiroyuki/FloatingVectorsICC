@@ -132,13 +132,35 @@ namespace Experience
         [Tooltip("Run the catch-up smoothing post-pass (the \"s\" in v11s).")]
         public bool runCatchupSmooth = true;
 
-        [Header("Audio (optional placeholders — null = silent)")]
-        public AudioClip startSe;
+        // One clip per visitor-facing screen, played ONCE the instant that screen
+        // appears (state entry — not on the crowd-notice repaint). null = silent.
+        // Idle is deliberately silent (unattended). The countdown tick / shutter
+        // below are sub-state event cues, not screen changes.
+        [Header("Audio — per-screen cue (optional; null = silent)")]
+        [Tooltip("Privacy consent screen (consentText).")]
+        public AudioClip consentSe;
+        [Tooltip("Greeting screen (welcomeText).")]
+        public AudioClip welcomeSe;
+        [Tooltip("Pose-guide screen (calibrateText / the star silhouette).")]
+        public AudioClip calibrateSe;
+        [Tooltip("Star pose matched — はかれたよ！ (calibrateMatchedText).")]
+        public AudioClip poseMatchedSe;
+        [Tooltip("Free-movement screen (freeMoveText).")]
+        public AudioClip freeMoveSe;
+        [Tooltip("Shoot cue screen (shootCueText), before the countdown.")]
+        public AudioClip shootCueSe;
+        [Tooltip("Processing / progress screen (processingText).")]
+        public AudioClip processingSe;
+        [Tooltip("Result screen — できたよ！ (resultText).")]
+        public AudioClip resultSe;
+        [Tooltip("QR screen (qrScanText).")]
+        public AudioClip qrShowSe;
+
+        [Header("Audio — countdown / shutter (event cues)")]
+        [Tooltip("Played on each countdown digit during Shoot.")]
         public AudioClip countdownTickSe;
         [Tooltip("Played at countdown zero (shutter) and again when the second ends.")]
         public AudioClip recordEndSe;
-        public AudioClip poseMatchedSe;
-        public AudioClip qrSe;
 
         [Header("Pose guide artwork")]
         [Tooltip("Star-pose guide image. Empty = programmatic silhouette " +
