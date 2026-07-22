@@ -787,8 +787,8 @@ namespace PointCloud
         /// intake so the whole visual — point cloud, TSDF mesh, BT skeleton and motion
         /// curves — holds the current moment. Reuses <see cref="IsPaused"/> as the signal so
         /// every downstream pause consumer (BonePoseHistory ring hold, PointCloudMotionCurves
-        /// auto-hold, SkeletonMerger staleness skip, WorkerGapMonitor suppression,
-        /// TSDFHoldBeautify) behaves exactly as in a playback pause. Works while idle OR
+        /// auto-hold, SkeletonMerger staleness skip, TSDFHoldBeautify) behaves exactly as
+        /// in a playback pause. Works while idle OR
         /// recording in live mode (the renderers keep tapping raw frames to the recorder
         /// during a hold, so REC continues across a freeze). Starting Rec or Play
         /// unfreezes first.
