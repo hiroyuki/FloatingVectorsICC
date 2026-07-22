@@ -1614,12 +1614,17 @@ namespace Experience
                 // renderers came back 4/4 every attempt and were killed each time.
                 // Polling exits the moment the rig is healthy and otherwise gives it
                 // the whole window.
+                // Wait on AllStreaming, NOT IsHealthy alone: for the first few seconds
+                // after StartLive every camera is inside its staleFrameSeconds slack, so
+                // IsHealthy reads true while nothing has actually delivered a frame.
+                // Exiting on that declared success on a dead rig and dropped straight
+                // back into Fault, forever — the settle window below was never used.
                 float deadline = Time.realtimeSinceStartup + config.cameraSettleSeconds;
                 while (Time.realtimeSinceStartup < deadline
-                       && healthMonitor != null && !healthMonitor.IsHealthy)
+                       && healthMonitor != null && !(healthMonitor.IsHealthy && healthMonitor.AllStreaming))
                     yield return new WaitForSecondsRealtime(0.5f);
 
-                if (healthMonitor == null || healthMonitor.IsHealthy)
+                if (healthMonitor == null || (healthMonitor.IsHealthy && healthMonitor.AllStreaming))
                 {
                     Debug.Log($"[{nameof(ExperienceDirector)}] camera auto-recovery: rig healthy " +
                               $"again after attempt {attempt} — the show resumes from Idle.", this);

@@ -62,6 +62,14 @@ namespace PointCloud
         /// suppressed). The experience director feeds this into the Fault state.</summary>
         public bool IsHealthy => _alerts.Count == 0;
 
+        /// <summary>True once every monitored camera has been seen ADVANCING its frame
+        /// timestamp since its current renderer was created. Deliberately stricter than
+        /// <see cref="IsHealthy"/>: a rig re-opened a moment ago raises no alert yet
+        /// (each camera gets <see cref="staleFrameSeconds"/> of slack before it counts as
+        /// stalled) but is not delivering frames either. Camera auto-recovery polls THIS
+        /// so it cannot declare success on a rig that has not produced a single frame.</summary>
+        public bool AllStreaming => _allStreaming;
+
         /// <summary>Fired when IsHealthy flips (arg = new health).</summary>
         public event Action<bool> OnHealthChanged;
 
@@ -78,9 +86,16 @@ namespace PointCloud
 
         private class Health
         {
+            // The renderer this entry describes. Entries are keyed by serial, but a
+            // re-opened rig hands us a NEW renderer for the same serial — see
+            // CheckStreaming for why reusing the old entry across that swap is fatal.
+            public PointCloudRenderer Owner;
             public ulong LastTs;
             public float LastProgressAt;
             public bool Seen;
+            // Set once we observe LastTimestampUs actually ADVANCE (not merely differ
+            // from whatever we saw first), i.e. this renderer has really delivered.
+            public bool Streamed;
             // identical-content detection
             public ulong LastContentHash;
             public float LastContentChangeAt;
@@ -99,6 +114,7 @@ namespace PointCloud
         private string _lastLoggedState = string.Empty;
         private string _firstFaultyLabel = "";
         private bool _lastHealthy = true;
+        private bool _allStreaming;
         private GUIStyle _alertStyle;
         // identical-content subscriptions (resynced every RunCheck so renderer
         // churn — keepLiveRenderersOnLoad, reconnects — never leaks handlers)
@@ -114,6 +130,7 @@ namespace PointCloud
             _alerts.Clear();
             _firstFaultyLabel = "";
             _lastHealthy = true;
+            _allStreaming = false;
         }
 
         private void OnDisable() => UnsubscribeAllContent();
@@ -144,7 +161,14 @@ namespace PointCloud
             //   recorder Playing/Paused AND 0 live    -> suppress (live torn down on purpose)
             //   recorder Playing/Paused AND live >= 1 -> MONITOR (attract coexistence)
             //   otherwise                             -> monitor
-            if (_manager == null || _manager.playbackOnly) { LogTransition(); return; }
+            // Suppressed states have no live rig to wait on, so nothing is "pending
+            // first frame" either — report streaming so a poll can never hang here.
+            if (_manager == null || _manager.playbackOnly)
+            {
+                _allStreaming = true;
+                LogTransition();
+                return;
+            }
             if (_recorder == null) _recorder = FindFirstObjectByType<SensorRecorder>();
             int liveCount = 0;
             var renderersEarly = _manager.Renderers;
@@ -156,6 +180,7 @@ namespace PointCloud
                 // frame consumption held): forget progress so nothing is flagged
                 // stale when live resumes.
                 _health.Clear();
+                _allStreaming = true;
                 LogTransition();
                 return;
             }
@@ -166,12 +191,18 @@ namespace PointCloud
                 // (Refines the plan's table: Paused+live>=1 suppresses, only
                 // Playing+live>=1 — the attract case — keeps monitoring.)
                 _health.Clear();
+                _allStreaming = true;
                 LogTransition();
                 return;
             }
-            if (Time.unscaledTime - _enabledAt < startupGraceSeconds) return;
+            // Startup grace: no verdict yet, so leave _allStreaming as it stands
+            // (false from OnEnable) rather than claiming a rig we haven't looked at.
+            // LogTransition for parity with every other early-out — _alerts is empty
+            // here, so it only ever reports a recovery that already happened.
+            if (Time.unscaledTime - _enabledAt < startupGraceSeconds) { LogTransition(); return; }
 
             ResolveExpected();
+            bool streamingAll = true;
             var renderers = _manager.Renderers;
             SyncContentSubscriptions(renderers);
 
@@ -185,9 +216,10 @@ namespace PointCloud
                     {
                         _alerts.Add($"カメラ {name} が異常です。接続を確認してください。（未検出）");
                         NoteFault(cam.Label);
+                        streamingAll = false;
                         continue;
                     }
-                    CheckStreaming(r, name, cam.Label);
+                    if (!CheckStreaming(r, name, cam.Label)) streamingAll = false;
                 }
             }
             else if (expectedCameraCount > 0)
@@ -199,16 +231,18 @@ namespace PointCloud
                 {
                     _alerts.Add($"カメラが {live}/{expectedCameraCount} 台しか接続されていません。接続を確認してください。");
                     NoteFault($"{live}/{expectedCameraCount}");
+                    streamingAll = false;
                 }
                 for (int i = 0; i < renderers.Count; i++)
                 {
                     var r = renderers[i];
                     if (r == null) continue;
                     string tail = PointCloudUtil.TailSerial(r.deviceSerial, 2);
-                    CheckStreaming(r, tail, tail);
+                    if (!CheckStreaming(r, tail, tail)) streamingAll = false;
                 }
             }
 
+            _allStreaming = streamingAll;
             LogTransition();
         }
 
@@ -219,23 +253,35 @@ namespace PointCloud
 
         // Flags a live renderer whose capture thread died or whose frame timestamp
         // stopped advancing (USB drop mid-run leaves the GO alive but frameless).
-        private void CheckStreaming(PointCloudRenderer r, string name, string label)
+        // Returns true once this renderer has been seen actually delivering frames.
+        private bool CheckStreaming(PointCloudRenderer r, string name, string label)
         {
             if (!r.IsCapturing)
             {
                 _alerts.Add($"カメラ {name} が異常です。接続を確認してください。（キャプチャ停止）");
                 NoteFault(label);
-                return;
+                return false;
             }
 
-            if (!_health.TryGetValue(r.deviceSerial, out var h))
+            // Entries are keyed by serial but BOUND to a renderer instance. A re-opened
+            // rig (camera auto-recovery, calibration's resolution boost, playback->live)
+            // hands us a brand new renderer for the same serial whose LastTimestampUs is
+            // 0 until its first frame. Reusing the old entry compares that 0 against the
+            // previous device's timestamp, reads the mismatch as progress, and reports
+            // the camera healthy before a single frame arrived — which let recovery
+            // declare success on a dead rig and re-fault staleFrameSeconds later, in a
+            // loop that never converged. Rebind and start the entry from scratch.
+            if (!_health.TryGetValue(r.deviceSerial, out var h) || h.Owner != r)
             {
-                h = new Health();
+                h = new Health { Owner = r };
                 _health[r.deviceSerial] = h;
             }
             ulong ts = r.LastTimestampUs;
             if (!h.Seen || ts != h.LastTs)
             {
+                // Only an advance from an ALREADY observed value proves delivery; the
+                // first sighting is just a baseline (it may be the pre-frame 0).
+                if (h.Seen) h.Streamed = true;
                 h.Seen = true;
                 h.LastTs = ts;
                 h.LastProgressAt = Time.unscaledTime;
@@ -254,6 +300,8 @@ namespace PointCloud
                 _alerts.Add($"カメラ {name} が異常です。接続を確認してください。（映像フリーズ）");
                 NoteFault(label);
             }
+
+            return h.Streamed;
         }
 
         // ---- identical-content detection (subscription lifecycle) ----

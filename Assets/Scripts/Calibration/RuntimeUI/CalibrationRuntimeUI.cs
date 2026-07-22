@@ -25,6 +25,7 @@
 // raw API values and their tooltips spell out both.
 
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
@@ -139,6 +140,13 @@ namespace Calibration.RuntimeUI
         public bool boostColorResolution = true;
         public uint calibColorWidth = 1920;
         public uint calibColorHeight = 1080;
+        [Min(0.5f)]
+        [Tooltip("Pause between destroying the live renderers and re-opening them on a " +
+                 "resolution switch, so the OrbbecSDK pipelines finish releasing the USB " +
+                 "devices. Mirrors ExperienceConfig.cameraReleaseSeconds — re-opening " +
+                 "before the previous session let go leaves the rig dead. Do not shorten " +
+                 "without testing on the four-camera rig.")]
+        public float rigReleaseSeconds = 3f;
 
         [Header("Floor anchor")]
         [Tooltip("How Solve levels the world. BoardSample: the [floorSampleKey] shot of the " +
@@ -1080,6 +1088,9 @@ namespace Calibration.RuntimeUI
         // -------- Floor tune (visual y=0 nudge) --------
 
         private bool _floorTune;
+        // True while the suspension of the show/BT/TSDF components was taken by floor
+        // tune rather than by calibration mode — see ToggleFloorTune.
+        private bool _tuneOwnsSuspend;
         private BoundingVolume.FilterMode _savedFilterMode;
         private bool _savedFilterModeValid;
         private PointCloudView _tunedView;
@@ -1115,9 +1126,20 @@ namespace Calibration.RuntimeUI
                 // displays the scene cameras render to — leaving them up hides the
                 // point cloud completely, which is the only thing floor tune shows.
                 SetExternalCanvasesVisible(false);
-                // Bring the cloud to the operator's own screen so the click and the
-                // projection share a coordinate space, and clear that screen.
+                // Bring the cloud to the operator's own screen and clear it.
                 BorrowOperatorDisplay();
+                // Floor tune is reachable WITHOUT calibration mode (Update handles the
+                // key before the _active gate), so it must suspend the show itself:
+                // otherwise ExperienceDirector.activateOnPlay keeps a visitor session
+                // running, the operator standing in the area is detected as the visitor,
+                // and the fit — which requires an EMPTY area — measures a person. The
+                // show also fights floor tune for Display 1. Only ours to restore when
+                // calibration mode is not already holding the suspension.
+                if (suspendInterferingComponents && !_active)
+                {
+                    _tuneOwnsSuspend = true;
+                    SuspendInterfering();
+                }
                 _tunedView = _manager != null ? _manager.view : null;
                 if (_tunedView != null)
                 {
@@ -1154,6 +1176,10 @@ namespace Calibration.RuntimeUI
                 SetExternalCanvasesVisible(true);
                 RestoreHiddenMeshesForTuneExit();
                 FlushFloorNudgeSaveNow();
+                // Only give the show back if floor tune is what took it away — inside
+                // calibration mode the suspension belongs to SetActive, which restores
+                // it on exit, and releasing here would start the show under calibration.
+                if (_tuneOwnsSuspend) { _tuneOwnsSuspend = false; RestoreInterfering(); }
                 SetStatus($"Floor tune OFF. rebaseFloorY  {(_manager != null ? _manager.rebaseFloorY : 0f):0.####}" +
                           "  (saved in calibration/floor.yaml — reloaded on next start)");
             }
@@ -1184,6 +1210,9 @@ namespace Calibration.RuntimeUI
             ReturnOperatorDisplay();
             SetExternalCanvasesVisible(true);
             FlushFloorNudgeSaveNow();
+            // Mirror ToggleFloorTune's release so a teardown/mode exit mid-tune does
+            // not leave the show suspended for the rest of the session.
+            if (_tuneOwnsSuspend) { _tuneOwnsSuspend = false; RestoreInterfering(); }
         }
 
         private void SetExternalCanvasesVisible(bool visible)
@@ -1800,14 +1829,34 @@ namespace Calibration.RuntimeUI
         {
             if (mgr.Renderers == null || mgr.Renderers.Count == 0) return;
             mgr.DestroyAllRenderers();
-            mgr.StartLive();
+            SetStatus($"Restarting live cameras: {why} (~15 s)…");
+            if (_restartLiveRoutine != null) StopCoroutine(_restartLiveRoutine);
+            _restartLiveRoutine = StartCoroutine(ReopenLiveAfterReleaseRoutine(mgr));
+        }
+
+        // DestroyAllRenderers only *schedules* the teardown: Object.Destroy is deferred
+        // to end of frame and it is PointCloudRenderer.OnDestroy that joins the capture
+        // thread and disposes the pipeline, so the devices are still held when this
+        // returns. Re-opening them on the next line raced the release and left the rig
+        // dead — no frames, every camera flagged, and with the director suspended during
+        // calibration nothing to recover it. Measured on the four-camera rig, the stop
+        // side takes seconds per device (OrbbecSDK "Try to stop pipeline!" to done).
+        // Same release pattern as ExperienceDirector.ReopenLiveAfterReleaseRoutine.
+        private IEnumerator ReopenLiveAfterReleaseRoutine(SensorManager mgr)
+        {
+            yield return null; // let the deferred Destroy()/OnDestroy actually run
+            yield return new WaitForSecondsRealtime(rigReleaseSeconds);
+            _restartLiveRoutine = null;
+            if (mgr == null) yield break;
+            // Belt and braces: if anything else re-opened the rig while we waited,
+            // a second StartLive would fight it for the same devices. Just rebind.
+            if (mgr.Renderers == null || mgr.Renderers.Count == 0) mgr.StartLive();
             // Same count in, same count out — Update's count-based re-subscribe
             // check cannot see that every renderer is a NEW object, so the frame
             // handlers would stay bound to the destroyed ones and no preview,
             // external display or capture would ever get a frame again.
             PurgeDeadFrameCaches();
             Subscribe();
-            SetStatus($"Restarting live cameras: {why} (~15 s)…");
         }
 
         // Drop _latest/_previews entries for renderers that are no longer the
@@ -1832,6 +1881,10 @@ namespace Calibration.RuntimeUI
                 if (kv.Key == null || !live.Contains(kv.Key)) deadLatest.Add(kv.Key);
             foreach (var k in deadLatest) _latest.Remove(k);
         }
+
+        // Pending rig re-open (see ReopenLiveAfterReleaseRoutine). Held so a second
+        // resolution switch cannot stack two StartLive calls on the same rig.
+        private Coroutine _restartLiveRoutine;
 
         private Experience.ExperienceSpaceBuilder _ownedSpaceBuilder;
 
@@ -2019,7 +2072,12 @@ namespace Calibration.RuntimeUI
             // cameras) → calibration has no color source at all; reconnect the
             // live rig. SwitchToLive stops playback and clears the loaded tracks
             // itself, then SensorManager.StartLive re-enumerates (~15 s).
-            if (switchToLiveOnEnter && Application.isPlaying)
+            // A pending resolution restart does NOT mean "no cameras": BoostColor-
+            // ResolutionForCalibration runs a step earlier in SetActive and leaves the
+            // renderer list empty until its release delay elapses. Treating that window
+            // as a dead rig fires SwitchToLive here, and the delayed StartLive then
+            // re-opens devices the recorder already owns — both rigs die on the spot.
+            if (switchToLiveOnEnter && Application.isPlaying && _restartLiveRoutine == null)
             {
                 var mgr = _manager != null ? _manager : FindFirstObjectByType<SensorManager>();
                 bool noLive = mgr == null || mgr.Renderers == null || mgr.Renderers.Count == 0;
@@ -2289,28 +2347,43 @@ namespace Calibration.RuntimeUI
 
         // -------- Interfering-component suspend (reflection, mirrors CalibrationWindow) --------
 
+        // The show must never run underneath calibration. ExperienceDirector.activateOnPlay
+        // turns the exhibition on by itself at the first Update, so entering calibration
+        // mode left a live visitor session running on top of board detection: presence
+        // (the operator carrying the board) starts a run, the FSM drives Fault/Idle, and
+        // its camera auto-recovery re-opens the rig mid-calibration. Suspended here rather
+        // than via suspendComponentTypeNames because it is a correctness requirement, not
+        // an operator preference — and every existing scene's serialized list predates it.
+        private const string ExperienceDirectorTypeName = "Experience.ExperienceDirector, Experience";
+
         private void SuspendInterfering()
         {
-            if (suspendComponentTypeNames == null) return;
-            foreach (var typeName in suspendComponentTypeNames)
-            {
-                if (string.IsNullOrEmpty(typeName)) continue;
-                var t = Type.GetType(typeName);
-                if (t == null) continue;
-                var found = FindObjectsByType(t, FindObjectsInactive.Include, FindObjectsSortMode.None);
-                foreach (var o in found)
-                {
-                    if (o is Behaviour b && !_suspended.ContainsKey(b))
-                    {
-                        _suspended[b] = b.enabled;
-                        b.enabled = false;
-                    }
-                }
-            }
+            SuspendByTypeName(ExperienceDirectorTypeName);
+            if (suspendComponentTypeNames != null)
+                foreach (var typeName in suspendComponentTypeNames)
+                    SuspendByTypeName(typeName);
+
             if (_suspended.Count > 0)
                 Debug.Log($"[CalibrationRuntimeUI] auto-disabled {_suspended.Count} interfering " +
-                          "component(s) (body-tracking / TSDF debug) so their keybindings don't fight " +
-                          "calibration. Restored on disable.");
+                          "component(s) (experience director / body-tracking / TSDF debug) so the " +
+                          "show cannot start and their keybindings don't fight calibration. " +
+                          "Restored on disable.");
+        }
+
+        private void SuspendByTypeName(string typeName)
+        {
+            if (string.IsNullOrEmpty(typeName)) return;
+            var t = Type.GetType(typeName);
+            if (t == null) return;
+            var found = FindObjectsByType(t, FindObjectsInactive.Include, FindObjectsSortMode.None);
+            foreach (var o in found)
+            {
+                if (o is Behaviour b && !_suspended.ContainsKey(b))
+                {
+                    _suspended[b] = b.enabled;
+                    b.enabled = false;
+                }
+            }
         }
 
         private void RestoreInterfering()
