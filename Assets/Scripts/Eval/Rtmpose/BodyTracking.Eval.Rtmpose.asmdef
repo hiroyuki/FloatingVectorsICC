@@ -6,6 +6,7 @@
         "BodyTracking",
         "PointCloud",
         "Orbbec",
+        "UnityEngine.UI",
         "com.github.asus4.onnxruntime",
         "com.github.asus4.onnxruntime.unity"
     ],

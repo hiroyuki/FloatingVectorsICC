@@ -642,6 +642,11 @@ namespace PointCloud
             public PointCloudRecording.RcsvStreamWriter Color;
             public PointCloudRecording.RcsvStreamWriter IR;
             public PointCloudRecording.RcsvStreamWriter Bodies;
+            // Live-v11 fused output goes here (SubmitExternalBodies path). Kept
+            // separate from Bodies so bodies_main (live k4abt) and bodies_v11s
+            // (fused) never share a file, matching the offline export layout —
+            // and so bodies_v11s can own playback even with ignoreRecordedBodies on.
+            public PointCloudRecording.RcsvStreamWriter BodiesV11s;
         }
         private readonly Dictionary<string, StreamWriters> _streamWriters = new Dictionary<string, StreamWriters>();
 
@@ -1939,6 +1944,7 @@ namespace PointCloud
                 if (sw.Color != null)  totalColor  += sw.Color.FrameCount;
                 if (sw.IR    != null)  totalIR     += sw.IR.FrameCount;
                 if (sw.Bodies != null) totalBodies += sw.Bodies.FrameCount;
+                if (sw.BodiesV11s != null) totalBodies += sw.BodiesV11s.FrameCount;
             }
             FinalizeAnyOpenStreamWriters();
 
@@ -2100,16 +2106,20 @@ namespace PointCloud
         }
 
         /// <summary>
-        /// Append one body-tracker frame to <c>bodies_main</c> for the given
-        /// device. Called by SkeletonMerger on every K4abtWorkerHost output
-        /// while the recorder is in <see cref="State.Recording"/>; no-op otherwise.
+        /// Append one body-tracker frame for the given device while the recorder
+        /// is in <see cref="State.Recording"/>; no-op otherwise. Two producers:
+        /// SkeletonMerger's live k4abt path writes <c>bodies_main</c>
+        /// (<paramref name="v11s"/> = false); the live RTMPose fusion
+        /// (SubmitExternalBodies) writes <c>bodies_v11s</c> (true) so the take
+        /// carries the LIVE fused output as a self-contained, replay-owning file.
+        /// Both share the identical RecordedBodySerializer payload layout.
         /// <paramref name="bytes"/> + <paramref name="byteCount"/> follow the
         /// usual SDK-buffer convention — no reference is retained after this
-        /// call. The bodies_main RCSV file is opened lazily on the first frame
-        /// per serial so its header records the actual k4abt body record format
-        /// (consistent with depth_main / color_main / ir_main lazy opening).
+        /// call. The RCSV file is opened lazily on the first frame per serial so
+        /// its header records the body record format (consistent with
+        /// depth_main / color_main / ir_main lazy opening).
         /// </summary>
-        public void RecordBodies(string serial, ulong tsNs, byte[] bytes, int byteCount)
+        public void RecordBodies(string serial, ulong tsNs, byte[] bytes, int byteCount, bool v11s = false)
         {
             if (CurrentState != State.Recording) return;
             if (string.IsNullOrEmpty(serial)) return;
@@ -2117,14 +2127,19 @@ namespace PointCloud
 
             var track = GetOrCreateTrack(serial);
             var sw = GetOrCreateStreamWriters(serial);
-            if (sw.Bodies == null)
+            var writer = v11s ? sw.BodiesV11s : sw.Bodies;
+            if (writer == null)
             {
+                string sensorName = v11s
+                    ? PointCloudRecording.BodiesV11sSensorName
+                    : PointCloudRecording.BodiesSensorName;
                 string path = PointCloudRecording.SensorFilePath(
-                    _recordRoot, _recordHost, serial, PointCloudRecording.BodiesSensorName);
+                    _recordRoot, _recordHost, serial, sensorName);
                 string header = PointCloudRecording.BuildBodiesHeaderYaml(serial);
-                sw.Bodies = new PointCloudRecording.RcsvStreamWriter(path, header);
+                writer = new PointCloudRecording.RcsvStreamWriter(path, header);
+                if (v11s) sw.BodiesV11s = writer; else sw.Bodies = writer;
             }
-            sw.Bodies.WriteFrame(tsNs, bytes, byteCount);
+            writer.WriteFrame(tsNs, bytes, byteCount);
             track.AddRecordedBodyFrame(new PointCloudRecording.Frame { TimestampNs = tsNs });
         }
 
@@ -2842,7 +2857,8 @@ namespace PointCloud
                 try { sw.Color?.Dispose();  } catch (Exception e) { Debug.LogWarning($"[{nameof(SensorRecorder)}] color writer dispose failed: {e.Message}",  this); }
                 try { sw.IR?.Dispose();     } catch (Exception e) { Debug.LogWarning($"[{nameof(SensorRecorder)}] IR writer dispose failed: {e.Message}",     this); }
                 try { sw.Bodies?.Dispose(); } catch (Exception e) { Debug.LogWarning($"[{nameof(SensorRecorder)}] bodies writer dispose failed: {e.Message}", this); }
-                sw.Depth = sw.Color = sw.IR = sw.Bodies = null;
+                try { sw.BodiesV11s?.Dispose(); } catch (Exception e) { Debug.LogWarning($"[{nameof(SensorRecorder)}] bodies_v11s writer dispose failed: {e.Message}", this); }
+                sw.Depth = sw.Color = sw.IR = sw.Bodies = sw.BodiesV11s = null;
             }
             _streamWriters.Clear();
         }

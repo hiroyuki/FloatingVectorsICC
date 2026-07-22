@@ -70,6 +70,21 @@ namespace BodyTracking.Eval.Rtmpose
                  "banzai degrades to the loop fallback.)")]
         public bool liveFramesOnly = false;
 
+        [Tooltip("Consume ONLY recorded playback frames, ignoring live camera frames. The " +
+                 "bone-verify playback review sets this so the per-camera 2D detection tracks " +
+                 "the RECORDED take, not the live cameras that may still be streaming. " +
+                 "Symmetric to liveFramesOnly; leave both off for normal live fusion.")]
+        public bool playbackFramesOnly = false;
+
+        [Tooltip("REVIEW-ONLY (bone-verify frame-stepping): fuse the stepped frames " +
+                 "synchronously on the main thread instead of via the playhead-paced disk " +
+                 "tap. The tap streams at the playhead's real-time rate and drops frames " +
+                 ">500ms behind it, so a PAUSED, hand-stepped playhead never feeds it; this " +
+                 "path fuses each stepped frame-set the moment it arrives (OnPlaybackFrame " +
+                 "events), so per-camera 2D is deterministic per step. The worker idles " +
+                 "while this is on. Has NO effect on live fusion — leave off for live.")]
+        public bool syncReviewFusion = false;
+
         [Tooltip("Folder with yolox-m/ and rtmpose-m/ ONNX models, relative to the " +
                  "project root.")]
         public string modelsDir = "eval/models";
@@ -176,6 +191,42 @@ namespace BodyTracking.Eval.Rtmpose
             jointsWorld = _latestFusedWorld;
             jointValid = _latestFusedValid;
             return true;
+        }
+
+        // ---- per-camera 2D pose exposure (live color-grid overlay) ----
+        // The raw per-camera RTMPose detection (pre-fusion), kept per serial in
+        // that camera's OpenCV frame (mm). The color-grid overlay reprojects it
+        // through the camera's colour intrinsics to draw the skeleton on each
+        // camera's live colour image. Worker thread writes under the lock; the
+        // overlay reads a copy on the main thread.
+        private sealed class PerCamPose
+        {
+            public readonly Vector3[] PosMm = new Vector3[(int)EvalJointId.Count];
+            public readonly bool[] Valid = new bool[(int)EvalJointId.Count];
+            public readonly float[] Conf = new float[(int)EvalJointId.Count];
+            public ulong TsNs;
+            public int UpdateTick; // Environment.TickCount at write (staleness gate)
+        }
+        private readonly object _perCamLock = new object();
+        private readonly Dictionary<string, PerCamPose> _perCam = new Dictionary<string, PerCamPose>();
+
+        /// <summary>Latest per-camera (pre-fusion) RTMPose skeleton for
+        /// <paramref name="serial"/>, in that camera's OpenCV frame (mm) — the raw
+        /// single-camera detection, for the live colour overlay. Copies into the
+        /// caller's buffers (length ≥ 15). Returns false when there is no pose for
+        /// the serial or the last one is older than <paramref name="maxAgeMs"/>.
+        /// Main-thread read; the worker writes under a lock.</summary>
+        public bool TryGetPerCameraPose(string serial, Vector3[] posMm, bool[] valid, int maxAgeMs = 400)
+        {
+            if (string.IsNullOrEmpty(serial) || posMm == null || valid == null) return false;
+            lock (_perCamLock)
+            {
+                if (!_perCam.TryGetValue(serial, out var p)) return false;
+                if (unchecked(Environment.TickCount - p.UpdateTick) > maxAgeMs) return false;
+                int n = Mathf.Min(posMm.Length, Mathf.Min(valid.Length, p.PosMm.Length));
+                for (int i = 0; i < n; i++) { posMm[i] = p.PosMm[i]; valid[i] = p.Valid[i]; }
+                return true;
+            }
         }
 
         // ---- per-visitor body-profile sampling (Calibrate star-pose hold) ----
@@ -311,8 +362,32 @@ namespace BodyTracking.Eval.Rtmpose
         // Worker thread (per-camera inference callback).
         private void OnPerCameraSkeletonsForProfile(EvalSkeletonFrame f)
         {
+            var primary = f.Primary();
+
+            // Publish the raw per-camera pose for the live overlay — always, so it
+            // works whether or not a star-pose calibration is sampling.
+            if (primary != null && !string.IsNullOrEmpty(f.Serial))
+            {
+                lock (_perCamLock)
+                {
+                    if (!_perCam.TryGetValue(f.Serial, out var slot))
+                    {
+                        slot = new PerCamPose();
+                        _perCam[f.Serial] = slot;
+                    }
+                    slot.TsNs = f.TimestampNs;
+                    slot.UpdateTick = Environment.TickCount;
+                    for (int j = 0; j < slot.PosMm.Length; j++)
+                    {
+                        slot.Valid[j] = primary.Joints[j].Valid;
+                        slot.Conf[j] = primary.Joints[j].Confidence;
+                        if (primary.Joints[j].Valid) slot.PosMm[j] = primary.Joints[j].PositionMm;
+                    }
+                }
+            }
+
             if (!_profileSampling) return;
-            var p = f.Primary();
+            var p = primary;
             if (p == null) return;
             lock (_profileLock)
             {
@@ -464,6 +539,9 @@ namespace BodyTracking.Eval.Rtmpose
         private readonly List<PointCloudRenderer> _subscribedRenderers = new List<PointCloudRenderer>();
         private SensorRecorder _recorder;
         private bool _mergerFlagOwned;
+        // main-thread synchronous review fusion scratch (SyncFuseDrained)
+        private readonly List<(Slot Slot, PendingFrame Pf)> _syncDrain = new List<(Slot, PendingFrame)>(16);
+        private readonly List<FusedRtmposeAdapter.BurstItem> _syncItems = new List<FusedRtmposeAdapter.BurstItem>(16);
 
         private void OnEnable()
         {
@@ -601,16 +679,32 @@ namespace BodyTracking.Eval.Rtmpose
 
             // late-joining renderers (live cameras open asynchronously)
             SubscribeSources();
-            // liveFramesOnly: the playback tap and playback pacing stay off — the
-            // recording being replayed is the SCULPTURE, not the person to fuse.
-            bool playing = !liveFramesOnly && _recorder != null && _recorder.IsPlaying;
-            s.PlaybackActive = playing;
-            if (playing)
+
+            if (syncReviewFusion)
             {
-                s.TapRoot = _recorder.playbackFolderPath;
-                Interlocked.Exchange(ref s.PlayheadNs, (long)_recorder.CurrentPlayheadNs);
+                // Review frame-stepping: the playhead-paced async tap can't feed a
+                // paused, hand-stepped playhead (it streams at the playhead rate and
+                // sheds frames >500ms behind it). Instead the stepped frames arrive as
+                // OnPlaybackFrame events into the slots (TapRoot null lets Ingest keep
+                // them), and we fuse them synchronously right here on the main thread.
+                // The worker idles (see WorkerLoop). Deterministic per step.
+                s.PlaybackActive = false;
+                s.TapRoot = null;
+                SyncFuseDrained(s);
             }
-            else s.TapRoot = null;
+            else
+            {
+                // liveFramesOnly: the playback tap and playback pacing stay off — the
+                // recording being replayed is the SCULPTURE, not the person to fuse.
+                bool playing = !liveFramesOnly && _recorder != null && _recorder.IsPlaying;
+                s.PlaybackActive = playing;
+                if (playing)
+                {
+                    s.TapRoot = _recorder.playbackFolderPath;
+                    Interlocked.Exchange(ref s.PlayheadNs, (long)_recorder.CurrentPlayheadNs);
+                }
+                else s.TapRoot = null;
+            }
 
             // drain fused results (main thread — merger touches Unity transforms).
             // The latest-fused snapshot updates on EVERY drain so pose detection
@@ -675,7 +769,10 @@ namespace BodyTracking.Eval.Rtmpose
         }
 
         private void OnLiveFrame(PointCloudRenderer r, RawFrameData frame)
-            => Ingest(r.deviceSerial, r.CameraParam, r.transform, frame);
+        {
+            if (playbackFramesOnly) return; // review mode: fuse the recorded take, not live cameras
+            Ingest(r.deviceSerial, r.CameraParam, r.transform, frame);
+        }
 
         private void OnPlaybackFrame(string serial, ObCameraParam? camParam, Transform tr, RawFrameData frame)
         {
@@ -912,6 +1009,11 @@ namespace BodyTracking.Eval.Rtmpose
                 s.Wake.WaitOne(10);
                 if (s.Stop) break;
 
+                // Review frame-stepping fuses on the main thread (SyncFuseDrained);
+                // the worker must not also drain the slots or it would race the ring
+                // and split bursts across threads. Idle here while that mode is on.
+                if (syncReviewFusion) continue;
+
                 if (s.ResetPending)
                 {
                     s.ResetPending = false;
@@ -1019,6 +1121,57 @@ namespace BodyTracking.Eval.Rtmpose
                 }
             }
             try { s.Fused?.FlushLag(); } catch { }
+        }
+
+        // Main-thread synchronous fusion for bone-verify REVIEW frame-stepping.
+        // Drains whatever the OnPlaybackFrame events pushed into the slots and fuses
+        // it in one blocking SubmitBurst, so per-camera 2D updates deterministically
+        // for the stepped frame. Mirrors the worker's drain/configure/submit path,
+        // minus the heartbeat + rate bookkeeping; the worker idles while this runs.
+        private void SyncFuseDrained(Session s)
+        {
+            if (s.Fused == null) return;
+            _syncDrain.Clear();
+            lock (s.SlotLock)
+            {
+                foreach (var kv in s.Slots)
+                {
+                    var slot = kv.Value;
+                    while (slot.Count > 0)
+                    {
+                        var pf = slot.Ring[slot.Tail];
+                        slot.Ring[slot.Tail] = null;
+                        slot.Tail = (slot.Tail + 1) % Slot.QueueDepth;
+                        slot.Count--;
+                        _syncDrain.Add((slot, pf));
+                    }
+                }
+            }
+            if (_syncDrain.Count == 0) return;
+
+            _syncItems.Clear();
+            foreach (var (slot, pf) in _syncDrain)
+            {
+                try
+                {
+                    EnsureConfigured(s, slot, pf);
+                    var raw = new RawFrameData(
+                        pf.Depth, pf.DepthCount, pf.DW, pf.DH,
+                        pf.Color, pf.ColorCount, pf.CW, pf.CH,
+                        pf.IR, pf.IRCount, pf.IW, pf.IH,
+                        pf.TsNs / 1000UL);
+                    _syncItems.Add(new FusedRtmposeAdapter.BurstItem { Serial = slot.Serial, Frame = raw, TsNs = pf.TsNs });
+                }
+                catch (Exception e) { Debug.LogException(e, this); }
+            }
+            if (_syncItems.Count > 0)
+            {
+                try { s.Fused.SubmitBurst(_syncItems); }
+                catch (Exception e) { Debug.LogException(e, this); }
+            }
+            lock (s.SlotLock)
+                foreach (var (slot, pf) in _syncDrain)
+                    if (slot.Free.Count < Slot.QueueDepth) slot.Free.Push(pf);
         }
 
         // Worker thread. Fresh adapter after a playback loop — timestamps rewind

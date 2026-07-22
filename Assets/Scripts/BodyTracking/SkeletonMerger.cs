@@ -629,6 +629,19 @@ namespace BodyTracking
         {
             if (!useExternalBodies) return;
             IngestBodies(serial, tsNs, bytes, byteCount, sourceTransform, cameraParam);
+
+            // Persist the LIVE fused (v11) skeleton to bodies_v11s while recording.
+            // bodies_v11s owns playback even with ignoreRecordedBodies on
+            // (RecordedV11sOwnsPlayback), so the recorded live run replays as-is
+            // instead of being re-derived — the live path is non-deterministic
+            // (async detect / GPU rate / heartbeats), so re-derivation would not
+            // reproduce it. The bytes are already RecordedBodySerializer-encoded
+            // (identical layout to bodies_main), so no re-encode is needed, and
+            // the per-serial fan-out mirrors the offline FusedBodiesExport layout
+            // (each device's file carries the fused skeleton in its own frame).
+            if (_subscribedRecorder != null
+                && _subscribedRecorder.CurrentState == SensorRecorder.State.Recording)
+                _subscribedRecorder.RecordBodies(serial, tsNs, bytes, byteCount, v11s: true);
         }
 
         private void IngestBodies(string serial, ulong tsNs, byte[] bytes, int byteCount,
@@ -731,6 +744,50 @@ namespace BodyTracking
             foreach (var bv in _pool.Visuals.Values)
                 return bv.TryGetJointWorld((int)joint, out world);
             return false;
+        }
+
+        /// <summary>Latest ingested skeleton for <paramref name="serial"/>, mapped into
+        /// that camera's COLOR frame (mm, OpenCV) — for the bone-verify colour overlay,
+        /// which reprojects it through the camera's colour intrinsics. In playback review
+        /// this is the recorded fused v11 skeleton (bodies_v11s); live it is the current
+        /// fused/worker skeleton. Fills <paramref name="posMm"/> / <paramref name="valid"/>
+        /// (length ≥ K4ABT_JOINT_COUNT) in raw k4abt joint order. Returns false when there
+        /// is no body for the serial. Main-thread read (slots are written on the main
+        /// thread by IngestBodies / OnWorkerSkeletons).</summary>
+        /// <summary>Device-clock (ns) source timestamp of the freshest ingested
+        /// skeleton across cameras — the frame the currently-shown pose was tracked
+        /// from. The bone-verify live sync feeds this to the point-cloud renderers'
+        /// timestamp-matched render delay so the cloud lines up with the pose.
+        /// Returns false when no body is present.</summary>
+        public bool TryGetLatestSkeletonTimestampNs(out ulong tsNs)
+        {
+            tsNs = 0;
+            foreach (var kv in _latestBySerial)
+            {
+                var slot = kv.Value;
+                if (slot.BodyCount > 0 && slot.CapturedTsNs > tsNs) tsNs = slot.CapturedTsNs;
+            }
+            return tsNs > 0;
+        }
+
+        public bool TryGetIngestedCameraFramePose(string serial, UnityEngine.Vector3[] posMm, bool[] valid)
+        {
+            if (string.IsNullOrEmpty(serial) || posMm == null || valid == null) return false;
+            if (!_latestBySerial.TryGetValue(serial, out var slot) || slot.BodyCount <= 0) return false;
+            var body = slot.Bodies[0];
+            int n = Mathf.Min(posMm.Length, Mathf.Min(valid.Length, K4ABTConsts.K4ABT_JOINT_COUNT));
+            for (int i = 0; i < n; i++)
+            {
+                var jt = body.Joints[i];
+                bool ok = jt.ConfidenceLevel > k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_NONE;
+                valid[i] = ok;
+                // k4abt joints are DEPTH-frame; the colour image lives in the colour frame,
+                // so map through the slot's depth→colour extrinsic (colour_mm = R·depth_mm + T).
+                if (ok)
+                    posMm[i] = slot.DepthToColorMm.MultiplyPoint3x4(
+                        new UnityEngine.Vector3(jt.Position.X, jt.Position.Y, jt.Position.Z));
+            }
+            return true;
         }
 
         private void Update()
