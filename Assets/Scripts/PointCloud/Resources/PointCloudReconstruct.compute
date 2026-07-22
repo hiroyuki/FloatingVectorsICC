@@ -8,10 +8,11 @@
 // mesh vertex buffer (RWByteAddressBuffer; we lay out Vertex as 6 floats =
 // 24 bytes to match OBColorPoint / the PointCloudUnlit vertex layout).
 //
-// Invalid pixels (depth == 0) are emitted with a far-away position so the
-// clip stage discards them — the CPU path skips them to keep the vertex
-// count tight, but emitting all dw*dh per frame is cheaper than compaction
-// on GPU and the rasterizer culls them anyway.
+// Invalid pixels (depth == 0, or rejected by the speckle filter below) are
+// emitted with a far-away position so the clip stage discards them — the CPU
+// path skips them to keep the vertex count tight, but emitting all dw*dh per
+// frame is cheaper than compaction on GPU and the rasterizer culls them
+// anyway.
 
 #pragma kernel CSMain
 
@@ -48,6 +49,47 @@ uint LoadDepthU16(uint u, uint v)
     uint word = _Depth.Load(byteOffset & ~3u);
     uint shift = (byteOffset & 2u) * 8u;
     return (word >> shift) & 0xFFFFu;
+}
+
+// Speckle rejection: drop points that have too few depth neighbours agreeing
+// with them. The sensors throw isolated "flying pixels" at depth edges and a
+// sparse haze of small blobs in mid-air; both read as chatter on screen and
+// carry no meaning, and neither survives a local-density test — a point on a
+// real surface has a full neighbourhood at nearly its own depth.
+//
+// _SpeckleRadius is the window half-width in pixels (0 = filter off, so an
+// unset uniform means "unchanged behaviour"). A pixel survives when at least
+// _SpeckleMinNeighbours of the (2r+1)^2 - 1 neighbours are non-zero and within
+// the depth tolerance. The tolerance grows with range because the sensor's
+// depth noise does: tol = max(_SpeckleTolMm, _SpeckleTolFrac * z).
+uint  _SpeckleRadius;
+uint  _SpeckleMinNeighbours;
+float _SpeckleTolMm;
+float _SpeckleTolFrac;
+
+bool PassSpeckle(uint u, uint v, float z)
+{
+    if (_SpeckleRadius == 0u) return true;
+
+    int r   = (int)_SpeckleRadius;
+    float tol = max(_SpeckleTolMm, _SpeckleTolFrac * z);
+    int u0  = max((int)u - r, 0);
+    int v0  = max((int)v - r, 0);
+    int u1  = min((int)u + r, (int)_DepthW - 1);
+    int v1  = min((int)v + r, (int)_DepthH - 1);
+
+    uint agree = 0u;
+    for (int vv = v0; vv <= v1; vv++)
+    {
+        for (int uu = u0; uu <= u1; uu++)
+        {
+            if (uu == (int)u && vv == (int)v) continue;
+            uint nz = LoadDepthU16((uint)uu, (uint)vv);
+            if (nz == 0u) continue;
+            if (abs((float)nz - z) <= tol) agree++;
+        }
+    }
+    return agree >= _SpeckleMinNeighbours;
 }
 
 float3 SampleColorRGB(int iu, int iv)
@@ -91,7 +133,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     uint outByteOffset = idx * 24u;
 
     uint zRaw = LoadDepthU16(u, v);
-    if (zRaw == 0u)
+    if (zRaw == 0u || !PassSpeckle(u, v, (float)zRaw))
     {
         // Far-away marker: clip-stage discards the resulting screen-space pos.
         _Out.Store3(outByteOffset,      asuint(float3(1e10, 1e10, 1e10)));

@@ -1258,7 +1258,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: PointCloud::PointCloud.PointCloudFloorMask
   mode: 1
-  floorHeight: 0.01
+  floorHeight: 0.05
   keepRadius: 0.5
 --- !u!4 &1016277182
 Transform:

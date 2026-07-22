@@ -61,6 +61,56 @@ namespace PointCloud
         private static readonly int kId_T     = Shader.PropertyToID("_T");
         private static readonly int kId_RayLut    = Shader.PropertyToID("_RayLut");
         private static readonly int kId_HasRayLut = Shader.PropertyToID("_HasRayLut");
+        private static readonly int kId_SpeckleRadius    = Shader.PropertyToID("_SpeckleRadius");
+        private static readonly int kId_SpeckleMinNeigh  = Shader.PropertyToID("_SpeckleMinNeighbours");
+        private static readonly int kId_SpeckleTolMm     = Shader.PropertyToID("_SpeckleTolMm");
+        private static readonly int kId_SpeckleTolFrac   = Shader.PropertyToID("_SpeckleTolFrac");
+
+        /// <summary>
+        /// Local-density rejection applied in the kernel: a depth pixel is only
+        /// emitted when enough of its neighbours sit at nearly the same depth.
+        /// Kills the mid-air chatter (flying pixels at silhouette edges, small
+        /// floating blobs) that no world-space filter can distinguish from real
+        /// surface points. Radius 0 disables it, which is the struct's default —
+        /// a caller that never assigns <see cref="Speckle"/> gets the old
+        /// behaviour unchanged.
+        /// </summary>
+        [Serializable]
+        public struct SpeckleSettings
+        {
+            [Tooltip("Neighbourhood half-width in depth pixels. 0 = off. 1 = 3x3 " +
+                     "(isolated flying pixels only), 2 = 5x5, 3 = 7x7 (kills blobs " +
+                     "up to roughly the window size). Cost is (2r+1)^2 depth loads " +
+                     "per pixel — negligible at 320x288 even at r=3.")]
+            [Range(0, 3)] public int radius;
+
+            [Tooltip("How many of the (2r+1)^2-1 neighbours must agree for the " +
+                     "point to survive. Higher = more aggressive; too high erodes " +
+                     "genuine silhouette edges.")]
+            [Min(0)] public int minNeighbours;
+
+            [Tooltip("Depth agreement tolerance (mm) at close range.")]
+            [Min(0f)] public float tolMm;
+
+            [Tooltip("Depth agreement tolerance as a fraction of range — sensor " +
+                     "depth noise grows with distance, so the tolerance has to as " +
+                     "well. Effective tolerance = max(tolMm, tolFrac * z).")]
+            [Min(0f)] public float tolFrac;
+
+            /// <summary>Tuned on the 4-camera rig: 5x5 window, half the neighbours
+            /// must agree. Removes the airborne chatter while leaving the body's
+            /// own silhouette intact.</summary>
+            public static SpeckleSettings Default => new SpeckleSettings
+            {
+                radius = 2, minNeighbours = 12, tolMm = 30f, tolFrac = 0.01f,
+            };
+
+            public bool Enabled => radius > 0 && minNeighbours > 0;
+        }
+
+        /// <summary>Speckle rejection for this reconstructor's next Dispatch.
+        /// Owner may reassign every frame (Inspector-driven tuning).</summary>
+        public SpeckleSettings Speckle;
 
         private readonly string _name;
         private Mesh _mesh;
@@ -165,6 +215,11 @@ namespace PointCloud
                 // StructuredBuffer slot is never left dangling between frames.
                 shader.SetBuffer(k, kId_RayLut, _rayLutGpu);
                 shader.SetInt(kId_HasRayLut, (_rayLutValid && !ForcePinhole) ? 1 : 0);
+                bool speckle = Speckle.Enabled;
+                shader.SetInt(kId_SpeckleRadius, speckle ? Speckle.radius : 0);
+                shader.SetInt(kId_SpeckleMinNeigh, speckle ? Speckle.minNeighbours : 0);
+                shader.SetFloat(kId_SpeckleTolMm, Speckle.tolMm);
+                shader.SetFloat(kId_SpeckleTolFrac, Speckle.tolFrac);
                 shader.SetInt(kId_DepthW, depthW);
                 shader.SetInt(kId_DepthH, depthH);
                 shader.SetInt(kId_ColorW, colorW);

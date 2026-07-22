@@ -164,6 +164,13 @@ namespace PointCloud
                  "(Y points down); flipping Y maps them to Unity's Y-up convention.")]
         public bool flipY = true;
 
+        [Tooltip("Speckle rejection in the reconstruction kernel: a depth pixel is only emitted when " +
+                 "enough neighbours sit at nearly the same depth, which removes flying pixels and the " +
+                 "small mid-air blobs the sensors throw. GPU reconstruction only (the CPU " +
+                 "PointCloudFilter path ignores this). Radius 0 turns it off.")]
+        public PointCloudReconstructor.SpeckleSettings speckleFilter =
+            PointCloudReconstructor.SpeckleSettings.Default;
+
         [Header("Bounding box filter")]
         [Tooltip("Optional oriented bounding box. When assigned and its filterMode is not Disabled, " +
                  "points falling outside/inside the box (per mode) are culled in the vertex shader.")]
@@ -281,6 +288,9 @@ namespace PointCloud
             if (!CameraParam.HasValue) return 0;
             int dw = depthW > 0 ? depthW : (int)depthWidth;
             int dh = depthH > 0 ? depthH : (int)depthHeight;
+            // Re-read every dispatch so the Inspector fields can be tuned while
+            // the rig is running, like the other point-cloud filters.
+            _reconstructor.Speckle = speckleFilter;
             if (!_reconstructor.Dispatch(
                     depthBytes, depthByteCount, dw, dh,
                     colorBytes, colorByteCount, colorW, colorH,
