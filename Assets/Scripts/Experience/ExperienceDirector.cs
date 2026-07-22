@@ -61,6 +61,7 @@ namespace Experience
         public BoundingVolume boundingVolume;
         public FloorOrigin floorOrigin;
         public TSDFVolume tsdfVolume;
+        public TSDFIntegrator tsdfIntegrator; // frozen at capture so the result stops recomputing
         public PointCloudMotionCurves motionCurves;
         public BonePoseHistory poseHistory;
         public TSDFPrintExporter printExporter; // capture/export settings source
@@ -127,6 +128,11 @@ namespace Experience
         // dev-value snapshot (restored on Exit)
         private int _savedHistorySamples;
         private bool _savedCurvesVisible, _savedCurvesFreeze;
+        // The finished sculpture is frozen at capture (integrator gate closed +
+        // curves frozen) so ResultShow/QrShow stop recomputing it — the model the
+        // visitor sees is fixed the instant it is generated. Restored on the next
+        // Idle (live-follow again) and on mode exit.
+        private bool _sculptureFrozen;
         private bool _savedMgrRebase, _savedRecRebase;
         private float _lastPoseDiagAt;
         // The visitor-facing curve as it stood the instant Processing began — i.e.
@@ -196,6 +202,7 @@ namespace Experience
             if (boundingVolume == null) boundingVolume = FindFirstObjectByType<BoundingVolume>();
             if (floorOrigin == null) floorOrigin = FindFirstObjectByType<FloorOrigin>();
             if (tsdfVolume == null) tsdfVolume = FindFirstObjectByType<TSDFVolume>();
+            if (tsdfIntegrator == null) tsdfIntegrator = FindFirstObjectByType<TSDFIntegrator>();
             if (motionCurves == null) motionCurves = FindFirstObjectByType<PointCloudMotionCurves>();
             if (poseHistory == null) poseHistory = FindFirstObjectByType<BonePoseHistory>();
             if (printExporter == null) printExporter = FindFirstObjectByType<TSDFPrintExporter>();
@@ -570,6 +577,14 @@ namespace Experience
                 motionCurves.visible = _savedCurvesVisible;
                 motionCurves.freeze = _savedCurvesFreeze;
             }
+            // A result freeze must not leak past the show — reopen the integrator
+            // gate and reset its batch state (curves already restored above to the
+            // operator's own value, so this does not touch motionCurves.freeze).
+            if (_sculptureFrozen)
+            {
+                ResumeIntegratorLiveFollow();
+                _sculptureFrozen = false;
+            }
             if (poseHistory != null) poseHistory.historySamples = _savedHistorySamples;
 
             Debug.Log($"[{nameof(ExperienceDirector)}] experience mode OFF (dev values restored).", this);
@@ -663,6 +678,7 @@ namespace Experience
                     // Unattended: nothing on the screens but the scene itself —
                     // the floor grid (ExperienceSpaceBuilder) and, as someone
                     // steps in, their live sculpture.
+                    UnfreezeSculpture(); // drop the previous run's frozen result → live-follow
                     StopVisitorPlayback();
                     // A playback session that predates Experience mode (dev
                     // session running, or loaded-and-stopped with its _Playback_*
@@ -1275,6 +1291,14 @@ namespace Experience
 
             if (compareCurveSources) LogCurveComparison(snap);
 
+            // Freeze the sculpture the instant it is generated: close the TSDF
+            // integrator gate and freeze the curves so ResultShow/QrShow stop
+            // recomputing the model. Without this the integrator stays in
+            // live-follow (integrationEnabled=true) and the curves keep rebuilding
+            // every frame — the frozen result visibly flickers. Restored on the
+            // next Idle (live-follow again) and on mode exit.
+            FreezeSculpture();
+
             _snapshot = snap;
             _ui.ShowProgress(1f, config.processingText);
             // historySamples intentionally stays at the one-second window: the
@@ -1399,6 +1423,47 @@ namespace Experience
         {
             if (poseHistory != null && _savedHistorySamples > 0)
                 poseHistory.historySamples = _savedHistorySamples;
+        }
+
+        // ---- sculpture freeze (final result holds fixed, no per-frame churn) ----
+
+        // Close the integrator gate and freeze the curves so the FRONT buffer — the
+        // exact mesh TSDFSnapshotBuilder.Capture just read — holds on screen.
+        // Deliberately does NOT Publish(): unlike TSDFTrailBaker.StopCapture (single-
+        // buffered accumulate, where write == front), the live-follow volume is
+        // double-buffered and its hidden WRITE buffer may be a partial/cleared
+        // in-progress batch — swapping that to the front would re-introduce the very
+        // flicker this freezes out. Idempotent.
+        private void FreezeSculpture()
+        {
+            if (_sculptureFrozen) return;
+            if (tsdfIntegrator != null) tsdfIntegrator.integrationEnabled = false;
+            if (motionCurves != null) motionCurves.freeze = true;
+            _sculptureFrozen = true;
+        }
+
+        // Back to live-follow for the next visitor (called on Idle) — the curves
+        // rebuild and the integrator folds live frames again. Exit restores the
+        // operator's own freeze via _savedCurvesFreeze instead.
+        private void UnfreezeSculpture()
+        {
+            if (!_sculptureFrozen) return;
+            ResumeIntegratorLiveFollow();
+            if (motionCurves != null) motionCurves.freeze = false;
+            _sculptureFrozen = false;
+        }
+
+        // Re-open the integrator gate AND reset its batch state. Resuming after a
+        // gated freeze without clearing the in-flight batch lets the batch state
+        // machine believe it is mid-batch and publish a partial first batch
+        // (TSDFIntegrator.BeginFreshBatch documents exactly this hazard).
+        // BeginFreshBatch clears the batch serial set and the write buffer so the
+        // next live/playback batch starts clean.
+        private void ResumeIntegratorLiveFollow()
+        {
+            if (tsdfIntegrator == null) return;
+            tsdfIntegrator.integrationEnabled = true;
+            tsdfIntegrator.BeginFreshBatch();
         }
 
         private TSDFSnapshotBuilder.CaptureOptions CaptureOptions()
