@@ -269,7 +269,10 @@ namespace PointCloud
         private void EnsureGridMaterial()
         {
             if (_gridMaterial != null) return;
-            var shader = Shader.Find("Orbbec/PointCloudUnlit");
+            // Resources first — a bare Shader.Find returns null in a player build
+            // (nothing references the shader, so it is stripped).
+            var shader = Resources.Load<Shader>("PointCloudUnlit");
+            if (shader == null) shader = Shader.Find("Orbbec/PointCloudUnlit");
             if (shader == null)
             {
                 Debug.LogWarning(

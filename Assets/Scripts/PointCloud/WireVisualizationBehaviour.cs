@@ -103,7 +103,10 @@ namespace PointCloud
 
             // Reuse the project's vertex-color unlit shader so the wire blends into the
             // same rendering setup as the points. Fall back to Unity built-ins if absent.
-            var shader = Shader.Find("Orbbec/PointCloudUnlit");
+            // Resources first — a bare Shader.Find returns null in a player build
+            // (nothing references the shader, so it is stripped).
+            var shader = Resources.Load<Shader>("PointCloudUnlit");
+            if (shader == null) shader = Shader.Find("Orbbec/PointCloudUnlit");
             if (shader == null) shader = Shader.Find("Hidden/Internal-Colored");
             if (shader != null)
             {

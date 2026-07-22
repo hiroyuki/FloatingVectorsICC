@@ -842,7 +842,12 @@ namespace PointCloud
             _meshFilter.sharedMesh = _mesh;
             if (pointMaterial == null)
             {
-                var shader = Shader.Find("Orbbec/PointCloudUnlit");
+                // Resources first: no .mat asset references this shader (the
+                // material is auto-created here), so a bare Shader.Find returns
+                // null in a player build — the shader gets stripped and the
+                // renderer falls back to the magenta default material.
+                var shader = Resources.Load<Shader>("PointCloudUnlit");
+                if (shader == null) shader = Shader.Find("Orbbec/PointCloudUnlit");
                 if (shader != null)
                 {
                     pointMaterial = new Material(shader) { name = "PointCloudUnlit (auto)" };

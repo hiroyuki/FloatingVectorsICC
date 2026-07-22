@@ -2683,7 +2683,10 @@ namespace PointCloud
             }
             if (mat == null)
             {
-                var shader = Shader.Find("Orbbec/PointCloudUnlit");
+                // Resources first — a bare Shader.Find returns null in a player
+                // build (nothing references the shader, so it is stripped).
+                var shader = Resources.Load<Shader>("PointCloudUnlit");
+                if (shader == null) shader = Shader.Find("Orbbec/PointCloudUnlit");
                 if (shader != null) mat = new Material(shader) { name = "PointCloudUnlit (playback)" };
             }
             if (mat != null) mr.sharedMaterial = mat;
