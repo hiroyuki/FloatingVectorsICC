@@ -32,13 +32,40 @@ Unity上でリアルタイムにポイントクラウドとして描画する。
 | 4070 | RTX 4070 | CL8F25300CA / CL8F25300HJ / CL8F25300C6 / CL8F25300F0 |
 | 5080 | RTX 5080 | CL8F253004N / CL8F253004Z / CL8F253004L / CL8F25300EG |
 
-- 5080 セットは実機で確認済み（2026-07-22 に extrinsics / floor まで再キャリブ、
-  カメラ位置は入れ替え前の calib と 10 cm 以内で一致）。**4070 セットは未確認・未キャリブ** —
-  向こうのマシンで最初に `Connection` と serial を確認してから再キャリブすること
+- **両セットとも 2026-07-22 に実機確認・再キャリブ済み**。上表の serial 対応は
+  両マシンで実機照合済み（4070 機の GPU は `Get-CimInstance Win32_VideoController` で
+  RTX 4070、接続 serial は CA / HJ / C6 / F0 を確認）
+  - 5080 セット: extrinsics / floor まで再キャリブ。カメラ位置は入れ替え前の calib と
+    10 cm 以内で一致
+  - 4070 セット: `cameras.yaml` / `extrinsics.yaml` / `floor.yaml` / `sensing_area.yaml` を
+    新規作成。id 順は **0=CA / 1=C6 / 2=F0 / 3=HJ**（origin=CA）。実測 4.6 m 四辺に対して
+    4.514〜4.624 m、対角 6.374 / 6.540 m、カメラ高さのばらつき 12 mm、床傾き 0.19°
 - カメラを挿し替えたら **USB のリンク速度を必ず確認する**。`Log/OrbbecSDK.log.txt` の
   `DeviceManager.cpp` 行に `Connection: USB3.1` / `USB2.1` が出る。USB2 で繋がった台は
   depth+color の帯域が足りず「フレーム停止」で異常判定される（入れ替え直後に 2 台が
   USB2 になっていた）
+- **キャリブ前に sync 配線と `SensorManager.applySyncConfig` を必ず確認する**。
+  2026-07-22 の 4070 機で、sync ケーブル未接続 + シーンの `applySyncConfig=false`
+  （配線が無い状態で Secondary にすると従属機が止まるため、誰かが落としていた）のまま
+  キャリブし、台間 skew 40〜90 ms で solve が破綻した（四辺 3.4/3.5/4.6/6.4 m、
+  カメラ高さが −0.35〜1.88 m に散る）。配線 + `applySyncConfig=true` で再キャリブして解決
+  - 台間 skew は `PointCloudRenderer.LastTimestampUs` を 4 台で比較すれば即わかる。
+    **sync が効いていればサブ ms**（4070 機の実測: Primary の CA が最速、残り 3 台が
+    1〜2 ms 以内）。数十 ms 出ていたら配線か設定を疑う
+  - **skew が丁度 33 ms（30fps の 1 フレーム）なら Play し直す**。台が 2 グループに
+    分かれ、グループ内はサブ ms なのにグループ間だけ 1 フレームずれることがある
+    （ストリーム開始時のトリガ捕捉タイミング）。2026-07-22 の 4070 機では
+    Play し直しだけで 33.5 ms → 1.5 ms に解消した
+  - **Primary は USB 列挙 index 0 の台**（`syncTopology` が SyncHubPro でも DaisyChain でも
+    同じ。`SensorManager.cs:545`）。これは `cameras.yaml` の camera-id とは**別の順番**で、
+    USB ポートを挿し替えると別の台に移る。**配線の起点（ハブ入力 / 鎖の先頭）を
+    index 0 の台に合わせる**こと。index 0 は GO 名 `PointCloud[0] ...` で確認できる。
+    4070 機は index 0 = CL8F25300CA（id 0 もたまたま CA だが決まり方は無関係）
+  - `maxSkewMs` は 150 ms に緩めてある（commit 171dbe9 の暫定処置）ので、
+    **粗悪なキャプチャが reject されずに通る**。skew の値はログで自分で見ること
+  - solve 後の検証は距離で行う: 四辺が実測値どおり、対角 2 本が一致、4 台の高さが揃うこと。
+    `extrinsics.yaml` の `global_tr_colorCamera.trans_m` がカメラ位置（OpenCV 系、
+    Unity の y は符号反転）
 
 - カメラ ID 割当（`cameras.yaml`）はマシンローカル（persistentDataPath 配下）。
   **セットをまたいで serial を持ち込まない** — 別セットの serial が id 0-3 を占有すると、

@@ -1140,7 +1140,7 @@ MonoBehaviour:
   defaultCumulative: {fileID: 18533122}
   defaultFloorMask: {fileID: 1016277181}
   syncTopology: 0
-  applySyncConfig: 0
+  applySyncConfig: 1
   trigger2ImageDelayStepUs: 160
   enableTimerSyncWithHost: 1
   enableGlobalTimestamp: 1
