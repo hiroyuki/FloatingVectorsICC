@@ -47,6 +47,16 @@ using UnityEngine;
 
 namespace Experience
 {
+    // Runs before every component whose Update ISSUES A DRAW, so a state change
+    // and the draws it unsuppresses land in the same frame. At the default order
+    // the Processing→ResultShow reveal split across two components: curves
+    // (order 0, arbitrary vs this one) could already have skipped their draw
+    // while TSDFView (order 10) always ran after and drew — one presented frame
+    // of bare shell with no ribbons. And that frame is the one ExportAndPublish
+    // then blocks on (~3 s), so the "one frame" sat on screen for seconds.
+    // -20 keeps it after K4abtWorkerHost (-100), which is where the skeletons
+    // this reads arrive from.
+    [DefaultExecutionOrder(-20)]
     [DisallowMultipleComponent]
     public class ExperienceDirector : MonoBehaviour, Shared.IViewToggle
     {
@@ -288,6 +298,62 @@ namespace Experience
                 _liveFeed = null;
                 ReapplyBodySourceForState(_fsm.State);
             }
+
+            UpdateLiveRenderSync();
+        }
+
+        // --- live cloud <-> skeleton timestamp sync (curve-quality knob) ---
+        // The live preview draws the cloud straight off the cameras while the
+        // ribbons seed from a fused skeleton that runs ~130-166ms behind. During
+        // motion the arm's points sit far from where the bones say the arm is, so
+        // those seeds fail the bone-distance test and the ribbons thin out exactly
+        // when the visitor moves. Matching the DISPLAYED cloud to the skeleton's
+        // own timestamp puts both at the same instant. Display-only: BT and the
+        // recording keep the newest frame, so the take behind ResultShow (which
+        // has its own playbackRenderDelayFrames) is untouched. Cost: the preview
+        // reads as a ~150ms-lagged mirror. Same mechanism BoneVerify's F8 live
+        // mode uses; off by default until the lag trade is judged on the rig.
+        private bool _liveSyncOn;
+
+        private void UpdateLiveRenderSync()
+        {
+            bool want = config != null && config.liveRenderSync && !_visitorPlaybackActive
+                        && _fsm.State is ExperienceState.Calibrate
+                                      or ExperienceState.FreeMove
+                                      or ExperienceState.Shoot;
+            if (!want)
+            {
+                if (_liveSyncOn) SetLiveRenderSync(false);
+                return;
+            }
+
+            // No fresh skeleton (tracking gap, worker restart) → target 0 so the
+            // cloud snaps back to real time instead of freezing on a stale target
+            // once that frame falls out of the renderer's delay ring.
+            ulong tsUs = 0UL;
+            if (merger != null && merger.TryGetLatestSkeletonTimestampNs(out ulong tsNs))
+                tsUs = tsNs / 1000UL;
+
+            _liveSyncOn = true;
+            if (sensorManager == null) return;
+            foreach (var r in sensorManager.Renderers)
+            {
+                if (r == null) continue;
+                r.renderDelayEnabled = true;
+                r.targetDisplayTimestampUs = tsUs;
+            }
+        }
+
+        private void SetLiveRenderSync(bool on)
+        {
+            _liveSyncOn = on;
+            if (sensorManager == null) return;
+            foreach (var r in sensorManager.Renderers)
+            {
+                if (r == null) continue;
+                r.renderDelayEnabled = on;
+                if (!on) r.targetDisplayTimestampUs = 0;
+            }
         }
 
         private void ReapplyBodySourceForState(ExperienceState s)
@@ -515,6 +581,10 @@ namespace Experience
         private void ExitMode()
         {
             _active = false;
+
+            // Display-only, but it must not outlive the mode: a dev session left
+            // with delayed live renderers looks like a stuck cloud.
+            if (_liveSyncOn) SetLiveRenderSync(false);
 
             StopRoutine(ref _calibrateRoutine);
             StopRoutine(ref _shootRoutine);

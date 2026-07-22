@@ -344,6 +344,15 @@ namespace PointCloud
             df.DW = slot.DepthWidth; df.DH = slot.DepthHeight;
             df.CW = slot.ColorWidth; df.CH = slot.ColorHeight;
             df.TsUs = slot.TimestampUs;
+            // Mask the COPY here, while this frame's IR is still in hand: the gate
+            // is fail-closed on missing IR (ProjectorMask.ProjectorVisible), and
+            // the ring does not keep IR, so masking later would silently no-op and
+            // put the rival-projector flare back into whatever consumes this frame
+            // (TSDF via TryGetDisplayedRawFrame). The live tap below still masks
+            // the slot itself for the newest-frame consumers.
+            if (maskRivalProjectors)
+                ProjectorMask.Apply(deviceSerial, df.Depth, df.DepthCount, df.DW, df.DH,
+                    slot.IRBytes, slot.IRByteCount, slot.IRWidth, slot.IRHeight);
             _delayHead = (_delayHead + 1) % _delayRing.Length;
             if (_delayCount < _delayRing.Length) _delayCount++;
         }
@@ -370,6 +379,36 @@ namespace PointCloud
                 if (diff < bestDiff) { bestDiff = diff; best = df; }
             }
             return best;
+        }
+
+        // The delay frame Update last drew, kept so consumers that must agree with
+        // the PICTURE (TSDF: its mesh sits in the same space as the cloud, and a
+        // mesh built from newest depth cuts through a cloud drawn 150ms ago) can
+        // take the displayed frame instead of the newest one.
+        //
+        // Deliberately NOT for SkeletonMerger: the skeleton is what the delay
+        // targets, so feeding it delayed depth would chase its own tail and walk
+        // the lag out one step per frame. Recording stays on newest too — the take
+        // must carry the real timeline.
+        private DelayFrame _displayedFrame;
+
+        /// <summary>The frame currently DRAWN, when the render delay is engaged.
+        /// False when the delay is off or the ring has not filled — callers then
+        /// keep the newest frame, which is also what the renderer is drawing.</summary>
+        public bool TryGetDisplayedRawFrame(out RawFrameData frame)
+        {
+            var df = _displayedFrame;
+            if (!renderDelayEnabled || df == null || df.DepthCount <= 0)
+            {
+                frame = default;
+                return false;
+            }
+            frame = new RawFrameData(
+                depthBytes: df.Depth, depthByteCount: df.DepthCount, depthWidth: df.DW, depthHeight: df.DH,
+                colorBytes: df.Color, colorByteCount: df.ColorCount, colorWidth: df.CW, colorHeight: df.CH,
+                irBytes: Array.Empty<byte>(), irByteCount: 0, irWidth: 0, irHeight: 0,
+                timestampUs: df.TsUs);
+            return true;
         }
 
         // --- Public state ---
@@ -470,6 +509,7 @@ namespace PointCloud
                                 // recording tap below still fires with the NEWEST slot.
                                 BufferDelayFrame(slot);
                                 var df = PickDelayFrame(targetDisplayTimestampUs);
+                                _displayedFrame = df;
                                 if (df != null)
                                 {
                                     n = DispatchGpuReconstructionRaw(df.Depth, df.DepthCount, df.DW, df.DH,

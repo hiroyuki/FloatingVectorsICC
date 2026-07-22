@@ -122,6 +122,13 @@ namespace Experience
                  "(~130ms fusion latency ≈ 4 frames).")]
         public int playbackRenderDelayFrames = 4;
 
+        [Tooltip("Live preview (Calibrate / FreeMove / Shoot): delay the DISPLAYED " +
+                 "point cloud to the fused skeleton's own timestamp so the ribbons " +
+                 "stop thinning out on fast limbs. Display-only — BT and the " +
+                 "recording still get the newest frame. Cost: the preview becomes a " +
+                 "~150ms-lagged mirror, so this is a look trade, not a fix.")]
+        public bool liveRenderSync = false;
+
         [Header("Pose detection")]
         [Min(0f)] public float starHoldSeconds = 0.5f;
 

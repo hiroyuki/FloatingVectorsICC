@@ -344,6 +344,13 @@ namespace TSDF
             // Live freeze: raw frames keep flowing (recording / health monitor)
             // but the sculpture must hold the frozen moment.
             if (r.holdLiveFrame) return;
+            // Render delay engaged (experience live preview / bone-verify F8): the
+            // cloud on screen is an older frame, matched to the fused skeleton. The
+            // TSDF surface shares that space, so integrating the NEWEST depth builds
+            // a mesh that cuts through the drawn cloud whenever the visitor moves.
+            // Follow the picture instead. Falls back to `raw` when the delay is off
+            // or the ring has not filled — that IS the newest frame in both cases.
+            if (r.TryGetDisplayedRawFrame(out var displayed)) raw = displayed;
             // Live renderer's own GameObject transform IS the source — its
             // localToWorldMatrix encodes the extrinsics + Y-flip baked in by
             // ExtrinsicsApply.ToUnityLocal.
