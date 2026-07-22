@@ -38,6 +38,10 @@ MonoBehaviour:
   yBandMin: 0.15
   yBandMax: 100
   occupancyThreshold: 1500
+  autoRecoverCameras: 1
+  cameraReleaseSeconds: 3
+  cameraSettleSeconds: 25
+  cameraRecoverAttempts: 3
   visitorRecordingRoot: 
   captureSeconds: 1
   shootCueSeconds: 2.5
