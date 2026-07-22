@@ -1004,7 +1004,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Calibration.RuntimeUI::Calibration.RuntimeUI.CalibrationRuntimeUI
   boardSpec: {fileID: 11400000, guid: e0ef65bfc4754de4da149f77a2c2e7c0, type: 2}
-  maxSkewMs: 50
+  maxSkewMs: 150
   extrinsicsRoot: 
   detectIntervalSec: 0.12
   showUI: 1
@@ -1029,6 +1029,7 @@ MonoBehaviour:
   boostColorResolution: 1
   calibColorWidth: 1920
   calibColorHeight: 1080
+  rigReleaseSeconds: 3
   floorAnchor: 1
   cameraHeightMeters: 1
   floorTuneKey: 103
