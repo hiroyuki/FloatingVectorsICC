@@ -1,6 +1,8 @@
 @echo off
-REM ダブルクリック起動用ランチャー。
-REM 同じフォルダの setup-claude-account.ps1 を ExecutionPolicy Bypass で実行する。
+REM Double-click launcher for setup-claude-account.ps1.
+REM ASCII only: cmd.exe reads .cmd files in the OEM codepage, so non-ASCII
+REM comments get mangled and can be executed as commands.
+chcp 65001 >NUL
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup-claude-account.ps1" %*
 echo.
 pause

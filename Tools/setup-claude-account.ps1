@@ -125,6 +125,28 @@ foreach ($p in $profilePaths) {
 # 現セッションでも即使えるように
 Invoke-Expression $profileBody
 
+# 実行ポリシーが既定の Restricted のままだと、通常起動の PowerShell は
+# プロファイルを一切読まない（= cc が未定義になる）。このスクリプト自体は
+# -ExecutionPolicy Bypass で走っているので気づきにくい。CurrentUser スコープ
+# なら管理者不要で変更できる。
+$cuPolicy = (Get-ExecutionPolicy -Scope CurrentUser)
+if ($cuPolicy -eq 'Undefined' -or $cuPolicy -eq 'Restricted') {
+    try {
+        Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force -ErrorAction Stop
+        Ok '実行ポリシー: CurrentUser を RemoteSigned に設定（プロファイル読み込みのため）'
+    } catch {
+        # Process スコープの Bypass に上書きされている旨の警告は成功でも出る
+        if ((Get-ExecutionPolicy -Scope CurrentUser) -eq 'RemoteSigned') {
+            Ok '実行ポリシー: CurrentUser を RemoteSigned に設定'
+        } else {
+            Warn "実行ポリシーを変更できませんでした: $($_.Exception.Message)"
+            Warn '手動で: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned'
+        }
+    }
+} else {
+    Ok "実行ポリシー: CurrentUser = $cuPolicy"
+}
+
 # ------------------------------------------------------------------
 Step '4/7  Claude の settings.json'
 $claudeDir = Join-Path $env:USERPROFILE '.claude'
