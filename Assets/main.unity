@@ -301,7 +301,7 @@ MonoBehaviour:
   jointMotionField: {fileID: 0}
   floorMask: {fileID: 0}
   cumulative: {fileID: 18533122}
-  folderPath: D:\FloatingVectorsICC\RecordingBase
+  folderPath: D:\Dropbox\projects\ICC\Recordings\RecordingBase
   folderPathMacOverride: /Volumes/horristicSSD2T/Dropbox/projects/ICC/Recordings/Rec2_jump
   playbackFolderPath: F:\RecordingBaseV11s\2026-07-14_15-09-52
   playbackFolderPathMacOverride: /Users/horihiroyuki/Dropbox/projects/ICC/Recordings/RecordingBase/2026-07-14_15-09-52
@@ -757,6 +757,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Experience::Experience.VisitorMessageUI
   visitorDisplays: 0100000002000000
+  messageDisplays: 01000000
   fontCandidates:
   - Yu Gothic Medium
   - "\u6E38\u30B4\u30B7\u30C3\u30AF Medium"
@@ -1676,6 +1677,7 @@ MonoBehaviour:
   usePlaybackFrames: 1
   submitToMerger: 1
   liveFramesOnly: 0
+  playbackFramesOnly: 0
   modelsDir: eval/models
   bodyProfilePath: eval/body_profile.json
   provider: 2
@@ -1683,6 +1685,9 @@ MonoBehaviour:
   captureVolumeFromRig: 1
   captureVolumeCenterMm: {x: 0, y: 200, z: 3000}
   captureVolumeHalfMm: {x: 1100, y: 1500, z: 1100}
+  profileMinJointConfidence: 0.5
+  profileMaxIqrFrac: 0.15
+  profileMaxIqrMm: 40
   heartbeatMs: 40
   medianLagFilter: 1
 --- !u!4 &1144015528
@@ -2129,6 +2134,7 @@ MonoBehaviour:
   recorder: {fileID: 86788058}
   historySamples: 32
   freshWindowFrames: 30
+  maxEndpointSpeed: 15
   handExtension: 0.18
   crownExtension: 0.18
   drawGizmos: 0
@@ -2547,6 +2553,7 @@ MonoBehaviour:
   liveFusedSource: {fileID: 0}
   debugForceFault: 0
   debugPoseDiagnostics: 1
+  compareCurveSources: 0
 --- !u!1 &1574009486
 GameObject:
   m_ObjectHideFlags: 0
@@ -2816,6 +2823,62 @@ MonoBehaviour:
   recorder: {fileID: 86788058}
   deviceSerialFilter: 
   autoProcessOnRead: 0
+--- !u!1 &2137757491
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 2137757493}
+  - component: {fileID: 2137757492}
+  m_Layer: 0
+  m_Name: BoneVerify
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!114 &2137757492
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2137757491}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: dc469d5fdfca3b54bba16b2a854ccae2, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: BodyTracking.Eval.Rtmpose::BodyTracking.Eval.Rtmpose.BoneVerifyController
+  gridDisplay: 2
+  sceneDisplay: 1
+  liveKey: 289
+  reviewKey: 288
+  stepForwardKey: 275
+  stepBackwardKey: 276
+  reviewTakePath: 
+  sensorManager: {fileID: 0}
+  recorder: {fileID: 0}
+  merger: {fileID: 0}
+  fused: {fileID: 0}
+  curves: {fileID: 0}
+--- !u!4 &2137757493
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2137757491}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0
@@ -2829,3 +2892,4 @@ SceneRoots:
   - {fileID: 2064251120}
   - {fileID: 1168916135}
   - {fileID: 1016277182}
+  - {fileID: 2137757493}
