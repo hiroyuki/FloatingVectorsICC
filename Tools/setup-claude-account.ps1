@@ -12,9 +12,9 @@
 [CmdletBinding()]
 param(
     # Unity プロジェクトのパス（UnityMCP をこのプロジェクトに登録する）。
-    # 既定はこのスクリプトの 1 つ上 = リポジトリルート。マシンごとにパスが違っても
-    # そのマシンの clone を指すので、通常は指定不要。
-    [string] $ProjectDir = (Split-Path $PSScriptRoot -Parent),
+    # 未指定ならこのスクリプトの 1 つ上 = リポジトリルートを使う。マシンごとに
+    # パスが違ってもそのマシンの clone を指すので、通常は指定不要。
+    [string] $ProjectDir,
 
     # 旧アカウントから持ち込む Claude プロジェクトメモリのコピー元。
     # 既定は Tools\export-claude-memory.ps1 の書き出し先。存在しなければスキップする。
@@ -25,14 +25,29 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+function Step($m) { Write-Host "`n=== $m ===" -ForegroundColor Cyan }
+function Ok($m)   { Write-Host "  [ok] $m" -ForegroundColor Green }
+function Warn($m) { Write-Host "  [!!] $m" -ForegroundColor Yellow }
 
 # Claude のプロジェクトキー: パス区切りとドライブのコロンを '-' に潰したもの
-# 例) C:\Users\hori\Documents\GitHub\FloatingVectorsICC
-#     -> C--Users-hori-Documents-GitHub-FloatingVectorsICC
+# 例) D:\GitHub\FloatingVectorsICC -> D--GitHub-FloatingVectorsICC
 function ConvertTo-ClaudeProjectKey([string] $path) {
     ($path.TrimEnd('\')) -replace '[:\\/]', '-'
 }
 
+# スクリプト自身の場所。$PSScriptRoot は .cmd 経由 / & 実行では入るが、内容を
+# 貼り付けたり iex で流したりすると空になる。その場合はカレントで代用する。
+function Get-ScriptDir {
+    if ($PSScriptRoot) { return $PSScriptRoot }
+    if ($MyInvocation.MyCommand.Path) { return Split-Path $MyInvocation.MyCommand.Path -Parent }
+    return (Get-Location).Path
+}
+
+if (-not $ProjectDir) {
+    $here = Get-ScriptDir
+    # Tools\ の中から実行された想定。そうでなければその場所自体をリポジトリとみなす。
+    $ProjectDir = if ((Split-Path $here -Leaf) -eq 'Tools') { Split-Path $here -Parent } else { $here }
+}
 $ProjectDir = [System.IO.Path]::GetFullPath($ProjectDir)
 if (-not $MemoryProjectKey) { $MemoryProjectKey = ConvertTo-ClaudeProjectKey $ProjectDir }
 if (-not $MemorySource) {
@@ -40,9 +55,10 @@ if (-not $MemorySource) {
 }
 Write-Host "ProjectDir : $ProjectDir"
 Write-Host "MemoryKey  : $MemoryProjectKey"
-function Step($m) { Write-Host "`n=== $m ===" -ForegroundColor Cyan }
-function Ok($m)   { Write-Host "  [ok] $m" -ForegroundColor Green }
-function Warn($m) { Write-Host "  [!!] $m" -ForegroundColor Yellow }
+if (-not (Test-Path (Join-Path $ProjectDir 'Assets'))) {
+    Warn "$ProjectDir が Unity プロジェクトに見えません（Assets が無い）。"
+    Warn '違っていれば -ProjectDir <リポジトリのパス> で明示してください。'
+}
 
 $LocalBin = Join-Path $env:USERPROFILE '.local\bin'
 

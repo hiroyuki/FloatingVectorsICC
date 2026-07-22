@@ -12,8 +12,8 @@
 
 [CmdletBinding()]
 param(
-    # 対象の Unity プロジェクト（既定: このスクリプトの 1 つ上 = リポジトリルート）
-    [string] $ProjectDir = (Split-Path $PSScriptRoot -Parent),
+    # 対象の Unity プロジェクト（未指定: このスクリプトの 1 つ上 = リポジトリルート）
+    [string] $ProjectDir,
 
     # 書き出し先ルート
     [string] $StageRoot = 'C:\Users\Public\claude-memory'
@@ -23,6 +23,13 @@ $ErrorActionPreference = 'Stop'
 function Ok($m)   { Write-Host "  [ok] $m" -ForegroundColor Green }
 function Warn($m) { Write-Host "  [!!] $m" -ForegroundColor Yellow }
 
+# $PSScriptRoot は貼り付け実行 / iex では空になるのでフォールバックを噛ませる
+if (-not $ProjectDir) {
+    $here = if ($PSScriptRoot) { $PSScriptRoot }
+            elseif ($MyInvocation.MyCommand.Path) { Split-Path $MyInvocation.MyCommand.Path -Parent }
+            else { (Get-Location).Path }
+    $ProjectDir = if ((Split-Path $here -Leaf) -eq 'Tools') { Split-Path $here -Parent } else { $here }
+}
 $ProjectDir = [System.IO.Path]::GetFullPath($ProjectDir)
 $key = ($ProjectDir.TrimEnd('\')) -replace '[:\\/]', '-'
 

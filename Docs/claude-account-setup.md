@@ -41,14 +41,18 @@ powershell -ExecutionPolicy Bypass -File <repo>\Tools\setup-claude-account.ps1
 ```
 
 管理者権限は不要。**プロジェクトパスは指定不要** — スクリプト自身の 1 つ上（= リポジトリルート）を
-既定値にしているので、`F:\FloatingVectorsICC` でも `C:\Users\<user>\Documents\GitHub\FloatingVectorsICC`
-でもそのまま動く。別の clone を登録したいときだけ `-ProjectDir` を渡す。
+使うので、`F:\FloatingVectorsICC` でも `D:\GitHub\FloatingVectorsICC` でもそのまま動く。
+別の clone を登録したいときだけ `-ProjectDir` を渡す。
 
-> **注意: リポジトリがユーザープロファイル配下にあるマシン**
-> `C:\Users\<user>\...` に clone してあると、その中身は他アカウントから読めない（ACL）。
-> 新アカウントで作業するなら、共有ドライブ（4070 セットの `F:\` など）か
-> `C:\Users\Public\` 配下に clone し直すこと。`.cmd` を新アカウントから実行できない場合、
-> それが理由。
+> **注意: リポジトリはユーザープロファイルの外に置く**
+> `C:\Users\<user>\...` に clone してあると、その中身は他アカウントから読めない（ACL）ので、
+> 新アカウントから `.cmd` を実行できない。共有ドライブ（4070 セットの `F:\`、5080 機の
+> `D:\GitHub\` など）に置くこと。
+
+> **注意: `.ps1` の中身をコンソールに貼り付けて実行しない**
+> `$PSScriptRoot` が空になり、リポジトリの場所を自力で解決できない
+> （フォールバックでカレントディレクトリを使うので、意図しない場所を登録しうる）。
+> `.cmd` から起動するか `-File` で渡すこと。
 
 スクリプトがやること（7ステップ、既存ファイルは上書きせず警告する）:
 
