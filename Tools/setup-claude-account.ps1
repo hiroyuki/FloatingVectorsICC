@@ -11,18 +11,35 @@
 
 [CmdletBinding()]
 param(
-    # Unity プロジェクトのパス（UnityMCP をこのプロジェクトに登録する）
-    [string] $ProjectDir = 'F:\FloatingVectorsICC',
+    # Unity プロジェクトのパス（UnityMCP をこのプロジェクトに登録する）。
+    # 既定はこのスクリプトの 1 つ上 = リポジトリルート。マシンごとにパスが違っても
+    # そのマシンの clone を指すので、通常は指定不要。
+    [string] $ProjectDir = (Split-Path $PSScriptRoot -Parent),
 
     # 旧アカウントから持ち込む Claude プロジェクトメモリのコピー元。
-    # 存在しなければスキップする。
-    [string] $MemorySource = 'C:\Users\Public\claude-memory\F--FloatingVectorsICC\memory',
+    # 既定は Tools\export-claude-memory.ps1 の書き出し先。存在しなければスキップする。
+    [string] $MemorySource,
 
-    # メモリのコピー先プロジェクトキー（persistentDataPath ではなく Claude 側のキー）
-    [string] $MemoryProjectKey = 'F--FloatingVectorsICC'
+    # メモリのコピー先プロジェクトキー（Claude 側のキー。既定は ProjectDir から導出）
+    [string] $MemoryProjectKey
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Claude のプロジェクトキー: パス区切りとドライブのコロンを '-' に潰したもの
+# 例) C:\Users\hori\Documents\GitHub\FloatingVectorsICC
+#     -> C--Users-hori-Documents-GitHub-FloatingVectorsICC
+function ConvertTo-ClaudeProjectKey([string] $path) {
+    ($path.TrimEnd('\')) -replace '[:\\/]', '-'
+}
+
+$ProjectDir = [System.IO.Path]::GetFullPath($ProjectDir)
+if (-not $MemoryProjectKey) { $MemoryProjectKey = ConvertTo-ClaudeProjectKey $ProjectDir }
+if (-not $MemorySource) {
+    $MemorySource = Join-Path 'C:\Users\Public\claude-memory' "$MemoryProjectKey\memory"
+}
+Write-Host "ProjectDir : $ProjectDir"
+Write-Host "MemoryKey  : $MemoryProjectKey"
 function Step($m) { Write-Host "`n=== $m ===" -ForegroundColor Cyan }
 function Ok($m)   { Write-Host "  [ok] $m" -ForegroundColor Green }
 function Warn($m) { Write-Host "  [!!] $m" -ForegroundColor Yellow }
@@ -138,6 +155,21 @@ if (Get-NetTCPConnection -LocalPort 8080 -State Listen -ErrorAction SilentlyCont
 # ------------------------------------------------------------------
 Step '6/7  プロジェクトメモリを取り込む（任意）'
 $memDst = Join-Path $env:USERPROFILE ".claude\projects\$MemoryProjectKey\memory"
+
+# 旧アカウントとリポジトリのパスが違うとキーも変わる。完全一致が無ければ、
+# 共有場所に候補が 1 つだけある場合に限りそれを使う（複数あれば手動指定させる）。
+if (-not (Test-Path $MemorySource)) {
+    $staged = @(Get-ChildItem 'C:\Users\Public\claude-memory' -Directory -ErrorAction SilentlyContinue |
+                Where-Object { Test-Path (Join-Path $_.FullName 'memory') })
+    if ($staged.Count -eq 1) {
+        $MemorySource = Join-Path $staged[0].FullName 'memory'
+        Warn "キー不一致のため共有場所の唯一の候補を使います: $($staged[0].Name)"
+    } elseif ($staged.Count -gt 1) {
+        Warn "共有場所に候補が複数あります。-MemorySource で明示してください:"
+        $staged | ForEach-Object { Warn "  $($_.FullName)\memory" }
+    }
+}
+
 if (Test-Path $MemorySource) {
     if (Test-Path $memDst) {
         Warn "既存のメモリがあるので上書きしません: $memDst"

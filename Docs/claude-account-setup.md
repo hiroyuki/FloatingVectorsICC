@@ -40,7 +40,15 @@ Tools\setup-claude-account.cmd        ← ダブルクリックでOK
 powershell -ExecutionPolicy Bypass -File <repo>\Tools\setup-claude-account.ps1
 ```
 
-管理者権限は不要。プロジェクトパスが `F:\FloatingVectorsICC` でないマシンでは `-ProjectDir` を渡す。
+管理者権限は不要。**プロジェクトパスは指定不要** — スクリプト自身の 1 つ上（= リポジトリルート）を
+既定値にしているので、`F:\FloatingVectorsICC` でも `C:\Users\<user>\Documents\GitHub\FloatingVectorsICC`
+でもそのまま動く。別の clone を登録したいときだけ `-ProjectDir` を渡す。
+
+> **注意: リポジトリがユーザープロファイル配下にあるマシン**
+> `C:\Users\<user>\...` に clone してあると、その中身は他アカウントから読めない（ACL）。
+> 新アカウントで作業するなら、共有ドライブ（4070 セットの `F:\` など）か
+> `C:\Users\Public\` 配下に clone し直すこと。`.cmd` を新アカウントから実行できない場合、
+> それが理由。
 
 スクリプトがやること（7ステップ、既存ファイルは上書きせず警告する）:
 
@@ -66,16 +74,21 @@ powershell -ExecutionPolicy Bypass -File <repo>\Tools\setup-claude-account.ps1
 
 ### 3. 旧アカウントのプロジェクトメモリを引き継ぐ場合（任意）
 
-Claude のプロジェクトメモリ（`~/.claude/projects/F--FloatingVectorsICC/memory/`）は per-user。
-**管理者でない限り他ユーザーのプロファイルは読めない**ので、旧アカウント側から共有場所に出しておく:
+Claude のプロジェクトメモリ（`~/.claude/projects/<プロジェクトキー>/memory/`）は per-user。
+**管理者でない限り他ユーザーのプロファイルは読めない**ので、**アカウントを切り替える前に**
+旧アカウント側で共有場所へ出しておく:
 
-```powershell
-# 旧アカウントで実行
-Copy-Item "$env:USERPROFILE\.claude\projects\F--FloatingVectorsICC\memory" `
-          'C:\Users\Public\claude-memory\F--FloatingVectorsICC\memory' -Recurse -Force
+```
+Tools\export-claude-memory.cmd        ← 旧アカウントでダブルクリック
 ```
 
-新アカウントでスクリプトを流すと step 6 が拾って取り込む。取り込み後、共有場所のコピーは消してよい:
+プロジェクトキー（`F--FloatingVectorsICC` / `C--Users-hori-Documents-GitHub-FloatingVectorsICC` など）は
+リポジトリのパスから自動で導出する。書き出し先は
+`C:\Users\Public\claude-memory\<キー>\memory`。
+
+新アカウントでセットアップスクリプトを流すと step 6 が拾って取り込む。旧と新でリポジトリの
+パスが違うとキーも変わるが、共有場所に候補が 1 つしか無ければそれを使う（複数あるときは
+`-MemorySource` で明示）。取り込み後、共有場所のコピーは消してよい:
 
 ```powershell
 Remove-Item -Recurse 'C:\Users\Public\claude-memory'
