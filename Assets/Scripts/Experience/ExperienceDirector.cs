@@ -82,6 +82,7 @@ namespace Experience
         public TSDFIntegrator tsdfIntegrator; // frozen at capture so the result stops recomputing
         public TSDFView tsdfView;             // hidden during Processing (see SetSculptureVisible)
         public PointCloudMotionCurves motionCurves;
+        public PointCloudDecimater decimater; // presentation-look switch (auto-resolved)
         public BonePoseHistory poseHistory;
         public TSDFPrintExporter printExporter; // capture/export settings source
         public CameraHealthMonitor healthMonitor; // fault source (auto-resolved)
@@ -295,6 +296,7 @@ namespace Experience
             if (tsdfIntegrator == null) tsdfIntegrator = FindFirstObjectByType<TSDFIntegrator>();
             if (tsdfView == null) tsdfView = FindFirstObjectByType<TSDFView>();
             if (motionCurves == null) motionCurves = FindFirstObjectByType<PointCloudMotionCurves>();
+            if (decimater == null) decimater = FindFirstObjectByType<PointCloudDecimater>();
             if (poseHistory == null) poseHistory = FindFirstObjectByType<BonePoseHistory>();
             if (printExporter == null) printExporter = FindFirstObjectByType<TSDFPrintExporter>();
             if (healthMonitor == null) healthMonitor = FindFirstObjectByType<CameraHealthMonitor>();
@@ -897,6 +899,7 @@ namespace Experience
             SetSculptureVisible(true);
             // Session-long TSDF hide + orbit ownership — hand both back.
             if (tsdfView != null) tsdfView.suppressDraw = _savedTsdfSuppress;
+            SetPresentationLook(false); // scene (live) values back before dev restore
             SetOrbit(false);
             foreach (var s in _orbitGates)
             {
@@ -1192,14 +1195,18 @@ namespace Experience
                     break;
             }
             if (state != ExperienceState.Fault) _ui.ClearAlert();
-            // Orbit is a playback-phase affair: the TestMove routines switch it on
-            // for their play-through and ResultShow's routine does the same (it
-            // stays on through QrShow). Every OTHER state forces it off, so any
-            // abnormal exit (walked away, fault, dev jump) restores the stage
-            // framing via the gates' pose restore.
-            if (state is not (ExperienceState.TestMove1 or ExperienceState.TestMove2
-                              or ExperienceState.ResultShow or ExperienceState.QrShow))
+            // Orbit + the rich presentation look are playback-phase affairs: the
+            // TestMove routines switch them on for their play-through and
+            // ResultShow's routine does the same (they stay on through QrShow).
+            // Every other state entry — including a TestMove entry, whose
+            // routine re-enables them only once its own playback starts —
+            // forces them off, so any abnormal exit (walked away, fault, dev
+            // jump) restores the stage framing and the live look.
+            if (state is not (ExperienceState.ResultShow or ExperienceState.QrShow))
+            {
                 SetOrbit(false);
+                SetPresentationLook(false);
+            }
             ApplyCurvesVisibility(state);
             // Cloud BEFORE bones: hiding the cloud clears _cloudRevealed, and the
             // bones read that flag — a jump from a revealed state back into the
@@ -2088,6 +2095,47 @@ namespace Experience
 
         // ---------------- orbit cameras (playback/QR phases) ----------------
 
+        // ---- presentation look (できたよ！ replay → QrShow) ----
+        // The live phases keep the scene's own light values (few seeds, heavy
+        // decimation — the cloud is the star); the replay presentation switches
+        // to the rich look from config and this restores the scene values on
+        // the way back. historySamples is NOT part of this — the ring window
+        // keeps its own switching (30-sample growth per loop).
+        private bool _presentationLook;
+        private int _savedSeedCount;
+        private float _savedTailAlpha;
+        private float _savedDecimate;
+
+        private void SetPresentationLook(bool on)
+        {
+            if (_presentationLook == on) return;
+            _presentationLook = on;
+            if (on)
+            {
+                if (motionCurves != null)
+                {
+                    _savedSeedCount = motionCurves.seedCount;
+                    _savedTailAlpha = motionCurves.tailAlpha;
+                    motionCurves.seedCount = config.presentationSeedCount;
+                    motionCurves.tailAlpha = config.presentationTailAlpha;
+                }
+                if (decimater != null)
+                {
+                    _savedDecimate = decimater.reductionPercent;
+                    decimater.reductionPercent = config.presentationDecimatePercent;
+                }
+            }
+            else
+            {
+                if (motionCurves != null)
+                {
+                    motionCurves.seedCount = _savedSeedCount;
+                    motionCurves.tailAlpha = _savedTailAlpha;
+                }
+                if (decimater != null) decimater.reductionPercent = _savedDecimate;
+            }
+        }
+
         // Flip every gate's override together. The gates themselves restore the
         // camera pose when their orbit turns off (RestorePoseOnDisable, forced
         // on for the session in EnterMode).
@@ -2349,6 +2397,7 @@ namespace Experience
                     PlaySe(config.resultSe);
                     _ui.ShowMessage(config.resultText);
                     SetOrbit(true); // ribbons already draw (state-level gate)
+                    SetPresentationLook(true);
                     // Canned dev take: replay only its tail — a full-length entrance
                     // recording would otherwise loop for minutes. (A recorded or
                     // tapped take is capture-window-sized and never triggers this.)
@@ -2362,8 +2411,9 @@ namespace Experience
 
                     // hand the stage back to the live body for the next round
                     // (the ribbons keep drawing — point cloud + curves is the
-                    // live look now too)
+                    // live look now too, just with the scene's lighter values)
                     SetOrbit(false);
+                    SetPresentationLook(false);
                     StopVisitorPlayback();
                     ApplyBodySource(BodySource.Live);
                     if (HasLiveRenderers())
@@ -2449,6 +2499,7 @@ namespace Experience
             }
 
             SetOrbit(true);
+            SetPresentationLook(true);
             double startAt = 0;
             double duration = sensorRecorder.PlaybackDurationSeconds;
             bool canned = _takeRoot == config.devCannedTakeRoot;

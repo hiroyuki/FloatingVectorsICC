@@ -485,7 +485,7 @@ MonoBehaviour:
   boneBlendCount: 2
   blendSharpness: 0.05
   smoothSubdiv: 7
-  brightness: 1
+  brightness: 2.5
   ribbonWidth: 0.006
   round: 1
   rimBoost: 0.5
@@ -2641,6 +2641,7 @@ MonoBehaviour:
   tsdfIntegrator: {fileID: 0}
   tsdfView: {fileID: 0}
   motionCurves: {fileID: 0}
+  decimater: {fileID: 0}
   poseHistory: {fileID: 0}
   printExporter: {fileID: 0}
   healthMonitor: {fileID: 0}
