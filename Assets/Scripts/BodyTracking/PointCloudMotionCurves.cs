@@ -186,6 +186,14 @@ namespace BodyTracking
                  "smoother curves (multiplies the vertex count / VRAM by this factor).")]
         public int smoothSubdiv = 4;
 
+        [Tooltip("Bake each curve vertex's colour from the frame it traces: a per-bone cylindrical " +
+                 "colour-map ring (t-along-bone x angle-around-bone, one slot per pose frame) is " +
+                 "splatted from the collected cloud every rebuild, and vertex k samples the slot of " +
+                 "history frame k. OFF = old behaviour: the whole line wears the seed point's CURRENT " +
+                 "cloud/TSDF colour, which visibly pops when that colour (or the nondeterministically " +
+                 "re-picked seed) changes between rebuilds.")]
+        public bool bakeVertexColors = true;
+
         [Range(0f, 3f)]
         [Tooltip("Overall brightness multiplier on the curves' original point-cloud colour.")]
         public float brightness = 1f;
@@ -233,6 +241,8 @@ namespace BodyTracking
         private int _collectTrisKernel = -1;   // CSCollectTris (TSDF-mesh triangle soup)
         private int _buildKernel = -1;
         private int _emitKernel = -1;   // CSEmitSegs (print export)
+        private int _clearColorKernel = -1;    // CSClearColor (zero a _ColorHist range)
+        private int _splatColorKernel = -1;    // CSSplatColors (bake collected colours into the ring)
         // Displayed TSDF surface to seed from (Shared.ITriangleSeedSource, implemented by
         // TSDFView). Discovered through the interface because TSDF already references this
         // assembly — a direct TSDFView reference would be circular. Re-resolved lazily when
@@ -250,6 +260,13 @@ namespace BodyTracking
         private GraphicsBuffer _collectCounter;  // uint[1]
         private int _collectCap;                 // _collectBuf capacity (total source verts sized)
         private GraphicsBuffer _segStatsBuf;     // uint[3] print-emit stats (appends / dropped / bridges skipped)
+        // Baked colour history: ring of per-bone cylindrical colour maps (see _ColorHist in the
+        // compute). Flat uint accumulators, 4 per cell; layout mirrors the compute's COLT/COLA.
+        private GraphicsBuffer _colorHistBuf;
+        private int _colorSlot;                  // ring slot of the newest pose frame (IngestCounter mod K)
+        private bool _lastBakeColors;            // rising-edge detect: re-clear stale slots on re-enable
+        private const int kColorCellsT = 16;     // MUST match COLT in MotionCurvesBuild.compute
+        private const int kColorCellsA = 24;     // MUST match COLA in MotionCurvesBuild.compute
         private static readonly uint[] s_counterReset = { 0u };
         private static readonly uint[] s_segStatsReset = { 0u, 0u, 0u };
         private int _boneCount;
@@ -303,6 +320,11 @@ namespace BodyTracking
         private static readonly int kPrintRadius = Shader.PropertyToID("_PrintRadius");
         private static readonly int kBridgeRadiusScale = Shader.PropertyToID("_BridgeRadiusScale");
         private static readonly int kMaxBridgeLength = Shader.PropertyToID("_MaxBridgeLength");
+        private static readonly int kColorHist = Shader.PropertyToID("_ColorHist");
+        private static readonly int kColorHistSlot = Shader.PropertyToID("_ColorHistSlot");
+        private static readonly int kBakeColors = Shader.PropertyToID("_BakeColors");
+        private static readonly int kColorClearBase = Shader.PropertyToID("_ColorClearBase");
+        private static readonly int kColorClearCount = Shader.PropertyToID("_ColorClearCount");
 
         private void OnEnable()
         {
@@ -317,6 +339,8 @@ namespace BodyTracking
                     _collectTrisKernel = _shader.FindKernel("CSCollectTris");
                     _buildKernel = _shader.FindKernel("CSBuild");
                     _emitKernel = _shader.FindKernel("CSEmitSegs");
+                    _clearColorKernel = _shader.FindKernel("CSClearColor");
+                    _splatColorKernel = _shader.FindKernel("CSSplatColors");
                 }
             }
             if (_mat == null)
@@ -346,6 +370,7 @@ namespace BodyTracking
             _collectBuf?.Release(); _collectBuf = null;
             _collectCounter?.Release(); _collectCounter = null;
             _segStatsBuf?.Release(); _segStatsBuf = null;
+            _colorHistBuf?.Release(); _colorHistBuf = null;
             _capacity = 0; _ringLen = 0; _subdiv = 0; _collectCap = 0;
             _hasBuilt = false;
         }
@@ -412,6 +437,7 @@ namespace BodyTracking
             hash.Add(envelopeMargin); hash.Add(floorY); hash.Add(floorBand);
             hash.Add(bboxPadding); hash.Add(boneBlendCount); hash.Add(blendSharpness);
             hash.Add(smoothSubdiv); hash.Add(sanityRange); hash.Add(seedFromTsdfMesh);
+            hash.Add(bakeVertexColors);
             hash.Add(history != null ? history.CurveSamples : 0);
             return hash.ToHashCode();
         }
@@ -497,7 +523,40 @@ namespace BodyTracking
 
             if (borrowed.Count == 0 && !triReady)
             { reason = "source mesh vertex buffers unavailable"; return false; }
+
+            // --- colour history: bake the collected colours into the newest ring slot ---
+            // The slot follows the pose ring (IngestCounter mod K), so while playback is
+            // paused the same slot is cleared and re-splatted (idempotent) and the older
+            // slots keep the colours their frames had — that frozen past is what CSBuild
+            // reads per vertex. Runs here (the shared front half) so the print/export
+            // paths bake the same maps as the per-frame draw path.
+            _colorSlot = (int)(history.IngestCounter % (ulong)_ringLen);
+            if (bakeVertexColors && _clearColorKernel >= 0 && _splatColorKernel >= 0)
+            {
+                if (!_lastBakeColors)
+                {
+                    // Just toggled on (or first build after enable): every slot holds
+                    // garbage/stale colours from before, and old frames will never be
+                    // re-splatted — clear the whole ring so they fall back cleanly.
+                    DispatchClearColor(0, _colorHistBuf.count);
+                }
+                int slotStride = _boneCount * kColorCellsT * kColorCellsA * 4;
+                DispatchClearColor(_colorSlot * slotStride, slotStride);
+                BindBuildParams(_splatColorKernel);
+                _shader.Dispatch(_splatColorKernel, (_collectCap + 63) / 64, 1, 1);
+            }
+            _lastBakeColors = bakeVertexColors;
             return true;
+        }
+
+        // Zero a range of the colour-history buffer on the GPU (fresh GraphicsBuffer
+        // memory is undefined, and the newest slot is re-splatted from scratch each build).
+        private void DispatchClearColor(int baseUint, int countUints)
+        {
+            _shader.SetBuffer(_clearColorKernel, kColorHist, _colorHistBuf);
+            _shader.SetInt(kColorClearBase, baseUint);
+            _shader.SetInt(kColorClearCount, countUints);
+            _shader.Dispatch(_clearColorKernel, (countUints + 63) / 64, 1, 1);
         }
 
         // Per-bone speed-adaptive extra tolerance: tip speed × lag compensation, capped.
@@ -551,6 +610,9 @@ namespace BodyTracking
             _shader.SetInt(kSubdiv, _subdiv);
             _shader.SetInt(kSeedBase, 0);
             _shader.SetInt(kSeedCount, _capacity);
+            _shader.SetBuffer(kernel, kColorHist, _colorHistBuf);
+            _shader.SetInt(kColorHistSlot, _colorSlot);
+            _shader.SetInt(kBakeColors, bakeVertexColors ? 1 : 0);
         }
 
         // ---- Print export (TSDFPrintExporter) ----
@@ -649,6 +711,11 @@ namespace BodyTracking
             {
                 _outBuf.GetData(slot, 0, s * vertsPerSeed, vertsPerSeed);
                 pts.Clear();
+                // Representative line colour: the NEWEST end's vertex. With baked
+                // vertex-time colours the buffer is no longer uniform per line, and
+                // the newest end is the seed's current surface colour — the closest
+                // match to the old single-colour behaviour.
+                Vector3 lineCol = slot[0].c;
                 for (int seg = 0; seg < segsPerSeed; seg++)
                 {
                     Vector3 a = slot[seg * 2].p, b = slot[seg * 2 + 1].p;
@@ -658,10 +725,11 @@ namespace BodyTracking
                         b.x == 0f && b.y == 0f && b.z == 0f) break;
                     if (seg == 0) pts.Add(a);
                     pts.Add(b);
+                    lineCol = slot[seg * 2 + 1].c;
                 }
                 if (pts.Count < 2) continue;
                 polylines.Add(pts.ToArray());
-                colors.Add(slot[0].c);
+                colors.Add(lineCol);
             }
             return true;
         }
@@ -801,6 +869,19 @@ namespace BodyTracking
             }
             if (_collectCounter == null)
                 _collectCounter = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 1, sizeof(uint));
+
+            // Baked colour history ring: sized by (boneCount, ringLen) ONLY — deliberately not
+            // part of the seedStale reallocation, so live seedCount/subdiv tuning (a rebuild
+            // of the output buffers) doesn't wipe the already-baked past colours.
+            int needColor = ringLen * boneCount * kColorCellsT * kColorCellsA * 4;
+            if (_colorHistBuf == null || _colorHistBuf.count != needColor)
+            {
+                _colorHistBuf?.Release();
+                _colorHistBuf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, needColor, sizeof(uint));
+                // Fresh GPU memory is undefined; a full clear here keeps unsplatted slots
+                // reading as empty (weight 0 -> seed-colour fallback) instead of garbage.
+                if (_clearColorKernel >= 0) DispatchClearColor(0, needColor);
+            }
         }
 
         // Standard bone radii (m), parent side (a) -> child side (b). Categorised by the joint pair.

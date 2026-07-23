@@ -190,6 +190,13 @@ namespace BodyTracking
         /// <summary>Ring length K: the per-bone stride into <see cref="HistoryBuffer"/>.</summary>
         public int RingLength => _ringLen;
 
+        /// <summary>Monotonic count of ingested pose frames (one per PoseVersion change that
+        /// reached <see cref="UpdateHistory"/>). Every bone with history has its NEWEST sample
+        /// from the ingest this counted, so consumers can key per-frame side data off it —
+        /// PointCloudMotionCurves maps it (mod <see cref="RingLength"/>) to the ring slot of
+        /// its baked colour history.</summary>
+        public ulong IngestCounter { get; private set; }
+
         private const float Eps = 1e-4f;
         private const float MinPerpSin = 0.34f; // sin(~20deg): reject references too near the bone axis
         private const int MaxK = 32;            // ring length; also the per-curve cap (MAXK) in the compute
@@ -335,6 +342,7 @@ namespace BodyTracking
             else if (newFrame)
             {
                 // New pose (play / frame-step): push fresh samples, reset bones that went invalid/stale.
+                IngestCounter++;
                 UpdateHistory();
                 PublishGpu();
             }
