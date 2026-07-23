@@ -31,7 +31,9 @@ namespace TSDF.DebugTools
         public string[] cameraKeys = new string[0];
 
         [Tooltip("0 = integrate all cached cameras at once.")]
-        public KeyCode allCamsKey = KeyCode.Alpha0;
+        // A ("all"), moved off Alpha0: the digit row belongs to the experience
+        // state-jump hotkeys (0=頭出し 1-8=state).
+        public KeyCode allCamsKey = KeyCode.A;
 
         [Tooltip("Toggle the existing point-cloud display.")]
         public KeyCode pointCloudToggleKey = KeyCode.P;
@@ -825,10 +827,12 @@ namespace TSDF.DebugTools
                 }
             }
 
-            // 1..4 — single-cam view from cache, time frozen.
+            // Q/W/E/R — single-cam view (cam 1..4) from cache, time frozen.
+            // Moved off the digit row, which belongs to the experience
+            // state-jump hotkeys.
             for (int i = 0; i < 4; i++)
             {
-                KeyCode key = (KeyCode)((int)KeyCode.Alpha1 + i);
+                KeyCode key = SingleCamKeys[i];
                 if (!Input.GetKeyDown(key)) continue;
                 if (cameraKeys == null || cameraKeys.Length == 0) AutoPopulateCameraKeys();
                 if (cameraKeys == null || i >= cameraKeys.Length)
@@ -849,6 +853,9 @@ namespace TSDF.DebugTools
                 ReplayAllCams();
             }
         }
+
+        private static readonly KeyCode[] SingleCamKeys =
+            { KeyCode.Q, KeyCode.W, KeyCode.E, KeyCode.R };
 
         private void AutoPopulateCameraKeys()
         {

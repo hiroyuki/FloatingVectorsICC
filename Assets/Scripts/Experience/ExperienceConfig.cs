@@ -105,15 +105,41 @@ namespace Experience
                  "window survives into the sculpture.")]
         public float recordPreRollSeconds = 0.3f;
 
-        [Tooltip("Dev: pre-recorded take used when timings.skipShoot is on (no " +
-                 "cameras needed). Point at a full RCSV take root.")]
+        [Tooltip("Dev: pre-recorded take used when timings.skipShoot or " +
+                 "timings.dummyShoot is on (no cameras needed). Point at a full " +
+                 "RCSV take root.")]
         public string devCannedTakeRoot =
             @"D:\Dropbox\projects\ICC\Recordings\RecordingBase\2026-07-14_15-50-24";
 
+        [Tooltip("Dev: number keys (top row / keypad) jump the show — 0=Idle(頭出し/" +
+                 "run reset) 1=Consent 2=Welcome 3=Calibrate 4=FreeMove 5=Shoot " +
+                 "6=Processing 7=ResultShow 8=QrShow. Works with the mode off too " +
+                 "(the jump turns it on). TSDFDebugSession's per-camera views " +
+                 "moved to Q/W/E/R (all: A) to free the digits. Forward jumps keep " +
+                 "the run's artifacts (take, capture) so each screen can be checked " +
+                 "in isolation. Turn OFF for production if stray keys are a risk.")]
+        public bool devStateJumpHotkeys = true;
+
+        [Tooltip("Dev (rig-less): keep the entrance recording playing whenever the " +
+                 "recorder is free — state jumps and run resets stop/unload it, and " +
+                 "without cameras the stage (and presence) would stay empty. Loops " +
+                 "the take. Never touches the recorder while live renderers exist, " +
+                 "during Processing, or while the visitor take is loaded. Turn OFF " +
+                 "to test 退場 (leaving).")]
+        public bool devLoopEntrancePlayback = true;
+
+        [Min(0f)]
+        [Tooltip("Dev: a canned take longer than this plays only its last N seconds " +
+                 "during Processing. A real visitor take is capture-window-sized " +
+                 "(~2 s), so this only affects the skipShoot/dummyShoot dev loop, " +
+                 "where a full-length recording would stretch Processing by the " +
+                 "whole take. 0 = always play the canned take in full.")]
+        public float devCannedTakeTailSeconds = 6f;
+
         [Tooltip("Dev: allow the Processing state to run the v11s conversion on the " +
-                 "CANNED take (skipShoot). The conversion rewrites bodies_main IN " +
-                 "PLACE — leave this OFF unless devCannedTakeRoot points at a " +
-                 "disposable copy, or a canonical recording gets mutated.")]
+                 "CANNED take (skipShoot/dummyShoot). The conversion rewrites " +
+                 "bodies_main IN PLACE — leave this OFF unless devCannedTakeRoot " +
+                 "points at a disposable copy, or a canonical recording gets mutated.")]
         public bool allowCannedTakeConversion = false;
 
         [Range(0, 16)]
@@ -128,6 +154,18 @@ namespace Experience
                  "recording still get the newest frame. Cost: the preview becomes a " +
                  "~150ms-lagged mirror, so this is a look trade, not a fix.")]
         public bool liveRenderSync = false;
+
+        [Header("Cloud reveal (はかれたよ！ → the point cloud rises from the feet)")]
+        [Min(0f)]
+        [Tooltip("How long the visitor's point cloud takes to rise from the floor to " +
+                 "full height when calibration finishes. 0 = pop in instantly.")]
+        public float cloudRevealSeconds = 1f;
+
+        [Min(0.1f)]
+        [Tooltip("Height (m above floorY) the reveal sweeps up to before the clip " +
+                 "switches off. Keep above head height with arms raised, or the top " +
+                 "pops in at the end of the sweep.")]
+        public float cloudRevealHeight = 2.6f;
 
         [Header("Pose detection")]
         [Min(0f)] public float starHoldSeconds = 0.5f;

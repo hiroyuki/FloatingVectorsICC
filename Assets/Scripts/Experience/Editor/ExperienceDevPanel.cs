@@ -21,6 +21,7 @@ namespace Experience.EditorTools
         private ExperienceDirector _director;
         private SensorRecorder _recorder;
         private PresenceDetector _presence; // runtime-spawned (_ExperiencePresence)
+        private Vector2 _scroll;
 
         private void OnEnable() => EditorApplication.playModeStateChanged += OnPlayMode;
         private void OnDisable() => EditorApplication.playModeStateChanged -= OnPlayMode;
@@ -46,6 +47,9 @@ namespace Experience.EditorTools
         {
             ResolveRefs();
 
+            using var scroll = new EditorGUILayout.ScrollViewScope(_scroll);
+            _scroll = scroll.scrollPosition;
+
             if (_director == null)
             {
                 EditorGUILayout.HelpBox(
@@ -53,6 +57,8 @@ namespace Experience.EditorTools
                     MessageType.Error);
                 return;
             }
+
+            HandleJumpKeys();
 
             // ---- mode / state ------------------------------------------------
             EditorGUILayout.LabelField("体験モード", EditorStyles.boldLabel);
@@ -64,6 +70,31 @@ namespace Experience.EditorTools
                     : "Experience mode（Play 中のみ操作可）";
                 bool want = EditorGUILayout.ToggleLeft(label, on);
                 if (want != on) _director.Visible = want;
+            }
+
+            // ---- state jump (the 0-8 keys mirror these buttons; they work with
+            //      either this panel or the Game view focused) ----
+            if (Application.isPlaying)
+            {
+                EditorGUILayout.Space(4);
+                EditorGUILayout.LabelField(
+                    "ステートジャンプ（このパネル or Game ビューでキー 0〜8 / 0=頭出し。mode OFF なら自動 ON）",
+                    EditorStyles.miniBoldLabel);
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    if (GUILayout.Button("0 頭出し")) Jump(ExperienceState.Idle);
+                    if (GUILayout.Button("1 同意")) Jump(ExperienceState.Consent);
+                    if (GUILayout.Button("2 挨拶")) Jump(ExperienceState.Welcome);
+                    if (GUILayout.Button("3 計測")) Jump(ExperienceState.Calibrate);
+                    if (GUILayout.Button("4 自由")) Jump(ExperienceState.FreeMove);
+                }
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    if (GUILayout.Button("5 撮影")) Jump(ExperienceState.Shoot);
+                    if (GUILayout.Button("6 処理")) Jump(ExperienceState.Processing);
+                    if (GUILayout.Button("7 結果")) Jump(ExperienceState.ResultShow);
+                    if (GUILayout.Button("8 QR")) Jump(ExperienceState.QrShow);
+                }
             }
 
             EditorGUILayout.Space(8);
@@ -131,11 +162,40 @@ namespace Experience.EditorTools
             DrawHints();
         }
 
+        // Jump with the mode implied ON — a dev jump with the mode off means
+        // "turn it on and go there", not a dead click.
+        private void Jump(ExperienceState state)
+        {
+            if (!Application.isPlaying) return;
+            if (!_director.IsActive) _director.Visible = true;
+            _director.DevJumpTo(state);
+        }
+
+        // The 0-8 jump keys, working while THIS WINDOW is focused — reaching the
+        // Game view needs a click first, and that click can land on the operator
+        // HUD's toggles (which is how the mode got switched off unnoticed).
+        // Same mapping as the director's in-game handler.
+        private void HandleJumpKeys()
+        {
+            if (!Application.isPlaying) return;
+            var e = Event.current;
+            if (e.type != EventType.KeyDown) return;
+            int idx = -1;
+            if (e.keyCode >= KeyCode.Alpha0 && e.keyCode <= KeyCode.Alpha8)
+                idx = e.keyCode - KeyCode.Alpha0;
+            else if (e.keyCode >= KeyCode.Keypad0 && e.keyCode <= KeyCode.Keypad8)
+                idx = e.keyCode - KeyCode.Keypad0;
+            if (idx < 0) return;
+            Jump((ExperienceState)idx);
+            e.Use();
+            Repaint();
+        }
+
         // One-shot screen previews on the scene VisitorUI — layout tuning per
         // state without running the sequence. Play mode only (canvases + font
         // are runtime-built). With Experience mode ON the director's state
         // side-effects overwrite these, so preview with the mode OFF.
-        private Texture2D _previewStar, _previewQr;
+        private Texture2D _previewQr;
         private ExperienceConfig _previewDefaults; // fallback texts when no config assigned
 
         private void DrawPreviewSection()
@@ -262,12 +322,11 @@ namespace Experience.EditorTools
                 MessageType.None);
         }
 
-        private Texture2D StarTex(ExperienceConfig cfg)
-        {
-            if (cfg.poseGuideTexture != null) return cfg.poseGuideTexture;
-            if (_previewStar == null) _previewStar = StickFigureTexture.DrawStarPose();
-            return _previewStar;
-        }
+        // Same resolution the director uses in Experience mode — one shared
+        // texture, so the preview shows exactly what the mode will show.
+        private Texture2D StarTex(ExperienceConfig cfg) =>
+            cfg.poseGuideTexture != null ? cfg.poseGuideTexture
+                                         : StickFigureTexture.StarPose();
 
         // Edits the SHARED ExperienceConfig asset (goes into git) — meant for the
         // Mac dev loop; restore skips before a Windows production run.
@@ -283,9 +342,15 @@ namespace Experience.EditorTools
                 "dryRunPublish（実アップロードせずフェイク URL）", cfg.dryRunPublish);
             bool ss = EditorGUILayout.ToggleLeft(
                 "skipShoot（Mac: 実録画の代わりに缶詰テイクを使用）", cfg.timings.skipShoot);
+            bool ds = EditorGUILayout.ToggleLeft(
+                "dummyShoot（Shoot 演出は通しで実行・録画せず缶詰テイクを使用）",
+                cfg.timings.dummyShoot);
             bool sp = EditorGUILayout.ToggleLeft(
                 "skipProcessing（v11s 変換を飛ばし録画済み BT で再生）", cfg.timings.skipProcessing);
             bool sq = EditorGUILayout.ToggleLeft("skipQr", cfg.timings.skipQr);
+            bool lp = EditorGUILayout.ToggleLeft(
+                "devLoopEntrancePlayback（入場再生をループ維持 / 退場テスト時は OFF）",
+                cfg.devLoopEntrancePlayback);
             float tm = EditorGUILayout.Slider(
                 new GUIContent("timeMultiplier", "全タイミングの早回し倍率"),
                 cfg.timings.timeMultiplier, 0.5f, 5f);
@@ -293,7 +358,7 @@ namespace Experience.EditorTools
             string canned = cfg.devCannedTakeRoot;
             using (new EditorGUILayout.HorizontalScope())
             {
-                canned = EditorGUILayout.TextField("缶詰テイク (skipShoot)", canned);
+                canned = EditorGUILayout.TextField("缶詰テイク (skip/dummyShoot)", canned);
                 if (GUILayout.Button("選択…", GUILayout.Width(60)))
                 {
                     string picked = EditorUtility.OpenFolderPanel("缶詰テイクのルート", canned, "");
@@ -306,15 +371,18 @@ namespace Experience.EditorTools
                 Undo.RecordObject(cfg, "Experience config (dev panel)");
                 cfg.dryRunPublish = dry;
                 cfg.timings.skipShoot = ss;
+                cfg.timings.dummyShoot = ds;
                 cfg.timings.skipProcessing = sp;
                 cfg.timings.skipQr = sq;
+                cfg.devLoopEntrancePlayback = lp;
                 cfg.timings.timeMultiplier = tm;
                 cfg.devCannedTakeRoot = canned;
                 EditorUtility.SetDirty(cfg);
             }
-            if (cfg.timings.skipShoot && !System.IO.Directory.Exists(cfg.devCannedTakeRoot))
+            if ((cfg.timings.skipShoot || cfg.timings.dummyShoot)
+                && !System.IO.Directory.Exists(cfg.devCannedTakeRoot))
                 EditorGUILayout.HelpBox(
-                    "skipShoot ON ですが缶詰テイクのフォルダが存在しません: " +
+                    "skipShoot/dummyShoot ON ですが缶詰テイクのフォルダが存在しません: " +
                     cfg.devCannedTakeRoot, MessageType.Warning);
         }
 
