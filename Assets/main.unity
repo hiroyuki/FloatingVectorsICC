@@ -1258,6 +1258,7 @@ MonoBehaviour:
   loadSensingAreaFromCalibration: 1
   targetFrameRate: 30
   verboseLogging: 0
+  openTimeoutSeconds: 30
   softStopTimeoutSeconds: 15
   hardStopTimeoutSeconds: 60
 --- !u!4 &925702424

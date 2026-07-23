@@ -413,6 +413,11 @@ namespace PointCloud
 
         // --- Public state ---
         public bool IsCapturing => _captureThread != null && _captureThread.IsAlive;
+
+        /// <summary>The device is open and its pipeline started — i.e. OpenDevice ran to
+        /// completion. Lets a staged boot skip <see cref="FinishOpen"/> for a camera whose
+        /// open faulted instead of building a Mesh around a pipeline that never started.</summary>
+        public bool IsDeviceOpen => _pipeline != null;
         public int LastPointCount { get; private set; }
         public ulong LastTimestampUs { get; private set; }
         public ulong FramesDropped { get; private set; }
@@ -445,6 +450,12 @@ namespace PointCloud
             _meshRenderer = GetComponent<MeshRenderer>();
         }
 
+        [Tooltip("Skip opening the device in Start(). SensorManager sets this on the boot " +
+                 "path so it can open the whole rig concurrently (OpenDeviceAsync) instead " +
+                 "of paying ~1.6s per camera back to back, and then calls FinishOpen() " +
+                 "here. Leave OFF for a renderer that owns its own startup.")]
+        public bool deferOpen;
+
         private void Start()
         {
             if (string.IsNullOrEmpty(deviceSerial))
@@ -453,23 +464,57 @@ namespace PointCloud
                 return;
             }
 
+            // Somebody else drives the open — doing it here as well would open the same
+            // device twice, and the second open fails.
+            if (deferOpen) return;
 
             try
             {
                 OpenDevice();
                 global::Shared.StartupProfiler.Mark($"PointCloudRenderer[{deviceSerial}].OpenDevice");
-                BuildMesh();
-                ApplyAxisConvention();
-                StartCaptureThread();
-                global::Shared.StartupProfiler.Mark($"PointCloudRenderer[{deviceSerial}].StartCaptureThread");
-                if (timerSyncWithHost && timerSyncIntervalSec > 0f)
-                    _timerSyncCoro = StartCoroutine(PeriodicTimerSync());
+                FinishOpen();
             }
             catch (Exception e)
             {
                 Debug.LogException(e, this);
                 StopCapture();
             }
+        }
+
+        /// <summary>
+        /// The blocking half of startup — device open, sync config and
+        /// <c>ob_pipeline_start</c> — on a worker thread. It is native and BCL only
+        /// (the same split <see cref="StopCaptureAsync"/> relies on), so a rig can open
+        /// its cameras at once instead of serialising ~1.6s each.
+        ///
+        /// ORDER STILL MATTERS: the pipeline starts inside here, so every Secondary
+        /// must have completed before the Primary is started — otherwise the Primary is
+        /// already emitting triggers that nobody is waiting for. The caller owns that
+        /// (see SensorManager.StartLiveStaged).
+        ///
+        /// The caller MUST await the task and then call <see cref="FinishOpen"/> on the
+        /// main thread; nothing is rendered or captured until it does.
+        /// </summary>
+        public Task OpenDeviceAsync()
+        {
+            return Task.Run(() =>
+            {
+                OpenDevice();
+                global::Shared.StartupProfiler.Mark($"PointCloudRenderer[{deviceSerial}].OpenDevice (async)");
+            });
+        }
+
+        /// <summary>Main-thread half of startup: Mesh creation, the transform flip and
+        /// the capture thread. Call once <see cref="OpenDeviceAsync"/> has completed
+        /// successfully.</summary>
+        public void FinishOpen()
+        {
+            BuildMesh();
+            ApplyAxisConvention();
+            StartCaptureThread();
+            global::Shared.StartupProfiler.Mark($"PointCloudRenderer[{deviceSerial}].StartCaptureThread");
+            if (timerSyncWithHost && timerSyncIntervalSec > 0f)
+                _timerSyncCoro = StartCoroutine(PeriodicTimerSync());
         }
 
         private void Update()
