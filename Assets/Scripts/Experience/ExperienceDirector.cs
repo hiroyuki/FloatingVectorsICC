@@ -1229,8 +1229,13 @@ namespace Experience
                     string fault = healthMonitor != null ? healthMonitor.FaultAlertText : "";
                     _ui.ShowAlert(string.IsNullOrEmpty(fault) ? "カメラが異常です" : fault);
                     // Try to bring the rig back by ourselves. Skipped when the operator
-                    // forced the fault (debugForceFault) — there is no camera to fix.
-                    if (config.autoRecoverCameras && !debugForceFault && _recoveryRoutine == null)
+                    // forced the fault (debugForceFault) — there is no camera to fix —
+                    // and on sessions that never had a live rig (_savedHadLiveRig):
+                    // there is nothing to re-open, and on a rig-less dev machine
+                    // StartLive would throw DllNotFoundException (no OrbbecSDK
+                    // native library on macOS).
+                    if (config.autoRecoverCameras && !debugForceFault && _savedHadLiveRig
+                        && _recoveryRoutine == null)
                         _recoveryRoutine = StartCoroutine(RecoverCamerasRoutine());
                     break;
             }

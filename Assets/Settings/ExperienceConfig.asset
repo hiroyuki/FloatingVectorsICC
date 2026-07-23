@@ -36,7 +36,7 @@ MonoBehaviour:
     timeMultiplier: 1
   countdownSeconds: 5
   testIntroSeconds: 4
-  playbackLoops: 3
+  playbackLoops: 1
   insetMeters: 0
   yBandMin: 0.15
   yBandMax: 100
