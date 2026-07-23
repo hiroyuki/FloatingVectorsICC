@@ -163,6 +163,12 @@ namespace Shared
         private void HideNow()
         {
             if (_hidden) return;
+            // Shutdown ownership beats every reason to hide, including this component's
+            // own safety timeout: the splash is only up during a teardown that ends in
+            // process exit, and safetyTimeoutSeconds / AppQuitHotkey.teardownWatchdogSeconds
+            // are edited independently, so a shortened timeout here must not be able to
+            // blank the displays while the cameras are still stopping.
+            if (_shutdownOwned) return;
             _hidden = true;
             OperatorOverlayGate.BootActive = false;
             if (_canvases == null) return;

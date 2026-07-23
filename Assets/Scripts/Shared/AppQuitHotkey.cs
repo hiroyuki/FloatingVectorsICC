@@ -103,13 +103,59 @@ namespace Shared
             foreach (var mb in FindObjectsByType<MonoBehaviour>(FindObjectsSortMode.None))
             {
                 if (mb is not IStagedShutdown staged) continue;
-                yield return StartCoroutine(staged.StopStaged((done, total) =>
-                    BootOverlay.SetStatus($"カメラを停止しています…  {done} / {total}")));
+                yield return StartCoroutine(DriveStaged(staged));
             }
 
             ShutdownProfiler.Mark("staged teardown done — quitting for real");
             s_teardownComplete = true;
             Application.Quit();
+        }
+
+        // Steps the teardown enumerator by hand instead of `yield return
+        // StartCoroutine(staged.StopStaged(...))`.
+        //
+        // Why: Unity logs an exception thrown inside a child coroutine and stops THAT
+        // coroutine, then resumes the parent as if it had finished. The quit would
+        // therefore proceed — setting s_teardownComplete, past the watchdog's reach —
+        // while the native pipeline stops the enumerator had already launched were
+        // still running, and the exit would dispose the SDK context underneath them.
+        // That is precisely the race AbandonForForcedExit exists to prevent, so a
+        // teardown that dies must take that path rather than be mistaken for success.
+        private IEnumerator DriveStaged(IStagedShutdown staged)
+        {
+            var it = staged.StopStaged((done, total) =>
+                BootOverlay.SetStatus($"カメラを停止しています…  {done} / {total}"));
+            while (true)
+            {
+                object current;
+                try
+                {
+                    if (!it.MoveNext()) yield break;
+                    current = it.Current;
+                }
+                catch (System.Exception e)
+                {
+                    Debug.LogError("[AppQuitHotkey] a staged teardown threw — treating the exit " +
+                                   "as forced so no subsystem is left assuming a clean stop.");
+                    Debug.LogException(e);
+                    ShutdownProfiler.Mark("staged teardown threw — forcing the safe-exit path");
+                    AbandonAllForForcedExit();
+                    yield break;
+                }
+                yield return current;
+            }
+        }
+
+        // Tell every staged subsystem the exit is being forced. Both the watchdog and a
+        // teardown that threw come through here; implementations must not block.
+        private static void AbandonAllForForcedExit()
+        {
+            foreach (var mb in FindObjectsByType<MonoBehaviour>(FindObjectsSortMode.None))
+            {
+                if (mb is not IStagedShutdown staged) continue;
+                try { staged.AbandonForForcedExit(); }
+                catch (System.Exception e) { Debug.LogException(e); }
+            }
         }
 
         private void Update()
@@ -139,12 +185,7 @@ namespace Shared
                     // path. Tell them the exit is being forced rather than assume they got
                     // there — for the rig that is what stops the SDK context being disposed
                     // under a native call that never returned.
-                    foreach (var mb in FindObjectsByType<MonoBehaviour>(FindObjectsSortMode.None))
-                    {
-                        if (mb is not IStagedShutdown staged) continue;
-                        try { staged.AbandonForForcedExit(); }
-                        catch (System.Exception e) { Debug.LogException(e); }
-                    }
+                    AbandonAllForForcedExit();
                     s_teardownComplete = true;
                     Application.Quit();
                 }
