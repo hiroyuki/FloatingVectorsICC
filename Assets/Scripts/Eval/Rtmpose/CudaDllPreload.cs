@@ -50,20 +50,6 @@ namespace BodyTracking.Eval.Rtmpose
             "cublas64_", "cufft64_", "cudnn",
         };
 
-        // ORT is loaded LAST and, unlike the CUDA group, WITHOUT
-        // LOAD_WITH_ALTERED_SEARCH_PATH. That flag resolves a DLL's imports from its own
-        // directory first, and in a player build that directory also holds the VC runtime
-        // Unity bundles for other plugins — msvcp140/vcruntime140 14.16 (shipped alongside
-        // OpenCV for Unity), with no vcruntime140_1.dll at all. ONNX Runtime 1.26 needs a
-        // modern CRT, so it would bind 14.16 for two of the three libraries and fall through
-        // to System32's 14.50 for vcruntime140_1: a spliced CRT, which fails the DLL's init
-        // routine outright (ERROR_DLL_INIT_FAILED) and leaves the bare-name lookup free to
-        // find the System32 inbox ORT. Without the flag the CRT resolves consistently from
-        // System32. Its CUDA imports still land on our copies because the group above has
-        // already made them resident, and a name lookup returns an already-loaded module.
-        // The Editor never hit this: the package plugin folder carries no VC runtime at all.
-        private static readonly string[] OrtPrefixes = { "onnxruntime" };
-
         private static readonly string[] SkipContains = { "tensorrt" };
 
         /// <summary>Whether the ONNX Runtime now resident in this process is the one from
@@ -104,14 +90,33 @@ namespace BodyTracking.Eval.Rtmpose
 
             int ok = 0, fail = 0;
             LoadGroup(dir, CudaPrefixes, LoadWithAlteredSearchPath, ref ok, ref fail);
-            LoadGroup(dir, OrtPrefixes, 0, ref ok, ref fail);
+
+            // Only onnxruntime.dll is pinned, and only it needs to be: it is the sole name
+            // that collides with a copy already reachable by name (System32 has no
+            // onnxruntime_providers_*). ORT loads its own provider DLLs out of its own
+            // directory when an execution provider is appended, which is both correct and
+            // the only way they link — preloading them here just produced failures that
+            // buried the one line worth reading.
+            string ortDll = Path.Combine(dir, "onnxruntime.dll");
+            if (LoadLibraryExW(ortDll, IntPtr.Zero, 0) != IntPtr.Zero) ok++;
+            else
+            {
+                fail++;
+                Debug.LogWarning($"[rtmpose] ORT preload failed (err={Marshal.GetLastWin32Error()}): {ortDll}");
+            }
 
             // Verify rather than trust the return code: a successful LoadLibrary only means
             // SOME module of that name is resident, and if a foreign copy got there first
             // the loader hands back that one. The resident path is the only proof.
+            // Compare canonicalised paths — dir comes from Application.dataPath and carries
+            // forward slashes, while the OS reports the module with backslashes, so a raw
+            // StartsWith reports a foreign DLL even when our own is the one loaded.
             OrtPath = FindLoadedModule("onnxruntime.dll");
-            OrtPinned = OrtPath != null
-                && OrtPath.StartsWith(dir, StringComparison.OrdinalIgnoreCase);
+            string residentDir = OrtPath != null ? Path.GetDirectoryName(Path.GetFullPath(OrtPath)) : null;
+            OrtPinned = residentDir != null && string.Equals(
+                residentDir.TrimEnd('\\', '/'),
+                Path.GetFullPath(dir).TrimEnd('\\', '/'),
+                StringComparison.OrdinalIgnoreCase);
 
             Debug.Log($"[rtmpose] ORT/CUDA preload from {dir}: {ok} loaded, {fail} failed; " +
                       $"onnxruntime resident at {OrtPath ?? "(none)"} -> pinned={OrtPinned}");
