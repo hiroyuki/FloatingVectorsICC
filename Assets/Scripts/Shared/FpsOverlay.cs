@@ -91,15 +91,19 @@ namespace Shared
             // Only the counters this scene actually produces. Keying the line to one
             // specific producer would blank it on a scene that runs the other, so each
             // field appears on its own terms.
-            bool rateLine = showPoseRate && RateProbe.AnyKnown;
+            bool rateLine = showPoseRate && (RateProbe.AnyKnown || SkeletonSourceProbe.EverReported);
             if (rateLine)
             {
-                label += "\n";
+                // Which engine is driving comes first: the rates below mean different
+                // things per engine, and a build that silently fell back to k4abt is
+                // otherwise indistinguishable from one running RTMPose.
+                label += "\nsrc " + (SkeletonSourceProbe.Current ?? "none");
                 if (RateProbe.IsKnown(RateProbe.Fused))
-                    label += $"fused {RateProbe.Hz(RateProbe.Fused):0.0} Hz"
-                           + $"   fresh {RateProbe.Hz(RateProbe.FreshFused):0.0} Hz";
+                    label += $"   fused {RateProbe.Hz(RateProbe.Fused):0.0}"
+                           + $"   fresh {RateProbe.Hz(RateProbe.FreshFused):0.0}";
                 if (RateProbe.IsKnown(RateProbe.PoseIngest))
-                    label += $"   pose {RateProbe.Hz(RateProbe.PoseIngest):0.0} Hz";
+                    label += $"   pose {RateProbe.Hz(RateProbe.PoseIngest):0.0}";
+                label += " Hz";
             }
 
             EnsureCanvases();

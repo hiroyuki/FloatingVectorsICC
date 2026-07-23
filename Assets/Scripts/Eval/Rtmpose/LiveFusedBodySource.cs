@@ -86,12 +86,20 @@ namespace BodyTracking.Eval.Rtmpose
         public bool syncReviewFusion = false;
 
         [Tooltip("Folder with yolox-m/ and rtmpose-m/ ONNX models, relative to the " +
-                 "project root.")]
+                 "resolved asset root (see Asset Root Override).")]
         public string modelsDir = "eval/models";
 
-        [Tooltip("Bone-length profile JSON (BodyProfileBuilder output), relative to " +
-                 "the project root. Empty = fusion runs without bone-length priors.")]
+        [Tooltip("Bone-length profile JSON (BodyProfileBuilder output), relative to the " +
+                 "resolved asset root. Empty = fusion runs without bone-length priors.")]
         public string bodyProfilePath = "eval/body_profile.json";
+
+        [Tooltip("Absolute path that Models Dir and Body Profile Path hang off. Leave EMPTY " +
+                 "for the normal case: the app folder is searched, then each parent above it, " +
+                 "then StreamingAssets — so the Editor finds the project's own eval/models, " +
+                 "and so does a build written anywhere inside the project tree. Set this only " +
+                 "for a build moved OUT of the tree, since the ~150MB of ONNX is untracked and " +
+                 "does not travel with a build.")]
+        public string assetRootOverride = "";
 
         [Tooltip("ONNX Runtime execution provider. Falls back downward only " +
                  "(Cuda→DirectML→Cpu); a mismatch between requested and actual " +
@@ -556,17 +564,19 @@ namespace BodyTracking.Eval.Rtmpose
 
             try
             {
-                string root = Directory.GetParent(Application.dataPath).FullName;
-                string models = Path.Combine(root, modelsDir);
-                string yolox = FirstOnnx(Path.Combine(models, "yolox-m"));
-                string rtm = FirstOnnx(Path.Combine(models, "rtmpose-m"));
-                if (yolox == null || rtm == null)
+                string root = ResolveAssetRoot(out string triedRoots);
+                if (root == null)
                 {
-                    Debug.LogError($"[{nameof(LiveFusedBodySource)}] ONNX models not found under {models} — disabling.", this);
+                    Debug.LogError($"[{nameof(LiveFusedBodySource)}] ONNX models ({modelsDir}/yolox-m, " +
+                                   $"{modelsDir}/rtmpose-m) found under none of: {triedRoots} — disabling. " +
+                                   "The merger will fall back to k4abt.", this);
                     s.Wake.Dispose();
                     enabled = false;
                     return;
                 }
+                string models = Path.Combine(root, modelsDir);
+                string yolox = FirstOnnx(Path.Combine(models, "yolox-m"));
+                string rtm = FirstOnnx(Path.Combine(models, "rtmpose-m"));
                 s.Backend = new OrtRtmposeBackend(yolox, rtm, provider);
                 s.Fused = new FusedRtmposeAdapter(s.Backend) { ConfThreshold = confThreshold, medianLagFilter = medianLagFilter, AsyncDetect = true };
                 string profile = Path.Combine(root, bodyProfilePath);
@@ -693,6 +703,11 @@ namespace BodyTracking.Eval.Rtmpose
             // distinguishable from no session at all.
             global::Shared.RateProbe.Report(global::Shared.RateProbe.Fused, s.FusedHz);
             global::Shared.RateProbe.Report(global::Shared.RateProbe.FreshFused, s.FreshFusedHz);
+            // Claim the source only while actually submitting: with submitToMerger off this
+            // component is a bystander and k4abt owns the merge, so saying "rtmpose" would
+            // name the engine that is running rather than the one driving the sculpture.
+            if (submitToMerger && merger != null && merger.useExternalBodies)
+                global::Shared.SkeletonSourceProbe.Report(global::Shared.SkeletonSourceProbe.Rtmpose);
 
             // late-joining renderers (live cameras open asynchronously)
             SubscribeSources();
@@ -1417,6 +1432,52 @@ namespace BodyTracking.Eval.Rtmpose
                     return rec.playbackFolderPath;
             }
             return null;
+        }
+
+        /// <summary>
+        /// Find the directory that <see cref="modelsDir"/> and <see cref="bodyProfilePath"/>
+        /// hang off, or null when no candidate holds the models.
+        ///
+        /// The anchor is <see cref="Application.dataPath"/>'s parent, which resolves to the
+        /// project root in the Editor and to the folder holding the .exe in a build — so the
+        /// build location was never hard-coded. What bites is that the ~150MB of ONNX is
+        /// deliberately untracked (eval/models/.gitignore), so it does NOT travel with a
+        /// build: writing the build anywhere but the project root left the models unfindable,
+        /// and the merger then silently ran k4abt instead.
+        ///
+        /// Walking up the parents fixes the normal case — a build written anywhere INSIDE the
+        /// project tree finds the project's own eval/models. StreamingAssets and the explicit
+        /// override cover a build that is moved out of the tree. Nothing is copied: the models
+        /// stay a machine-local asset, as intended.
+        /// </summary>
+        private string ResolveAssetRoot(out string triedRoots)
+        {
+            var tried = new List<string>();
+            string Try(string candidate)
+            {
+                if (string.IsNullOrEmpty(candidate)) return null;
+                tried.Add(candidate);
+                string dir = Path.Combine(candidate, modelsDir);
+                return FirstOnnx(Path.Combine(dir, "yolox-m")) != null
+                    && FirstOnnx(Path.Combine(dir, "rtmpose-m")) != null ? candidate : null;
+            }
+
+            // Explicit override wins outright — it exists precisely to escape the search.
+            string hit = Try(string.IsNullOrWhiteSpace(assetRootOverride) ? null : assetRootOverride.Trim());
+
+            // Then the app's own folder, and every parent above it.
+            if (hit == null)
+            {
+                var d = Directory.GetParent(Application.dataPath);
+                // Bounded so a misconfigured override can't walk a whole volume.
+                for (int i = 0; i < 8 && d != null && hit == null; i++, d = d.Parent)
+                    hit = Try(d.FullName);
+            }
+
+            if (hit == null) hit = Try(Application.streamingAssetsPath);
+
+            triedRoots = string.Join(", ", tried);
+            return hit;
         }
 
         private static string FirstOnnx(string dir)

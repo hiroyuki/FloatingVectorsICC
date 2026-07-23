@@ -1228,6 +1228,10 @@ namespace BodyTracking
             slot.CapturedTsNs = tsNs;
             _diagSnapshotsRecv += n;
             _poseVersion++;
+            // Reached only when useExternalBodies is off (checked above), i.e. k4abt really
+            // is the engine driving the merge — which is the case a build silently lands in
+            // when RTMPose cannot find its models.
+            global::Shared.SkeletonSourceProbe.Report(global::Shared.SkeletonSourceProbe.K4abt);
 
             // While recording, persist this worker's output to bodies_main so playback
             // can skip k4abt entirely (and run on Mac). Encode here so the byte buffer
