@@ -70,7 +70,8 @@ namespace PointCloud
 
             float decimKeep = (decimater != null && decimater.Enabled) ? Mathf.Clamp01(decimater.KeepRatio) : 1f;
             mpb.SetFloat(_DecimKeep, decimKeep);
-            mpb.SetFloat(_DecimFrame, Time.frameCount);
+            mpb.SetFloat(_DecimFrame, PointCloudDecimater.DecimFramePin >= 0
+                ? PointCloudDecimater.DecimFramePin : Time.frameCount);
 
             float capsMode = 0f;
             int capsCount = 0;

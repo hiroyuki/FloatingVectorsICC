@@ -62,6 +62,10 @@ Shader "Orbbec/MotionCurves"
             float _RimBoost;
             float _TailAlpha;
             float _TailFadePow;
+            // Global dissolve fade (shoot-end → できたよ), shared with the point cloud.
+            // 0 = shown (default), 1 = fully dissolved. Scales the dither coverage so
+            // the ribbons melt away with the cloud.
+            float _PcFadeCull;
 
             struct V2F
             {
@@ -183,6 +187,7 @@ Shader "Orbbec/MotionCurves"
                 // pass opaque (ZWrite On) so ribbons still occlude each other.
                 float ramp = pow(saturate(i.age), max(_TailFadePow, 0.01));
                 float coverage = lerp(saturate(_TailAlpha), 1.0, ramp);
+                coverage *= (1.0 - saturate(_PcFadeCull)); // global dissolve to black
                 if (coverage < Bayer8x8(uint2(i.pos.xy))) discard;
                 return fixed4(rgb, 1.0);
             }

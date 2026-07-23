@@ -55,6 +55,17 @@ namespace CameraControl
             set { ResolveOrbit(); if (orbit != null) orbit.autoOrbit = value; }
         }
 
+        // When set, the recorder-paused / baker-capturing auto-orbit triggers in
+        // Update are ignored — only autoOrbitOverride drives the orbit. The
+        // ExperienceDirector forces this on for the session so freezing the model
+        // (which pauses the recorder) can't pop the camera into a dev pause-orbit.
+        [System.NonSerialized] public bool suppressTransportOrbit;
+        public bool SuppressTransportOrbit
+        {
+            get => suppressTransportOrbit;
+            set => suppressTransportOrbit = value;
+        }
+
         private void ResolveOrbit()
         {
             if (orbit == null) orbit = GetComponent<CameraOrbitController>();
@@ -130,8 +141,9 @@ namespace CameraControl
         {
             if (orbit == null) return;
             bool want = autoOrbitOverride
-                        || (recorder != null && recorder.IsPaused)
-                        || (baker != null && baker.IsCapturing);
+                        || (!suppressTransportOrbit
+                            && ((recorder != null && recorder.IsPaused)
+                                || (baker != null && baker.IsCapturing)));
             if (orbit.enabled == want) return;
             // Snapshot on the off→on edge / restore on the on→off edge. The
             // restore happens the same frame the controller is disabled, so its

@@ -30,6 +30,15 @@ namespace Shared
         /// by itself — and restores the dev value on exit.</summary>
         bool AutoOrbit { get; set; }
 
+        /// <summary>Ignore the gate's own transport-pause / bake-capture auto-orbit
+        /// triggers. The dev gate spins the camera whenever the recorder is paused
+        /// or the trail baker is capturing, but during the experience the director
+        /// owns the camera entirely (via OrbitOverride) — and freezing the model for
+        /// the shoot-end dissolve pauses the recorder, which would otherwise pop the
+        /// camera into a dev pause-orbit mid-dissolve. The show forces this on for the
+        /// session and restores the dev value on exit.</summary>
+        bool SuppressTransportOrbit { get; set; }
+
         /// <summary>Disable the orbit controller NOW and restore the saved
         /// camera pose (when RestorePoseOnDisable is set). The gate normally
         /// processes the off-edge in its own next Update, but mode exit

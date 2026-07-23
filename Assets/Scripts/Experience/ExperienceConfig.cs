@@ -50,9 +50,36 @@ namespace Experience
         public float presentationPlaybackRate = 1f / 3f;
 
         [Min(0f)]
+        [Tooltip("ResultShow only: hold the できたよ！text alone on a blank stage for " +
+                 "this long before the model appears and the replay begins. 0 = model " +
+                 "appears with the text.")]
+        public float resultRevealDelaySeconds = 0.5f;
+
+        [Min(0f)]
+        [Tooltip("Shoot-end → できたよ！ transition: after 撮影中 the live model FREEZES " +
+                 "in place and holds for this long before it dissolves away.")]
+        public float shootEndFreezeHoldSeconds = 0.3f;
+
+        [Min(0f)]
+        [Tooltip("Shoot-end → できたよ！ transition: seconds the frozen model takes to " +
+                 "DISSOLVE to nothing (dither fade of the point cloud + ribbons).")]
+        public float shootEndDissolveSeconds = 0.5f;
+
+        [Tooltip("DEBUG (editor only): auto-pause the Editor the instant the shoot-end " +
+                 "dissolve begins, so you can step through it one frame at a time (⏭). " +
+                 "Leave off for the show.")]
+        public bool debugPauseAtShootDissolve;
+
+        [Min(0f)]
         [Tooltip("Orbit speed (yaw °/s) during the replays and the QR screen. The dev " +
                  "pause-orbit keeps the camera's own slower value.")]
         public float presentationOrbitYawSpeedDeg = 30f;
+
+        [Min(0f)]
+        [Tooltip("ResultShow: the camera stays STILL through the できたよ！replay and only " +
+                 "starts orbiting once the replay ends, easing its yaw speed 0→full over " +
+                 "this many seconds (SmoothStep). 0 = snap to full speed immediately.")]
+        public float presentationOrbitEaseInSeconds = 1.5f;
 
         [Min(0f)]
         [Tooltip("Vertical bob amplitude (m) of the presentation orbit.")]

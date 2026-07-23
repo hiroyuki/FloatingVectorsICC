@@ -117,8 +117,11 @@ namespace PointCloud
         // --- Internal ---
         private Mesh _gridMesh;
         private Material _gridMaterial;
+        private MaterialPropertyBlock _gridMpb; // pins _PcFadeCull=0 so the grid never
+                                                // dissolves with the point cloud
         private Material _shadowMaterial;
         private MaterialPropertyBlock _shadowMpb;
+        private static readonly int kPcFadeCull = Shader.PropertyToID("_PcFadeCull");
 
         // Tracks whatever was last used to build the grid, so we can rebuild only when those change.
         private int _builtCells = -1;
@@ -198,8 +201,14 @@ namespace PointCloud
                     // lives in this Transform's local space and follows the anchor.
                     Matrix4x4 m = fitToBoundingBox && boundingBox != null
                         ? Matrix4x4.identity : transform.localToWorldMatrix;
+                    // The grid shares PointCloudUnlit with the cloud, which now honours
+                    // the global _PcFadeCull dissolve — pin it to 0 for the grid so the
+                    // stage grid doesn't dither away (and leave diagonal remnants) when
+                    // the shoot-end dissolve fades the point cloud.
+                    if (_gridMpb == null) _gridMpb = new MaterialPropertyBlock();
+                    _gridMpb.SetFloat(kPcFadeCull, 0f);
                     Graphics.DrawMesh(_gridMesh, m, _gridMaterial,
-                                      renderLayer, null, 0, null, ShadowCastingMode.Off, false);
+                                      renderLayer, null, 0, _gridMpb, ShadowCastingMode.Off, false);
                 }
             }
 

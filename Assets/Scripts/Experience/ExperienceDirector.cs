@@ -259,6 +259,7 @@ namespace Experience
         private Coroutine _cloudRevealRoutine;
         private static readonly int PcRevealModeId = Shader.PropertyToID("_PcRevealMode");
         private static readonly int PcRevealYId = Shader.PropertyToID("_PcRevealY");
+        private static readonly int PcFadeCullId = Shader.PropertyToID("_PcFadeCull");
         private bool _savedLfbsSubmit;
         private bool _savedLfbsLiveOnly;
 
@@ -295,9 +296,11 @@ namespace Experience
             public bool savedOverride;
             public bool savedRestore;
             public bool savedAutoOrbit;
+            public bool savedSuppressTransport;
         }
         private readonly List<OrbitGateSnap> _orbitGates = new List<OrbitGateSnap>();
         private bool _orbitOn;
+        private Coroutine _orbitEaseRoutine; // ResultShow yaw ease-in (0→full)
         // Person-tracking orbit anchor (chest↔waist midpoint of the merged
         // skeleton). The presentation camera looks here while it circles.
         private Transform _presentationPivot;
@@ -588,11 +591,15 @@ namespace Experience
                     savedOverride = gate.OrbitOverride,
                     savedRestore = gate.RestorePoseOnDisable,
                     savedAutoOrbit = gate.AutoOrbit,
+                    savedSuppressTransport = gate.SuppressTransportOrbit,
                 });
                 gate.OrbitOverride = false;
                 gate.RestorePoseOnDisable = true;
                 // The visitor has no mouse — an orbit phase must rotate by itself.
                 gate.AutoOrbit = true;
+                // The director owns the camera; the dev pause/bake auto-orbit must
+                // not fire (freezing the model for the dissolve pauses the recorder).
+                gate.SuppressTransportOrbit = true;
             }
             if (motionCurves != null)
             {
@@ -778,6 +785,8 @@ namespace Experience
             StopRoutine(ref _gapPaintRoutine);
             StopRoutine(ref _cloudRevealRoutine);
             Shader.SetGlobalFloat(PcRevealModeId, 0f); // never leak the clip into dev
+            Shader.SetGlobalFloat(PcFadeCullId, 0f);   // nor an interrupted dissolve
+            PointCloud.PointCloudDecimater.DecimFramePin = -1; // nor a pinned decimate seed
             // Camera recovery must not outlive the mode: left running it would call
             // StartLive() partway through the dev/playback restore below.
             if (_recoveryRoutine != null)
@@ -947,6 +956,7 @@ namespace Experience
                 s.gate.OrbitOverride = s.savedOverride;
                 s.gate.RestorePoseOnDisable = s.savedRestore;
                 s.gate.AutoOrbit = s.savedAutoOrbit;
+                s.gate.SuppressTransportOrbit = s.savedSuppressTransport;
             }
             _orbitGates.Clear();
             if (_presentationPivot != null)
@@ -1077,6 +1087,11 @@ namespace Experience
             // Release AND clear the frozen ribbons: the next visitor must draw their
             // own, not append to the previous one's curve.
             if (poseHistory != null) poseHistory.ReleaseHoldAndClear();
+            // Belt-and-suspenders: a shoot-end dissolve that never reached its reveal
+            // (Processing failure, dev jump) can leave _PcFadeCull at 1 / the decimate
+            // pinned / frames frozen. Clear it here — this runs on Idle entry BEFORE
+            // ApplyCloudVisibility shows the live cloud, so the stage can't come up black.
+            AbortShootEndDissolve();
         }
 
         // ------------------------------------------------ state side effects ----
@@ -1107,17 +1122,33 @@ namespace Experience
                 AbortVisitorRecording();
                 _converter?.Abort();
                 _testMovePresenting = false;
+                AbortShootEndDissolve(); // stopped mid dissolve: no half-dissolved/frozen leak
             }
             if (from == ExperienceState.Shoot)
             {
                 StopRoutine(ref _shootRoutine);
-                if (to != ExperienceState.Processing) AbortVisitorRecording();
+                // Shoot -> Processing is the normal path; the dissolve there completed
+                // and must keep the black (cull=1) through Processing until the ResultShow
+                // reveal. Any OTHER exit was interrupted mid-dissolve — reset it.
+                if (to != ExperienceState.Processing)
+                {
+                    AbortVisitorRecording();
+                    AbortShootEndDissolve();
+                }
             }
-            if (from == ExperienceState.Processing && _processingRoutine != null)
+            if (from == ExperienceState.Processing)
             {
-                StopRoutine(ref _processingRoutine);
-                _converter?.Abort();
-                RestoreHistorySamples(); // the capture may have been mid-flight
+                if (_processingRoutine != null)
+                {
+                    StopRoutine(ref _processingRoutine);
+                    _converter?.Abort();
+                    RestoreHistorySamples(); // the capture may have been mid-flight
+                }
+                // MUST run even when the routine already nulled itself on a failure path
+                // (no take / playback / capture failure): every Processing exit that
+                // isn't the ResultShow reveal has to clear the shoot-end dissolve, or
+                // _PcFadeCull stays at 1 and the next visible state comes up black.
+                if (to != ExperienceState.ResultShow) AbortShootEndDissolve();
             }
             if (from == ExperienceState.ResultShow)
             {
@@ -1268,6 +1299,23 @@ namespace Experience
             // visitor walked off, processing failure — lands right.
             // (The TSDF mesh is session-suppressed in EnterMode and never shows.)
             SetSculptureVisible(state is not ExperienceState.Processing);
+
+            // ResultShow opens on a BLANK stage (behaviour B, 2026-07-24). Processing
+            // froze the FULL sculpture — the built curve buffer AND the pose ring — and
+            // leaving it on screen through the inter-state beat read as "the finished
+            // lines are already drawn and the body just retraces them". Clear the stale
+            // curves + ring and hide the cloud NOW so the beat is truly empty;
+            // ResultShowRoutine reveals the model and replays it FROM ZERO after the
+            // beat, together with the できたよ！paint. Guarded on a replayable take so
+            // the no-take edge still shows the frozen piece rather than a black screen.
+            if (state == ExperienceState.ResultShow
+                && sensorRecorder != null
+                && !string.IsNullOrEmpty(_takeRoot) && Directory.Exists(_takeRoot))
+            {
+                if (motionCurves != null) { motionCurves.freeze = false; motionCurves.suppressDraw = true; }
+                if (poseHistory != null) poseHistory.ReleaseHoldAndClear();
+                SetCloudRenderersVisible(false);
+            }
 
             // The beat between screens (stateGapSeconds): blank now, then the new
             // screen and its cue land together after the gap. Fault must alert
@@ -1884,6 +1932,15 @@ namespace Experience
                 _takeIsTapped = false;
             }
             PlaySe(config.recordEndSe);
+
+            // Erase the shot model with the same freeze → hold → dissolve as the
+            // practice rounds, so Processing's progress bar comes up on black instead
+            // of the model blinking out. Recording is already finished above, so the
+            // freeze only holds the live/playback DISPLAY.
+            _ui.ClearAll();
+            yield return DissolveShootEndToBlack();
+            if (!_active || _fsm.State != ExperienceState.Shoot) yield break;
+
             _recordingDone = true;
             _shootRoutine = null;
         }
@@ -2186,10 +2243,11 @@ namespace Experience
         // Flip every gate's override together. The gates themselves restore the
         // camera pose when their orbit turns off (RestorePoseOnDisable, forced
         // on for the session in EnterMode).
-        private void SetOrbit(bool on)
+        private void SetOrbit(bool on, bool easeIn = false)
         {
             if (_orbitOn == on) return;
             _orbitOn = on;
+            StopRoutine(ref _orbitEaseRoutine);
             if (on)
             {
                 // Seed the anchor at the person (or stage centre) BEFORE the
@@ -2198,15 +2256,121 @@ namespace Experience
                 EnsurePresentationPivot();
                 _pivotSeeded = false;
                 UpdatePresentationPivot();
+                // ResultShow eases the rotation IN from the replay-end framing: the
+                // controllers switch on at 0°/s (camera holds where the replay left
+                // it) and the routine ramps the yaw up. The routine owns the gates
+                // while it runs, so return before the immediate apply below.
+                if (easeIn && isActiveAndEnabled && config.presentationOrbitEaseInSeconds > 0f)
+                {
+                    _orbitEaseRoutine = StartCoroutine(EaseInOrbitRoutine());
+                    return;
+                }
             }
+            ApplyOrbitToGates(on, on ? config.presentationOrbitYawSpeedDeg : 0f);
+        }
+
+        // Push the current orbit state + yaw speed to every gate. Repeated calls are
+        // cheap: SetPresentationOrbit saves the dev values once (first non-null pivot)
+        // and just updates the speed after, so the ease-in can call it per frame.
+        private void ApplyOrbitToGates(bool on, float yawSpeedDeg)
+        {
             foreach (var s in _orbitGates)
             {
                 if (s.gate is not MonoBehaviour mb || mb == null) continue;
                 s.gate.SetPresentationOrbit(on ? _presentationPivot : null,
-                                            config.presentationOrbitYawSpeedDeg,
+                                            yawSpeedDeg,
                                             config.presentationOrbitBobMeters);
                 s.gate.OrbitOverride = on;
             }
+        }
+
+        // Enable the orbit at 0°/s (the camera holds the replay-end framing), then
+        // ramp the yaw speed 0→full over presentationOrbitEaseInSeconds (SmoothStep)
+        // so the rotation eases in instead of snapping to speed.
+        private IEnumerator EaseInOrbitRoutine()
+        {
+            float dur = Mathf.Max(0.01f, config.presentationOrbitEaseInSeconds);
+            float target = config.presentationOrbitYawSpeedDeg;
+            ApplyOrbitToGates(true, 0f);
+            for (float e = 0f; e < dur; e += Time.deltaTime)
+            {
+                ApplyOrbitToGates(true, target * Mathf.SmoothStep(0f, 1f, e / dur));
+                yield return null;
+            }
+            ApplyOrbitToGates(true, target);
+            _orbitEaseRoutine = null;
+        }
+
+        // Shoot-end → できたよ！transition: freeze whatever the visitor was watching
+        // (live cloud OR playback, plus the ribbons), hold it still for a beat, then
+        // dissolve it away to black (global dither cull 0→1 across the cloud, shadow
+        // and ribbon shaders). Leaves the stage black + hidden and the cull reset to 0
+        // so the replay model later reveals at full. The caller owns the ring/curve
+        // state for the growing replay that follows.
+        private IEnumerator DissolveShootEndToBlack()
+        {
+            // Freeze the frame: HoldFrames pauses playback or freezes the live intake;
+            // the ribbons hold their built buffer. Pin the decimate seed so the point
+            // cloud's per-frame RANDOM drop pattern stops varying (same density, no
+            // blink) — otherwise the kept points flicker/"revive" on the still image.
+            sensorRecorder?.HoldFrames();
+            PointCloud.PointCloudDecimater.DecimFramePin = Time.frameCount;
+            if (motionCurves != null) motionCurves.freeze = true;
+            if (poseHistory != null) poseHistory.hold = true;
+
+            float mult = Mathf.Max(0.01f, config.timings.timeMultiplier);
+            float hold = config.shootEndFreezeHoldSeconds / mult;
+            if (hold > 0f) yield return new WaitForSeconds(hold);
+
+#if UNITY_EDITOR
+            // Freeze the Editor right at the dissolve start so it can be stepped frame
+            // by frame (⏭). Each step advances one cull increment of the ramp below.
+            if (config.debugPauseAtShootDissolve) UnityEditor.EditorApplication.isPaused = true;
+#endif
+
+            // Frame-based ramp (one SmoothStep increment PER FRAME), not time-based:
+            // while frame-stepping the Editor (⏭) Time.deltaTime collapses to ~0, so a
+            // time-driven ramp barely moves per step and looks stuck. Counting frames
+            // makes every ⏭ advance exactly one visible cull step. ~30 fps target, so
+            // normal playback still takes ≈ shootEndDissolveSeconds.
+            float dur = Mathf.Max(0.01f, config.shootEndDissolveSeconds / mult);
+            int totalFrames = Mathf.Max(1, Mathf.RoundToInt(dur * 30f));
+            for (int f = 1; f <= totalFrames; f++)
+            {
+                Shader.SetGlobalFloat(PcFadeCullId, Mathf.SmoothStep(0f, 1f, (float)f / totalFrames));
+                yield return null;
+            }
+            Shader.SetGlobalFloat(PcFadeCullId, 1f); // fully dissolved
+
+            // Gone: hide the renderers + ribbons, un-freeze / release the hold and
+            // resume the transport so DOWNSTREAM rebuilds cleanly (the Processing
+            // capture needs the curves to rebuild, the replay reveal a fresh ring).
+            // CRUCIAL: leave the cull at 1 (still fully dissolved = black). Resetting
+            // it to 0 here flashed the FULL cloud for one frame, because ResumeFrames
+            // re-shows the playback renderers and cull 0 means "no dither" = full
+            // density. cull stays 1 (black) through the beat; each reveal site sets it
+            // back to 0 the instant it shows the model. (The mode-exit / abort cleanup
+            // also resets it, so it can never leak out.)
+            SetCloudRenderersVisible(false);
+            if (motionCurves != null) { motionCurves.suppressDraw = true; motionCurves.freeze = false; }
+            if (poseHistory != null) poseHistory.hold = false;
+            sensorRecorder?.ResumeFrames();
+            PointCloud.PointCloudDecimater.DecimFramePin = -1; // back to per-frame
+        }
+
+        // Reset every transient the shoot-end dissolve leaves behind. The dissolve
+        // deliberately holds _PcFadeCull at 1 (black) until a reveal site clears it, and
+        // freezes the transport + pins the decimate seed + holds the curve/pose ring
+        // while it runs — so any exit that ISN'T a normal reveal (walked away, fault,
+        // dev jump, or a Processing failure that returns to Idle) must run this or the
+        // next state inherits a black stage / frozen live view / pinned decimate.
+        private void AbortShootEndDissolve()
+        {
+            Shader.SetGlobalFloat(PcFadeCullId, 0f);
+            PointCloud.PointCloudDecimater.DecimFramePin = -1;
+            if (motionCurves != null) motionCurves.freeze = false;
+            if (poseHistory != null) poseHistory.hold = false;
+            sensorRecorder?.ResumeFrames();
         }
 
         private void EnsurePresentationPivot()
@@ -2471,32 +2635,60 @@ namespace Experience
                     if (!Active()) yield break;
                 }
 
-                // -- できたよ！ + looped playback with the ribbons + orbit --
+                // -- shoot-end dissolve → black → できたよ！ → model reveal + growth --
+                //    Freeze the frozen model, hold, dissolve it away; then a black beat,
+                //    できたよ！alone, another beat, and finally the replay whose ribbons
+                //    grow 0→~30 (instead of the finished lines flashing up and being
+                //    retraced). Same shape as ResultShow.
                 bool played = false;
                 if (haveTake)
                 {
-                    // The ribbons GROW over the replayed second: widen the pose
-                    // ring to the one-second window (same formula as the
-                    // Processing capture) and start it empty, so the lines build
-                    // 0 → ~30 samples as the take plays. The ring is flushed on
-                    // every loop wrap (recorder's OnPlaybackLooped consumers),
-                    // so each of the playbackLoops repeats the growth. Restored
-                    // to the dev value when the round hands back to live.
+                    // 撮影中 off so the frozen model stands alone, then freeze → hold →
+                    // dissolve it to black (ends with the cloud + ribbons hidden).
+                    _ui.ClearAll();
+                    yield return DissolveShootEndToBlack();
+                    if (!Active()) yield break;
+
+                    // Prep the ring for the growing replay: widen to the one-second
+                    // window and start it EMPTY (the lines build as the take plays,
+                    // flushed on every loop wrap). Restored to the dev value on hand-back.
                     if (poseHistory != null)
                     {
                         poseHistory.historySamples =
                             Mathf.Clamp(Mathf.RoundToInt(config.captureSeconds * 30f), 2, 32);
                         poseHistory.ReleaseHoldAndClear();
                     }
+
+                    float beat = config.resultRevealDelaySeconds
+                                 / Mathf.Max(0.01f, config.timings.timeMultiplier);
+
+                    // 0.5s of pure black after the dissolve, BEFORE できたよ！
+                    if (beat > 0f) yield return new WaitForSeconds(beat);
+                    if (!Active()) yield break;
+
+                    // できたよ！alone on the black stage, then hold it for the reveal delay.
+                    PlaySe(config.resultSe);
+                    _ui.ShowMessage(config.resultText);
+                    if (beat > 0f) yield return new WaitForSeconds(beat);
+                    if (!Active()) yield break;
+
+                    // Reveal the model and start the growing replay. Drop the dissolve
+                    // cull to 0 (undithered) the same frame the model is shown, so it
+                    // comes back at full — the dissolve left it at 1 to hold black.
+                    Shader.SetGlobalFloat(PcFadeCullId, 0f);
+                    SetCloudRenderersVisible(true);
+                    if (motionCurves != null) { motionCurves.freeze = false; motionCurves.suppressDraw = false; }
+                    if (poseHistory != null) poseHistory.ReleaseHoldAndClear();
                     StartVisitorPlayback(takeRoot, loop: true,
                                          rate: config.presentationPlaybackRate);
                     played = _visitorPlaybackActive && sensorRecorder != null && sensorRecorder.IsPlaying;
                 }
                 if (played)
                 {
-                    PlaySe(config.resultSe);
-                    _ui.ShowMessage(config.resultText);
-                    SetOrbit(true); // ribbons already draw (state-level gate)
+                    // Camera stays STILL through the replay (same as ResultShow) — the
+                    // model appears and its ribbons grow with a fixed camera. Practice
+                    // hands straight back to live afterwards, so there is no post-replay
+                    // orbit ease-in here (that belongs to ResultShow's held QR frame).
                     SetPresentationLook(true);
                     // Canned dev take: replay only its tail — a full-length entrance
                     // recording would otherwise loop for minutes. (A recorded or
@@ -2574,12 +2766,25 @@ namespace Experience
                 yield break;
             }
 
-            // Un-freeze the presentation: the exported snapshot already sits in
-            // _snapshot, so the Processing-end hold/freeze only served that
-            // screen. The ring rebuilds from the replay. The TSDF integrator
-            // stays gated (_sculptureFrozen) — the mesh is session-hidden and
-            // no longer consumed by anything.
-            if (motionCurves != null) motionCurves.freeze = false;
+            // Hold the できたよ！text ALONE on the blank stage for a moment first (the
+            // gap paint lands the text at the beat; the model follows resultReveal-
+            // DelaySeconds later), so the reveal reads as "done! … and here it is".
+            float revealDelay = config.resultRevealDelaySeconds
+                                / Mathf.Max(0.01f, config.timings.timeMultiplier);
+            if (revealDelay > 0f) yield return new WaitForSeconds(revealDelay);
+            if (!_active || _fsm.State != ExperienceState.ResultShow)
+            { _resultShowRoutine = null; yield break; }
+
+            // Reveal the model now. The stage was blanked at entry (cloud hidden,
+            // ribbons suppressed, ring cleared), so the finished piece appears from
+            // nothing and its ribbons grow from an empty ring as the replay plays,
+            // instead of the full sculpture lingering through the beat and being
+            // retraced. The exported snapshot already sits in _snapshot; the TSDF
+            // integrator stays gated (_sculptureFrozen) — the mesh is session-hidden
+            // and no longer consumed.
+            Shader.SetGlobalFloat(PcFadeCullId, 0f); // clear any lingering shoot-end dissolve
+            SetCloudRenderersVisible(true);
+            if (motionCurves != null) { motionCurves.freeze = false; motionCurves.suppressDraw = false; }
             if (poseHistory != null) poseHistory.ReleaseHoldAndClear();
 
             // Restart the take from the top, looping. Processing left the
@@ -2599,7 +2804,9 @@ namespace Experience
                 yield break;
             }
 
-            SetOrbit(true);
+            // The camera stays STILL through the replay (no SetOrbit here) — it
+            // starts circling only once the take finishes, easing in from the
+            // replay-end framing (SetOrbit(easeIn) below).
             SetPresentationLook(true);
             double startAt = 0;
             double duration = sensorRecorder.PlaybackDurationSeconds;
@@ -2611,9 +2818,14 @@ namespace Experience
             if (!_active || _fsm.State != ExperienceState.ResultShow)
             { _resultShowRoutine = null; yield break; }
 
-            // Freeze the final frame + finished ribbons for the QR screen.
+            // Replay finished: freeze the final frame + ribbons for the QR screen,
+            // then ease the orbit in from where the camera was left standing (the
+            // ease-in routine runs on past _resultShowDone, into QrShow, which keeps
+            // the orbit on). Freeze BEFORE the orbit so the pivot reads the settled
+            // final skeleton.
             if (poseHistory != null) poseHistory.hold = true;
             if (motionCurves != null) motionCurves.freeze = true;
+            SetOrbit(true, easeIn: true);
             _resultShowDone = true;
             _resultShowRoutine = null;
         }
@@ -2862,25 +3074,20 @@ namespace Experience
 
         private TSDFSnapshotBuilder.CaptureOptions CaptureOptions()
         {
+            // Single source of truth: the exporter's own options, so the capture
+            // reads ALL curves (stride 1) when a size budget is set and lets the
+            // export's longest-first budget selection do the only thinning. The
+            // seed-stride path here used to decimate 1-in-webCurveStride BEFORE
+            // the budget saw them, so "keep the longest" only ranked the survivors.
             if (printExporter != null)
-                return new TSDFSnapshotBuilder.CaptureOptions
-                {
-                    smoothIterations = printExporter.smoothIterations,
-                    triangleBudgetPerSlab = printExporter.triangleBudgetPerSlab,
-                    meshTargetTris = printExporter.webMeshTargetTris,
-                    includeCurves = printExporter.webIncludeCurves,
-                    curveStride = printExporter.webCurveStride,
-                    curveSides = printExporter.webCurveSides,
-                    curveTipTaper = printExporter.webCurveTipTaper,
-                    curveTolerance = printExporter.webCurveTolerance,
-                };
+                return printExporter.WebCaptureOptions();
             return new TSDFSnapshotBuilder.CaptureOptions
             {
                 smoothIterations = 10,
                 triangleBudgetPerSlab = 2_000_000,
                 meshTargetTris = 150_000,
                 includeCurves = true,
-                curveStride = 40,
+                curveStride = 1, // the export's size budget picks from all curves
                 curveSides = 4,
                 curveTipTaper = 0.25f,
                 curveTolerance = 0.0015f,
@@ -2929,9 +3136,19 @@ namespace Experience
             }
 
             // Synchronous local write (atomic tmp+rename; the frozen result view
-            // absorbs the hitch frame).
+            // absorbs the hitch frame — the AO bake adds to it, watch aoMs in the log).
+            var webOpt = printExporter != null
+                ? printExporter.WebExportOptions()
+                : new TSDFSnapshotBuilder.WebFileOptions
+                {
+                    ao = new MeshAO.Options { strength = 0.6f, samples = 32, maxDistance = 0.15f },
+                    omitMesh = true,
+                    curveBudgetBytes = 9L * 1048576,
+                    shortCurveShare = 0.15f,
+                    curveRadiusScale = 1.5f,
+                };
             if (!TSDFSnapshotBuilder.ExportFiles(snap, glbPath, usdzPath, usdPython,
-                                                 out _, out string err))
+                                                 out _, out string err, webOpt))
             {
                 Debug.LogError($"[{nameof(ExperienceDirector)}] export failed: {err}", this);
                 _exportFailed = true;

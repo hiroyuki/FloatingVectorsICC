@@ -10,6 +10,13 @@ namespace PointCloud
     [DisallowMultipleComponent]
     public class PointCloudDecimater : MonoBehaviour, Shared.IPanelTunable
     {
+        /// <summary>When >= 0, PointCloudShaderFilters pins the per-frame decimate seed
+        /// (_DecimFrame) to this value instead of Time.frameCount — the random drop
+        /// pattern stops varying frame to frame, WITHOUT changing the drop density. The
+        /// ExperienceDirector pins it while a frozen model dissolves so the kept points
+        /// don't blink ("revive") on the still image. -1 = normal per-frame behaviour.</summary>
+        public static int DecimFramePin = -1;
+
         [Range(0f, 100f)]
         [Tooltip("Percentage of points to randomly drop each frame. " +
                  "0 = keep all, 100 = drop all.")]

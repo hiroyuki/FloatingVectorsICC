@@ -102,6 +102,9 @@ Shader "Orbbec/PointCloudShadow"
             // Globals (never in a Properties block — see PointCloudUnlit note).
             float    _PcRevealMode;
             float    _PcRevealY;
+            // Global dissolve fade — mirrors PointCloudUnlit so the shadow thins out
+            // with the cloud. 0 = shown (default), 1 = fully dissolved.
+            float    _PcFadeCull;
             float    _ShadowUseReveal;
             float4   _ShadowColor;
             float    _FloorY;
@@ -196,6 +199,15 @@ Shader "Orbbec/PointCloudShadow"
                 return worldPos.y <= _PcRevealY;
             }
 
+            bool PassFade(uint vid)
+            {
+                if (_PcFadeCull <= 0.0) return true;
+                uint h = vid * 2654435761u;
+                h ^= h << 13; h ^= h >> 17; h ^= h << 5;
+                float u = (h & 0x00FFFFFFu) * (1.0 / 16777216.0);
+                return u >= _PcFadeCull;
+            }
+
             // Motion-field mirror: cull past _MotionMaxDist and displace by the
             // nearest joint's velocity, so the shadow tracks the displaced
             // silhouette the viewer actually sees. Color logic is irrelevant
@@ -225,7 +237,8 @@ Shader "Orbbec/PointCloudShadow"
                 v2f o;
                 float3 V = mul(unity_ObjectToWorld, v.vertex).xyz;
                 float keep = (PassObb(v.vertex.xyz) && PassDecim(v.vid)
-                              && PassCapsules(V) && PassFloor(V) && PassReveal(V))
+                              && PassCapsules(V) && PassFloor(V) && PassReveal(V)
+                              && PassFade(v.vid))
                              ? 1.0 : 0.0;
                 ApplyMotion(V, keep);
                 float3 floored;

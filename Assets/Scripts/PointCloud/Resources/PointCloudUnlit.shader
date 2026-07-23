@@ -107,6 +107,11 @@ Shader "Orbbec/PointCloudUnlit"
             // animates Y floor→overhead then switches the mode back off.
             float    _PcRevealMode;
             float    _PcRevealY;
+            // Global dissolve fade (shoot-end → できたよ). 0 = fully shown (default;
+            // Unity zero-fills unset globals, so dev scenes are untouched), ramps to
+            // 1 = fully dissolved. Each point gets a STABLE per-vertex threshold, so
+            // it thins out in a fixed order rather than sparkling frame to frame.
+            float    _PcFadeCull;
 
             struct appdata
             {
@@ -202,6 +207,18 @@ Shader "Orbbec/PointCloudUnlit"
                 return worldPos.y <= _PcRevealY;
             }
 
+            // Dissolve cull: keep a point only if its stable per-vertex threshold is
+            // above the current cull level. _PcFadeCull 0→1 drops points in a fixed
+            // random order (a smooth dither dissolve).
+            bool PassFade(uint vid)
+            {
+                if (_PcFadeCull <= 0.0) return true;
+                uint h = vid * 2654435761u;
+                h ^= h << 13; h ^= h >> 17; h ^= h << 5;
+                float u = (h & 0x00FFFFFFu) * (1.0 / 16777216.0);
+                return u >= _PcFadeCull;
+            }
+
             // Locate the closest joint to `worldPos`. Returns the joint index
             // (-1 if no joints), its squared distance, and its velocity / speed.
             // Squared distance avoids a per-iteration sqrt; the caller compares
@@ -234,7 +251,7 @@ Shader "Orbbec/PointCloudUnlit"
                 v2f o;
                 float3 wp = mul(unity_ObjectToWorld, float4(v.vertex.xyz, 1.0)).xyz;
                 bool keep = PassObb(v.vertex.xyz) && PassDecim(v.vid) && PassCapsules(wp)
-                         && PassFloor(wp) && PassReveal(wp);
+                         && PassFloor(wp) && PassReveal(wp) && PassFade(v.vid);
                 float3 outColor = v.color;
                 float3 wpOut = wp;
 

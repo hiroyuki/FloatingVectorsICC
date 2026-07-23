@@ -389,16 +389,20 @@ namespace BodyTracking
                 return;
             }
 
-            // Auto-hold on pause: with the pose AND build params unchanged there is nothing new to
-            // build, and rebuilding anyway is actively harmful — collected sites outnumber the seed
-            // budget (TSDF mesh seeding) and GPU append order is nondeterministic, so each rebuild
-            // seeds a DIFFERENT subset and the paused sculpture shimmers. Any parameter tweak or
-            // frame-step (PoseVersion change) rebuilds normally.
-            bool paused = recorder != null && recorder.IsPaused;
+            // Auto-hold whenever the pose AND build params are unchanged: rebuilding then is
+            // actively harmful — collected sites outnumber the seed budget (TSDF mesh seeding) and
+            // GPU append order is nondeterministic, so each rebuild seeds a DIFFERENT subset and the
+            // curves shimmer. This covers BOTH a paused transport AND slow playback: at 1/3 speed the
+            // same recorded frame (same PoseVersion) is shown for ~3 display frames, and rebuilding
+            // each of them was the ResultShow ribbon flicker. Gated on the recorder being the pose
+            // source (paused or playing) so LIVE — where PoseVersion changes every frame anyway and
+            // the recorder is idle — is untouched. Any parameter tweak or a new frame (PoseVersion
+            // change) rebuilds normally, so playback growth still advances one step per recorded frame.
+            bool recorderSourced = recorder != null && (recorder.IsPaused || recorder.IsPlaying);
             int paramHash = BuildParamsHash();
             ulong poseVersion = history != null && history.bodyTracking != null
                 ? history.bodyTracking.PoseVersion : 0UL;
-            if (paused && _hasBuilt && _outBuf != null
+            if (recorderSourced && _hasBuilt && _outBuf != null
                 && paramHash == _lastBuildParamHash && poseVersion == _lastBuildPoseVersion)
             {
                 DrawCurves();
