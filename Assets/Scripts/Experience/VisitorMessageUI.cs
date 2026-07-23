@@ -84,6 +84,14 @@ namespace Experience
                  "digits can sit clear of the pose guide / visitor.")]
         public Vector2 countdownPosition = Vector2.zero;
 
+        [Tooltip("Hint text anchored position (reference px from canvas center) — the " +
+                 "small message shown ABOVE the countdown digits (ヒント すきなどうぶつに…).")]
+        public Vector2 hintPosition = new Vector2(0f, 320f);
+
+        [Min(10)]
+        [Tooltip("Hint text size (the ヒント line above the countdown digits).")]
+        public int hintFontSize = 40;
+
         [Tooltip("Message text anchored position (reference px from canvas center).")]
         public Vector2 messagePosition = Vector2.zero;
 
@@ -127,6 +135,7 @@ namespace Experience
             public int display;
             public Canvas canvas;
             public Text message;
+            public Text hint;      // small line above the countdown digits
             public GameObject qrGroup;
             public RawImage qrImage;
             public Text qrCaption;
@@ -205,6 +214,7 @@ namespace Experience
         // the base must replay too). The alert replays separately from _alertOwned.
         private System.Action _replayBase;
         private int _countdownOverlay = -1; // -1 = no countdown on screen
+        private string _countdownHint;      // hint riding above the digits
         private bool _replaying;
 
         public void ShowMessage(string text)
@@ -212,6 +222,7 @@ namespace Experience
             EnsureBuilt();
             _replayBase = () => ShowMessage(text);
             _countdownOverlay = -1;
+            _countdownHint = null;
             _countdownMode = false;
             foreach (var ui in _uis)
             {
@@ -220,6 +231,7 @@ namespace Experience
                 ui.message.text = text ?? "";
                 ui.message.rectTransform.anchoredPosition = messagePosition;
                 ui.message.gameObject.SetActive(true);
+                ui.hint.gameObject.SetActive(false);
                 ui.qrGroup.SetActive(false);
                 ui.poseGroup.SetActive(false);
                 ui.progressGroup.SetActive(false);
@@ -228,12 +240,14 @@ namespace Experience
         }
 
         /// <summary>Big countdown digits (same slot as the message, repositioned
-        /// to countdownPosition so they can sit clear of the pose guide).</summary>
-        public void ShowCountdown(int seconds)
+        /// to countdownPosition so they can sit clear of the pose guide). An
+        /// optional hint rides above the digits (ヒント すきなどうぶつに…).</summary>
+        public void ShowCountdown(int seconds, string hint = null)
         {
             EnsureBuilt();
             // Overlay only — the base (pose guide / cue message) stays as set.
             _countdownOverlay = seconds;
+            _countdownHint = hint;
             _countdownMode = true;
             foreach (var ui in _uis)
             {
@@ -242,6 +256,11 @@ namespace Experience
                 ui.message.text = seconds.ToString();
                 ui.message.rectTransform.anchoredPosition = countdownPosition;
                 ui.message.gameObject.SetActive(true);
+                bool hasHint = !string.IsNullOrEmpty(hint);
+                ui.hint.text = hint ?? "";
+                ui.hint.fontSize = hintFontSize;
+                ui.hint.rectTransform.anchoredPosition = hintPosition;
+                ui.hint.gameObject.SetActive(hasHint);
                 ui.qrGroup.SetActive(false);
             }
         }
@@ -259,6 +278,7 @@ namespace Experience
             EnsureBuilt();
             _replayBase = () => ShowPoseGuide(guide, text);
             _countdownOverlay = -1; // director re-issues ShowCountdown each second
+            _countdownHint = null;
             foreach (var ui in _uis)
             {
                 if (!MessageShownOn(ui.display)) { HideContentGroups(ui); continue; }
@@ -273,6 +293,7 @@ namespace Experience
                 // Drop any previous state's message; ShowCountdown re-activates
                 // the slot when digits need to overlay the guide.
                 ui.message.gameObject.SetActive(false);
+                ui.hint.gameObject.SetActive(false);
             }
         }
 
@@ -284,6 +305,7 @@ namespace Experience
             EnsureBuilt();
             _replayBase = () => ShowNotice(text);
             _countdownOverlay = -1;
+            _countdownHint = null;
             _countdownMode = false;
             foreach (var ui in _uis)
             {
@@ -292,6 +314,7 @@ namespace Experience
                 ApplyNoticeLayout(ui);
                 ui.noticeGroup.SetActive(true);
                 ui.message.gameObject.SetActive(false);
+                ui.hint.gameObject.SetActive(false);
                 ui.qrGroup.SetActive(false);
                 ui.poseGroup.SetActive(false);
                 ui.progressGroup.SetActive(false);
@@ -352,6 +375,7 @@ namespace Experience
         private static void HideContentGroups(DisplayUi ui)
         {
             if (ui.message != null) ui.message.gameObject.SetActive(false);
+            if (ui.hint != null) ui.hint.gameObject.SetActive(false);
             if (ui.qrGroup != null) ui.qrGroup.SetActive(false);
             if (ui.poseGroup != null) ui.poseGroup.SetActive(false);
             if (ui.progressGroup != null) ui.progressGroup.SetActive(false);
@@ -401,6 +425,11 @@ namespace Experience
                         _countdownMode ? countdownPosition : messagePosition;
                     ui.message.fontSize = _countdownMode ? countdownFontSize : messageFontSize;
                 }
+                if (ui.hint != null && ui.hint.gameObject.activeSelf)
+                {
+                    ui.hint.rectTransform.anchoredPosition = hintPosition;
+                    ui.hint.fontSize = hintFontSize;
+                }
                 if (ui.qrGroup != null && ui.qrGroup.activeSelf) ApplyQrLayout(ui);
             }
         }
@@ -411,6 +440,7 @@ namespace Experience
             EnsureBuilt();
             _replayBase = () => ShowProgress(value01, caption);
             _countdownOverlay = -1;
+            _countdownHint = null;
             float v = Mathf.Clamp01(value01);
             foreach (var ui in _uis)
             {
@@ -421,6 +451,7 @@ namespace Experience
                 ui.qrGroup.SetActive(false);
                 ui.poseGroup.SetActive(false);
                 ui.message.gameObject.SetActive(false);
+                ui.hint.gameObject.SetActive(false);
                 ui.noticeGroup.SetActive(false);
             }
         }
@@ -434,6 +465,7 @@ namespace Experience
             EnsureBuilt();
             _replayBase = () => ShowResult(headline);
             _countdownOverlay = -1;
+            _countdownHint = null;
             foreach (var ui in _uis)
             {
                 if (!MessageShownOn(ui.display)) { HideContentGroups(ui); continue; }
@@ -444,6 +476,7 @@ namespace Experience
                 ui.qrHeadline.gameObject.SetActive(!string.IsNullOrEmpty(headline));
                 ui.qrGroup.SetActive(true);
                 ui.message.gameObject.SetActive(false);
+                ui.hint.gameObject.SetActive(false);
                 ui.poseGroup.SetActive(false);
                 ui.progressGroup.SetActive(false);
                 ui.noticeGroup.SetActive(false);
@@ -458,6 +491,7 @@ namespace Experience
             EnsureBuilt();
             _replayBase = () => ShowQr(qr, caption, headline);
             _countdownOverlay = -1;
+            _countdownHint = null;
             foreach (var ui in _uis)
             {
                 if (!MessageShownOn(ui.display)) { HideContentGroups(ui); continue; }
@@ -470,6 +504,7 @@ namespace Experience
                 ui.qrHeadline.gameObject.SetActive(!string.IsNullOrEmpty(headline));
                 ui.qrGroup.SetActive(true);
                 ui.message.gameObject.SetActive(false);
+                ui.hint.gameObject.SetActive(false);
                 ui.poseGroup.SetActive(false);
                 ui.progressGroup.SetActive(false);
             }
@@ -508,9 +543,11 @@ namespace Experience
         {
             _replayBase = null; // late canvases stay blank (Idle floor-grid only)
             _countdownOverlay = -1;
+            _countdownHint = null;
             foreach (var ui in _uis)
             {
                 if (ui.message != null) ui.message.gameObject.SetActive(false);
+                if (ui.hint != null) ui.hint.gameObject.SetActive(false);
                 if (ui.qrGroup != null) ui.qrGroup.SetActive(false);
                 if (ui.poseGroup != null) ui.poseGroup.SetActive(false);
                 if (ui.progressGroup != null) ui.progressGroup.SetActive(false);
@@ -639,8 +676,9 @@ namespace Experience
             {
                 _replaying = true;
                 int cd = _countdownOverlay; // _replayBase resets it — capture first
+                string cdHint = _countdownHint;
                 _replayBase?.Invoke();
-                if (cd >= 0) ShowCountdown(cd);
+                if (cd >= 0) ShowCountdown(cd, cdHint);
                 if (_alertOwned) foreach (var ui in _uis)
                 {
                     ui.alertText.text = _alertMessage;
@@ -885,6 +923,12 @@ namespace Experience
             // both) — push the message slot above the content groups; the alert
             // group is created after and stays topmost.
             ui.message.transform.SetAsLastSibling();
+
+            // -- hint line above the countdown digits (same layer as the digits) --
+            ui.hint = MakeText(root.transform, "Hint", hintFontSize, Color.white,
+                               new Vector2(1700f, 300f));
+            ui.hint.rectTransform.anchoredPosition = hintPosition;
+            ui.hint.gameObject.SetActive(false);
 
             // -- alert group: backdrop + red text, LAST sibling = on top --
             ui.alertGroup = new GameObject("AlertGroup", typeof(RectTransform));

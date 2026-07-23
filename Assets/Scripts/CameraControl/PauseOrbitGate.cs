@@ -11,7 +11,7 @@ using UnityEngine;
 namespace CameraControl
 {
     [RequireComponent(typeof(CameraOrbitController))]
-    public class PauseOrbitGate : MonoBehaviour
+    public class PauseOrbitGate : MonoBehaviour, Shared.IOrbitOverride
     {
         [Tooltip("Transport whose pause state gates the orbit control. Auto-resolves " +
                  "the first SensorRecorder when left empty.")]
@@ -26,8 +26,60 @@ namespace CameraControl
         public TSDFTrailBaker baker;
 
         [Tooltip("Keep the orbit controller enabled regardless of pause — driven by the " +
-                 "Display 1 Auto Orbit toggle (Display1OperatorHud).")]
+                 "Display 1 Auto Orbit toggle (Display1OperatorHud) and by the " +
+                 "ExperienceDirector during playback/QR phases (via Shared.IOrbitOverride).")]
         public bool autoOrbitOverride;
+
+        [Tooltip("Snapshot the camera pose as the orbit turns on and restore it as it " +
+                 "turns off. Off by default (dev keeps the inspection angle); the " +
+                 "ExperienceDirector forces it on for the show so the stage framing " +
+                 "comes back for the next visitor.")]
+        public bool restorePoseOnDisable;
+
+        // ---- Shared.IOrbitOverride (ExperienceDirector, cross-asmdef) ----
+        public bool OrbitOverride
+        {
+            get => autoOrbitOverride;
+            set => autoOrbitOverride = value;
+        }
+
+        public bool RestorePoseOnDisable
+        {
+            get => restorePoseOnDisable;
+            set => restorePoseOnDisable = value;
+        }
+
+        public bool AutoOrbit
+        {
+            get { ResolveOrbit(); return orbit != null && orbit.autoOrbit; }
+            set { ResolveOrbit(); if (orbit != null) orbit.autoOrbit = value; }
+        }
+
+        private void ResolveOrbit()
+        {
+            if (orbit == null) orbit = GetComponent<CameraOrbitController>();
+        }
+
+        /// <summary>Immediate off-edge: disable the controller and restore the
+        /// saved pose without waiting for the next Update. Used by the
+        /// ExperienceDirector's mode exit, where the deferred Update would run
+        /// only after the gate's dev flags were already restored.</summary>
+        public void ReleaseOrbit()
+        {
+            ResolveOrbit();
+            if (orbit == null || !orbit.enabled) return;
+            orbit.enabled = false;
+            if (restorePoseOnDisable && _haveSavedPose)
+            {
+                transform.position = _savedPos;
+                transform.rotation = _savedRot;
+                _haveSavedPose = false;
+            }
+        }
+
+        private Vector3 _savedPos;
+        private Quaternion _savedRot;
+        private bool _haveSavedPose;
 
         private void OnEnable()
         {
@@ -42,7 +94,23 @@ namespace CameraControl
             bool want = autoOrbitOverride
                         || (recorder != null && recorder.IsPaused)
                         || (baker != null && baker.IsCapturing);
-            if (orbit.enabled != want) orbit.enabled = want;
+            if (orbit.enabled == want) return;
+            // Snapshot on the off→on edge / restore on the on→off edge. The
+            // restore happens the same frame the controller is disabled, so its
+            // LateUpdate can never re-apply an orbit pose over it.
+            if (want)
+            {
+                _savedPos = transform.position;
+                _savedRot = transform.rotation;
+                _haveSavedPose = true;
+            }
+            orbit.enabled = want;
+            if (!want && restorePoseOnDisable && _haveSavedPose)
+            {
+                transform.position = _savedPos;
+                transform.rotation = _savedRot;
+                _haveSavedPose = false;
+            }
         }
     }
 }

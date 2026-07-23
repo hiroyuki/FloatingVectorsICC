@@ -1,5 +1,5 @@
 // The show's single owner: drives the one-second-take ExperienceStateMachine
-// (Idle → Calibrate → FreeMove → Shoot → Processing → ResultShow → QrShow —
+// (Idle → Calibrate → TestMove1/2 → Shoot → Processing → ResultShow → QrShow —
 // Idle shows nothing but the floor grid while unattended), owns
 // every runtime object the experience spawns (visitor UI, presence detector,
 // live skeleton feed), snapshots the dev-mode values it touches on Enter and
@@ -11,19 +11,27 @@
 //                and become the PER-VISITOR fusion profile — applied to the
 //                live fusion immediately and to the take conversion later.
 //                Window expiry proceeds with the default profile.
-//   FreeMove   — free movement with the (now personally calibrated) live
-//                sculpture.
-//   Shoot      — cue text → countdown (recording starts WITH the countdown so
-//                the fusion has warm-up) → at zero ONE second is the take →
-//                recording stops.
+//   TestMove1/2 — practice rounds: intro message(s) → countdown with a hint →
+//                ONE second recorded → v11s conversion → できたよ！ +
+//                playbackLoops looped play-throughs with the ribbons and the
+//                orbit cameras. No capture, no export, no upload; the take
+//                stays on disk unused. Ends in TestMoveDone.
+//   Shoot      — ほんばん cue → countdown with a hint → at zero ONE second is
+//                the take → recording stops.
 //   Processing — FusedTakeConverter (v11s, per-visitor profile) on a worker
 //                thread with a progress bar, then a single play-through of
 //                the converted take (loop off) and the final capture over the
 //                one-second trail window. Failure at any step falls back so
 //                the visitor is never dead-ended.
-//   ResultShow — the sculpture stays frozen at the captured moment (that IS
-//                the exported shape) while glb/usdz export + upload run.
-//   QrShow     — QR + scan prompt over the frozen result.
+//   ResultShow — the take replays playbackLoops times with the ribbons + the
+//                orbit cameras (できたよ！) while glb/usdz export + upload run
+//                in the background; the last loop freezes on the final frame.
+//   QrShow     — QR + scan prompt on the right, the frozen line model centre
+//                stage, orbit still running.
+//
+// The TSDF mesh is never drawn while the mode is on (suppressDraw held for
+// the whole session): the visible content is the point cloud + the ribbons.
+// Production still runs underneath — the capture/export consume the mesh.
 //
 // Capture protocol (carried over): set historySamples to the one-second
 // window -> wait for PointCloudMotionCurves.BuildVersion +2 (2 s timeout;
@@ -207,10 +215,26 @@ namespace Experience
         private readonly System.Collections.Generic.Dictionary<string, bool> _savedLiveSuppress =
             new System.Collections.Generic.Dictionary<string, bool>();
 
-        // visitor recording (Shoot)
+        // visitor recording (Shoot / practice rounds)
         private bool _visitorRecordingActive;
+        // The active recording is the playback TAP (rig-less machine: the
+        // played entrance take is the only frame source — SensorRecorder
+        // records its own playback stream into a new take).
+        private bool _visitorRecordingTapped;
+        // The current run's take came from the tap. Its bodies are passed
+        // through from the already-converted source take, so the v11s
+        // conversion is redundant (and on a CPU-only machine, prohibitive).
+        private bool _takeIsTapped;
         private string _savedRecFolderPath;
         private bool _savedRecAutoTimestamp;
+        // Every take recorded during the current run (practice rounds + the
+        // real one). Visitor privacy + disk hygiene: they are all DELETED once
+        // the QR is up (the QR only appears after export/upload completed, so
+        // nothing reads them again) — the still-loaded take follows on unload.
+        // Applies to dev AND production (user decision 2026-07-23). Kept across
+        // ResetRunState so a failed delete (transient file lock) retries on the
+        // next boundary.
+        private readonly List<string> _runTakeRoots = new List<string>();
 
         // visitor playback (the Processing play-through; stays switched through
         // ResultShow/QrShow so the frozen result keeps its transport)
@@ -228,6 +252,7 @@ namespace Experience
         private PointCloudView _pcView;
         private bool _savedShowClouds;
         private bool _cloudsShown;
+        private bool _cloudRevealed; // sweep finished — the bones hand over to the cloud
         private Coroutine _cloudRevealRoutine;
         private static readonly int PcRevealModeId = Shader.PropertyToID("_PcRevealMode");
         private static readonly int PcRevealYId = Shader.PropertyToID("_PcRevealY");
@@ -242,6 +267,12 @@ namespace Experience
         private bool _profileSamplingActive;
         private PoseHoldDetector _starHold;
         private bool _calibrationDone;
+        private bool _testMoveDone;    // practice mini-cycle finished (per TestMove state)
+        // The practice presentation stretch (recording stopped → conversion →
+        // load → looped playback): suspends the FSM's leave reset — see
+        // ExperienceInputs.TestMovePresenting. Cleared on every exit path.
+        private bool _testMovePresenting;
+        private bool _resultShowDone;  // ResultShow playback loops finished
         private bool _recordingDone;
         private bool _processingDone, _processingFailed;
         private string _takeRoot;
@@ -249,6 +280,22 @@ namespace Experience
         private TSDFSnapshot _snapshot;
         private bool _exportDone, _exportFailed;
         private Coroutine _calibrateRoutine, _shootRoutine, _processingRoutine, _exportRoutine;
+        private Coroutine _testMoveRoutine, _resultShowRoutine;
+
+        // Orbit cameras (visitor displays). Found via Shared.IOrbitOverride —
+        // PauseOrbitGate lives in Assembly-CSharp, which this asmdef cannot
+        // reference. The gates snapshot+restore the camera pose themselves
+        // (RestorePoseOnDisable, forced on for the session).
+        private struct OrbitGateSnap
+        {
+            public Shared.IOrbitOverride gate;
+            public bool savedOverride;
+            public bool savedRestore;
+            public bool savedAutoOrbit;
+        }
+        private readonly List<OrbitGateSnap> _orbitGates = new List<OrbitGateSnap>();
+        private bool _orbitOn;
+        private bool _savedTsdfSuppress; // mesh hidden for the whole session
         private Coroutine _gapPaintRoutine; // deferred state paint (stateGapSeconds)
         private CancellationTokenSource _cts;
         private Task<PublishResult> _publishTask;
@@ -320,11 +367,14 @@ namespace Experience
                 Present = ComputePresent(),
                 Fault = debugForceFault || (healthMonitor != null && !healthMonitor.IsHealthy),
                 CalibrationDone = _calibrationDone,
+                TestMoveDone = _testMoveDone,
+                TestMovePresenting = _testMovePresenting,
                 RecordingDone = _recordingDone,
                 ProcessingDone = _processingDone,
                 ProcessingFailed = _processingFailed,
                 ExportDone = _exportDone,
                 ExportFailed = _exportFailed,
+                ResultShowDone = _resultShowDone,
             };
             _fsm.Tick(Time.deltaTime, in inputs, config.timings);
             UpdateCrowdNotice();
@@ -423,12 +473,14 @@ namespace Experience
                 case ExperienceState.Consent:
                 case ExperienceState.Welcome:
                 case ExperienceState.Calibrate:
-                case ExperienceState.FreeMove:
                 case ExperienceState.Shoot:
                     ApplyBodySource(BodySource.Live);
                     break;
+                case ExperienceState.TestMove1:
+                case ExperienceState.TestMove2:
                 case ExperienceState.Processing:
-                    // Live until the play-through switches the transport.
+                    // Live until the play-through switches the transport (the
+                    // TestMove states carry their own playback sub-phase).
                     if (_visitorPlaybackActive) ApplyBodySource(BodySource.VisitorPlayback, _takeHasBodies);
                     else ApplyBodySource(BodySource.Live);
                     break;
@@ -462,6 +514,14 @@ namespace Experience
         // presence blend fires the moment someone steps in.
         private bool ComputePresent()
         {
+            // Playback-driven rig (no live cameras): presence monitoring is OFF
+            // by design — the stand-in visitor is a recording, and every
+            // transport swap (practice takes, entrance reloads) opens multi-
+            // second gaps in the fallback signals that reset the run for no
+            // reason. The leave-grace / QR-departure flows are validated on the
+            // real rig, where live renderers exist and the monitoring below
+            // runs unchanged. Deliberately no toggle (user decision 2026-07-23).
+            if (!HasLiveRenderers()) return true;
             if (_presence == null) return false;
             bool ghostDrivesMerge = _visitorPlaybackActive && _takeHasBodies;
             if (!ghostDrivesMerge) return _presence.IsPresent;
@@ -497,6 +557,34 @@ namespace Experience
 
             // 1) snapshot dev values.
             if (poseHistory != null) _savedHistorySamples = poseHistory.historySamples;
+            // The TSDF mesh never draws during the show — the visible content is
+            // the point cloud + the ribbons. Draw-only: integration/capture/export
+            // still consume the mesh. Restored on Exit.
+            if (tsdfView != null)
+            {
+                _savedTsdfSuppress = tsdfView.suppressDraw;
+                tsdfView.suppressDraw = true;
+            }
+            // Orbit cameras: the show owns the override for the session (playback
+            // and QR phases orbit the model) and forces pose-restore-on-disable so
+            // the stage framing comes back for the next visitor / on exit.
+            _orbitGates.Clear();
+            _orbitOn = false;
+            foreach (var mb in FindObjectsByType<MonoBehaviour>(FindObjectsSortMode.None))
+            {
+                if (mb is not Shared.IOrbitOverride gate) continue;
+                _orbitGates.Add(new OrbitGateSnap
+                {
+                    gate = gate,
+                    savedOverride = gate.OrbitOverride,
+                    savedRestore = gate.RestorePoseOnDisable,
+                    savedAutoOrbit = gate.AutoOrbit,
+                });
+                gate.OrbitOverride = false;
+                gate.RestorePoseOnDisable = true;
+                // The visitor has no mouse — an orbit phase must rotate by itself.
+                gate.AutoOrbit = true;
+            }
             if (motionCurves != null)
             {
                 _savedCurvesVisible = motionCurves.visible;
@@ -638,6 +726,7 @@ namespace Experience
                 _pcView.showPointClouds = false;
             }
             _cloudsShown = false;
+            _cloudRevealed = false;
             Shader.SetGlobalFloat(PcRevealModeId, 0f);
             _cumulative = FindFirstObjectByType<PointCloudCumulative>();
             if (_cumulative != null)
@@ -672,8 +761,10 @@ namespace Experience
             if (_liveSyncOn) SetLiveRenderSync(false);
 
             StopRoutine(ref _calibrateRoutine);
+            StopRoutine(ref _testMoveRoutine);
             StopRoutine(ref _shootRoutine);
             StopRoutine(ref _processingRoutine);
+            StopRoutine(ref _resultShowRoutine);
             StopRoutine(ref _exportRoutine);
             StopRoutine(ref _gapPaintRoutine);
             StopRoutine(ref _cloudRevealRoutine);
@@ -712,6 +803,7 @@ namespace Experience
             _converter = null;
             AbortVisitorRecording();
             StopVisitorPlayback();
+            DeleteRunTakes(includeLoaded: true); // visitor data never outlives the show
             RestoreHistorySamples(); // in case a capture was mid-flight
 
             // body-source restore (mirror of the EnterMode snapshot). The
@@ -829,8 +921,24 @@ namespace Experience
                 _sculptureFrozen = false;
             }
             if (poseHistory != null) poseHistory.historySamples = _savedHistorySamples;
-            // Leaving mode mid-Processing must not strand the sculpture hidden.
+            // Leaving mode mid-Processing must not strand the ribbons hidden.
             SetSculptureVisible(true);
+            // Session-long TSDF hide + orbit ownership — hand both back.
+            if (tsdfView != null) tsdfView.suppressDraw = _savedTsdfSuppress;
+            SetOrbit(false);
+            foreach (var s in _orbitGates)
+            {
+                if (s.gate is not MonoBehaviour mb || mb == null) continue;
+                // Off-edge NOW, while RestorePoseOnDisable is still the show's
+                // forced true — the gate's own deferred Update would run only
+                // after the dev flags below took effect, stranding the camera
+                // at the orbit pose.
+                s.gate.ReleaseOrbit();
+                s.gate.OrbitOverride = s.savedOverride;
+                s.gate.RestorePoseOnDisable = s.savedRestore;
+                s.gate.AutoOrbit = s.savedAutoOrbit;
+            }
+            _orbitGates.Clear();
 
             Debug.Log($"[{nameof(ExperienceDirector)}] experience mode OFF (dev values restored).", this);
         }
@@ -887,21 +995,35 @@ namespace Experience
             switch (target)
             {
                 case ExperienceState.Calibrate: _calibrationDone = false; break;
+                case ExperienceState.TestMove1:
+                case ExperienceState.TestMove2:
+                    _testMoveDone = false;
+                    break;
                 case ExperienceState.Shoot: _recordingDone = false; break;
                 case ExperienceState.Processing:
                     _processingDone = _processingFailed = false;
+                    if (string.IsNullOrEmpty(_takeRoot))
+                    {
+                        _takeRoot = config.devCannedTakeRoot;
+                        _takeIsTapped = false;
+                    }
+                    break;
+                case ExperienceState.ResultShow:
+                    _exportDone = _exportFailed = false;
+                    _resultShowDone = false;
+                    // A direct jump has no play-through behind it — borrow the
+                    // canned take so the replay presentation can be checked.
                     if (string.IsNullOrEmpty(_takeRoot)) _takeRoot = config.devCannedTakeRoot;
                     break;
-                case ExperienceState.ResultShow: _exportDone = _exportFailed = false; break;
             }
             Debug.Log($"[{nameof(ExperienceDirector)}] dev jump → {target}.", this);
             _fsm.ForceTransition(target, "dev jump");
         }
 
         // Digit row (and keypad), in state order: 0=Idle(頭出し) 1=Consent
-        // 2=Welcome 3=Calibrate 4=FreeMove 5=Shoot 6=Processing 7=ResultShow
-        // 8=QrShow. TSDFDebugSession's per-camera views moved to Q/W/E/R (all
-        // cams: A) to free the digits for this.
+        // 2=Welcome 3=Calibrate 4=TestMove1 5=TestMove2 6=Shoot 7=Processing
+        // 8=ResultShow 9=QrShow. TSDFDebugSession's per-camera views moved to
+        // Q/W/E/R (all cams: A) to free the digits for this.
         private void HandleDevJumpHotkeys()
         {
             if (!Input.anyKeyDown) return;
@@ -924,9 +1046,13 @@ namespace Experience
             _metricsMeasured = false;
             _visitorProfile = null;
             _calibrationDone = false;
+            _testMoveDone = false;
+            _testMovePresenting = false;
+            _resultShowDone = false;
             _recordingDone = false;
             _processingDone = _processingFailed = false;
             _takeRoot = null;
+            _takeIsTapped = false;
             _snapshot = null;
             _exportDone = _exportFailed = false;
             _takeHasBodies = true;
@@ -952,8 +1078,20 @@ namespace Experience
                 // whatever the cameras collected over the window still yields a
                 // usable best-effort profile — the star pose only makes the
                 // samples cleaner. Walked-away/fault paths discard as before.
-                if (to == ExperienceState.FreeMove) FinalizeProfileSamplingBestEffort();
+                if (to == ExperienceState.TestMove1) FinalizeProfileSamplingBestEffort();
                 else CancelProfileSampling();
+            }
+            if (from is ExperienceState.TestMove1 or ExperienceState.TestMove2
+                && _testMoveRoutine != null)
+            {
+                // Abnormal exit (walked away, fault, dev jump) mid-practice: the
+                // routine did not run its own cleanup — stop whatever sub-phase
+                // was live. The playback transport is torn down by the Idle side
+                // effects / the next StartVisitorPlayback.
+                StopRoutine(ref _testMoveRoutine);
+                AbortVisitorRecording();
+                _converter?.Abort();
+                _testMovePresenting = false;
             }
             if (from == ExperienceState.Shoot)
             {
@@ -966,8 +1104,12 @@ namespace Experience
                 _converter?.Abort();
                 RestoreHistorySamples(); // the capture may have been mid-flight
             }
-            if (from == ExperienceState.ResultShow && to == ExperienceState.Idle)
-                CancelPublish(); // fail path or skip; success path already completed
+            if (from == ExperienceState.ResultShow)
+            {
+                StopRoutine(ref _resultShowRoutine);
+                if (to == ExperienceState.Idle)
+                    CancelPublish(); // fail path or skip; success path already completed
+            }
 
             // Idle → visitor handoff (k4abt pipeline only): restart the workers
             // across the clock jump left by the previous run's playback. The
@@ -980,6 +1122,17 @@ namespace Experience
 
             if (to == ExperienceState.Idle || from == ExperienceState.QrShow)
                 ResetRunState();
+
+            // The SAME director flag drives both TestMove states in sequence —
+            // entering the second with the first's TestMoveDone still up would
+            // skip it entirely (the FSM clears its own latch on entry, but it
+            // re-latches from this input on the very next tick). ResultShowDone
+            // gets the same treatment for symmetry (dev jumps land here without
+            // a run reset).
+            if (to is ExperienceState.TestMove1 or ExperienceState.TestMove2)
+                _testMoveDone = false;
+            if (to == ExperienceState.ResultShow)
+                _resultShowDone = false;
 
             ApplyStateSideEffects(to);
         }
@@ -1006,6 +1159,9 @@ namespace Experience
                     if (sensorRecorder != null
                         && (sensorRecorder.IsPlaying || sensorRecorder.RecordedFrameCount > 0))
                         sensorRecorder.StopAndUnload();
+                    // Transport unloaded — the last run's still-loaded take can
+                    // go now (QrShow already deleted the rest).
+                    DeleteRunTakes(includeLoaded: true);
                     RestoreHistorySamples(); // drop the one-second window of the previous run
                     _ui.ClearAll();
                     ApplyBodySource(BodySource.Live);
@@ -1019,12 +1175,19 @@ namespace Experience
                     if (!t.skipCalibrate)
                         _calibrateRoutine = StartCoroutine(CalibrateRoutine());
                     break;
-                case ExperienceState.FreeMove:
-                    break; // message only — the live sculpture is the content
+                case ExperienceState.TestMove1:
+                    if (!t.skipTestMoves)
+                        _testMoveRoutine = StartCoroutine(TestMoveRoutine(1));
+                    break;
+                case ExperienceState.TestMove2:
+                    if (!t.skipTestMoves)
+                        _testMoveRoutine = StartCoroutine(TestMoveRoutine(2));
+                    break;
                 case ExperienceState.Shoot:
                     if (t.skipShoot)
                     {
                         _takeRoot = config.devCannedTakeRoot; // pre-recorded dev take
+                        _takeIsTapped = false;
                     }
                     else
                     {
@@ -1036,8 +1199,16 @@ namespace Experience
                     break;
                 case ExperienceState.ResultShow:
                     _exportRoutine = StartCoroutine(ExportAndPublish());
+                    _resultShowRoutine = StartCoroutine(ResultShowRoutine());
                     break;
                 case ExperienceState.QrShow:
+                    // The frozen line model keeps orbiting under the QR (a dev
+                    // jump straight here turns the orbit on too).
+                    SetOrbit(true);
+                    // The QR is up = export/upload done — the recorded takes
+                    // (practice + real) have served their purpose. Delete them
+                    // now; the loaded one (on screen) follows on unload.
+                    DeleteRunTakes(includeLoaded: false);
                     break; // QR cue handled by PlayStateEnterSe below
                 case ExperienceState.Fault:
                     string fault = healthMonitor != null ? healthMonitor.FaultAlertText : "";
@@ -1049,16 +1220,29 @@ namespace Experience
                     break;
             }
             if (state != ExperienceState.Fault) _ui.ClearAlert();
+            // Orbit is a playback-phase affair: the TestMove routines switch it on
+            // for their play-through and ResultShow's routine does the same (it
+            // stays on through QrShow). Every OTHER state forces it off, so any
+            // abnormal exit (walked away, fault, dev jump) restores the stage
+            // framing via the gates' pose restore.
+            if (state is not (ExperienceState.TestMove1 or ExperienceState.TestMove2
+                              or ExperienceState.ResultShow or ExperienceState.QrShow))
+                SetOrbit(false);
             ApplyCurvesVisibility(state);
-            ApplyBonesVisibility(state);
+            // Cloud BEFORE bones: hiding the cloud clears _cloudRevealed, and the
+            // bones read that flag — a jump from a revealed state back into the
+            // intro must land with the bones already back on.
             ApplyCloudVisibility(state);
-            // The TSDF mesh + ribbons stay OFF SCREEN for the whole interactive
-            // run now (bones-only intro, then the raw cloud is the content — see
-            // ApplyBonesVisibility / ApplyCloudVisibility) and through Processing,
-            // so the finished sculpture is a REVEAL at ResultShow. Draw-only:
+            ApplyBonesVisibility(state);
+            // The ribbons stay OFF SCREEN through the live/interactive phases
+            // (bones-only intro, then the raw cloud is the content — see
+            // ApplyBonesVisibility / ApplyCloudVisibility) and through Processing;
+            // they are the star of the playback phases. The TestMove routines
+            // flip this on for their own play-through sub-phase. Draw-only:
             // production keeps running underneath for the capture/export. Driven
             // off the state (not the routines) so every exit path — fault, visitor
             // walked off, processing failure — lands on the right visibility.
+            // (The TSDF mesh is session-suppressed in EnterMode and never shows.)
             SetSculptureVisible(state is ExperienceState.Idle
                                      or ExperienceState.ResultShow
                                      or ExperienceState.QrShow
@@ -1106,7 +1290,8 @@ namespace Experience
                 case ExperienceState.Consent: PlaySe(config.consentSe); break;
                 case ExperienceState.Welcome: PlaySe(config.welcomeSe); break;
                 case ExperienceState.Calibrate: PlaySe(config.calibrateSe); break;
-                case ExperienceState.FreeMove: PlaySe(config.freeMoveSe); break;
+                case ExperienceState.TestMove1:
+                case ExperienceState.TestMove2: PlaySe(config.testMoveSe); break;
                 case ExperienceState.Shoot: PlaySe(config.shootCueSe); break;
                 case ExperienceState.Processing: PlaySe(config.processingSe); break;
                 case ExperienceState.ResultShow: PlaySe(config.resultSe); break;
@@ -1119,7 +1304,7 @@ namespace Experience
         /// read-the-screen stages (notice, greeting, pose guide) and curves drawn
         /// from the approach walk are noise the visitor has no way to read; the
         /// sculpture should appear the moment it becomes theirs to move. From
-        /// FreeMove on they are the content, and Processing/ResultShow need them
+        /// the TestMoves on they are the content, and Processing/ResultShow need them
         /// visible because the capture builds from them.
         /// </summary>
         private void ApplyCurvesVisibility(ExperienceState state)
@@ -1130,7 +1315,8 @@ namespace Experience
             // reveal is tied to the visitor's own action.
             if (state == ExperienceState.Calibrate && _calibrationDone)
             { motionCurves.visible = true; return; }
-            motionCurves.visible = state is ExperienceState.FreeMove
+            motionCurves.visible = state is ExperienceState.TestMove1
+                                        or ExperienceState.TestMove2
                                         or ExperienceState.Shoot
                                         or ExperienceState.Processing
                                         or ExperienceState.ResultShow
@@ -1141,10 +1327,14 @@ namespace Experience
         /// The intro (Consent through the pose guide) shows the visitor as a bare
         /// skeleton — bone lines only, no TSDF mesh, no clouds — so the privacy
         /// notice and このポーズをとってね are read against exactly the body data
-        /// being captured. The bones then STAY on over the revealed point cloud
-        /// through FreeMove and Shoot. Off from Processing on (progress bar, then
-        /// the frozen sculpture own those screens) and in Idle/Fault. EnterMode
-        /// snapshots the operator's showBones; ExitMode restores it.
+        /// being captured. The bones stay on while the point cloud rises, then
+        /// HAND OVER: the instant the reveal sweep completes (_cloudRevealed) the
+        /// bones go out and the cloud alone is the content through the TestMoves and
+        /// Shoot. Off from Processing on (progress bar, then the frozen sculpture
+        /// own those screens) and in Idle/Fault. Re-evaluated on every state entry
+        /// AND on reveal completion (CloudRevealRoutine); a backward jump or run
+        /// reset hides the cloud, which clears _cloudRevealed and brings the bones
+        /// back. EnterMode snapshots the operator's showBones; ExitMode restores it.
         /// </summary>
         private void ApplyBonesVisibility(ExperienceState state)
         {
@@ -1152,8 +1342,10 @@ namespace Experience
             merger.showBones = state is ExperienceState.Consent
                                      or ExperienceState.Welcome
                                      or ExperienceState.Calibrate
-                                     or ExperienceState.FreeMove
-                                     or ExperienceState.Shoot;
+                                     or ExperienceState.TestMove1
+                                     or ExperienceState.TestMove2
+                                     or ExperienceState.Shoot
+                            && !_cloudRevealed;
         }
 
         /// <summary>
@@ -1163,20 +1355,43 @@ namespace Experience
         /// cloudRevealSeconds (a global shader clip on PointCloudUnlit sweeping
         /// _PcRevealY from the feet up — see the shader note on why globals).
         /// The window-expiry and skipCalibrate paths land here too, via the
-        /// FreeMove entry. Hidden again from Processing on. Display-only on both
+        /// TestMove1 entry. Hidden during Processing. Display-only on both
         /// halves: PointCloudView toggles MeshRenderers and the clip lives in the
         /// vertex shader, so BT, TSDF integration, curves and the capture always
         /// consume the full cloud.
         /// </summary>
         private void ApplyCloudVisibility(ExperienceState state)
         {
-            bool show = state is ExperienceState.FreeMove or ExperienceState.Shoot
+            // Clouds carry every phase that has stage content now: the live body
+            // from the はかれたよ！ beat through the practice rounds and the shoot,
+            // the take replays (TestMove playback / ResultShow) and the frozen
+            // final frame under the QR. Idle too — with the TSDF mesh session-
+            // hidden, the raw cloud is what a walk-in visitor sees of themselves.
+            // Hidden only for the bones-only intro (Consent..Calibrate pre-match)
+            // and Processing (progress bar owns the screen).
+            bool show = state is ExperienceState.Idle
+                             or ExperienceState.TestMove1
+                             or ExperienceState.TestMove2
+                             or ExperienceState.Shoot
+                             or ExperienceState.ResultShow
+                             or ExperienceState.QrShow
                      || (state == ExperienceState.Calibrate && _calibrationDone);
-            if (show == _cloudsShown) return;
+            if (show == _cloudsShown)
+            {
+                // No visibility edge, but a state change during playback still
+                // needs the live MRs' show/hide refreshed (StartVisitorPlayback
+                // hides them under the shared PointCloudView flag).
+                if (show && !_visitorPlaybackActive && HasLiveRenderers())
+                    sensorManager?.SetLiveVisualsVisible(true);
+                return;
+            }
             _cloudsShown = show;
+            _cloudRevealed = false; // hand-back: bones return until the next sweep lands
             StopRoutine(ref _cloudRevealRoutine);
             Shader.SetGlobalFloat(PcRevealModeId, 0f);
             SetCloudRenderersVisible(show);
+            if (show && !_visitorPlaybackActive && HasLiveRenderers())
+                sensorManager?.SetLiveVisualsVisible(true);
             if (show && isActiveAndEnabled)
                 _cloudRevealRoutine = StartCoroutine(CloudRevealRoutine());
         }
@@ -1189,8 +1404,11 @@ namespace Experience
 
         // Sweep the reveal plane from the floor to overhead, then drop the clip
         // entirely (mode 0) so the fully-shown cloud pays nothing per vertex.
-        // Survives the Calibrate→FreeMove transition because ApplyCloudVisibility
-        // only restarts it on a hidden→shown edge.
+        // Survives the Calibrate→TestMove1 transition because ApplyCloudVisibility
+        // only restarts it on a hidden→shown edge. Completion is the bones'
+        // exit cue: the skeleton that carried the intro hands the stage to the
+        // fully-risen cloud (an interrupted sweep never sets _cloudRevealed, so
+        // the bones stay up on every abort path).
         private IEnumerator CloudRevealRoutine()
         {
             float dur = config.cloudRevealSeconds
@@ -1206,7 +1424,9 @@ namespace Experience
                 }
                 Shader.SetGlobalFloat(PcRevealModeId, 0f);
             }
+            _cloudRevealed = true;
             _cloudRevealRoutine = null;
+            if (_fsm != null) ApplyBonesVisibility(_fsm.State);
         }
 
         /// <summary>
@@ -1233,7 +1453,8 @@ namespace Experience
         /// </summary>
         private void SetSculptureVisible(bool shown)
         {
-            if (tsdfView != null) tsdfView.suppressDraw = !shown;
+            // Ribbons only — the TSDF mesh is suppressed for the whole session
+            // (EnterMode): the show's visible content is point cloud + lines.
             if (motionCurves != null) motionCurves.suppressDraw = !shown;
         }
 
@@ -1301,7 +1522,10 @@ namespace Experience
                     if (_calibrationDone) _ui.ShowMessage(config.calibrateMatchedText);
                     else _ui.ShowPoseGuide(StarGuide(), config.calibrateText);
                     break;
-                case ExperienceState.FreeMove: _ui.ShowMessage(config.freeMoveText); break;
+                // The routines own the intro → countdown → playback sequences;
+                // repaint restores the first intro (same contract as Shoot's cue).
+                case ExperienceState.TestMove1: _ui.ShowMessage(config.testMove1IntroText); break;
+                case ExperienceState.TestMove2: _ui.ShowMessage(config.testMove2IntroText); break;
                 case ExperienceState.Shoot:
                     // the routine owns the cue → countdown → shooting sequence;
                     // repaint just restores the cue text
@@ -1477,22 +1701,96 @@ namespace Experience
 
         // ------------------------------------------------ Shoot (recording) ----
 
+        /// <summary>The rig-less path can still record: the recorder is playing
+        /// (the entrance stand-in) and its stream can be tapped into a new take.</summary>
+        private bool CanTapRecord =>
+            sensorRecorder != null && !HasLiveRenderers() && sensorRecorder.IsPlaying;
+
         private void StartVisitorRecording()
         {
-            if (config.timings.dummyShoot) return; // dummy shoot — no recorder involved
+            _visitorRecordingTapped = false;
             if (sensorRecorder == null) return;
+            bool tap = CanTapRecord;
+            // dummyShoot without a tappable source: the old no-recording path
+            // (canned take substitutes). With a playing source the take is REAL
+            // — recorded off the playback stream, production-length.
+            if (config.timings.dummyShoot && !tap) return;
             _savedRecFolderPath = sensorRecorder.folderPath;
             _savedRecAutoTimestamp = sensorRecorder.autoTimestampFolder;
             if (!string.IsNullOrEmpty(config.visitorRecordingRoot))
                 sensorRecorder.folderPath = config.visitorRecordingRoot;
             sensorRecorder.autoTimestampFolder = true;
-            sensorRecorder.StartRecording();
-            _visitorRecordingActive = sensorRecorder.CurrentState == SensorRecorder.State.Recording;
+            if (tap)
+            {
+                _visitorRecordingActive = sensorRecorder.StartPlaybackTapRecording();
+                _visitorRecordingTapped = _visitorRecordingActive;
+            }
+            else
+            {
+                sensorRecorder.StartRecording();
+                _visitorRecordingActive = sensorRecorder.CurrentState == SensorRecorder.State.Recording;
+            }
             if (!_visitorRecordingActive)
             {
                 Debug.LogError($"[{nameof(ExperienceDirector)}] recording failed to start " +
-                               "(no live renderers?) — the take will be empty.", this);
+                               "(no live renderers and no playback to tap?) — the take will be empty.", this);
                 RestoreRecorderFolderConfig();
+            }
+        }
+
+        /// <summary>Stop whichever recording mode is active and return the
+        /// finished take root (null when nothing was recorded). Sets
+        /// _takeIsTapped for the conversion skip.</summary>
+        private string FinishVisitorRecording()
+        {
+            if (!_visitorRecordingActive || sensorRecorder == null) return null;
+            string root;
+            if (_visitorRecordingTapped)
+            {
+                sensorRecorder.StopPlaybackTapRecording();
+                root = sensorRecorder.LastTapRecordingRoot;
+                _takeIsTapped = true;
+            }
+            else
+            {
+                sensorRecorder.StopRecording();
+                root = sensorRecorder.LastRecordingRoot;
+                _takeIsTapped = false;
+            }
+            _visitorRecordingActive = false;
+            _visitorRecordingTapped = false;
+            RestoreRecorderFolderConfig();
+            if (!string.IsNullOrEmpty(root) && !_runTakeRoots.Contains(root))
+                _runTakeRoots.Add(root);
+            return root;
+        }
+
+        /// <summary>Delete the takes recorded during this run. Only paths that
+        /// FinishVisitorRecording produced are ever in the list — the canned
+        /// dev take and the entrance recording can never be deleted here. The
+        /// take still loaded in the transport (frozen on the QR screen) is
+        /// skipped unless includeLoaded — its RCSV files may be open for lazy
+        /// reads; it is deleted after the unload on the next run boundary.</summary>
+        private void DeleteRunTakes(bool includeLoaded)
+        {
+            for (int i = _runTakeRoots.Count - 1; i >= 0; i--)
+            {
+                string root = _runTakeRoots[i];
+                if (string.IsNullOrEmpty(root)) { _runTakeRoots.RemoveAt(i); continue; }
+                bool loaded = _visitorPlaybackActive && root == _takeRoot;
+                if (!includeLoaded && loaded) continue;
+                try
+                {
+                    if (Directory.Exists(root)) Directory.Delete(root, true);
+                    _runTakeRoots.RemoveAt(i);
+                    Debug.Log($"[{nameof(ExperienceDirector)}] deleted visitor take {root}.", this);
+                }
+                catch (Exception e)
+                {
+                    // Keep it in the list — the next boundary retries.
+                    Debug.LogWarning($"[{nameof(ExperienceDirector)}] could not delete take " +
+                                     $"{root}: {e.Message} — will retry.", this);
+                }
             }
         }
 
@@ -1501,7 +1799,7 @@ namespace Experience
         // Recording covers the CAPTURE WINDOW ONLY (plus recordPreRollSeconds).
         // It used to start with the countdown, to warm the fusion up before the
         // second that counts — but the live RTMPose fusion runs continuously
-        // through FreeMove, so it is already warm when Shoot begins. Recording
+        // through the practice rounds, so it is already warm when Shoot begins. Recording
         // the countdown only produced ~3 extra seconds per camera that the
         // v11s conversion then paid full inference on and the capture threw
         // away (the pose history keeps the capture window).
@@ -1535,7 +1833,7 @@ namespace Experience
                 int remain = Mathf.Max(1, Mathf.CeilToInt(zeroAt - _fsm.TimeInState));
                 if (remain != shown)
                 {
-                    _ui.ShowCountdown(remain);
+                    _ui.ShowCountdown(remain, config.shootHintText);
                     PlaySe(config.countdownTickSe);
                     shown = remain;
                 }
@@ -1553,31 +1851,45 @@ namespace Experience
                 yield return null;
             if (!_active || _fsm.State != ExperienceState.Shoot) yield break;
 
-            if (t.dummyShoot)
+            if (_visitorRecordingActive && sensorRecorder != null)
+            {
+                _takeRoot = FinishVisitorRecording();
+            }
+            else if (t.dummyShoot)
             {
                 _takeRoot = config.devCannedTakeRoot; // canned take stands in for the shot
-            }
-            else if (_visitorRecordingActive && sensorRecorder != null)
-            {
-                sensorRecorder.StopRecording();
-                _takeRoot = sensorRecorder.LastRecordingRoot;
-                _visitorRecordingActive = false;
-                RestoreRecorderFolderConfig();
+                _takeIsTapped = false;
             }
             PlaySe(config.recordEndSe);
             _recordingDone = true;
             _shootRoutine = null;
         }
 
-        /// <summary>Visitor walked away / fault mid-recording: stop and DISCARD
-        /// (the take stays on disk but is not used).</summary>
+        /// <summary>Visitor walked away / fault mid-recording: stop and discard.
+        /// The partial take is visitor data like any finished one — it joins
+        /// _runTakeRoots so the next boundary (Idle / QR / mode exit) deletes
+        /// it from disk.</summary>
         private void AbortVisitorRecording()
         {
             if (!_visitorRecordingActive) return;
             _visitorRecordingActive = false;
-            if (sensorRecorder != null
-                && sensorRecorder.CurrentState == SensorRecorder.State.Recording)
-                sensorRecorder.StopRecording();
+            if (sensorRecorder != null)
+            {
+                string root = null;
+                if (_visitorRecordingTapped)
+                {
+                    sensorRecorder.StopPlaybackTapRecording();
+                    root = sensorRecorder.LastTapRecordingRoot;
+                }
+                else if (sensorRecorder.CurrentState == SensorRecorder.State.Recording)
+                {
+                    sensorRecorder.StopRecording();
+                    root = sensorRecorder.LastRecordingRoot;
+                }
+                if (!string.IsNullOrEmpty(root) && !_runTakeRoots.Contains(root))
+                    _runTakeRoots.Add(root);
+            }
+            _visitorRecordingTapped = false;
             RestoreRecorderFolderConfig();
         }
 
@@ -1618,71 +1930,9 @@ namespace Experience
                     Debug.LogWarning($"[{nameof(ExperienceDirector)}] live curve snapshot skipped: {curveWhy}", this);
             }
 
-            // ---- stage 1: v11s conversion (skippable) ----
-            // Canned-take protection: the conversion rewrites bodies_main IN PLACE.
-            // A dev E2E run must never mutate the canonical recording unless the
-            // operator explicitly opted in with a disposable copy.
+            // ---- stage 1: v11s conversion (skippable, shared with TestMove) ----
             bool cannedTake = t.skipShoot || t.dummyShoot;
-            bool convert = !t.skipProcessing
-                && !(cannedTake && !config.allowCannedTakeConversion);
-            if (cannedTake && !config.allowCannedTakeConversion && !t.skipProcessing)
-                Debug.Log($"[{nameof(ExperienceDirector)}] canned take — skipping v11s conversion " +
-                          "(allowCannedTakeConversion is off); playing existing bodies_main.", this);
-
-            if (convert)
-            {
-                _converter = new FusedTakeConverter();
-                bool started = _converter.Start(_takeRoot, new FusedTakeConverter.Options
-                {
-                    ModelsDir = config.conversionModelsDir,
-                    BodyProfilePath = config.conversionBodyProfilePath,
-                    ProfileOverride = _visitorProfile, // per-visitor calibration, if measured
-                    Provider = config.conversionProvider,
-                    ConfThreshold = config.conversionConfThreshold,
-                    RunCatchupSmooth = config.runCatchupSmooth,
-                });
-                if (!started)
-                {
-                    Debug.LogWarning($"[{nameof(ExperienceDirector)}] v11s conversion could not start " +
-                                     $"({_converter.Error}) — falling back to the take's own bodies.", this);
-                }
-                else
-                {
-                    float deadline = Time.realtimeSinceStartup + t.processingTimeoutSeconds;
-                    float abandonAt = float.PositiveInfinity;
-                    while (_converter.Status == FusedTakeConverter.ConvertStatus.Running)
-                    {
-                        float now = Time.realtimeSinceStartup;
-                        if (float.IsInfinity(abandonAt) && now > deadline)
-                        {
-                            Debug.LogWarning($"[{nameof(ExperienceDirector)}] v11s conversion exceeded " +
-                                             $"{t.processingTimeoutSeconds:0}s — aborting, falling back " +
-                                             "to the take's own bodies.", this);
-                            _converter.Abort();
-                            abandonAt = now + 5f; // grace for the cooperative stop
-                        }
-                        // Abort() is cooperative — a worker stuck inside a native ORT
-                        // call can't observe it. Don't hold the visitor hostage:
-                        // abandon the thread after the grace window. Abort() locked
-                        // the converter's finalize gate, so an abandoned thread can
-                        // never rename/smooth bodies_main under the playback we
-                        // start next — unless it already ENTERED finalize (bounded
-                        // file I/O), which we wait out instead of racing.
-                        if (now > abandonAt && !_converter.IsFinalizing)
-                        {
-                            Debug.LogWarning($"[{nameof(ExperienceDirector)}] converter did not stop " +
-                                             "within the grace window — abandoning it.", this);
-                            break;
-                        }
-                        _ui.ShowProgress(_converter.Progress * 0.8f, config.processingText);
-                        yield return null;
-                    }
-                    if (_converter.Status != FusedTakeConverter.ConvertStatus.Done)
-                        Debug.LogWarning($"[{nameof(ExperienceDirector)}] v11s conversion ended " +
-                                         $"{_converter.Status} ({_converter.Error}) — playing the take's " +
-                                         "own bodies.", this);
-                }
-            }
+            yield return ConvertTakeRoutine(_takeRoot, 0f, 0.8f);
 
             // ---- stage 2: single play-through of the take (loop off) ----
             StartVisitorPlayback(_takeRoot);
@@ -1867,12 +2117,393 @@ namespace Experience
             return b;
         }
 
+        // ---------------- orbit cameras (playback/QR phases) ----------------
+
+        // Flip every gate's override together. The gates themselves restore the
+        // camera pose when their orbit turns off (RestorePoseOnDisable, forced
+        // on for the session in EnterMode).
+        private void SetOrbit(bool on)
+        {
+            if (_orbitOn == on) return;
+            _orbitOn = on;
+            foreach (var s in _orbitGates)
+                if (s.gate is MonoBehaviour mb && mb != null)
+                    s.gate.OrbitOverride = on;
+        }
+
+        // -------------- shared v11s conversion (Processing + practice) --------------
+
+        // Runs the FusedTakeConverter on takeRoot with the per-visitor profile,
+        // mapping its progress onto [progressFrom..progressTo] of the progress
+        // bar. Honours the canned-take guard and the processing timeout; every
+        // failure path just returns — the caller plays the take's own bodies.
+        //
+        // Canned-take protection: the conversion rewrites bodies_main IN PLACE.
+        // A dev E2E run must never mutate the canonical recording unless the
+        // operator explicitly opted in with a disposable copy.
+        private IEnumerator ConvertTakeRoutine(string takeRoot, float progressFrom, float progressTo)
+        {
+            var t = config.timings;
+            if (_takeIsTapped)
+            {
+                Debug.Log($"[{nameof(ExperienceDirector)}] playback-sourced (tapped) take — its " +
+                          "bodies passed through from the already-converted source; skipping " +
+                          "v11s conversion.", this);
+                yield break;
+            }
+            bool cannedTake = takeRoot == config.devCannedTakeRoot;
+            bool convert = !t.skipProcessing
+                && !(cannedTake && !config.allowCannedTakeConversion);
+            if (cannedTake && !config.allowCannedTakeConversion && !t.skipProcessing)
+                Debug.Log($"[{nameof(ExperienceDirector)}] canned take — skipping v11s conversion " +
+                          "(allowCannedTakeConversion is off); playing existing bodies_main.", this);
+            if (!convert) yield break;
+
+            _converter = new FusedTakeConverter();
+            bool started = _converter.Start(takeRoot, new FusedTakeConverter.Options
+            {
+                ModelsDir = config.conversionModelsDir,
+                BodyProfilePath = config.conversionBodyProfilePath,
+                ProfileOverride = _visitorProfile, // per-visitor calibration, if measured
+                Provider = config.conversionProvider,
+                ConfThreshold = config.conversionConfThreshold,
+                RunCatchupSmooth = config.runCatchupSmooth,
+            });
+            if (!started)
+            {
+                Debug.LogWarning($"[{nameof(ExperienceDirector)}] v11s conversion could not start " +
+                                 $"({_converter.Error}) — falling back to the take's own bodies.", this);
+                yield break;
+            }
+
+            float deadline = Time.realtimeSinceStartup + t.processingTimeoutSeconds;
+            float abandonAt = float.PositiveInfinity;
+            while (_converter.Status == FusedTakeConverter.ConvertStatus.Running)
+            {
+                float now = Time.realtimeSinceStartup;
+                if (float.IsInfinity(abandonAt) && now > deadline)
+                {
+                    Debug.LogWarning($"[{nameof(ExperienceDirector)}] v11s conversion exceeded " +
+                                     $"{t.processingTimeoutSeconds:0}s — aborting, falling back " +
+                                     "to the take's own bodies.", this);
+                    _converter.Abort();
+                    abandonAt = now + 5f; // grace for the cooperative stop
+                }
+                // Abort() is cooperative — a worker stuck inside a native ORT
+                // call can't observe it. Don't hold the visitor hostage:
+                // abandon the thread after the grace window. Abort() locked
+                // the converter's finalize gate, so an abandoned thread can
+                // never rename/smooth bodies_main under the playback we
+                // start next — unless it already ENTERED finalize (bounded
+                // file I/O), which we wait out instead of racing.
+                if (now > abandonAt && !_converter.IsFinalizing)
+                {
+                    Debug.LogWarning($"[{nameof(ExperienceDirector)}] converter did not stop " +
+                                     "within the grace window — abandoning it.", this);
+                    break;
+                }
+                _ui.ShowProgress(progressFrom + (progressTo - progressFrom) * _converter.Progress,
+                                 config.processingText);
+                yield return null;
+            }
+            if (_converter.Status != FusedTakeConverter.ConvertStatus.Done)
+                Debug.LogWarning($"[{nameof(ExperienceDirector)}] v11s conversion ended " +
+                                 $"{_converter.Status} ({_converter.Error}) — playing the take's " +
+                                 "own bodies.", this);
+        }
+
+        // ---------------- looped playback (practice + result presentation) ----------------
+
+        // Plays the loaded visitor take config.playbackLoops times and leaves
+        // the transport STOPPED on the take's final frame: on entering the last
+        // loop the recorder's loop flag is dropped, so the take's own end-stop
+        // freezes the final frame + the completed ribbons on screen (a wrap
+        // would flush the pose ring and land on frame 0). startAtSeconds > 0
+        // replays only the take's tail (canned dev takes) — re-sought after
+        // every wrap, deferred to the routine so the seek never re-enters the
+        // recorder from inside its own loop event.
+        private IEnumerator RunPlaybackLoops(ExperienceState owner, double startAtSeconds = 0)
+        {
+            if (sensorRecorder == null) yield break;
+            int target = Mathf.Max(1, config.playbackLoops);
+            int loops = 0;
+            bool seekPending = startAtSeconds > 0;
+            sensorRecorder.loop = target > 1;
+            Action onLoop = () =>
+            {
+                loops++;
+                if (loops >= target - 1) sensorRecorder.loop = false;
+                if (startAtSeconds > 0) seekPending = true;
+            };
+            sensorRecorder.OnPlaybackLooped += onLoop;
+            double duration = Math.Max(0.1, sensorRecorder.PlaybackDurationSeconds);
+            float deadline = Time.realtimeSinceStartup + (float)(duration * target) + 15f;
+            while (_active && _fsm != null && _fsm.State == owner
+                   && sensorRecorder.IsPlaying
+                   && Time.realtimeSinceStartup < deadline)
+            {
+                if (seekPending)
+                {
+                    seekPending = false;
+                    if (sensorRecorder.SeekToPlayheadSeconds(startAtSeconds))
+                        sensorRecorder.ResumePlayback();
+                }
+                yield return null;
+            }
+            sensorRecorder.OnPlaybackLooped -= onLoop;
+            // Deadline expiry / owner-state exit with the transport still
+            // rolling: freeze where we are so nothing advances under whatever
+            // owns the screen next. Normal completion is already stopped.
+            if (sensorRecorder.IsPlaying) sensorRecorder.PausePlayback();
+        }
+
+        // ---------------- TestMove (practice mini-cycle) ----------------
+
+        // The whole practice round for TestMove1 (round=1) / TestMove2 (round=2):
+        // intro message(s) → clear → countdown with a hint above the digits
+        // (recording starts recordPreRollSeconds before zero) → ONE second
+        // recorded → v11s conversion (progress bar, same pipeline as the real
+        // take) → できたよ！ + playbackLoops looped play-throughs with the
+        // ribbons + orbit → back to live. No capture, no export, no upload.
+        // Ends by latching TestMoveDone; every failure path still gets there so
+        // a practice hiccup never dead-ends the visitor.
+        private IEnumerator TestMoveRoutine(int round)
+        {
+            var t = config.timings;
+            var state = round == 1 ? ExperienceState.TestMove1 : ExperienceState.TestMove2;
+            string hint = round == 1 ? config.testMove1HintText : config.testMove2HintText;
+
+            // Timeline on the state clock — TimeInState freezes while the
+            // visitor is absent, so all of this measures real attendance.
+            float introEnd = round == 1 ? config.testIntroSeconds * 2f : config.testIntroSeconds;
+            float zeroAt = introEnd + config.countdownSeconds;
+            float shootEnd = zeroAt + config.captureStartOffsetSeconds + config.captureSeconds;
+            float recStart = Mathf.Max(introEnd, zeroAt - config.recordPreRollSeconds);
+            bool canned = t.skipShoot || t.dummyShoot;
+
+            // -- intro: the state paint showed the first message; TestMove1
+            //    sequences its second one here --
+            bool secondShown = false;
+            while (Active() && _fsm.TimeInState < introEnd)
+            {
+                if (round == 1 && !secondShown && _fsm.TimeInState >= config.testIntroSeconds)
+                {
+                    _ui.ShowMessage(config.testMove1Intro2Text);
+                    secondShown = true;
+                }
+                yield return null;
+            }
+            if (!Active()) yield break;
+            _ui.ClearAll(); // 消してから — the countdown lands on a cleared screen
+
+            // -- countdown with hint (+ recording pre-roll) --
+            int shown = -1;
+            bool recStarted = false;
+            while (Active() && _fsm.TimeInState < zeroAt)
+            {
+                if (!t.skipShoot && !recStarted && _fsm.TimeInState >= recStart)
+                {
+                    StartVisitorRecording(); // self-gates: dummyShoot without a tappable source is a no-op
+                    recStarted = true;
+                }
+                int remain = Mathf.Max(1, Mathf.CeilToInt(zeroAt - _fsm.TimeInState));
+                if (remain != shown)
+                {
+                    _ui.ShowCountdown(remain, hint);
+                    PlaySe(config.countdownTickSe);
+                    shown = remain;
+                }
+                yield return null;
+            }
+            if (!Active()) yield break;
+            if (!t.skipShoot && !recStarted) StartVisitorRecording();
+
+            PlaySe(config.recordEndSe); // shutter at zero
+            _ui.ShowMessage(config.shootingText);
+            while (Active() && _fsm.TimeInState < shootEnd) yield return null;
+            if (!Active()) yield break;
+
+            // From here the visitor's part is done — the presentation stretch
+            // (save/convert/load/replay) must not be reset by a presence flicker:
+            // the ghost owns the merge, so occupancy/live-fusion are the only
+            // presence signals and they blink across the conversion and load
+            // gaps. try/finally so the flag can never outlive the stretch, even
+            // if the routine dies on an exception or is stopped mid-yield
+            // (StopCoroutine disposes the iterator, which runs the finally).
+            _testMovePresenting = true;
+            try
+            {
+                string takeRoot = null;
+                if (_visitorRecordingActive && sensorRecorder != null)
+                {
+                    takeRoot = FinishVisitorRecording();
+                }
+                if (string.IsNullOrEmpty(takeRoot) && canned)
+                {
+                    // no recording ran (skipShoot, or dummyShoot without a
+                    // tappable source) — the canned take stands in
+                    takeRoot = config.devCannedTakeRoot;
+                    _takeIsTapped = false;
+                }
+                PlaySe(config.recordEndSe);
+
+                // -- conversion (same pipeline as the real take; no capture) --
+                bool haveTake = !string.IsNullOrEmpty(takeRoot) && Directory.Exists(takeRoot);
+                if (haveTake)
+                {
+                    yield return ConvertTakeRoutine(takeRoot, 0f, 1f);
+                    if (!Active()) yield break;
+                }
+
+                // -- できたよ！ + looped playback with the ribbons + orbit --
+                bool played = false;
+                if (haveTake)
+                {
+                    // The ribbons GROW over the replayed second: widen the pose
+                    // ring to the one-second window (same formula as the
+                    // Processing capture) and start it empty, so the lines build
+                    // 0 → ~30 samples as the take plays. The ring is flushed on
+                    // every loop wrap (recorder's OnPlaybackLooped consumers),
+                    // so each of the playbackLoops repeats the growth. Restored
+                    // to the dev value when the round hands back to live.
+                    if (poseHistory != null)
+                    {
+                        poseHistory.historySamples =
+                            Mathf.Clamp(Mathf.RoundToInt(config.captureSeconds * 30f), 2, 32);
+                        poseHistory.ReleaseHoldAndClear();
+                    }
+                    StartVisitorPlayback(takeRoot, loop: true);
+                    played = _visitorPlaybackActive && sensorRecorder != null && sensorRecorder.IsPlaying;
+                }
+                if (played)
+                {
+                    PlaySe(config.resultSe);
+                    _ui.ShowMessage(config.resultText);
+                    SetSculptureVisible(true); // the ribbons draw during the replay
+                    SetOrbit(true);
+                    // Canned dev take: replay only its tail — a full-length entrance
+                    // recording would otherwise loop for minutes. (A recorded or
+                    // tapped take is capture-window-sized and never triggers this.)
+                    double startAt = 0;
+                    double duration = sensorRecorder.PlaybackDurationSeconds;
+                    if (takeRoot == config.devCannedTakeRoot && config.devCannedTakeTailSeconds > 0f
+                        && duration > config.devCannedTakeTailSeconds)
+                        startAt = duration - config.devCannedTakeTailSeconds;
+                    yield return RunPlaybackLoops(state, startAt);
+                    if (!Active()) yield break;
+
+                    // hand the stage back to the live body for the next round
+                    SetOrbit(false);
+                    SetSculptureVisible(false);
+                    StopVisitorPlayback();
+                    ApplyBodySource(BodySource.Live);
+                    if (HasLiveRenderers())
+                    {
+                        sensorManager?.SetLiveSuppressedAsSource(false);
+                        sensorManager?.SetLiveVisualsVisible(true);
+                    }
+                    RestoreHistorySamples(); // back to the dev ring size
+                    if (poseHistory != null) poseHistory.ReleaseHoldAndClear();
+                }
+                else
+                {
+                    Debug.LogWarning($"[{nameof(ExperienceDirector)}] practice round {round}: nothing " +
+                                     $"to play back ('{takeRoot}') — moving on.", this);
+                    // The ring was widened for a playback that never started —
+                    // put the live round's window back (mirrors the success path).
+                    if (haveTake)
+                    {
+                        if (_visitorPlaybackActive) StopVisitorPlayback();
+                        RestoreHistorySamples();
+                        if (poseHistory != null) poseHistory.ReleaseHoldAndClear();
+                    }
+                }
+            }
+            finally
+            {
+                _testMovePresenting = false;
+            }
+
+            _testMoveDone = true;
+            _testMoveRoutine = null;
+
+            bool Active() => _active && _fsm != null && _fsm.State == state;
+        }
+
+        // ---------------- ResultShow (looped replay + freeze) ----------------
+
+        // Replays the finished take playbackLoops times with the ribbons and
+        // the orbit cameras while ExportAndPublish runs in parallel, then
+        // freezes on the take's final frame (that frame + the completed
+        // ribbons ARE the QR screen's centre piece). Ends by latching
+        // ResultShowDone — the FSM waits for it alongside ExportDone.
+        private IEnumerator ResultShowRoutine()
+        {
+            // Sit out the inter-state beat (parity with the deferred paint).
+            float beat = config.timings.stateGapSeconds
+                         / Mathf.Max(0.01f, config.timings.timeMultiplier);
+            if (beat > 0f) yield return new WaitForSeconds(beat);
+            if (!_active || _fsm.State != ExperienceState.ResultShow)
+            { _resultShowRoutine = null; yield break; }
+
+            bool replayable = sensorRecorder != null
+                && !string.IsNullOrEmpty(_takeRoot) && Directory.Exists(_takeRoot);
+            if (!replayable)
+            {
+                _resultShowDone = true; // nothing to present — don't gate the QR
+                _resultShowRoutine = null;
+                yield break;
+            }
+
+            // Un-freeze the presentation: the exported snapshot already sits in
+            // _snapshot, so the Processing-end hold/freeze only served that
+            // screen. The ring rebuilds from the replay. The TSDF integrator
+            // stays gated (_sculptureFrozen) — the mesh is session-hidden and
+            // no longer consumed by anything.
+            if (motionCurves != null) motionCurves.freeze = false;
+            if (poseHistory != null) poseHistory.ReleaseHoldAndClear();
+
+            // Restart the take from the top, looping. Processing left the
+            // transport loaded and stopped at the final frame; a dev jump
+            // straight here starts from nothing — StartVisitorPlayback covers
+            // both (Load is idempotent over a loaded take).
+            StartVisitorPlayback(_takeRoot, loop: true);
+            if (!_visitorPlaybackActive || !sensorRecorder.IsPlaying)
+            {
+                Debug.LogWarning($"[{nameof(ExperienceDirector)}] result replay failed to start — " +
+                                 "holding the frozen frame instead.", this);
+                if (poseHistory != null) poseHistory.hold = true;
+                if (motionCurves != null) motionCurves.freeze = true;
+                _resultShowDone = true;
+                _resultShowRoutine = null;
+                yield break;
+            }
+
+            SetOrbit(true);
+            double startAt = 0;
+            double duration = sensorRecorder.PlaybackDurationSeconds;
+            bool canned = _takeRoot == config.devCannedTakeRoot;
+            if (canned && config.devCannedTakeTailSeconds > 0f
+                && duration > config.devCannedTakeTailSeconds)
+                startAt = duration - config.devCannedTakeTailSeconds;
+            yield return RunPlaybackLoops(ExperienceState.ResultShow, startAt);
+            if (!_active || _fsm.State != ExperienceState.ResultShow)
+            { _resultShowRoutine = null; yield break; }
+
+            // Freeze the final frame + finished ribbons for the QR screen.
+            if (poseHistory != null) poseHistory.hold = true;
+            if (motionCurves != null) motionCurves.freeze = true;
+            _resultShowDone = true;
+            _resultShowRoutine = null;
+        }
+
         // ------------------------------------------------ visitor playback ----
 
-        // Single play-through transport for the converted take (loop OFF — the
-        // recorder stops itself at the end and the scene freezes on the final
-        // state, which ResultShow/QrShow keep on screen).
-        private void StartVisitorPlayback(string takeRoot)
+        // Playback transport for the converted take. Processing runs it loop OFF
+        // (the recorder stops itself at the end and the scene freezes on the
+        // final state); the practice/result play-throughs run loop ON and count
+        // wraps via OnPlaybackLooped (RunPlaybackLoops).
+        private void StartVisitorPlayback(string takeRoot, bool loop = false)
         {
             if (sensorRecorder == null) return;
             if (string.IsNullOrEmpty(takeRoot) || !Directory.Exists(takeRoot))
@@ -1884,11 +2515,26 @@ namespace Experience
             // The visitor take replaces any playback a dev session left running.
             if (sensorRecorder.IsPlaying) sensorRecorder.StopAndUnload();
 
-            _savedRenderDelay = sensorRecorder.playbackRenderDelayFrames;
+            // Save the dev transport knobs only on the first activation of a
+            // playback stretch — a re-activation (a second practice round after
+            // the first restored them, or a restart) must not overwrite the
+            // operator's values with the show's own.
+            if (!_visitorPlaybackActive)
+            {
+                _savedRenderDelay = sensorRecorder.playbackRenderDelayFrames;
+                _savedLoop = sensorRecorder.loop;
+            }
             sensorRecorder.playbackRenderDelayFrames = config.playbackRenderDelayFrames;
-            _savedLoop = sensorRecorder.loop;
-            sensorRecorder.loop = false;
-            if (HasLiveRenderers()) sensorManager?.SetLiveSuppressedAsSource(true);
+            sensorRecorder.loop = loop;
+            if (HasLiveRenderers())
+            {
+                sensorManager?.SetLiveSuppressedAsSource(true);
+                // Hide the LIVE clouds while the replay owns the stage — with the
+                // shared PointCloudView flag on (playback phases show clouds), the
+                // live person would otherwise render alongside their own ghost.
+                // Re-shown by ApplyCloudVisibility once the playback ends.
+                sensorManager?.SetLiveVisualsVisible(false);
+            }
 
             sensorRecorder.playbackFolderPath = takeRoot;
             // On Mac ResolvePlaybackRoot prefers the mac override (the operator's
@@ -2255,9 +2901,12 @@ namespace Experience
             if (_fsm == null || _ui == null) return;
             var s = _fsm.State;
             // Only during the live-interaction stages — playback/result states
-            // read presence from occupancy where crowd counting is meaningless.
+            // read presence from occupancy where crowd counting is meaningless
+            // (the TestMove states count only while their live half is up).
             bool eligible = s == ExperienceState.Welcome || s == ExperienceState.Calibrate
-                || s == ExperienceState.FreeMove || s == ExperienceState.Shoot;
+                || s == ExperienceState.Shoot
+                || ((s == ExperienceState.TestMove1 || s == ExperienceState.TestMove2)
+                    && !_visitorPlaybackActive);
             bool crowd = eligible && _presence != null && _presence.CrowdActive;
             if (crowd && !_crowdShowing)
             {

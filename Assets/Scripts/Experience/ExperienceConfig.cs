@@ -29,7 +29,19 @@ namespace Experience
         [Header("Timings / dev skips")]
         public ExperienceTimings timings = new ExperienceTimings();
 
-        [Min(1)] public int countdownSeconds = 3;
+        [Min(1)] public int countdownSeconds = 5;
+
+        [Header("Practice rounds (TestMove1 / TestMove2)")]
+        [Min(0f)]
+        [Tooltip("How long each practice intro message stays on screen before the " +
+                 "next one (TestMove1 shows two, TestMove2 one) and the countdown " +
+                 "begins.")]
+        public float testIntroSeconds = 4f;
+
+        [Min(1)]
+        [Tooltip("How many times the recorded second plays back after できたよ！ — " +
+                 "practice rounds AND the ResultShow presentation.")]
+        public int playbackLoops = 3;
 
         [Header("Sensing overrides (pushed into PresenceDetector on enter)")]
         [Min(0f)] public float insetMeters = 0f;
@@ -112,8 +124,8 @@ namespace Experience
             @"D:\Dropbox\projects\ICC\Recordings\RecordingBase\2026-07-14_15-50-24";
 
         [Tooltip("Dev: number keys (top row / keypad) jump the show — 0=Idle(頭出し/" +
-                 "run reset) 1=Consent 2=Welcome 3=Calibrate 4=FreeMove 5=Shoot " +
-                 "6=Processing 7=ResultShow 8=QrShow. Works with the mode off too " +
+                 "run reset) 1=Consent 2=Welcome 3=Calibrate 4=TestMove1 5=TestMove2 " +
+                 "6=Shoot 7=Processing 8=ResultShow 9=QrShow. Works with the mode off too " +
                  "(the jump turns it on). TSDFDebugSession's per-camera views " +
                  "moved to Q/W/E/R (all: A) to free the digits. Forward jumps keep " +
                  "the run's artifacts (take, capture) so each screen can be checked " +
@@ -148,7 +160,7 @@ namespace Experience
                  "(~130ms fusion latency ≈ 4 frames).")]
         public int playbackRenderDelayFrames = 4;
 
-        [Tooltip("Live preview (Calibrate / FreeMove / Shoot): delay the DISPLAYED " +
+        [Tooltip("Live preview (Calibrate / TestMove / Shoot): delay the DISPLAYED " +
                  "point cloud to the fused skeleton's own timestamp so the ribbons " +
                  "stop thinning out on fast limbs. Display-only — BT and the " +
                  "recording still get the newest frame. Cost: the preview becomes a " +
@@ -222,8 +234,9 @@ namespace Experience
         public AudioClip calibrateSe;
         [Tooltip("Star pose matched — はかれたよ！ (calibrateMatchedText).")]
         public AudioClip poseMatchedSe;
-        [Tooltip("Free-movement screen (freeMoveText).")]
-        public AudioClip freeMoveSe;
+        [UnityEngine.Serialization.FormerlySerializedAs("freeMoveSe")]
+        [Tooltip("Practice-round intro screens (TestMove1/TestMove2).")]
+        public AudioClip testMoveSe;
         [Tooltip("Shoot cue screen (shootCueText), before the countdown.")]
         public AudioClip shootCueSe;
         [Tooltip("Processing / progress screen (processingText).")]
@@ -292,11 +305,30 @@ namespace Experience
         [TextArea] public string welcomeText = "ようこそ、からだをつかって　おもしろいかたちが　つくれるよ";
         [TextArea] public string calibrateText = "この　ポーズを　とってね";
         [TextArea] public string calibrateMatchedText = "はかれたよ！";
-        [TextArea] public string freeMoveText = "すきに　うごいてみよう！";
-        [TextArea] public string shootCueText = "これから　うごきを　さつえいするよ";
+        [Header("Visitor texts — practice rounds (hiragana)")]
+        [TextArea]
+        [Tooltip("TestMove1 first intro message.")]
+        public string testMove1IntroText = "じぶんの　うごきを\nとるれんしゅうを　しよう";
+        [TextArea]
+        [Tooltip("TestMove1 second intro message (how the take works).")]
+        public string testMove1Intro2Text = "５びょうたったら\n１びょうかん　とるよ\nたくさん　うごいてね";
+        [TextArea]
+        [Tooltip("TestMove2 single intro message.")]
+        public string testMove2IntroText = "どうだった？\nもういちど　れんしゅうするよ";
+        [TextArea]
+        [Tooltip("Hint shown above the TestMove1 countdown digits.")]
+        public string testMove1HintText = "ヒント\nすきな　どうぶつに\nなってみよう";
+        [TextArea]
+        [Tooltip("Hint shown above the TestMove2 countdown digits.")]
+        public string testMove2HintText = "ヒント\nすきな　キャラクターに\nなってみよう";
+        [Header("Visitor texts — the real take (hiragana)")]
+        [TextArea] public string shootCueText = "じゃぁ　ほんばんだよ";
+        [TextArea]
+        [Tooltip("Hint shown above the Shoot (ほんばん) countdown digits.")]
+        public string shootHintText = "じぶんの　すきな\nうごきを　してみよう";
         [TextArea] public string shootingText = "さつえいちゅう！";
         [TextArea] public string processingText = "きろくを　じゅんびしているよ　まってね";
         [TextArea] public string resultText = "できたよ！";
-        [TextArea] public string qrScanText = "いりぐちの　にじげんコードを　スキャンしてね";
+        [TextArea] public string qrScanText = "にじげんコードの　しゃしんを　とったら\nおうちでも　みれるよ";
     }
 }

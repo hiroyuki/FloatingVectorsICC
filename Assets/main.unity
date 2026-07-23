@@ -169,11 +169,12 @@ MonoBehaviour:
   gridCells: 20
   gridSpacing: 0.5
   gridColor: {r: 0.4, g: 0.4, b: 0.4, a: 1}
+  innerLineBrightness: 0.4
   axisColor: {r: 0.85, g: 0.85, b: 0.85, a: 1}
   showShadow: 1
-  shadowColor: {r: 0.24528301, g: 0.24528301, b: 0.24528301, a: 0.08627451}
-  shadowBlurRadius: 400
-  shadowBlurSamples: 3
+  shadowColor: {r: 0.45, g: 0.45, b: 0.45, a: 0.2}
+  shadowBlurRadius: 0.02
+  shadowBlurSamples: 4
   lightMode: 0
   lightDirection: {x: 0.2, y: -1, z: 0.1}
   lightPosition: {x: 1, y: 3, z: 0}
@@ -769,13 +770,15 @@ MonoBehaviour:
   alertFontSize: 80
   captionFontSize: 24
   qrSizePixels: 480
-  qrPosition: {x: 0, y: 60}
+  qrPosition: {x: 600, y: 60}
   alertBackdropAlpha: 0.75
   poseGuideDisplays: 01000000
   poseGuideSizePixels: 420
   poseImagePosition: {x: 0, y: -150}
   poseLabelPosition: {x: 0, y: 250}
   countdownPosition: {x: 0, y: 0}
+  hintPosition: {x: 0, y: 320}
+  hintFontSize: 40
   messagePosition: {x: 0, y: 0}
   noticeFontSize: 36
   noticeBoxSize: {x: 1120, y: 400}
@@ -783,7 +786,7 @@ MonoBehaviour:
   noticeBorderWidth: 4
   noticePadding: 56
   noticeFrameColor: {r: 1, g: 1, b: 1, a: 1}
-  qrHeadlinePosition: {x: 0, y: 420}
+  qrHeadlinePosition: {x: 600, y: 420}
   progressBarWidth: 800
 --- !u!82 &810990087
 AudioSource:
@@ -1060,6 +1063,7 @@ MonoBehaviour:
   orbit: {fileID: 0}
   baker: {fileID: 0}
   autoOrbitOverride: 1
+  restorePoseOnDisable: 0
 --- !u!114 &814255268
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -1998,6 +2002,7 @@ MonoBehaviour:
   orbit: {fileID: 0}
   baker: {fileID: 0}
   autoOrbitOverride: 1
+  restorePoseOnDisable: 0
 --- !u!114 &1147706889
 MonoBehaviour:
   m_ObjectHideFlags: 0

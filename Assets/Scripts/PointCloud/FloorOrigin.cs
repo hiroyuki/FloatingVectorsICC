@@ -7,11 +7,13 @@
 //   - A line-mesh grid at the floor plane (default ON), so the operator sees
 //     the floor in both Scene and Game views without dropping a real plane mesh
 //     into the scene.
-//   - A drop shadow for every active PointCloudRenderer: each mesh is drawn a
-//     second time with PointCloudShadow.shader (per-vertex Y collapsed to
-//     _FloorY in world space, fragment = shadow color). The same OBB /
-//     decimation filters as the live cloud are pushed through a per-draw
-//     MaterialPropertyBlock so culled points don't cast a shadow either.
+//   - A drop shadow ("floor reflection") of what is VISIBLE right now: every
+//     enabled point-cloud / playback / skeleton MeshRenderer is drawn a second
+//     time with PointCloudShadow.shader (per-vertex Y collapsed to _FloorY in
+//     world space, fragment = shadow color). The source renderer's own
+//     MaterialPropertyBlock is copied per draw, so every display filter (OBB,
+//     decimation, capsules, floor mask, motion field, reveal clip) applies to
+//     the reflection identically — hidden meshes and culled points don't cast.
 //
 // Why DrawMesh instead of a second pass on PointCloudUnlit: keeps the existing
 // material/shader pipeline (live + playback + cumulative snapshots) untouched
@@ -60,7 +62,7 @@ namespace PointCloud
         [Tooltip("Brightness multiplier applied to interior grid lines. The border " +
                  "rectangle (outermost lines) and the axis lines keep their full color.")]
         [Range(0f, 1f)]
-        public float innerLineBrightness = 0.7f;
+        public float innerLineBrightness = 0.4f;
 
         [Tooltip("Color of the two axis lines through the origin (X and Z). Drawn on top of regular grid lines.")]
         public Color axisColor = new Color(0.85f, 0.85f, 0.85f, 1f);
@@ -132,12 +134,10 @@ namespace PointCloud
         // Reused per-MultiLive sweep so GetComponentsInChildren doesn't allocate per frame.
         private static readonly List<MeshRenderer> s_meshRendererScratch = new List<MeshRenderer>(128);
 
-        // Shader property IDs (mirror PointCloudShaderFilters + PointCloudShadow.shader).
-        private static readonly int kObbObjToBox = Shader.PropertyToID("_ObbObjToBox");
-        private static readonly int kObbMode     = Shader.PropertyToID("_ObbMode");
-        private static readonly int kDecimKeep   = Shader.PropertyToID("_DecimKeep");
-        private static readonly int kDecimFrame  = Shader.PropertyToID("_DecimFrame");
+        // Shader property IDs (shadow-only stamps; the filter uniforms come in
+        // by copying the source renderer's own MaterialPropertyBlock).
         private static readonly int kFloorY      = Shader.PropertyToID("_FloorY");
+        private static readonly int kUseReveal   = Shader.PropertyToID("_ShadowUseReveal");
         private static readonly int kShadowColor = Shader.PropertyToID("_ShadowColor");
         private static readonly int kBlurOffset  = Shader.PropertyToID("_BlurOffset");
         private static readonly int kLightMode   = Shader.PropertyToID("_LightMode");
@@ -351,42 +351,48 @@ namespace PointCloud
             if (!doBlur) blurSamples = 1;
 
             // 1) Live PointCloudRenderers — typical when devices are connected.
+            // The MR check is what keeps the reflection honest: PointCloudView
+            // (and the experience's per-state show/hide) toggles MeshRenderer
+            // .enabled, so a hidden cloud must not reflect either.
             var live = FindObjectsByType<PointCloudRenderer>(FindObjectsSortMode.None);
             for (int i = 0; i < live.Length; i++)
             {
                 var pcr = live[i];
                 if (pcr == null || !pcr.isActiveAndEnabled) continue;
+                var mr = pcr.GetComponent<MeshRenderer>();
+                if (mr == null || !mr.enabled) continue;
                 var mf = pcr.GetComponent<MeshFilter>();
                 var mesh = mf != null ? mf.sharedMesh : null;
                 if (mesh == null) continue;
 
-                DrawWithBlurTaps(mesh, pcr.transform.localToWorldMatrix, pcr.boundingBox, pcr.decimater,
-                                 pcr.transform, floorY, blurSamples, doBlur);
+                DrawWithBlurTaps(mesh, pcr.transform.localToWorldMatrix, mr, floorY,
+                                 blurSamples, doBlur, applyReveal: true);
             }
 
             // 2) Playback meshes — `_Playback_<serial>` children of every active
-            // SensorRecorder. The recorder owns the bbox / decimater used by
-            // PointCloudShaderFilters on the live cloud, so mirror them here so
-            // the shadow matches what the live mesh actually draws.
+            // SensorRecorder. Their MPB is filled by the same
+            // PointCloudShaderFilters.Apply as the live path, so copying it
+            // (DrawWithBlurTaps) keeps the shadow point-for-point with the
+            // visible cloud.
             var recorders = FindObjectsByType<SensorRecorder>(FindObjectsSortMode.None);
             for (int r = 0; r < recorders.Length; r++)
             {
                 var rec = recorders[r];
                 if (rec == null || !rec.isActiveAndEnabled) continue;
-                var bb = rec.boundingBox;
-                var dec = rec.decimater;
                 int childCount = rec.transform.childCount;
                 for (int c = 0; c < childCount; c++)
                 {
                     var child = rec.transform.GetChild(c);
                     if (child == null || !child.gameObject.activeInHierarchy) continue;
                     if (!child.name.StartsWith("_Playback_")) continue;
+                    var mr = child.GetComponent<MeshRenderer>();
+                    if (mr == null || !mr.enabled) continue;
                     var mf = child.GetComponent<MeshFilter>();
                     var mesh = mf != null ? mf.sharedMesh : null;
                     if (mesh == null || mesh.vertexCount == 0) continue;
 
-                    DrawWithBlurTaps(mesh, child.localToWorldMatrix, bb, dec, child, floorY,
-                                     blurSamples, doBlur);
+                    DrawWithBlurTaps(mesh, child.localToWorldMatrix, mr, floorY,
+                                     blurSamples, doBlur, applyReveal: true);
                 }
             }
 
@@ -416,8 +422,12 @@ namespace PointCloud
                     var mesh = mf != null ? mf.sharedMesh : null;
                     if (mesh == null || mesh.vertexCount == 0) continue;
 
-                    DrawWithBlurTaps(mesh, mr.transform.localToWorldMatrix, null, null, mr.transform,
-                                     floorY, blurSamples, doBlur);
+                    // applyReveal: false — skeleton meshes are triangles, and a
+                    // per-vertex reveal clip stretches straddling triangles into
+                    // screen-crossing slivers; displayed bones aren't reveal-
+                    // clipped either, so the reflection matches by skipping it.
+                    DrawWithBlurTaps(mesh, mr.transform.localToWorldMatrix, mr,
+                                     floorY, blurSamples, doBlur, applyReveal: false);
                 }
                 s_meshRendererScratch.Clear();
             }
@@ -428,10 +438,16 @@ namespace PointCloud
         // Per-tap alpha is shadowColor.a / blurSamples so the integral over taps
         // matches a single hard-shadow tap. doBlur=false collapses to one draw
         // with offset (0,0) and full alpha.
+        //
+        // The filter uniforms are not rebuilt here: the source renderer's own
+        // MaterialPropertyBlock — filled by PointCloudShaderFilters.Apply on the
+        // display path (OBB, decimation, capsules, floor mask, motion field) —
+        // is copied wholesale, so the reflection keeps exactly the vertices the
+        // visible mesh keeps. Renderers that never set one (skeleton meshes)
+        // yield an empty block and the shadow shader's pass-through defaults.
         private void DrawWithBlurTaps(Mesh mesh, Matrix4x4 modelMatrix,
-                                      BoundingVolume bb, PointCloudDecimater dec,
-                                      Transform meshTransform, float floorY,
-                                      int blurSamples, bool doBlur)
+                                      MeshRenderer sourceRenderer, float floorY,
+                                      int blurSamples, bool doBlur, bool applyReveal)
         {
             float perTapAlpha = doBlur ? (shadowColor.a / blurSamples) : shadowColor.a;
             for (int t = 0; t < blurSamples; t++)
@@ -439,37 +455,15 @@ namespace PointCloud
                 Vector2 offsetUnit = doBlur ? s_blurOffsets[t] : Vector2.zero;
                 Vector4 offsetWorld = new Vector4(offsetUnit.x * shadowBlurRadius, 0f,
                                                   offsetUnit.y * shadowBlurRadius, 0f);
-                BuildShadowMpb(bb, dec, meshTransform, floorY);
+                sourceRenderer.GetPropertyBlock(_shadowMpb);
+                _shadowMpb.SetFloat(kFloorY, floorY);
+                _shadowMpb.SetFloat(kUseReveal, applyReveal ? 1f : 0f);
                 _shadowMpb.SetColor(kShadowColor,
                     new Color(shadowColor.r, shadowColor.g, shadowColor.b, perTapAlpha));
                 _shadowMpb.SetVector(kBlurOffset, offsetWorld);
                 Graphics.DrawMesh(mesh, modelMatrix, _shadowMaterial,
                                   renderLayer, null, 0, _shadowMpb, ShadowCastingMode.Off, false);
             }
-        }
-
-        // Mirrors PointCloudShaderFilters.Apply so the shadow sees the same culled
-        // points the live (or playback) cloud does.
-        private void BuildShadowMpb(BoundingVolume bb, PointCloudDecimater decim,
-                                    Transform meshTransform, float floorY)
-        {
-            _shadowMpb.Clear();
-
-            float obbMode = 0f;
-            if (bb != null && bb.Mode != BoundingVolume.FilterMode.Disabled)
-            {
-                obbMode = bb.Mode == BoundingVolume.FilterMode.KeepInside ? 1f : 2f;
-                var m = bb.transform.worldToLocalMatrix * meshTransform.localToWorldMatrix;
-                _shadowMpb.SetMatrix(kObbObjToBox, m);
-            }
-            _shadowMpb.SetFloat(kObbMode, obbMode);
-
-            float decimKeep = (decim != null && decim.Enabled) ? Mathf.Clamp01(decim.KeepRatio) : 1f;
-            _shadowMpb.SetFloat(kDecimKeep, decimKeep);
-            _shadowMpb.SetFloat(kDecimFrame, Time.frameCount);
-
-            _shadowMpb.SetFloat(kFloorY, floorY);
-            _shadowMpb.SetColor(kShadowColor, shadowColor);
         }
 
         private void DestroyOwnedAssets()

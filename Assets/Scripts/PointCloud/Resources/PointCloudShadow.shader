@@ -1,15 +1,20 @@
-// Drop-shadow companion for PointCloudUnlit. Same per-vertex OBB / decimation
-// culling, but each surviving vertex is collapsed to a fixed world-space Y
-// (_FloorY) and the fragment outputs _ShadowColor instead of the per-vertex
-// color. FloorOrigin issues a second draw of every live point-cloud mesh with
-// this material so the visible points cast a flat silhouette onto the floor.
+// Drop-shadow companion for PointCloudUnlit. Same per-vertex culling as the
+// displayed cloud — OBB, decimation, capsule union, floor mask, joint motion
+// field and the global bottom-up reveal — but each surviving vertex is
+// collapsed to a fixed world-space Y (_FloorY) and the fragment outputs
+// _ShadowColor instead of the per-vertex color. FloorOrigin issues a second
+// draw of every VISIBLE point-cloud / skeleton mesh with this material so the
+// floor mirrors exactly what is on screen at that moment.
 //
-// MaterialPropertyBlock contract (set by FloorOrigin.UpdateShadowMpb):
-//   _ObbObjToBox / _ObbMode / _DecimKeep / _DecimFrame  -- mirror the live
-//      PointCloudRenderer's filter state so the shadow matches the visible
-//      cloud point-for-point.
+// MaterialPropertyBlock contract: FloorOrigin COPIES the source renderer's own
+// property block (filled by PointCloudShaderFilters.Apply on the display path)
+// so every filter uniform below matches the visible mesh point-for-point, then
+// stamps the shadow-only properties on top:
 //   _FloorY      -- world-space Y of the floor plane.
 //   _ShadowColor -- RGBA shadow tint. Alpha is consumed via SrcAlpha blending.
+//   _BlurOffset  -- per-tap soft-shadow jitter.
+// _PcRevealMode/_PcRevealY are globals (set by ExperienceDirector), picked up
+// here automatically so the reflection rises with the cloud.
 
 Shader "Orbbec/PointCloudShadow"
 {
@@ -20,6 +25,25 @@ Shader "Orbbec/PointCloudShadow"
         _ObbMode    ("OBB Mode (0=Disabled 1=KeepInside 2=KeepOutside)", Float) = 0
         _DecimKeep  ("Decimation Keep Ratio [0..1]", Float) = 1
         _DecimFrame ("Decimation Frame Counter",   Float) = 0
+        _CapsMode   ("Capsule Mode (0=Disabled 1=KeepInside 2=KeepOutside)", Float) = 0
+        _CapsCount  ("Capsule Count", Float) = 0
+        _MotionMode         ("Motion Mode (0=Disabled 1=Enabled)", Float) = 0
+        _MotionCount        ("Motion Joint Count",                Float) = 0
+        _MotionMaxDist      ("Motion Max Assign Distance (m, 0=off)", Float) = 0
+        _MotionDisplace     ("Motion Displace Vertices (0=off 1=on)", Float) = 0
+        _MotionDisplaceScale("Motion Displace Scale",             Float) = 0
+        // Same park-below-everything default as PointCloudUnlit: a source MR
+        // whose property block never set the mask (skeleton meshes) must not
+        // get its shadow clipped at y=0.
+        _FloorMaskY      ("Floor Mask Height (m)",   Float) = -1000000000
+        _FloorMaskRadius ("Floor Keep Radius Around Feet (m)", Float) = 0.5
+        _FloorFootCount  ("Floor Foot Count",                  Float) = 0
+        // FloorOrigin sets this to 1 only for point-cloud sources. The global
+        // _PcRevealMode clip culls per-VERTEX, which is safe for point topology
+        // but stretches triangles that straddle the reveal plane into screen-
+        // crossing slivers — and displayed skeleton meshes are not reveal-
+        // clipped anyway, so their reflection must not be either.
+        _ShadowUseReveal ("Apply Reveal Clip (point clouds only)", Float) = 0
         // World-space XZ offset added to each vertex after floor projection. Used
         // by FloorOrigin's multi-tap soft shadow to jitter each tap into a Gauss
         // disc; per-tap alpha is folded into _ShadowColor.a by the caller so N
@@ -56,6 +80,29 @@ Shader "Orbbec/PointCloudShadow"
             float    _ObbMode;
             float    _DecimKeep;
             float    _DecimFrame;
+            // Mirror of PointCloudUnlit's display filters (see that shader for
+            // the semantics). Array lengths must stay in lockstep with
+            // PointCloudCapsuleFilter.MaxCapsules / PointCloudJointMotionField
+            // .MaxJoints / PointCloudFloorMask.MaxFeet.
+            float    _CapsMode;
+            float    _CapsCount;
+            float4   _CapsA[64];
+            float4   _CapsB[64];
+            float    _MotionMode;
+            float    _MotionCount;
+            float    _MotionMaxDist;
+            float    _MotionDisplace;
+            float    _MotionDisplaceScale;
+            float4   _MotionPos[64];
+            float4   _MotionVel[64];
+            float    _FloorMaskY;
+            float    _FloorMaskRadius;
+            float    _FloorFootCount;
+            float4   _FloorFoot[8];
+            // Globals (never in a Properties block — see PointCloudUnlit note).
+            float    _PcRevealMode;
+            float    _PcRevealY;
+            float    _ShadowUseReveal;
             float4   _ShadowColor;
             float    _FloorY;
             float4   _BlurOffset;
@@ -99,12 +146,88 @@ Shader "Orbbec/PointCloudShadow"
                 return u < _DecimKeep;
             }
 
+            // The three world-space culls below are copied verbatim from
+            // PointCloudUnlit so the shadow keeps exactly the vertices the
+            // display keeps.
+            bool PassCapsules(float3 worldPos)
+            {
+                if (_CapsMode < 0.5) return true;
+                int n = (int)_CapsCount;
+                bool insideAny = false;
+                for (int i = 0; i < n; i++)
+                {
+                    float3 a = _CapsA[i].xyz;
+                    float3 b = _CapsB[i].xyz;
+                    float  r = _CapsA[i].w;
+                    float3 ab = b - a;
+                    float ab2 = dot(ab, ab);
+                    float3 closest;
+                    if (ab2 < 1e-12)
+                    {
+                        closest = a;
+                    }
+                    else
+                    {
+                        float t = saturate(dot(worldPos - a, ab) / ab2);
+                        closest = a + t * ab;
+                    }
+                    float3 d = worldPos - closest;
+                    if (dot(d, d) <= r * r) { insideAny = true; break; }
+                }
+                return (_CapsMode < 1.5) ? insideAny : !insideAny;
+            }
+
+            bool PassFloor(float3 worldPos)
+            {
+                if (worldPos.y >= _FloorMaskY) return true;
+                int n = (int)_FloorFootCount;
+                float r2 = _FloorMaskRadius * _FloorMaskRadius;
+                for (int i = 0; i < n; i++)
+                {
+                    float2 d = worldPos.xz - _FloorFoot[i].xz;
+                    if (dot(d, d) <= r2) return true;
+                }
+                return false;
+            }
+
+            bool PassReveal(float3 worldPos)
+            {
+                if (_ShadowUseReveal < 0.5 || _PcRevealMode < 0.5) return true;
+                return worldPos.y <= _PcRevealY;
+            }
+
+            // Motion-field mirror: cull past _MotionMaxDist and displace by the
+            // nearest joint's velocity, so the shadow tracks the displaced
+            // silhouette the viewer actually sees. Color logic is irrelevant
+            // here (fragment is a flat tint) and skipped.
+            void ApplyMotion(inout float3 worldPos, inout float keep)
+            {
+                if (_MotionMode < 0.5 || _MotionCount < 0.5) return;
+                int idx = -1;
+                float distSq = 1e30;
+                float3 vel = float3(0.0, 0.0, 0.0);
+                int n = (int)_MotionCount;
+                for (int i = 0; i < n; i++)
+                {
+                    float3 d = worldPos - _MotionPos[i].xyz;
+                    float dd = dot(d, d);
+                    if (dd < distSq) { distSq = dd; idx = i; vel = _MotionVel[i].xyz; }
+                }
+                if (idx < 0) return;
+                if (_MotionMaxDist > 0.0 && distSq > _MotionMaxDist * _MotionMaxDist)
+                    keep = 0.0;
+                if (_MotionDisplace >= 0.5)
+                    worldPos += vel * _MotionDisplaceScale;
+            }
+
             v2f vert(appdata v)
             {
                 v2f o;
-                float keep = (PassObb(v.vertex.xyz) && PassDecim(v.vid)) ? 1.0 : 0.0;
-
                 float3 V = mul(unity_ObjectToWorld, v.vertex).xyz;
+                float keep = (PassObb(v.vertex.xyz) && PassDecim(v.vid)
+                              && PassCapsules(V) && PassFloor(V) && PassReveal(V))
+                             ? 1.0 : 0.0;
+                ApplyMotion(V, keep);
                 float3 floored;
                 if (_LightMode < 0.5)
                 {
