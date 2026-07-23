@@ -1,16 +1,22 @@
 // Push-based Hz counters for cadences that are NOT the render frame rate.
 //
-// Why this exists: the render loop can sit at a comfortable 60fps while the body
-// frames that actually drive the sculpture arrive far slower, and nothing on
-// screen distinguishes the two. The motion-curve trail advances one history slot
-// per pose ingest, so a low ingest rate reads as a stuttering trail even though
-// the fps readout looks perfect — and the two show machines (4070 / 5080) run the
-// same code, so the only way to find where they diverge is to see both numbers
-// side by side on each machine.
+// Why this exists: the render loop can sit at its frame cap while the body frames
+// that actually drive the sculpture arrive far slower, and nothing on screen
+// distinguishes the two. The motion-curve trail advances one history slot per pose
+// ingest, so a low ingest rate reads as a stuttering trail even though the fps
+// readout looks perfect — and the two show machines (4070 / 5080) run the same
+// code, so the only way to find where they diverge is to see the numbers side by
+// side on each machine.
 //
-// Deliberately in Shared with no dependencies: producers live in BodyTracking
-// (which references Shared) and the consumer is FpsOverlay (also Shared), so a
-// direct reference either way would be circular.
+// Name the counters after what actually produces them. The live skeleton source in
+// this project is RTMPose (LiveFusedBodySource drives the merger through
+// SubmitExternalBodies); k4abt is bypassed entirely in that mode. A counter labelled
+// for the wrong engine is worse than no counter — it invites reading a healthy
+// RTMPose rate as evidence about k4abt.
+//
+// Deliberately in Shared with no dependencies: producers live in BodyTracking and
+// BodyTracking.Eval.Rtmpose (both reference Shared) and the consumer is FpsOverlay
+// (also Shared), so a direct reference either way would be circular.
 
 using System.Collections.Generic;
 using UnityEngine;
@@ -23,13 +29,22 @@ namespace Shared
         /// trail actually advances at.</summary>
         public const string PoseIngest = "pose";
 
-        /// <summary>Individual body-tracker snapshots, summed over all cameras. With
-        /// four hardware-synced cameras this runs ~4x PoseIngest when the workers keep
-        /// up; if it collapses toward PoseIngest the snapshots are arriving bunched into
-        /// one render frame rather than the workers being slow.</summary>
-        public const string BtSnapshot = "bt";
+        /// <summary>Fused skeletons emitted by the live RTMPose source, held frames
+        /// included. Reported (not ticked) — the fusion session already measures its own
+        /// rate, and its number is authoritative where a count of merger injections is
+        /// not: the fused pose is injected once per camera serial, so counting those
+        /// would read 4x the true rate.</summary>
+        public const string Fused = "fused";
 
-        // Rolling window: count ticks until the window closes, then publish and reset.
+        /// <summary>Fused skeletons carrying a genuinely NEW inference, i.e. Fused minus
+        /// the held/repeated emissions. The gap between the two is the tell: equal means
+        /// every emission is fresh, and fresh collapsing while fused holds steady means
+        /// the source is coasting on held frames because inference is falling behind.</summary>
+        public const string FreshFused = "fresh";
+
+        // A counter is either ticked per event (Tick) or handed a rate measured elsewhere
+        // (Report). Ticks/WindowStart stay unused in the reported case; LastTick drives
+        // staleness for both.
         private sealed class Counter
         {
             public int Ticks;
@@ -78,6 +93,23 @@ namespace Shared
             }
         }
 
+        /// <summary>Publish a rate that the producer already measures itself, instead of
+        /// counting events here. Call it every frame while the producer is alive — that
+        /// is what keeps the counter out of the stale branch, so reporting a genuine 0
+        /// (source running but emitting nothing) stays distinguishable from the source
+        /// being gone entirely. Call from the main thread.</summary>
+        public static void Report(string name, float hz)
+        {
+            float now = Time.realtimeSinceStartup;
+            if (!s_counters.TryGetValue(name, out var c))
+            {
+                c = new Counter { WindowStart = now };
+                s_counters[name] = c;
+            }
+            c.Hz = hz;
+            c.LastTick = now;
+        }
+
         /// <summary>Most recent rate for <paramref name="name"/>, or 0 when it has never
         /// ticked or has gone quiet.</summary>
         public static float Hz(string name)
@@ -87,9 +119,14 @@ namespace Shared
             return c.Hz;
         }
 
-        /// <summary>True once <paramref name="name"/> has ever ticked — lets a readout
-        /// hide the field entirely on a machine where that subsystem isn't running,
-        /// instead of showing a permanent 0.</summary>
+        /// <summary>True once <paramref name="name"/> has ever ticked or been reported —
+        /// lets a readout hide the field entirely on a machine where that subsystem isn't
+        /// running, instead of showing a permanent 0.</summary>
         public static bool IsKnown(string name) => s_counters.ContainsKey(name);
+
+        /// <summary>True when any counter at all has been seen. A readout uses this to
+        /// decide whether the whole rate line is worth drawing, rather than keying it to
+        /// one particular producer that a given scene may not contain.</summary>
+        public static bool AnyKnown => s_counters.Count > 0;
     }
 }

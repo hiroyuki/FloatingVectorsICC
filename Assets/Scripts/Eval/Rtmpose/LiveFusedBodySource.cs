@@ -686,6 +686,14 @@ namespace BodyTracking.Eval.Rtmpose
             var s = _session;
             if (s == null) return;
 
+            // Publish the fusion rates to the on-screen readout. Reported rather than
+            // counted at the merger: the fused pose is submitted once per camera serial,
+            // so counting injections there would read 4x the real rate. Every frame while
+            // the session lives, so a genuine 0 (session up, producing nothing) stays
+            // distinguishable from no session at all.
+            global::Shared.RateProbe.Report(global::Shared.RateProbe.Fused, s.FusedHz);
+            global::Shared.RateProbe.Report(global::Shared.RateProbe.FreshFused, s.FreshFusedHz);
+
             // late-joining renderers (live cameras open asynchronously)
             SubscribeSources();
 

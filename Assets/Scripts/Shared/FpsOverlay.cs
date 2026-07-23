@@ -52,10 +52,13 @@ namespace Shared
         public bool showWorstFrame = true;
 
         [Tooltip("Also show the body-tracking cadence: 'pose' is how often the pose " +
-                 "history advances (what the motion-curve trail steps at) and 'bt' is " +
-                 "the raw tracker snapshot rate summed over all cameras. A healthy fps " +
-                 "with a low pose rate is exactly what a stuttering trail looks like. " +
-                 "Hidden until body tracking actually runs.")]
+                 "history advances (what the motion-curve trail steps at); 'fused' and " +
+                 "'fresh' are the live RTMPose fusion rate and the part of it carrying a " +
+                 "genuinely new inference. A healthy fps with a low skeleton rate is " +
+                 "exactly what a stuttering trail looks like — the frame cap says nothing " +
+                 "about how often the sculpture actually advances. Only the fields the " +
+                 "running scene produces are drawn, and the line is hidden entirely until " +
+                 "some skeleton source reports.")]
         public bool showPoseRate = true;
 
         private Text[] _texts;
@@ -85,17 +88,25 @@ namespace Shared
             string label = showWorstFrame
                 ? $"{fps:0.0} fps   {avgMs:0.0} ms   max {1000f * _worstFrame:0.0}"
                 : $"{fps:0.0} fps   {avgMs:0.0} ms";
-            if (showPoseRate && RateProbe.IsKnown(RateProbe.PoseIngest))
+            // Only the counters this scene actually produces. Keying the line to one
+            // specific producer would blank it on a scene that runs the other, so each
+            // field appears on its own terms.
+            bool rateLine = showPoseRate && RateProbe.AnyKnown;
+            if (rateLine)
             {
-                label += $"\npose {RateProbe.Hz(RateProbe.PoseIngest):0.0} Hz"
-                       + $"   bt {RateProbe.Hz(RateProbe.BtSnapshot):0.0} Hz";
+                label += "\n";
+                if (RateProbe.IsKnown(RateProbe.Fused))
+                    label += $"fused {RateProbe.Hz(RateProbe.Fused):0.0} Hz"
+                           + $"   fresh {RateProbe.Hz(RateProbe.FreshFused):0.0} Hz";
+                if (RateProbe.IsKnown(RateProbe.PoseIngest))
+                    label += $"   pose {RateProbe.Hz(RateProbe.PoseIngest):0.0} Hz";
             }
 
             EnsureCanvases();
-            // The pose line appears only once body tracking starts, so the backing panel
-            // has to grow then — a fixed height would leave the second line drawn outside
-            // the dark box and unreadable over the point cloud.
-            int lines = showPoseRate && RateProbe.IsKnown(RateProbe.PoseIngest) ? 2 : 1;
+            // The rate line appears only once a skeleton source starts, so the backing
+            // panel has to grow then — a fixed height would leave the second line drawn
+            // outside the dark box and unreadable over the point cloud.
+            int lines = rateLine ? 2 : 1;
             for (int i = 0; i < _texts.Length; i++)
             {
                 if (_texts[i] == null) continue;
