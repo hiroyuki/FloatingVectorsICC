@@ -16,6 +16,20 @@ namespace Experience
 {
     public static class StickFigureTexture
     {
+        // Single shared star-guide instance — the director and the dev panel
+        // used to each cache their own copy, and the director's reference-null
+        // check (??=) could keep serving a destroyed texture, which a RawImage
+        // renders as a solid white square. The Unity-overloaded == below
+        // regenerates after any Destroy / play-mode transition instead.
+        private static Texture2D _starCached;
+
+        /// <summary>Cached star-pose guide shared by every consumer.</summary>
+        public static Texture2D StarPose()
+        {
+            if (_starCached == null) _starCached = DrawStarPose();
+            return _starCached;
+        }
+
         // One silhouette part: a segment with a tapered radius (cone capsule).
         private readonly struct Part
         {

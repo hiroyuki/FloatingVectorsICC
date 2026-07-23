@@ -98,6 +98,15 @@ Shader "Orbbec/PointCloudUnlit"
             float    _FloorMaskRadius;
             float    _FloorFootCount;
             float4   _FloorFoot[8];
+            // Bottom-up reveal (experience: cloud rises from the feet when
+            // calibration finishes). GLOBALS on purpose — deliberately NOT in
+            // the Properties block, where per-material serialized values would
+            // shadow them. Unity zero-fills unset globals, so mode 0 = off and
+            // every dev scene / snapshot material is untouched. Mode 1 keeps
+            // only points at or below _PcRevealY (world m); ExperienceDirector
+            // animates Y floor→overhead then switches the mode back off.
+            float    _PcRevealMode;
+            float    _PcRevealY;
 
             struct appdata
             {
@@ -187,6 +196,12 @@ Shader "Orbbec/PointCloudUnlit"
                 return false;
             }
 
+            bool PassReveal(float3 worldPos)
+            {
+                if (_PcRevealMode < 0.5) return true;
+                return worldPos.y <= _PcRevealY;
+            }
+
             // Locate the closest joint to `worldPos`. Returns the joint index
             // (-1 if no joints), its squared distance, and its velocity / speed.
             // Squared distance avoids a per-iteration sqrt; the caller compares
@@ -218,7 +233,8 @@ Shader "Orbbec/PointCloudUnlit"
             {
                 v2f o;
                 float3 wp = mul(unity_ObjectToWorld, float4(v.vertex.xyz, 1.0)).xyz;
-                bool keep = PassObb(v.vertex.xyz) && PassDecim(v.vid) && PassCapsules(wp) && PassFloor(wp);
+                bool keep = PassObb(v.vertex.xyz) && PassDecim(v.vid) && PassCapsules(wp)
+                         && PassFloor(wp) && PassReveal(wp);
                 float3 outColor = v.color;
                 float3 wpOut = wp;
 

@@ -6,9 +6,11 @@
 // list available at all it falls back to comparing the connected renderer
 // count against expectedCameraCount.
 //
-// Alerts are suppressed while SensorManager.playbackOnly is set and while the
+// Alerts are suppressed while SensorManager.playbackOnly is set, while the
 // SensorRecorder is playing back a recording (playback destroys the live
-// renderers on purpose — that is not a camera fault).
+// renderers on purpose — that is not a camera fault), and for good once the
+// application starts quitting (Shared.AppShutdown) — teardown stops the
+// pipelines deliberately and used to raise a fault over the shutdown splash.
 
 using System;
 using System.Collections.Generic;
@@ -155,6 +157,19 @@ namespace PointCloud
         {
             _alerts.Clear();
             _firstFaultyLabel = "";
+
+            // Shutdown: the pipelines are being stopped on purpose, so every symptom
+            // this monitor looks for (frames stop advancing, renderers disappear,
+            // IsCapturing goes false) is expected. Stand down permanently — clearing
+            // _alerts above and reporting healthy also takes the full-screen fault
+            // alert off the shutdown splash via OnHealthChanged.
+            if (Shared.AppShutdown.IsShuttingDown)
+            {
+                _health.Clear();
+                _allStreaming = true;
+                LogTransition();
+                return;
+            }
 
             // Suppression truth table (Plans/phase6-attract-watchdog-plan.md):
             //   playbackOnly                          -> suppress (dev, no live rig by design)
