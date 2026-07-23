@@ -122,6 +122,9 @@ namespace Experience.EditorTools
             DrawPreviewSection();
 
             EditorGUILayout.Space(8);
+            DrawLayoutSection();
+
+            EditorGUILayout.Space(8);
             DrawConfigSection();
 
             EditorGUILayout.Space(8);
@@ -194,6 +197,69 @@ namespace Experience.EditorTools
                 EditorGUILayout.HelpBox(
                     "Experience mode が ON — ステート遷移がプレビューを上書きします。調整中は OFF 推奨。",
                     MessageType.Warning);
+        }
+
+        // Position / size tuning for the visitor UI elements (VisitorMessageUI's
+        // serialized layout fields). Everything live-applies while the element is
+        // on screen, so the loop is: Play → preview button above → drag numbers
+        // here and watch the visitor display. Values persist with the scene.
+        private bool _layoutFoldout = true;
+
+        private void DrawLayoutSection()
+        {
+            var ui = FindFirstObjectByType<VisitorMessageUI>(FindObjectsInactive.Include);
+            if (ui == null) return; // the preview section already shows the warning
+
+            _layoutFoldout = EditorGUILayout.Foldout(_layoutFoldout,
+                "UI レイアウト（文字/画像/QR の位置・サイズ）", true, EditorStyles.foldoutHeader);
+            if (!_layoutFoldout) return;
+
+            EditorGUI.BeginChangeCheck();
+
+            EditorGUILayout.LabelField("位置（画面中心からの px, 1920×1080 基準）",
+                EditorStyles.miniBoldLabel);
+            Vector2 msgPos = EditorGUILayout.Vector2Field("メッセージ文字", ui.messagePosition);
+            Vector2 cdPos = EditorGUILayout.Vector2Field("カウントダウン数字", ui.countdownPosition);
+            Vector2 poseImgPos = EditorGUILayout.Vector2Field("ポーズ画像", ui.poseImagePosition);
+            Vector2 poseLblPos = EditorGUILayout.Vector2Field("ポーズ説明文字", ui.poseLabelPosition);
+            Vector2 qrPos = EditorGUILayout.Vector2Field("QR コード", ui.qrPosition);
+            Vector2 qrHeadPos = EditorGUILayout.Vector2Field("QR 見出し文字", ui.qrHeadlinePosition);
+            Vector2 noticePos = EditorGUILayout.Vector2Field("注意書きボックス", ui.noticePosition);
+
+            EditorGUILayout.Space(4);
+            EditorGUILayout.LabelField("サイズ（文字 pt / 画像 px）", EditorStyles.miniBoldLabel);
+            int msgFont = EditorGUILayout.IntField("メッセージ文字", ui.messageFontSize);
+            int cdFont = EditorGUILayout.IntField("カウントダウン文字", ui.countdownFontSize);
+            float poseSize = EditorGUILayout.FloatField("ポーズ画像", ui.poseGuideSizePixels);
+            float qrSize = EditorGUILayout.FloatField("QR コード", ui.qrSizePixels);
+            int capFont = EditorGUILayout.IntField("QR キャプション文字", ui.captionFontSize);
+            int noticeFont = EditorGUILayout.IntField("注意書き文字", ui.noticeFontSize);
+
+            if (EditorGUI.EndChangeCheck())
+            {
+                Undo.RecordObject(ui, "Visitor UI layout");
+                ui.messagePosition = msgPos;
+                ui.countdownPosition = cdPos;
+                ui.poseImagePosition = poseImgPos;
+                ui.poseLabelPosition = poseLblPos;
+                ui.qrPosition = qrPos;
+                ui.qrHeadlinePosition = qrHeadPos;
+                ui.noticePosition = noticePos;
+                // Same floors as the fields' [Min] attributes (this path bypasses
+                // the Inspector's clamping).
+                ui.messageFontSize = Mathf.Max(10, msgFont);
+                ui.countdownFontSize = Mathf.Max(10, cdFont);
+                ui.poseGuideSizePixels = Mathf.Max(64f, poseSize);
+                ui.qrSizePixels = Mathf.Max(64f, qrSize);
+                ui.captionFontSize = Mathf.Max(10, capFont);
+                ui.noticeFontSize = Mathf.Max(10, noticeFont);
+                EditorUtility.SetDirty(ui);
+            }
+
+            EditorGUILayout.HelpBox(
+                "Play 中に上の画面プレビューで対象を表示しながら動かすと即反映（X/Y ラベルの" +
+                "ドラッグで連続調整）。値は VisitorUI のシーン値 — 保存を忘れずに。",
+                MessageType.None);
         }
 
         private Texture2D StarTex(ExperienceConfig cfg)

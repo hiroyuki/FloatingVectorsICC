@@ -56,6 +56,10 @@ namespace Experience
         [Min(10)] public int captionFontSize = 24;
         [Min(64f)] public float qrSizePixels = 480f;
 
+        [Tooltip("QR code image anchored position (reference px from canvas center). " +
+                 "The caption rides 70 px below the code's bottom edge.")]
+        public Vector2 qrPosition = new Vector2(0f, 60f);
+
         [Range(0f, 1f)]
         [Tooltip("Black backdrop opacity behind the red alert text.")]
         public float alertBackdropAlpha = 0.75f;
@@ -356,6 +360,22 @@ namespace Experience
             rect.sizeDelta = new Vector2(poseGuideSizePixels, poseGuideSizePixels);
             rect.anchoredPosition = poseImagePosition;
             ui.poseLabel.rectTransform.anchoredPosition = poseLabelPosition;
+            ui.poseLabel.fontSize = messageFontSize;
+        }
+
+        // Same live-apply contract for the QR screen: code position/size, the
+        // caption riding 70 px below the code's bottom edge, and the headline.
+        private void ApplyQrLayout(DisplayUi ui)
+        {
+            var qrRect = (RectTransform)ui.qrImage.transform;
+            qrRect.sizeDelta = new Vector2(qrSizePixels, qrSizePixels);
+            qrRect.anchoredPosition = qrPosition;
+            ui.qrCaption.rectTransform.anchoredPosition =
+                new Vector2(qrPosition.x, qrPosition.y - qrSizePixels * 0.5f - 70f);
+            ui.qrCaption.fontSize = captionFontSize;
+            ui.qrCaption.resizeTextMaxSize = captionFontSize;
+            ui.qrHeadline.rectTransform.anchoredPosition = qrHeadlinePosition;
+            ui.qrHeadline.fontSize = messageFontSize;
         }
 
         private void Update()
@@ -366,12 +386,15 @@ namespace Experience
             {
                 if (ui.poseGroup != null && ui.poseGroup.activeSelf) ApplyPoseLayout(ui);
                 if (ui.noticeGroup != null && ui.noticeGroup.activeSelf) ApplyNoticeLayout(ui);
-                // live-apply countdown/message position (Inspector tuning in Play mode)
+                // live-apply countdown/message position + size (panel/Inspector
+                // tuning in Play mode)
                 if (ui.message != null && ui.message.gameObject.activeSelf)
+                {
                     ui.message.rectTransform.anchoredPosition =
                         _countdownMode ? countdownPosition : messagePosition;
-                if (ui.qrHeadline != null && ui.qrHeadline.gameObject.activeSelf)
-                    ui.qrHeadline.rectTransform.anchoredPosition = qrHeadlinePosition;
+                    ui.message.fontSize = _countdownMode ? countdownFontSize : messageFontSize;
+                }
+                if (ui.qrGroup != null && ui.qrGroup.activeSelf) ApplyQrLayout(ui);
             }
         }
 
@@ -410,7 +433,7 @@ namespace Experience
                 ui.qrImage.gameObject.SetActive(false);
                 ui.qrCaption.text = "";
                 ui.qrHeadline.text = headline ?? "";
-                ui.qrHeadline.rectTransform.anchoredPosition = qrHeadlinePosition;
+                ApplyQrLayout(ui);
                 ui.qrHeadline.gameObject.SetActive(!string.IsNullOrEmpty(headline));
                 ui.qrGroup.SetActive(true);
                 ui.message.gameObject.SetActive(false);
@@ -436,7 +459,7 @@ namespace Experience
                 ui.qrImage.gameObject.SetActive(true);
                 ui.qrCaption.text = caption ?? "";
                 ui.qrHeadline.text = headline ?? "";
-                ui.qrHeadline.rectTransform.anchoredPosition = qrHeadlinePosition;
+                ApplyQrLayout(ui);
                 ui.qrHeadline.gameObject.SetActive(!string.IsNullOrEmpty(headline));
                 ui.qrGroup.SetActive(true);
                 ui.message.gameObject.SetActive(false);
@@ -637,16 +660,11 @@ namespace Experience
 
             var qrGo = new GameObject("QrImage", typeof(RectTransform));
             qrGo.transform.SetParent(ui.qrGroup.transform, false);
-            var qrRect = qrGo.GetComponent<RectTransform>();
-            qrRect.sizeDelta = new Vector2(qrSizePixels, qrSizePixels);
-            qrRect.anchoredPosition = new Vector2(0f, 60f);
             ui.qrImage = qrGo.AddComponent<RawImage>();
             ui.qrImage.color = Color.white;
 
             ui.qrCaption = MakeText(ui.qrGroup.transform, "QrCaption", captionFontSize, Color.white,
                                     new Vector2(1700f, 60f));
-            var capRect = ui.qrCaption.rectTransform;
-            capRect.anchoredPosition = new Vector2(0f, -(qrSizePixels * 0.5f) + 60f - 70f);
             ui.qrCaption.horizontalOverflow = HorizontalWrapMode.Overflow; // one line, no wrap
             ui.qrCaption.resizeTextForBestFit = true;                      // shrink long URLs
             ui.qrCaption.resizeTextMaxSize = captionFontSize;
@@ -654,8 +672,8 @@ namespace Experience
 
             ui.qrHeadline = MakeText(ui.qrGroup.transform, "QrHeadline", messageFontSize,
                                      Color.white, new Vector2(1700f, 120f));
-            ui.qrHeadline.rectTransform.anchoredPosition = qrHeadlinePosition;
             ui.qrHeadline.gameObject.SetActive(false);
+            ApplyQrLayout(ui); // qrPosition / qrSizePixels / caption / headline
             ui.qrGroup.SetActive(false);
 
             // -- pose-guide group: figure above center, instruction below.

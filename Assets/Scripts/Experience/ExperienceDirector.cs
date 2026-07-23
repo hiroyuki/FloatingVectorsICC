@@ -58,7 +58,7 @@ namespace Experience
     // this reads arrive from.
     [DefaultExecutionOrder(-20)]
     [DisallowMultipleComponent]
-    public class ExperienceDirector : MonoBehaviour, Shared.IViewToggle
+    public class ExperienceDirector : MonoBehaviour, Shared.IViewToggle, Shared.IStartupActivatable
     {
         [Tooltip("Experience configuration asset. A default instance is created " +
                  "at runtime when left empty (dev convenience).")]
@@ -115,6 +115,14 @@ namespace Experience
                  "does a synchronous GPU readback per sampled seed, i.e. hundreds of " +
                  "blocking readbacks right at the start of Processing.")]
         public bool compareCurveSources;
+
+        // ---- IStartupActivatable (Control Panel's big Activate On Play toggle) ----
+        public string ActivateLabel => "Experience mode";
+        public bool ActivateOnPlay
+        {
+            get => activateOnPlay;
+            set => activateOnPlay = value;
+        }
 
         // ---- IViewToggle ("Experience mode" in the Views panel) ----
         public string ViewLabel => "Experience mode";

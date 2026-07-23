@@ -31,6 +31,8 @@ namespace Shared.EditorTools
         private readonly List<IViewToggle> _views = new List<IViewToggle>();
         private readonly List<IAccumulationController> _accums = new List<IAccumulationController>();
         private readonly List<IPanelTunable> _tunables = new List<IPanelTunable>();
+        private readonly List<IStartupActivatable> _activatables = new List<IStartupActivatable>();
+        private GUIStyle _bigToggleStyle;
         private Vector2 _scroll;
 
         private void OnGUI()
@@ -41,12 +43,14 @@ namespace Shared.EditorTools
             _views.Clear();
             _accums.Clear();
             _tunables.Clear();
+            _activatables.Clear();
             foreach (var mb in FindObjectsByType<MonoBehaviour>(FindObjectsInactive.Include, FindObjectsSortMode.None))
             {
                 if (mb is IRecorderTransport rt) _transports.Add(rt);
                 if (mb is IViewToggle vt) _views.Add(vt);
                 if (mb is IAccumulationController ac) _accums.Add(ac);
                 if (mb is IPanelTunable tn) _tunables.Add(tn);
+                if (mb is IStartupActivatable sa) _activatables.Add(sa);
             }
             // FindObjectsSortMode.None gives a nondeterministic order that changes
             // every Play — sort ALL sections so rows never jump around.
@@ -58,9 +62,12 @@ namespace Shared.EditorTools
                 int c = string.CompareOrdinal(a.TuningLabel, b.TuningLabel);
                 return c != 0 ? c : string.CompareOrdinal(GoName(a), GoName(b));
             });
+            _activatables.Sort((a, b) => string.CompareOrdinal(a.ActivateLabel, b.ActivateLabel));
 
             _scroll = EditorGUILayout.BeginScrollView(_scroll);
 
+            DrawActivateOnPlaySection();
+            EditorGUILayout.Space(12);
             DrawRecorderSection();
             EditorGUILayout.Space(12);
             DrawViewsSection();
@@ -70,6 +77,53 @@ namespace Shared.EditorTools
             DrawTuningSection();
 
             EditorGUILayout.EndScrollView();
+        }
+
+        // ---------------- Activate On Play ----------------
+        // The exhibition arming switch (e.g. ExperienceDirector.activateOnPlay):
+        // ON means the next Play boots straight into the experience with no
+        // operator action. Deliberately LARGE — this is the one flag that decides
+        // whether Play starts a show or a dev session, so it must be impossible
+        // to miss when closing up the exhibition machine.
+        private void DrawActivateOnPlaySection()
+        {
+            EditorGUILayout.LabelField("Activate On Play (起動時に自動開始)", EditorStyles.boldLabel);
+            if (_activatables.Count == 0)
+            {
+                EditorGUILayout.HelpBox("No IStartupActivatable components in the open scene(s).", MessageType.Info);
+                return;
+            }
+
+            if (_bigToggleStyle == null)
+                _bigToggleStyle = new GUIStyle(GUI.skin.button)
+                {
+                    fontSize = 18,
+                    fontStyle = FontStyle.Bold,
+                    fixedHeight = 48,
+                };
+
+            foreach (var sa in _activatables)
+            {
+                var comp = sa as Component;
+                bool on = sa.ActivateOnPlay;
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    Color saved = GUI.backgroundColor;
+                    GUI.backgroundColor = on ? new Color(0.35f, 1f, 0.45f) : saved;
+                    bool now = GUILayout.Toggle(on,
+                        (on ? "⦿ " : "○ ") + sa.ActivateLabel + " — Activate On Play: " + (on ? "ON" : "OFF"),
+                        _bigToggleStyle);
+                    GUI.backgroundColor = saved;
+                    if (now != on)
+                    {
+                        if (comp != null) Undo.RecordObject(comp, "Activate On Play");
+                        sa.ActivateOnPlay = now;
+                        if (comp != null) EditorUtility.SetDirty(comp);
+                    }
+                    DrawSelectButton(comp);
+                }
+            }
+            EditorGUILayout.HelpBox("ON = 次の Play で自動的に体験モードへ入る（展示用）。OFF = Dev セッション。", MessageType.None);
         }
 
         // ---------------- Recorder ----------------
