@@ -398,8 +398,23 @@ namespace BodyTracking
         // from the PC_Renderer feature attaches automatically) so the bones catch
         // scene lighting and read as 3D cylinders. Falls back to TrailOverlay, then
         // to URP particle / sprite shaders as a last resort.
+        /// <summary>When true the bone tubes use the always-on-top TrailOverlay shader
+        /// instead of the lit one, so they are never hidden behind the point cloud or the
+        /// TSDF surface. Diagnostic: judging how far the tracked skeleton trails the body
+        /// is impossible while the body's own points occlude it. Set from
+        /// SkeletonMerger.alwaysOverlayBones before the visuals are built.</summary>
+        public static bool OverlayBones = true;
+
         private static Shader ResolveTrailLitShader()
         {
+            // Overlay first when asked: TrailOverlay is the ZTest-Always variant, so the
+            // bones draw through whatever is in front of them.
+            if (OverlayBones)
+            {
+                Shader o = Resources.Load<Shader>("TrailOverlay");
+                if (o == null) o = Shader.Find("BodyTracking/TrailOverlay");
+                if (o != null) return o;
+            }
             Shader s = Resources.Load<Shader>("TrailLit");
             if (s == null) s = Shader.Find("BodyTracking/TrailLit");
             if (s == null) s = Resources.Load<Shader>("TrailOverlay");

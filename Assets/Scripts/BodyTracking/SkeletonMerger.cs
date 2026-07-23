@@ -122,9 +122,24 @@ namespace BodyTracking
         [UnityEngine.Serialization.FormerlySerializedAs("showSkeleton")]
         public bool showBones = true;
 
+        [Tooltip("Diagnostic: keep the skeleton on screen and drawn THROUGH everything, " +
+                 "whatever the experience state or the Views panel asks for. The bone " +
+                 "tubes switch to the ZTest-Always overlay shader, and showBones is held " +
+                 "on. Needed to judge how far the tracked skeleton trails the real body — " +
+                 "which is impossible while the visitor's own point cloud occludes it, and " +
+                 "impossible at all in the states that hide the skeleton. Turn OFF for the " +
+                 "visitor-facing look.")]
+        public bool alwaysOverlayBones = true;
+
         // ---- Shared.IViewToggle (unified Views panel) ----
         public string ViewLabel => "BT skeleton";
-        public bool Visible { get => showBones; set => showBones = value; }
+        // The diagnostic override wins over the Views panel too: a toggle that silently
+        // did nothing would be worse than one that is visibly ignored.
+        public bool Visible
+        {
+            get => showBones;
+            set { if (!alwaysOverlayBones) showBones = value; }
+        }
 
         // Increments whenever a new body frame is ingested (playback or live worker). Consumers like
         // BonePoseHistory watch it to know a genuinely new pose arrived — so they update on play AND on
@@ -810,6 +825,15 @@ namespace BodyTracking
 
             // Late-binding for renderers spawned mid-Play by SensorManager.
             BindNewRenderers();
+
+            // Reassert every frame, not once at startup: the experience director flips
+            // showBones per state, so a one-shot set would be overwritten the moment the
+            // flow advances — exactly the states this diagnostic exists to look at.
+            // BodyVisual reads the static when it builds a visual's materials, so it is
+            // set here too rather than only in OnEnable (visuals are created on demand
+            // as bodies appear).
+            BodyVisual.OverlayBones = alwaysOverlayBones;
+            if (alwaysOverlayBones) showBones = true;
 
             // Always merge/update the skeleton so data consumers (BonePoseHistory / TSDF trail) keep
             // getting current poses. showBones no longer gates the compute — it flows into the visual

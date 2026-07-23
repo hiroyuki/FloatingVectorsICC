@@ -58,7 +58,8 @@ namespace Experience
     // this reads arrive from.
     [DefaultExecutionOrder(-20)]
     [DisallowMultipleComponent]
-    public class ExperienceDirector : MonoBehaviour, Shared.IViewToggle, Shared.IStartupActivatable
+    public class ExperienceDirector : MonoBehaviour, Shared.IViewToggle, Shared.IStartupActivatable,
+                                      Shared.IPanelTunable
     {
         [Tooltip("Experience configuration asset. A default instance is created " +
                  "at runtime when left empty (dev convenience).")]
@@ -131,6 +132,28 @@ namespace Experience
             get => _active;
             set { if (value && !_active) EnterMode(); else if (!value && _active) ExitMode(); }
         }
+
+        // ---- IPanelTunable (Control Panel > Tuning) ----
+        // Live sync is a genuine trade, not a fix, so it belongs on the panel rather than
+        // buried in the config asset: ON aligns the cloud with the tracked skeleton at the
+        // cost of showing everything ~150ms late; OFF is real-time but the skeleton
+        // visibly trails the body during motion. Which one is right depends on what the
+        // operator is judging, so let them flip it while looking at the result.
+        public string TuningLabel => "Experience";
+        public int TunableCount => 1;
+        public string TunableName(int i) => "Live sync (0=real-time, 1=aligned)";
+        public float TunableValue(int i) => config != null && config.liveRenderSync ? 1f : 0f;
+        public void SetTunableValue(int i, float value)
+        {
+            if (config == null) return;
+            config.liveRenderSync = value >= 0.5f;
+            // Push it immediately: UpdateLiveRenderSync clears the delay on the next tick
+            // when it goes off, but turning it ON should not wait for a state change.
+            UpdateLiveRenderSync();
+        }
+        public float TunableMin(int i) => 0f;
+        public float TunableMax(int i) => 1f;
+        public bool TunableIsInt(int i) => true;
 
         public ExperienceState CurrentState => _fsm?.State ?? ExperienceState.Idle;
         public bool IsActive => _active;
@@ -325,10 +348,16 @@ namespace Experience
 
         private void UpdateLiveRenderSync()
         {
-            bool want = config != null && config.liveRenderSync && !_visitorPlaybackActive
-                        && _fsm.State is ExperienceState.Calibrate
-                                      or ExperienceState.FreeMove
-                                      or ExperienceState.Shoot;
+            // Every live state, not just the three that draw the sculpture. Restricting it
+            // meant the visitor's first impression — walking up, Consent, Welcome — showed
+            // the cloud in real time with the skeleton trailing ~150ms behind it, and the
+            // mismatch then vanished the moment Calibrate began. A lag that appears and
+            // disappears reads as a fault; a consistently aligned picture does not. The
+            // cost is that the preview is a ~150ms-late mirror throughout, which is the
+            // trade this project already accepted for the states that had it.
+            // Visitor playback stays excluded: the take owns its own timing there
+            // (SensorRecorder.playbackRenderDelayFrames).
+            bool want = config != null && config.liveRenderSync && !_visitorPlaybackActive;
             if (!want)
             {
                 if (_liveSyncOn) SetLiveRenderSync(false);
