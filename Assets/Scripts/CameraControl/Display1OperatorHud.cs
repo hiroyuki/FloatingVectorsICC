@@ -72,6 +72,13 @@ namespace CameraControl
                  "whenever the tiles are visible (whichever key toggled them).")]
         public bool exclusiveWithDebugView = true;
 
+        // Where the cheat sheet starts, below the widgets (slider / toggles / export).
+        private const float SheetTopOffset = 150f;
+
+        /// <summary>Panel height in scaled GUI units as last measured in OnGUI.
+        /// Exposed so a check can tell whether the panel still fits the display.</summary>
+        public float MeasuredHeight { get; private set; }
+
         private bool _autoOrbit;
 
         private void OnEnable()
@@ -119,8 +126,19 @@ namespace CameraControl
 
             GUI.matrix = Matrix4x4.Scale(Vector3.one * uiScale);
 
+            // Cheat sheet first: the backdrop has to be drawn before the widgets, and
+            // its height comes from measuring the sheet, so the text is built up here.
+            string sheet = BuildCheatSheet();
+            var sheetContent = new GUIContent(sheet);
+            float sheetTop = position.y + SheetTopOffset;
+            // Measured, not a per-line guess: the skin's line height is not knowable
+            // outside OnGUI, and a wrong guess clipped the last row off the panel.
+            float sheetHeight = GUI.skin.label.CalcHeight(sheetContent, width);
+            MeasuredHeight = sheetTop - position.y + sheetHeight + 34f;
+
             // Panel backdrop so the widgets read against the black operator display.
-            GUI.Box(new Rect(position.x - 12, position.y - 10, width + 24, 296), GUIContent.none);
+            GUI.Box(new Rect(position.x - 12, position.y - 10, width + 24, MeasuredHeight),
+                    GUIContent.none);
 
             // Tunable 0 is History Samples (frames) — same knob as the Control Panel.
             float min = history.TunableMin(0);
@@ -161,29 +179,49 @@ namespace CameraControl
                 if (exp != experienceDirector.Visible) experienceDirector.Visible = exp;
             }
 
-            // Hotkey cheat sheet (dancer-session workflow) with the live values.
-            float cd = recorder != null ? recorder.liveFreezeCountdownSeconds : 5f;
-            float stop = recorder != null ? recorder.stopRecAfterFreezeSeconds : 0f;
-            int trail = publisher != null ? publisher.trailSamples : 0;
-            string recStop = stop > 0f ? $" (REC: auto-stops {stop:0}s later)" : "";
-            string busy = publisher != null && publisher.IsBusy ? "  [PUBLISHING…]" : "";
             GUI.color = new Color(1f, 1f, 1f, 0.35f);
-            GUI.DrawTexture(new Rect(position.x, position.y + 142, width, 2), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(position.x, sheetTop - 8f, width, 2), Texture2D.whiteTexture);
             GUI.color = Color.white;
-            GUI.Label(new Rect(position.x, position.y + 150, width, 136),
-                      $"F9      REC start / stop\n" +
-                      $"Space   freeze in {cd:0}s{recStop}\n" +
-                      $"F10     export -> upload -> QR on disp 2/3 (trail {trail}){busy}\n" +
-                      $"F12     toggle: export preview <-> live\n" +
-                      $"F11     hide QR\n" +
-                      $"</>   step frame (paused)      Tab  HUD <-> 4cam");
+            GUI.Label(new Rect(position.x, sheetTop, width, sheetHeight), sheetContent);
             if (publisher != null && !string.IsNullOrEmpty(publisher.StatusText))
-                GUI.Label(new Rect(position.x, position.y + 268, width, 22),
+                GUI.Label(new Rect(position.x, sheetTop + sheetHeight + 4f, width, 22),
                           publisher.StatusText.Length > 60
                               ? publisher.StatusText.Substring(0, 60) + "…"
                               : publisher.StatusText);
 
             GUI.matrix = Matrix4x4.identity;
+        }
+
+        // Hotkey cheat sheet with the live values, grouped by what the operator is
+        // doing: run the session, publish the result, then everything that only
+        // changes what the operator display itself shows.
+        private string BuildCheatSheet()
+        {
+            float cd = recorder != null ? recorder.liveFreezeCountdownSeconds : 5f;
+            float stop = recorder != null ? recorder.stopRecAfterFreezeSeconds : 0f;
+            int trail = publisher != null ? publisher.trailSamples : 0;
+            string recStop = stop > 0f ? $" (REC auto-stops {stop:0}s later)" : "";
+            string busy = publisher != null && publisher.IsBusy ? "  [PUBLISHING…]" : "";
+            // The tiles have their own toggle key besides this HUD's; show both, since
+            // either one gets the operator back from a screen full of camera tiles.
+            string tiles = debugView != null
+                ? $"{viewSwitchKey} / {debugView.toggleKey}"
+                : viewSwitchKey.ToString();
+
+            return "SESSION\n" +
+                   $"  F9         REC start / stop\n" +
+                   $"  Space      freeze in {cd:0}s{recStop}\n" +
+                   $"  <- / ->    step frame (paused)\n" +
+                   "PUBLISH\n" +
+                   $"  F10        export -> upload -> QR on disp 2/3 (trail {trail}){busy}\n" +
+                   "  F11        hide QR\n" +
+                   "  F12        toggle: export preview <-> live\n" +
+                   "OPERATOR DISPLAY\n" +
+                   $"  {tiles,-9}  HUD <-> 4-cam tiles\n" +
+                   "  F2         FPS readout (all displays)\n" +
+                   "  F4         display diagnostics   (F3 moves it)\n" +
+                   "  F1         calibration mode\n" +
+                   "  Esc hold   quit (build only)";
         }
 
         // ON: every stage camera's orbit controller runs its idle auto-orbit,
