@@ -44,12 +44,25 @@ namespace BodyTracking.Eval.Rtmpose
         // TensorRT is deliberately absent: its provider DLL needs nvinfer*, which is not
         // shipped, so preloading it only ever logs a spurious ERROR_MOD_NOT_FOUND that
         // buries the failures worth reading.
-        private static readonly string[] Prefixes =
+        private static readonly string[] CudaPrefixes =
         {
             "cudart64_", "nvrtc-builtins", "nvrtc64_", "cublasLt64_",
             "cublas64_", "cufft64_", "cudnn",
-            "onnxruntime",
         };
+
+        // ORT is loaded LAST and, unlike the CUDA group, WITHOUT
+        // LOAD_WITH_ALTERED_SEARCH_PATH. That flag resolves a DLL's imports from its own
+        // directory first, and in a player build that directory also holds the VC runtime
+        // Unity bundles for other plugins — msvcp140/vcruntime140 14.16 (shipped alongside
+        // OpenCV for Unity), with no vcruntime140_1.dll at all. ONNX Runtime 1.26 needs a
+        // modern CRT, so it would bind 14.16 for two of the three libraries and fall through
+        // to System32's 14.50 for vcruntime140_1: a spliced CRT, which fails the DLL's init
+        // routine outright (ERROR_DLL_INIT_FAILED) and leaves the bare-name lookup free to
+        // find the System32 inbox ORT. Without the flag the CRT resolves consistently from
+        // System32. Its CUDA imports still land on our copies because the group above has
+        // already made them resident, and a name lookup returns an already-loaded module.
+        // The Editor never hit this: the package plugin folder carries no VC runtime at all.
+        private static readonly string[] OrtPrefixes = { "onnxruntime" };
 
         private static readonly string[] SkipContains = { "tensorrt" };
 
@@ -90,23 +103,8 @@ namespace BodyTracking.Eval.Rtmpose
             if (dir == null) return; // no plugin dir found — nothing of ours to pin
 
             int ok = 0, fail = 0;
-            foreach (string prefix in Prefixes)
-            {
-                foreach (string path in Directory.GetFiles(dir, prefix + "*.dll"))
-                {
-                    bool skip = false;
-                    foreach (string s in SkipContains)
-                        if (path.IndexOf(s, StringComparison.OrdinalIgnoreCase) >= 0) { skip = true; break; }
-                    if (skip) continue;
-
-                    if (LoadLibraryExW(path, IntPtr.Zero, LoadWithAlteredSearchPath) != IntPtr.Zero) ok++;
-                    else
-                    {
-                        fail++;
-                        Debug.LogWarning($"[rtmpose] preload failed (err={Marshal.GetLastWin32Error()}): {path}");
-                    }
-                }
-            }
+            LoadGroup(dir, CudaPrefixes, LoadWithAlteredSearchPath, ref ok, ref fail);
+            LoadGroup(dir, OrtPrefixes, 0, ref ok, ref fail);
 
             // Verify rather than trust the return code: a successful LoadLibrary only means
             // SOME module of that name is resident, and if a foreign copy got there first
@@ -120,6 +118,29 @@ namespace BodyTracking.Eval.Rtmpose
             if (!OrtPinned && OrtPath != null)
                 Debug.LogError("[rtmpose] a foreign onnxruntime.dll won the load — the ORT managed " +
                                "binding would crash the process against it, so RTMPose will be skipped.");
+        }
+
+        // Absolute paths throughout, so `flags` only ever changes how each DLL's own imports
+        // are resolved — never which file we load.
+        private static void LoadGroup(string dir, string[] prefixes, uint flags, ref int ok, ref int fail)
+        {
+            foreach (string prefix in prefixes)
+            {
+                foreach (string path in Directory.GetFiles(dir, prefix + "*.dll"))
+                {
+                    bool skip = false;
+                    foreach (string s in SkipContains)
+                        if (path.IndexOf(s, StringComparison.OrdinalIgnoreCase) >= 0) { skip = true; break; }
+                    if (skip) continue;
+
+                    if (LoadLibraryExW(path, IntPtr.Zero, flags) != IntPtr.Zero) ok++;
+                    else
+                    {
+                        fail++;
+                        Debug.LogWarning($"[rtmpose] preload failed (err={Marshal.GetLastWin32Error()}): {path}");
+                    }
+                }
+            }
         }
 
         private static string FindLoadedModule(string moduleName)
