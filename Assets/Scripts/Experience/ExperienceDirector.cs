@@ -1206,19 +1206,16 @@ namespace Experience
             // intro must land with the bones already back on.
             ApplyCloudVisibility(state);
             ApplyBonesVisibility(state);
-            // The ribbons stay OFF SCREEN through the live/interactive phases
-            // (bones-only intro, then the raw cloud is the content — see
-            // ApplyBonesVisibility / ApplyCloudVisibility) and through Processing;
-            // they are the star of the playback phases. The TestMove routines
-            // flip this on for their own play-through sub-phase. Draw-only:
-            // production keeps running underneath for the capture/export. Driven
-            // off the state (not the routines) so every exit path — fault, visitor
-            // walked off, processing failure — lands on the right visibility.
+            // The ribbons draw EVERYWHERE the cloud is content — the live phases
+            // after calibration (point cloud + curves, 2026-07-23 decision) and
+            // every playback phase. Hidden only during Processing (the progress
+            // bar owns that screen); the bones-only intro shows nothing anyway
+            // because ApplyCurvesVisibility gates the BUILD until the match.
+            // Draw-only: production keeps running underneath for the
+            // capture/export. Driven off the state so every exit path — fault,
+            // visitor walked off, processing failure — lands right.
             // (The TSDF mesh is session-suppressed in EnterMode and never shows.)
-            SetSculptureVisible(state is ExperienceState.Idle
-                                     or ExperienceState.ResultShow
-                                     or ExperienceState.QrShow
-                                     or ExperienceState.Fault);
+            SetSculptureVisible(state is not ExperienceState.Processing);
 
             // The beat between screens (stateGapSeconds): blank now, then the new
             // screen and its cue land together after the gap. Fault must alert
@@ -2351,8 +2348,7 @@ namespace Experience
                 {
                     PlaySe(config.resultSe);
                     _ui.ShowMessage(config.resultText);
-                    SetSculptureVisible(true); // the ribbons draw during the replay
-                    SetOrbit(true);
+                    SetOrbit(true); // ribbons already draw (state-level gate)
                     // Canned dev take: replay only its tail — a full-length entrance
                     // recording would otherwise loop for minutes. (A recorded or
                     // tapped take is capture-window-sized and never triggers this.)
@@ -2365,8 +2361,9 @@ namespace Experience
                     if (!Active()) yield break;
 
                     // hand the stage back to the live body for the next round
+                    // (the ribbons keep drawing — point cloud + curves is the
+                    // live look now too)
                     SetOrbit(false);
-                    SetSculptureVisible(false);
                     StopVisitorPlayback();
                     ApplyBodySource(BodySource.Live);
                     if (HasLiveRenderers())

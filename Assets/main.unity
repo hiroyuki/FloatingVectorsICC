@@ -422,7 +422,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 4e1c8b0a6d2f4a91b7e35c2d094f8b3c, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::PointCloud.PointCloudDecimater
-  reductionPercent: 7.9
+  reductionPercent: 50.5
 --- !u!4 &173474410
 Transform:
   m_ObjectHideFlags: 0
@@ -473,7 +473,7 @@ MonoBehaviour:
   sourceMeshes: []
   autoSourcePrefix: _Playback_
   seedFromTsdfMesh: 1
-  seedCount: 60000
+  seedCount: 500
   radiusScale: 0.8
   surfaceMargin: 0.07
   lagCompSeconds: 0.07
@@ -489,7 +489,7 @@ MonoBehaviour:
   ribbonWidth: 0.006
   round: 1
   rimBoost: 0.5
-  tailAlpha: 1
+  tailAlpha: 0
   tailFadePow: 0.5
   freeze: 0
   sanityRange: 100
