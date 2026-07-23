@@ -30,6 +30,7 @@ MonoBehaviour:
     skipCalibrate: 0
     skipFreeMove: 0
     skipShoot: 0
+    dummyShoot: 1
     skipProcessing: 0
     skipQr: 0
     timeMultiplier: 1
@@ -47,7 +48,7 @@ MonoBehaviour:
   shootCueSeconds: 2.5
   captureStartOffsetSeconds: 0.25
   recordPreRollSeconds: 0.3
-  devCannedTakeRoot: D:\Dropbox\projects\ICC\Recordings\RecordingBase\2026-07-14_15-50-24
+  devCannedTakeRoot: /Users/horihiroyuki/Dropbox/projects/ICC/Recordings/RecordingBase/2026-07-14_15-50-24
   allowCannedTakeConversion: 0
   playbackRenderDelayFrames: 4
   liveRenderSync: 1
@@ -73,7 +74,7 @@ MonoBehaviour:
   countdownTickSe: {fileID: 0}
   recordEndSe: {fileID: 0}
   poseGuideTexture: {fileID: 0}
-  dryRunPublish: 0
+  dryRunPublish: 1
   dryRunDelaySeconds: 1
   qrUrlKind: 2
   uploadScriptSha256: 46d660b6ae081b648fdbcead21bfeb44419df78410c3e89cb55302c65dfac687

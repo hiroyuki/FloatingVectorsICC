@@ -221,7 +221,14 @@ namespace CameraControl
                    "  F2         FPS readout (all displays)\n" +
                    "  F4         display diagnostics   (F3 moves it)\n" +
                    "  F1         calibration mode\n" +
-                   "  Esc hold   quit (build only)";
+                   "  Esc hold   quit (build only)\n" +
+                   "EXPERIENCE (dev jump — mode auto-ON)\n" +
+                   "  0          頭出し (run reset -> Idle)\n" +
+                   "  1 2 3 4    Consent / Welcome / Calibrate / FreeMove\n" +
+                   "  5 6 7 8    Shoot / Processing / ResultShow / QrShow\n" +
+                   "TSDF DEBUG\n" +
+                   "  Q W E R    single-cam view (cam 1-4)\n" +
+                   "  A          all cams";
         }
 
         // ON: every stage camera's orbit controller runs its idle auto-orbit,

@@ -151,7 +151,6 @@ namespace Experience
         private LiveSkeletonFeed _liveFeed;
         private ExperienceSpaceBuilder _space;
         private AudioSource _audio;
-        private Texture2D _starGuideGenerated;
 
         // dev-value snapshot (restored on Exit)
         private int _savedHistorySamples;
@@ -171,12 +170,15 @@ namespace Experience
         private readonly List<Vector3> _liveCurveColors = new List<Vector3>();
         private bool _savedKeepLive;
         private string _savedPlaybackFolder;
+        private string _savedPlaybackFolderMacOverride;
         private bool _savedWasPlaying;
         private bool _savedWasPaused;
         private bool _savedWasLoaded;
         private bool _savedLiveFrozen;
         private bool _savedCumulativeNoErase;
         private PointCloudCumulative _cumulative;
+        private bool _savedMeshCumHotkeys;
+        private TSDF.MeshCumulative _meshCumulative;
         private readonly System.Collections.Generic.Dictionary<string, bool> _savedLiveVisible =
             new System.Collections.Generic.Dictionary<string, bool>();
         private readonly System.Collections.Generic.Dictionary<string, bool> _savedLiveSuppress =
@@ -215,6 +217,7 @@ namespace Experience
         private TSDFSnapshot _snapshot;
         private bool _exportDone, _exportFailed;
         private Coroutine _calibrateRoutine, _shootRoutine, _processingRoutine, _exportRoutine;
+        private Coroutine _gapPaintRoutine; // deferred state paint (stateGapSeconds)
         private CancellationTokenSource _cts;
         private Task<PublishResult> _publishTask;
         private string _qrUrl;
@@ -270,7 +273,15 @@ namespace Experience
                 if (!_active) Visible = true;
             }
 
-            if (!_active) return;
+            if (!_active)
+            {
+                // The jump keys stay live with the mode off — pressing one means
+                // "turn the show on and go there" (same as the dev panel), so a
+                // key press is never silently swallowed by a mode that something
+                // (calibration suspend, HUD toggle, play restart) switched off.
+                if (config != null && config.devStateJumpHotkeys) HandleDevJumpHotkeys();
+                return;
+            }
 
             var inputs = new ExperienceInputs
             {
@@ -285,6 +296,8 @@ namespace Experience
             };
             _fsm.Tick(Time.deltaTime, in inputs, config.timings);
             UpdateCrowdNotice();
+            if (config.devStateJumpHotkeys) HandleDevJumpHotkeys();
+            MaintainDevEntrancePlayback();
 
             // Fused source died mid-session (CUDA fault, component disabled):
             // bring up the k4abt fallback feed so calibration/presence keep a
@@ -477,7 +490,11 @@ namespace Experience
             }
 
             // 3) sensing area (TSDF volume + floor grid follow automatically).
-            _space = gameObject.AddComponent<ExperienceSpaceBuilder>();
+            // Reuse a leftover builder ([DisallowMultipleComponent]): if an earlier
+            // EnterMode died mid-way, AddComponent would return null here and every
+            // future enter would NRE — the mode stays bricked until domain reload.
+            if (!TryGetComponent(out _space))
+                _space = gameObject.AddComponent<ExperienceSpaceBuilder>();
             _space.boundingVolume = boundingVolume;
             _space.floorOrigin = floorOrigin;
             _space.sensorManager = sensorManager;
@@ -543,6 +560,7 @@ namespace Experience
             {
                 _savedKeepLive = sensorRecorder.keepLiveRenderersOnLoad;
                 _savedPlaybackFolder = sensorRecorder.playbackFolderPath;
+                _savedPlaybackFolderMacOverride = sensorRecorder.playbackFolderPathMacOverride;
                 _savedWasPlaying = sensorRecorder.IsPlaying;             // Idle stops it; Exit resumes it
                 _savedWasPaused = sensorRecorder.IsPaused;               // resume paused, not advancing
                 _savedWasLoaded = sensorRecorder.RecordedFrameCount > 0; // loaded-but-stopped: Exit reloads
@@ -576,6 +594,14 @@ namespace Experience
                 _savedCumulativeNoErase = _cumulative.noErase;
                 _cumulative.noErase = false;
             }
+            // The show owns the freeze state — MeshCumulative's raw C/V/R
+            // hotkeys must not fire mid-run (R doubles as a state-jump key).
+            _meshCumulative = FindFirstObjectByType<TSDF.MeshCumulative>();
+            if (_meshCumulative != null)
+            {
+                _savedMeshCumHotkeys = _meshCumulative.hotkeysEnabled;
+                _meshCumulative.hotkeysEnabled = false;
+            }
             // 5) run.
             ResetRunState();
             _fsm = new ExperienceStateMachine();
@@ -598,6 +624,7 @@ namespace Experience
             StopRoutine(ref _shootRoutine);
             StopRoutine(ref _processingRoutine);
             StopRoutine(ref _exportRoutine);
+            StopRoutine(ref _gapPaintRoutine);
             // Camera recovery must not outlive the mode: left running it would call
             // StartLive() partway through the dev/playback restore below.
             if (_recoveryRoutine != null)
@@ -663,13 +690,13 @@ namespace Experience
             _audio = null; // lived on the UI object
             if (_presence != null) { Destroy(_presence.gameObject); _presence = null; }
             if (_liveFeed != null) { Destroy(_liveFeed.gameObject); _liveFeed = null; }
-            if (_starGuideGenerated != null) { Destroy(_starGuideGenerated); _starGuideGenerated = null; }
             _snapshot = null;
 
             if (sensorRecorder != null)
             {
                 sensorRecorder.keepLiveRenderersOnLoad = _savedKeepLive;
                 sensorRecorder.playbackFolderPath = _savedPlaybackFolder;
+                sensorRecorder.playbackFolderPathMacOverride = _savedPlaybackFolderMacOverride;
                 // A dev playback session existed when the mode was entered
                 // (Idle unloaded it) — bring it back in the same transport
                 // state: reload when it was merely loaded, resume when it was
@@ -706,6 +733,11 @@ namespace Experience
             {
                 _cumulative.noErase = _savedCumulativeNoErase;
                 _cumulative = null;
+            }
+            if (_meshCumulative != null)
+            {
+                _meshCumulative.hotkeysEnabled = _savedMeshCumHotkeys;
+                _meshCumulative = null;
             }
 
             if (_space != null) { _space.Restore(); Destroy(_space); _space = null; }
@@ -744,6 +776,79 @@ namespace Experience
         private void StopRoutine(ref Coroutine routine)
         {
             if (routine != null) { StopCoroutine(routine); routine = null; }
+        }
+
+        // Dev (rig-less) quality-of-life: the entrance recording is the stand-in
+        // visitor, but Idle's cleanup and the visitor play-through stop/unload
+        // the recorder — after which the stage (and presence) stays empty until
+        // the operator presses 入場 again. Whenever the recorder is free, bring
+        // the entrance playback back, looping so the take never runs out.
+        private float _entranceRetryAt;
+
+        private void MaintainDevEntrancePlayback()
+        {
+            if (!config.devLoopEntrancePlayback || sensorRecorder == null) return;
+            if (_visitorPlaybackActive || HasLiveRenderers()) return;
+            if (_fsm.State == ExperienceState.Fault
+                || _fsm.State == ExperienceState.Processing) return;
+            if (sensorRecorder.CurrentState != SensorRecorder.State.Idle) return;
+            if (Time.realtimeSinceStartup < _entranceRetryAt) return;
+            _entranceRetryAt = Time.realtimeSinceStartup + 3f; // don't thrash a failing Load
+            sensorRecorder.loop = true;
+            sensorRecorder.TogglePlay();
+            if (sensorRecorder.CurrentState == SensorRecorder.State.Playing)
+                Debug.Log($"[{nameof(ExperienceDirector)}] entrance playback restarted " +
+                          "(devLoopEntrancePlayback).", this);
+        }
+
+        // ------------------------------------------------ dev state jumping ----
+
+        /// <summary>
+        /// Dev hotkeys / panel: jump the running show straight to a state.
+        /// Idle restarts the run (頭出し). Forward jumps clear only the flags that
+        /// would fast-forward past the target, and keep the run's artifacts
+        /// (take root, capture snapshot, QR) so ResultShow/QrShow can be checked
+        /// right after a Processing jump. Processing with no take yet borrows the
+        /// canned dev take.
+        /// </summary>
+        public void DevJumpTo(ExperienceState target)
+        {
+            if (target == ExperienceState.Fault) return;
+            if (!_active) Visible = true; // dev jump implies the mode — enter first
+            if (!_active || _fsm == null) return; // mode failed to enter
+            if (target == ExperienceState.Idle)
+            {
+                ResetRunState();
+                _fsm.ForceTransition(ExperienceState.Idle, "dev jump (頭出し)");
+                return;
+            }
+            switch (target)
+            {
+                case ExperienceState.Calibrate: _calibrationDone = false; break;
+                case ExperienceState.Shoot: _recordingDone = false; break;
+                case ExperienceState.Processing:
+                    _processingDone = _processingFailed = false;
+                    if (string.IsNullOrEmpty(_takeRoot)) _takeRoot = config.devCannedTakeRoot;
+                    break;
+                case ExperienceState.ResultShow: _exportDone = _exportFailed = false; break;
+            }
+            Debug.Log($"[{nameof(ExperienceDirector)}] dev jump → {target}.", this);
+            _fsm.ForceTransition(target, "dev jump");
+        }
+
+        // Digit row (and keypad), in state order: 0=Idle(頭出し) 1=Consent
+        // 2=Welcome 3=Calibrate 4=FreeMove 5=Shoot 6=Processing 7=ResultShow
+        // 8=QrShow. TSDFDebugSession's per-camera views moved to Q/W/E/R (all
+        // cams: A) to free the digits for this.
+        private void HandleDevJumpHotkeys()
+        {
+            if (!Input.anyKeyDown) return;
+            for (int i = 0; i <= (int)ExperienceState.QrShow; i++)
+                if (Input.GetKeyDown(KeyCode.Alpha0 + i) || Input.GetKeyDown(KeyCode.Keypad0 + i))
+                {
+                    DevJumpTo((ExperienceState)i);
+                    return;
+                }
         }
 
         private void ResetRunState()
@@ -881,16 +986,40 @@ namespace Experience
                         _recoveryRoutine = StartCoroutine(RecoverCamerasRoutine());
                     break;
             }
-            if (state != ExperienceState.Fault)
-            {
-                _ui.ClearAlert();
-                PlayStateEnterSe(state); // one cue per screen, on entry only
-            }
+            if (state != ExperienceState.Fault) _ui.ClearAlert();
             ApplyCurvesVisibility(state);
             // Sculpture hidden for the whole of Processing, revealed on entering
             // ResultShow. Driven off the state (not the routine) so every exit path —
             // fault, visitor walked off, processing failure — brings it back.
             SetSculptureVisible(state != ExperienceState.Processing);
+
+            // The beat between screens (stateGapSeconds): blank now, then the new
+            // screen and its cue land together after the gap. Fault must alert
+            // instantly and Idle is blank by definition — both paint immediately.
+            StopRoutine(ref _gapPaintRoutine);
+            float gap = t.stateGapSeconds / Mathf.Max(0.01f, t.timeMultiplier);
+            if (gap <= 0f || state == ExperienceState.Fault || state == ExperienceState.Idle)
+            {
+                if (state != ExperienceState.Fault)
+                    PlayStateEnterSe(state); // one cue per screen, on entry only
+                ShowStateMessage(state);
+            }
+            else
+            {
+                _ui.ClearAll(); // hold the blank; late canvases stay blank too
+                _gapPaintRoutine = StartCoroutine(GapPaintRoutine(state, gap));
+            }
+        }
+
+        // Deferred half of ApplyStateSideEffects — the screen + audio cue for
+        // `state`, landing stateGapSeconds after the transition blanked the UI.
+        private IEnumerator GapPaintRoutine(ExperienceState state, float delay)
+        {
+            yield return new WaitForSeconds(delay);
+            _gapPaintRoutine = null;
+            if (!_active || _fsm.State != state) yield break; // a newer transition owns the screen
+            if (_crowdShowing) yield break; // crowd warning owns it; repaint on clear
+            PlayStateEnterSe(state);
             ShowStateMessage(state);
         }
 
@@ -1052,7 +1181,7 @@ namespace Experience
         private Texture2D StarGuide() =>
             config.poseGuideTexture != null
                 ? config.poseGuideTexture
-                : _starGuideGenerated ??= StickFigureTexture.DrawStarPose();
+                : StickFigureTexture.StarPose();
 
         private void PlaySe(AudioClip clip)
         {
@@ -1206,6 +1335,7 @@ namespace Experience
 
         private void StartVisitorRecording()
         {
+            if (config.timings.dummyShoot) return; // dummy shoot — no recorder involved
             if (sensorRecorder == null) return;
             _savedRecFolderPath = sensorRecorder.folderPath;
             _savedRecAutoTimestamp = sensorRecorder.autoTimestampFolder;
@@ -1279,7 +1409,11 @@ namespace Experience
                 yield return null;
             if (!_active || _fsm.State != ExperienceState.Shoot) yield break;
 
-            if (_visitorRecordingActive && sensorRecorder != null)
+            if (t.dummyShoot)
+            {
+                _takeRoot = config.devCannedTakeRoot; // canned take stands in for the shot
+            }
+            else if (_visitorRecordingActive && sensorRecorder != null)
             {
                 sensorRecorder.StopRecording();
                 _takeRoot = sensorRecorder.LastRecordingRoot;
@@ -1315,6 +1449,11 @@ namespace Experience
         private IEnumerator ProcessingRoutine()
         {
             var t = config.timings;
+            // Sit out the inter-state beat — this routine paints the progress bar
+            // every frame, which would otherwise pop in during the blank that the
+            // deferred state paint (GapPaintRoutine) owns.
+            float beat = t.stateGapSeconds / Mathf.Max(0.01f, t.timeMultiplier);
+            if (beat > 0f) yield return new WaitForSeconds(beat);
             if (string.IsNullOrEmpty(_takeRoot) || !Directory.Exists(_takeRoot))
             {
                 Debug.LogError($"[{nameof(ExperienceDirector)}] no take to process ('{_takeRoot}').", this);
@@ -1339,9 +1478,10 @@ namespace Experience
             // Canned-take protection: the conversion rewrites bodies_main IN PLACE.
             // A dev E2E run must never mutate the canonical recording unless the
             // operator explicitly opted in with a disposable copy.
+            bool cannedTake = t.skipShoot || t.dummyShoot;
             bool convert = !t.skipProcessing
-                && !(t.skipShoot && !config.allowCannedTakeConversion);
-            if (t.skipShoot && !config.allowCannedTakeConversion && !t.skipProcessing)
+                && !(cannedTake && !config.allowCannedTakeConversion);
+            if (cannedTake && !config.allowCannedTakeConversion && !t.skipProcessing)
                 Debug.Log($"[{nameof(ExperienceDirector)}] canned take — skipping v11s conversion " +
                           "(allowCannedTakeConversion is off); playing existing bodies_main.", this);
 
@@ -1411,7 +1551,19 @@ namespace Experience
                 yield break;
             }
             double duration = sensorRecorder.PlaybackDurationSeconds;
-            float playDeadline = Time.realtimeSinceStartup + (float)duration + 10f;
+            // A canned dev take is a full-length recording (a real visitor take
+            // barely exceeds the capture window) — jump to its tail so the
+            // play-through costs production-like seconds, not the whole take.
+            if (cannedTake && config.devCannedTakeTailSeconds > 0f
+                && duration > config.devCannedTakeTailSeconds)
+            {
+                if (sensorRecorder.SeekToPlayheadSeconds(duration - config.devCannedTakeTailSeconds))
+                    sensorRecorder.ResumePlayback();
+                Debug.Log($"[{nameof(ExperienceDirector)}] canned take: skipping to the last " +
+                          $"{config.devCannedTakeTailSeconds:0}s of {duration:0}s.", this);
+            }
+            double remaining = duration - sensorRecorder.CurrentPlayheadSeconds;
+            float playDeadline = Time.realtimeSinceStartup + (float)remaining + 10f;
             while (sensorRecorder.CurrentState == SensorRecorder.State.Playing
                    && Time.realtimeSinceStartup < playDeadline)
             {
@@ -1595,6 +1747,10 @@ namespace Experience
             if (HasLiveRenderers()) sensorManager?.SetLiveSuppressedAsSource(true);
 
             sensorRecorder.playbackFolderPath = takeRoot;
+            // On Mac ResolvePlaybackRoot prefers the mac override (the operator's
+            // entrance take) over playbackFolderPath — the visitor take must win
+            // here or Processing replays the wrong recording. Restored on exit.
+            sensorRecorder.playbackFolderPathMacOverride = takeRoot;
             sensorRecorder.Load();
 
             // Skeleton source for the playback. Normal path: the take carries
@@ -1625,6 +1781,12 @@ namespace Experience
                 sensorRecorder.StopAndUnload();
                 sensorRecorder.playbackRenderDelayFrames = _savedRenderDelay;
                 sensorRecorder.loop = _savedLoop;
+                // playbackFolderPath stays until Exit (see Idle side effects), but
+                // the mac override must revert NOW: it outranks playbackFolderPath
+                // on Mac, and the next visitor's entrance playback (Mac dev loop)
+                // would otherwise load this visitor's take instead of the
+                // operator's entrance recording.
+                sensorRecorder.playbackFolderPathMacOverride = _savedPlaybackFolderMacOverride;
             }
         }
 
@@ -1941,7 +2103,10 @@ namespace Experience
             else if (!crowd && _crowdShowing)
             {
                 _crowdShowing = false;
-                ShowStateMessage(s); // repaint only — never re-enter the state
+                // Mid-gap the blank is intentional — the pending GapPaintRoutine
+                // will paint this state when the beat ends.
+                if (_gapPaintRoutine == null)
+                    ShowStateMessage(s); // repaint only — never re-enter the state
             }
         }
     }

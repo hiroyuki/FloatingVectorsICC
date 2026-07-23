@@ -107,8 +107,20 @@ namespace Experience
         public bool skipCalibrate;   // default bone profile
         public bool skipFreeMove;
         public bool skipShoot;       // director substitutes devCannedTakeRoot
+        [Tooltip("Shoot plays out in full (cue, countdown, capture window) but no " +
+                 "recording happens — the director substitutes devCannedTakeRoot as " +
+                 "the take. For rigless (Mac) runs that still need the Shoot UX.")]
+        public bool dummyShoot;      // FSM-inert: advance still rides RecordingDone
         public bool skipProcessing;  // skip the v11s conversion (capture still runs)
         public bool skipQr;          // ResultShow success goes straight to Idle
+
+        [Min(0f)]
+        [Tooltip("Blank beat between state screens: on entering a state the visitor " +
+                 "UI clears, and the new screen (message + its audio cue) lands this " +
+                 "many seconds later. State logic and scene-side visuals are not " +
+                 "delayed; Fault and Idle paint immediately. 0 = hard cut. " +
+                 "FSM-inert — consumed by the director.")]
+        public float stateGapSeconds = 1f;
 
         [Min(0.01f)]
         [Tooltip("Dev time multiplier applied to Tick dt (2 = twice as fast).")]

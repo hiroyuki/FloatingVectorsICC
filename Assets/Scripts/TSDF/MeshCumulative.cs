@@ -65,8 +65,14 @@ namespace TSDF
         [FormerlySerializedAs("stopKey")]
         public KeyCode freezeKey = KeyCode.V;
         [Tooltip("Release the frozen mesh and return the integrator to live-follow. " +
-                 "R (not B) so it doesn't clash with TSDFDebugSession's B-mode key.")]
-        public KeyCode releaseKey = KeyCode.R;
+                 "X — R now belongs to TSDFDebugSession's single-cam (cam 4) view, " +
+                 "and B is its B-mode key.")]
+        public KeyCode releaseKey = KeyCode.X;
+
+        [Tooltip("Gate for the C/V/R hotkeys above. The ExperienceDirector turns " +
+                 "this off for the duration of Experience mode — the show owns the " +
+                 "freeze state there, and R doubles as a state-jump key.")]
+        public bool hotkeysEnabled = true;
 
         public CumulativeState State { get; private set; } = CumulativeState.Idle;
         /// <summary>Seconds elapsed in the current run (0 when idle).</summary>
@@ -226,9 +232,12 @@ namespace TSDF
 
         private void Update()
         {
-            if (Input.GetKeyDown(beginKey)) Begin();
-            if (Input.GetKeyDown(freezeKey)) Freeze();
-            if (Input.GetKeyDown(releaseKey)) Release();
+            if (hotkeysEnabled)
+            {
+                if (Input.GetKeyDown(beginKey)) Begin();
+                if (Input.GetKeyDown(freezeKey)) Freeze();
+                if (Input.GetKeyDown(releaseKey)) Release();
+            }
 
             if (State != CumulativeState.Accumulating) return;
 
