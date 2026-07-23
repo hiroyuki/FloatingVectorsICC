@@ -80,6 +80,9 @@ namespace Shared
             if (s_teardownStarted) return false;  // teardown running — reject, don't race it
             if (s_instance == null) return true;  // nobody to run the coroutine
             s_teardownStarted = true;
+            // Before anything is torn down: the pipelines are about to stop on
+            // purpose, and the rig watchdog must not read that as a camera fault.
+            AppShutdown.Begin();
             ShutdownProfiler.Mark("quit requested — showing the shutdown splash");
             BootOverlay.ShowShutdown("停止しています…");
             s_instance.StartCoroutine(s_instance.QuitAfterPresent());

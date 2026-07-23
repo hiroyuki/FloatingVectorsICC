@@ -1642,6 +1642,9 @@ namespace Experience
         {
             yield return null; // let the deferred Destroy()/OnDestroy actually run
             yield return new WaitForSecondsRealtime(config.cameraReleaseSeconds);
+            // Quitting started during the release delay: leave the rig closed. Re-opening
+            // now would hand the staged teardown devices it has already let go of.
+            if (Shared.AppShutdown.IsShuttingDown) yield break;
             sensorManager?.StartLive();
             Debug.Log($"[{nameof(ExperienceDirector)}] re-opened the live rig that an " +
                       "interrupted camera recovery had torn down.", this);
@@ -1660,7 +1663,9 @@ namespace Experience
         /// Runs ONLY in Fault, where the FSM has already aborted the run, so it can
         /// never interrupt a visitor. A teardown is always followed by its StartLive
         /// in the same iteration — the loop only re-checks state before tearing down,
-        /// never between, so we can't leave the rig destroyed.
+        /// never between, so we can't leave the rig destroyed. The single exception is
+        /// a quit that begins during the release delay, where leaving it closed is the
+        /// point.
         /// </summary>
         private IEnumerator RecoverCamerasRoutine()
         {
@@ -1674,6 +1679,13 @@ namespace Experience
                     _recoveryRoutine = null;
                     yield break;
                 }
+                // Quitting: the rig is being torn down on purpose. Re-opening it here
+                // would race the staged teardown and re-open devices it just closed.
+                if (Shared.AppShutdown.IsShuttingDown)
+                {
+                    _recoveryRoutine = null;
+                    yield break;
+                }
 
                 Debug.LogWarning($"[{nameof(ExperienceDirector)}] camera auto-recovery: " +
                                  $"re-init attempt {attempt}/{attempts} " +
@@ -1681,6 +1693,14 @@ namespace Experience
 
                 sensorManager?.DestroyAllRenderers();
                 yield return new WaitForSecondsRealtime(config.cameraReleaseSeconds);
+                // Quitting started during the release delay. This is the one path that
+                // leaves the rig torn down without its StartLive — deliberately: the
+                // process is on its way out and the devices are already free.
+                if (Shared.AppShutdown.IsShuttingDown)
+                {
+                    _recoveryRoutine = null;
+                    yield break;
+                }
                 sensorManager?.StartLive();
 
                 // POLL for health rather than judging after a flat wait. StartLive
