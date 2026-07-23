@@ -57,6 +57,11 @@ namespace PointCloud
         [Tooltip("Color of the regular grid lines.")]
         public Color gridColor = new Color(0.4f, 0.4f, 0.4f, 1f);
 
+        [Tooltip("Brightness multiplier applied to interior grid lines. The border " +
+                 "rectangle (outermost lines) and the axis lines keep their full color.")]
+        [Range(0f, 1f)]
+        public float innerLineBrightness = 0.7f;
+
         [Tooltip("Color of the two axis lines through the origin (X and Z). Drawn on top of regular grid lines.")]
         public Color axisColor = new Color(0.85f, 0.85f, 0.85f, 1f);
 
@@ -118,6 +123,7 @@ namespace PointCloud
         private float _builtSpacing = -1f;
         private Color _builtGridColor;
         private Color _builtAxisColor;
+        private float _builtInnerBrightness = -1f;
         private bool _builtFit;
         private Vector3 _builtFitMin, _builtFitMax; // world AABB of the fitted grid
 
@@ -225,6 +231,7 @@ namespace PointCloud
                 && Mathf.Approximately(_builtSpacing, gridSpacing)
                 && _builtGridColor == gridColor
                 && _builtAxisColor == axisColor
+                && Mathf.Approximately(_builtInnerBrightness, innerLineBrightness)
                 && (!fit || ((_builtFitMin - fitMin).sqrMagnitude < 1e-8f &&
                              (_builtFitMax - fitMax).sqrMagnitude < 1e-8f)))
             {
@@ -239,8 +246,12 @@ namespace PointCloud
                     hideFlags = HideFlags.DontSave,
                 };
             }
-            if (fit) BuildFitGridMesh(_gridMesh, fitMin, fitMax, gridSpacing, gridColor, axisColor);
-            else BuildGridMesh(_gridMesh, gridCells, gridSpacing, gridColor, axisColor);
+            Color innerColor = new Color(gridColor.r * innerLineBrightness,
+                                         gridColor.g * innerLineBrightness,
+                                         gridColor.b * innerLineBrightness,
+                                         gridColor.a);
+            if (fit) BuildFitGridMesh(_gridMesh, fitMin, fitMax, gridSpacing, gridColor, innerColor, axisColor);
+            else BuildGridMesh(_gridMesh, gridCells, gridSpacing, gridColor, innerColor, axisColor);
             _builtFit = fit;
             _builtFitMin = fitMin;
             _builtFitMax = fitMax;
@@ -248,6 +259,7 @@ namespace PointCloud
             _builtSpacing = gridSpacing;
             _builtGridColor = gridColor;
             _builtAxisColor = axisColor;
+            _builtInnerBrightness = innerLineBrightness;
         }
 
         // World AABB of the box's bottom face (handles a rotated OBB as its AABB;
@@ -484,9 +496,10 @@ namespace PointCloud
         // WORLD-space grid clipped to the box footprint: interior lines sit on
         // world multiples of `spacing` (so the world origin is always a line
         // crossing when inside the box), plus the border rectangle. The world
-        // axis lines (x=0 / z=0) get axisColor.
+        // axis lines (x=0 / z=0) get axisColor; interior non-axis lines get
+        // innerColor, the border keeps gridColor.
         private static void BuildFitGridMesh(Mesh mesh, Vector3 min, Vector3 max, float spacing,
-                                             Color gridColor, Color axisColor)
+                                             Color gridColor, Color innerColor, Color axisColor)
         {
             spacing = Mathf.Max(0.001f, spacing);
             float y = min.y;
@@ -504,13 +517,13 @@ namespace PointCloud
             {
                 float x = k * spacing;
                 AddLine(new Vector3(x, y, min.z), new Vector3(x, y, max.z),
-                        k == 0 ? axisColor : gridColor);
+                        k == 0 ? axisColor : innerColor);
             }
             for (int k = Mathf.CeilToInt(min.z / spacing); k * spacing <= max.z + 1e-4f; k++)
             {
                 float z = k * spacing;
                 AddLine(new Vector3(min.x, y, z), new Vector3(max.x, y, z),
-                        k == 0 ? axisColor : gridColor);
+                        k == 0 ? axisColor : innerColor);
             }
             // border rectangle so the grid reads as the sensing area's edge
             AddLine(new Vector3(min.x, y, min.z), new Vector3(max.x, y, min.z), gridColor);
@@ -529,8 +542,10 @@ namespace PointCloud
         }
 
         // Square line grid centered on (0,0,0) in the local XZ plane. The two axis lines
-        // (x=0 and z=0) get the axisColor, every other line gets the regular gridColor.
-        private static void BuildGridMesh(Mesh mesh, int cells, float spacing, Color gridColor, Color axisColor)
+        // (x=0 and z=0) get the axisColor, the outermost (border) lines keep gridColor,
+        // every other line gets innerColor.
+        private static void BuildGridMesh(Mesh mesh, int cells, float spacing,
+                                          Color gridColor, Color innerColor, Color axisColor)
         {
             int lineCount = (cells + 1) * 2; // (cells+1) lines along X plus (cells+1) along Z
             int vertCount = lineCount * 2;
@@ -546,7 +561,8 @@ namespace PointCloud
             {
                 float x = -halfExtent + i * spacing;
                 bool isAxis = Mathf.Abs(x) < spacing * 0.001f;
-                Color c = isAxis ? axisColor : gridColor;
+                bool isBorder = i == 0 || i == cells;
+                Color c = isAxis ? axisColor : isBorder ? gridColor : innerColor;
                 verts[v]   = new Vector3(x, 0f, -halfExtent);
                 verts[v+1] = new Vector3(x, 0f,  halfExtent);
                 colors[v] = c; colors[v+1] = c;
@@ -558,7 +574,8 @@ namespace PointCloud
             {
                 float z = -halfExtent + j * spacing;
                 bool isAxis = Mathf.Abs(z) < spacing * 0.001f;
-                Color c = isAxis ? axisColor : gridColor;
+                bool isBorder = j == 0 || j == cells;
+                Color c = isAxis ? axisColor : isBorder ? gridColor : innerColor;
                 verts[v]   = new Vector3(-halfExtent, 0f, z);
                 verts[v+1] = new Vector3( halfExtent, 0f, z);
                 colors[v] = c; colors[v+1] = c;
