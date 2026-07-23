@@ -402,7 +402,8 @@ namespace BodyTracking
         /// instead of the lit one, so they are never hidden behind the point cloud or the
         /// TSDF surface. Diagnostic: judging how far the tracked skeleton trails the body
         /// is impossible while the body's own points occlude it. Set from
-        /// SkeletonMerger.alwaysOverlayBones before the visuals are built.</summary>
+        /// SkeletonMerger.overlayBoneShader before the visuals are built. Shader policy
+        /// only — bone VISIBILITY belongs to the experience sequence / Views panel.</summary>
         public static bool OverlayBones = true;
 
         private static Shader ResolveTrailLitShader()
