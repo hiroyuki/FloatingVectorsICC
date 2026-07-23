@@ -387,8 +387,10 @@ namespace BodyTracking
         private void StopAllWorkers()
         {
             if (_sessions.Count == 0) return;
+            global::Shared.ShutdownProfiler.Mark($"K4abtWorkerHost.StopAllWorkers enter ({_sessions.Count} session(s))");
             var keys = SnapshotKeys();
             for (int i = 0; i < keys.Count; i++) StopWorker(keys[i]);
+            global::Shared.ShutdownProfiler.Mark("K4abtWorkerHost.StopAllWorkers done");
         }
 
         // --- internals ---
@@ -597,7 +599,9 @@ namespace BodyTracking
             {
                 Debug.LogWarning($"[K4abtWorkerHost] teardown wait error: {ex}");
             }
+            global::Shared.ShutdownProfiler.Mark($"  [k4abt {s.Serial}] process exit wait");
             s.Dispose();
+            global::Shared.ShutdownProfiler.Mark($"  [k4abt {s.Serial}] session dispose");
         }
 
         private static string ResolveExePath(string raw)

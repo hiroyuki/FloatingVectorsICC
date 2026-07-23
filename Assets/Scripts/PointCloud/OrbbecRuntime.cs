@@ -59,8 +59,10 @@ namespace PointCloud
             {
                 if (s_context != null)
                 {
+                    global::Shared.ShutdownProfiler.Mark("OrbbecRuntime.Shutdown enter");
                     s_context.Dispose();
                     s_context = null;
+                    global::Shared.ShutdownProfiler.Mark("OrbbecRuntime context dispose");
                 }
             }
         }

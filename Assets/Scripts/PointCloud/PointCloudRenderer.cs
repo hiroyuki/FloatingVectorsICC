@@ -466,7 +466,7 @@ namespace PointCloud
             catch (Exception e)
             {
                 Debug.LogException(e, this);
-                ShutdownCapture();
+                StopCapture();
             }
         }
 
@@ -684,7 +684,7 @@ namespace PointCloud
 
         private void OnDestroy()
         {
-            ShutdownCapture();
+            StopCapture();
             // GPU mode: Reconstructor owns the Mesh. CPU mode: we own it.
             if (useGpuReconstruction)
             {
@@ -699,6 +699,7 @@ namespace PointCloud
             }
             _slots?.Dispose();
             _slots = null;
+            global::Shared.ShutdownProfiler.Mark($"PointCloudRenderer[{(string.IsNullOrEmpty(deviceSerial) ? name : deviceSerial)}].OnDestroy done");
         }
 
         // --- Setup ---
@@ -1188,13 +1189,52 @@ namespace PointCloud
             }
         }
 
-        private void ShutdownCapture()
+        /// <summary>
+        /// Stop the pipeline and release the device NOW, ahead of GameObject
+        /// destruction. SensorManager calls this on quit so it can control the
+        /// ORDER the rig shuts down in (Secondaries before the Primary — see
+        /// SensorManager.StopCaptureSecondariesFirst). Idempotent; OnDestroy
+        /// calls it again and it no-ops.
+        /// </summary>
+        public void StopCapture()
         {
+            if (!BeginStopCapture(out string tag)) return;
+            StopCaptureNative(tag);
+        }
+
+        /// <summary>
+        /// Same as <see cref="StopCapture"/> but runs the blocking native part on a
+        /// worker thread, so a rig can stop several cameras at once instead of paying
+        /// each ob_pipeline_stop back to back. The Unity-API part (coroutine stop) is
+        /// done synchronously on the calling main thread before the task starts.
+        /// The caller MUST await the returned task before the objects are destroyed.
+        /// </summary>
+        public Task StopCaptureAsync()
+        {
+            if (!BeginStopCapture(out string tag)) return Task.CompletedTask;
+            return Task.Run(() => StopCaptureNative(tag));
+        }
+
+        private bool _captureShutdown;
+
+        // Main-thread-only prologue. False when a stop already ran (idempotent).
+        private bool BeginStopCapture(out string tag)
+        {
+            tag = string.IsNullOrEmpty(deviceSerial) ? name : deviceSerial;
+            if (_captureShutdown) return false;
+            _captureShutdown = true;
+            global::Shared.ShutdownProfiler.Mark($"PointCloudRenderer[{tag}].ShutdownCapture enter");
             if (_timerSyncCoro != null)
             {
-                StopCoroutine(_timerSyncCoro);
+                StopCoroutine(_timerSyncCoro); // Unity API — main thread only
                 _timerSyncCoro = null;
             }
+            return true;
+        }
+
+        // Everything below is native/BCL only and safe off the main thread.
+        private void StopCaptureNative(string tag)
+        {
             _cts?.Cancel();
             if (_captureThread != null)
             {
@@ -1202,13 +1242,16 @@ namespace PointCloud
                     Debug.LogWarning($"[{nameof(PointCloudRenderer)}] capture thread did not exit cleanly.", this);
                 _captureThread = null;
             }
+            global::Shared.ShutdownProfiler.Mark($"  [{tag}] capture thread join");
             _cts?.Dispose();
             _cts = null;
 
             _pointCloudFilter?.Dispose(); _pointCloudFilter = null;
             _alignFilter?.Dispose(); _alignFilter = null;
             _colorFormatConverter?.Dispose(); _colorFormatConverter = null;
+            global::Shared.ShutdownProfiler.Mark($"  [{tag}] filters dispose");
             _pipeline?.Dispose(); _pipeline = null;
+            global::Shared.ShutdownProfiler.Mark($"  [{tag}] pipeline dispose (ob_pipeline_stop)");
             _config?.Dispose(); _config = null;
 
             // A background TimerSyncWithHost may still hold the device handle; disposing
@@ -1221,9 +1264,12 @@ namespace PointCloud
                 Debug.LogWarning($"[{nameof(PointCloudRenderer)}] in-flight TimerSyncWithHost did not " +
                                  "finish within 2s; leaking the device handle.", this);
                 _device = null;
+                global::Shared.ShutdownProfiler.Mark($"  [{tag}] timer-sync wait (TIMED OUT, device leaked)");
                 return;
             }
+            global::Shared.ShutdownProfiler.Mark($"  [{tag}] timer-sync wait");
             _device?.Dispose(); _device = null;
+            global::Shared.ShutdownProfiler.Mark($"  [{tag}] device dispose");
         }
 
         private System.Collections.IEnumerator PeriodicTimerSync()

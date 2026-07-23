@@ -630,12 +630,16 @@ namespace BodyTracking.Eval.Rtmpose
             _session = null;
             if (s == null) return;
 
+            global::Shared.ShutdownProfiler.Mark("LiveFusedBodySource.OnDisable enter");
             s.Stop = true;
             s.Wake.Set();
             // reader sleeps ≤50ms between polls; if it is stuck in a long file read
             // it closes its own streams in its finally block — abandoning is safe
             s.Reader?.Join(1000);
-            if (s.Worker == null || s.Worker.Join(5000))
+            global::Shared.ShutdownProfiler.Mark("  [LFBS] reader join");
+            bool workerJoined = s.Worker == null || s.Worker.Join(5000);
+            global::Shared.ShutdownProfiler.Mark(workerJoined ? "  [LFBS] worker join" : "  [LFBS] worker join (TIMED OUT)");
+            if (workerJoined)
             {
                 // clean exit: the worker is gone, the session is ours to dispose.
                 // Adapter first — it parks its dedicated inference threads, and
@@ -647,6 +651,7 @@ namespace BodyTracking.Eval.Rtmpose
                     abandoned = s.Fused != null && s.Fused.InferenceThreadsAbandoned;
                 }
                 catch (Exception e) { Debug.LogException(e); abandoned = true; }
+                global::Shared.ShutdownProfiler.Mark("  [LFBS] fused adapter dispose (parks inference threads)");
 
                 // Same contract as the stuck-worker branch below: a thread still
                 // inside ORT means the backend is NOT ours to dispose. Disposing
@@ -658,6 +663,9 @@ namespace BodyTracking.Eval.Rtmpose
                     Debug.LogError($"[{nameof(LiveFusedBodySource)}] an inference thread did not stop — " +
                                    "abandoning the ONNX backend (deliberate leak) instead of disposing " +
                                    "sessions under a running inference", this);
+                global::Shared.ShutdownProfiler.Mark(abandoned
+                    ? "  [LFBS] ONNX backend ABANDONED (leaked)"
+                    : "  [LFBS] ONNX backend dispose (ORT sessions)");
                 s.Wake.Dispose();
             }
             else
@@ -670,6 +678,7 @@ namespace BodyTracking.Eval.Rtmpose
                 // teardown reclaims it.
                 Debug.LogError($"[{nameof(LiveFusedBodySource)}] worker did not stop within 5s — abandoning the whole session (deliberate leak) instead of racing a running inference", this);
             }
+            global::Shared.ShutdownProfiler.Mark("LiveFusedBodySource.OnDisable done");
         }
 
         private void Update()

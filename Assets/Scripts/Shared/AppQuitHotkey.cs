@@ -50,6 +50,7 @@ namespace Shared
             _heldFor = 0f;
 
             Debug.Log($"[AppQuitHotkey] {quitKey} held {holdSeconds:0.0}s — quitting.");
+            ShutdownProfiler.Mark("AppQuitHotkey: Application.Quit() requested");
 #if UNITY_EDITOR
             // Deliberately does not stop play mode; see the header note.
             Debug.Log("[AppQuitHotkey] Editor: quit suppressed (build-only).");

@@ -298,12 +298,59 @@ namespace PointCloud
             if (applyExtrinsics) ApplyExtrinsicsToLive();
         }
 
+        // Quitting fires before the scene's GameObjects are destroyed, which is the
+        // only place we still control the ORDER the rig stops in.
+        private void OnApplicationQuit() => StopCaptureSecondariesFirst();
+
+        /// <summary>
+        /// Stop every renderer's pipeline, Secondaries first and the Primary (index 0,
+        /// see <see cref="ResolveSyncMode"/>) last.
+        ///
+        /// Why the order matters: a Secondary's ob_pipeline_stop blocks until its
+        /// in-flight frame wait times out, and with the Primary already stopped no
+        /// more sync triggers arrive, so every Secondary pays the full timeout. Left
+        /// to Unity's own teardown order (spawn order = Primary first) a 4-camera rig
+        /// measured 18.2s of ob_pipeline_stop: 1.3s for the Primary, then 5.0 / 5.1 /
+        /// 6.8s for the Secondaries. Stopping them while the trigger still runs keeps
+        /// each stop on the fast path.
+        /// </summary>
+        public void StopCaptureSecondariesFirst()
+        {
+            if (_renderers.Count == 0) return;
+            global::Shared.ShutdownProfiler.Mark(
+                $"SensorManager: stopping {_renderers.Count} renderer(s), Secondaries first");
+
+            // Secondaries (everything but index 0) stop concurrently: each
+            // ob_pipeline_stop still costs ~1.3s of internal frame-thread wait even on
+            // the fast path, and those waits have no reason to queue up behind each
+            // other. The Primary is stopped last and on this thread — it keeps the
+            // sync trigger running for the others until they are done.
+            var tasks = new System.Collections.Generic.List<System.Threading.Tasks.Task>(_renderers.Count);
+            for (int i = _renderers.Count - 1; i >= 1; i--)
+            {
+                var r = _renderers[i];
+                if (r != null) tasks.Add(r.StopCaptureAsync());
+            }
+            if (tasks.Count > 0)
+            {
+                // Bounded: a wedged native stop must not hang the quit forever. On
+                // timeout the pipelines are left to process teardown, same contract as
+                // the in-flight-timer-sync leak inside PointCloudRenderer.
+                if (!System.Threading.Tasks.Task.WaitAll(tasks.ToArray(), 15000))
+                    Debug.LogWarning("[SensorManager] secondary pipeline stop did not finish within 15s.", this);
+                global::Shared.ShutdownProfiler.Mark($"SensorManager: {tasks.Count} secondary stop(s) joined");
+            }
+
+            if (_renderers.Count > 0 && _renderers[0] != null) _renderers[0].StopCapture();
+        }
+
         private void OnDestroy()
         {
             // Renderers Dispose themselves on OnDestroy; nothing to do here for them.
             // Tear down the shared context after children are gone.
             // Unity destroys children before parents in default scene teardown,
             // but to be safe we defer context shutdown to next frame via Application.quitting in OrbbecRuntime.
+            global::Shared.ShutdownProfiler.Mark("SensorManager.OnDestroy");
             OrbbecRuntime.RequestShutdown();
         }
 
@@ -316,6 +363,10 @@ namespace PointCloud
         /// </summary>
         public void DestroyAllRenderers()
         {
+            // Same Secondaries-first ordering as the quit path, and for the same
+            // reason (see StopCaptureSecondariesFirst) — Destroy is deferred to the
+            // end of frame, so stop the pipelines synchronously here first.
+            StopCaptureSecondariesFirst();
             for (int i = 0; i < _renderers.Count; i++)
             {
                 var r = _renderers[i];
