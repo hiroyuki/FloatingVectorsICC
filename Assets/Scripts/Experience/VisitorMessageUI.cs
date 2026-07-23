@@ -143,6 +143,13 @@ namespace Experience
             public Text noticeText;
             public GameObject alertGroup;
             public Text alertText;
+
+            // Screen size this canvas was laid out for. The CanvasScaler's factor is
+            // fixed at build time from these; if the display later reports a
+            // different size (activation, mode change, Game view resize) the canvas
+            // is rebuilt. See RebuildResizedDisplays.
+            public int builtW, builtH;
+            public float staleSince;   // unscaled time the size mismatch started; 0 = matching
         }
 
         private readonly List<DisplayUi> _uis = new List<DisplayUi>();
@@ -180,8 +187,7 @@ namespace Experience
                 Shared.OperatorOverlayGate.AlertActive = false;
                 _alertOwned = false;
             }
-            foreach (var ui in _uis)
-                if (ui.canvas != null) Destroy(ui.canvas.gameObject);
+            foreach (var ui in _uis) RetireCanvas(ui);
             _uis.Clear();
             _builtDisplays.Clear();
             _warnedDisplays.Clear();
@@ -380,8 +386,9 @@ namespace Experience
 
         private void Update()
         {
-            // retry canvases for displays whose camera wasn't up at OnEnable
+            // retry canvases for displays whose camera (or OS display) wasn't up at OnEnable
             if (_uis.Count < visitorDisplays.Length) EnsureBuilt();
+            RebuildResizedDisplays();
             foreach (var ui in _uis)
             {
                 if (ui.poseGroup != null && ui.poseGroup.activeSelf) ApplyPoseLayout(ui);
@@ -553,13 +560,63 @@ namespace Experience
         private readonly HashSet<int> _builtDisplays = new HashSet<int>();
         private readonly HashSet<int> _warnedDisplays = new HashSet<int>();
 
+        // Canvas GameObjects that survive without their bookkeeping. _uis and
+        // _builtDisplays are plain runtime state, so an Editor domain reload
+        // (recompiling while in play mode) wipes them while the canvases they
+        // describe stay in the hierarchy — EnsureBuilt then builds a SECOND set and
+        // the stale one keeps rendering underneath at whatever scale it was laid out
+        // for, which reads as text at the wrong size and position. Adopt nothing,
+        // just delete what we no longer track.
+        //
+        // Ownership is the VisitorUiCanvasTag component, not the name: the tag is
+        // only ever added by BuildDisplayUi, it survives the domain reload that
+        // loses the bookkeeping, and a scene object that merely shares the naming
+        // convention is left alone.
+        private void DestroyOrphanCanvases()
+        {
+            for (int i = transform.childCount - 1; i >= 0; i--)
+            {
+                var child = transform.GetChild(i);
+                var tag = child.GetComponent<VisitorUiCanvasTag>();
+                if (tag == null || tag.retired) continue;
+                bool tracked = false;
+                foreach (var ui in _uis)
+                    if (ui.canvas != null && ui.canvas.transform == child) { tracked = true; break; }
+                if (tracked) continue;
+                Debug.LogWarning($"[{nameof(VisitorMessageUI)}] orphaned canvas '{child.name}' " +
+                                 "(domain reload during play?) — destroying it.", this);
+                RetireCanvas(tag, child.gameObject);
+            }
+        }
+
+        // Single retirement path for a canvas we own. Unity's Destroy is deferred to
+        // the end of frame, so the object stays reachable meanwhile: mark the tag
+        // first (the orphan sweep skips retired tags, otherwise a canvas retired on
+        // purpose — resize rebuild, teardown — is reported as a domain-reload orphan
+        // and destroyed a second time) and hide it so it stops drawing right away.
+        private void RetireCanvas(DisplayUi ui)
+        {
+            if (ui == null || ui.canvas == null) return;
+            RetireCanvas(ui.canvas.GetComponent<VisitorUiCanvasTag>(), ui.canvas.gameObject);
+        }
+
+        private void RetireCanvas(VisitorUiCanvasTag tag, GameObject go)
+        {
+            if (go == null) return;
+            if (tag != null) tag.retired = true;
+            go.SetActive(false);
+            Destroy(go);
+        }
+
         private void EnsureBuilt()
         {
             ResolveFont();
+            DestroyOrphanCanvases();
             bool addedAny = false;
             foreach (int d in visitorDisplays)
             {
                 if (_builtDisplays.Contains(d)) continue;
+                if (!DisplayReady(d)) continue; // OS display not activated yet
                 var cam = FindDisplayCamera(d);
                 if (cam == null)
                 {
@@ -623,6 +680,71 @@ namespace Experience
             return null;
         }
 
+        // A canvas built before MultiDisplayActivator calls Display.Activate() gets
+        // its CanvasScaler factor from whatever size the inactive display reported —
+        // the text then renders small and pushed toward the bottom-left corner for
+        // the whole run, while the 3D content (which does not go through the canvas)
+        // looks perfectly fine. Nothing guarantees the Start order between the two,
+        // so the same build did it only sometimes. Wait for the activation instead.
+        //
+        // Display 1 is always active. In the Editor Display.displays has a single
+        // entry no matter how many Game views are open, so displays past the end are
+        // let through there (they preview in a Game view) and skipped in a player,
+        // where they would render nowhere until the monitor actually shows up —
+        // EnsureBuilt keeps retrying either way.
+        private static bool DisplayReady(int display)
+        {
+            if (display <= 0) return true;
+            if (display < Display.displays.Length) return Display.displays[display].active;
+            return Application.isEditor;
+        }
+
+        // Size the canvas for `display` should currently be laid out for.
+        private static void GetDisplaySize(int display, out int w, out int h)
+        {
+            if (display > 0 && display < Display.displays.Length)
+            {
+                var d = Display.displays[display];
+                w = d.renderingWidth; h = d.renderingHeight;
+                return;
+            }
+            w = Screen.width; h = Screen.height;
+        }
+
+        // Rebuild any canvas whose display changed size since it was built (late
+        // activation, resolution change, Game view resize). Debounced so dragging a
+        // Game view edge doesn't rebuild once per frame.
+        private const float kResizeSettleSeconds = 0.5f;
+
+        private void RebuildResizedDisplays()
+        {
+            _resizedScratch.Clear();
+            float now = Time.unscaledTime;
+            foreach (var ui in _uis)
+            {
+                GetDisplaySize(ui.display, out int w, out int h);
+                if (w == ui.builtW && h == ui.builtH) { ui.staleSince = 0f; continue; }
+                if (ui.staleSince <= 0f) { ui.staleSince = now; continue; }
+                if (now - ui.staleSince < kResizeSettleSeconds) continue;
+                _resizedScratch.Add(ui);
+            }
+            if (_resizedScratch.Count == 0) return;
+
+            foreach (var ui in _resizedScratch)
+            {
+                GetDisplaySize(ui.display, out int w, out int h);
+                Debug.Log($"[{nameof(VisitorMessageUI)}] display {ui.display} resized " +
+                          $"{ui.builtW}x{ui.builtH} -> {w}x{h}; rebuilding its canvas.", this);
+                RetireCanvas(ui);
+                _uis.Remove(ui);
+                _builtDisplays.Remove(ui.display);
+            }
+            _resizedScratch.Clear();
+            EnsureBuilt(); // rebuilds and replays the current visual onto them
+        }
+
+        private readonly List<DisplayUi> _resizedScratch = new List<DisplayUi>();
+
         private DisplayUi BuildDisplayUi(int display, Camera cam)
         {
             // `display` is Unity's 0-based targetDisplay; the name is 1-origin
@@ -630,6 +752,7 @@ namespace Experience
             // Inspector, the OS and the physical screens.
             var root = new GameObject($"_VisitorUI_Display{display + 1}");
             root.transform.SetParent(transform, false);
+            root.AddComponent<VisitorUiCanvasTag>().display = display; // ownership marker for the orphan sweep
 
             var canvas = root.AddComponent<Canvas>();
             // Overlay, NOT ScreenSpaceCamera: the visitor displays are mirrored by
@@ -646,7 +769,8 @@ namespace Experience
             scaler.referenceResolution = new Vector2(1920f, 1080f);
             scaler.matchWidthOrHeight = 0.5f;
 
-            var ui = new DisplayUi { display = display, canvas = canvas };
+            GetDisplaySize(display, out int builtW, out int builtH);
+            var ui = new DisplayUi { display = display, canvas = canvas, builtW = builtW, builtH = builtH };
 
             // -- message / countdown (one slot) --
             ui.message = MakeText(root.transform, "Message", messageFontSize, Color.white,
