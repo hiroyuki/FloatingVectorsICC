@@ -2245,6 +2245,227 @@ namespace PointCloud
             track.AddRecordedBodyFrame(new PointCloudRecording.Frame { TimestampNs = tsNs });
         }
 
+        // --- Playback re-record tap ---
+        //
+        // Records the PLAYED stream as a new take while the transport stays in
+        // Playing. The normal Recording state is exclusive with playback
+        // (StartRecording stops it and ClearTracks wipes the loaded take), so a
+        // rig-less machine — where the entrance playback IS the only frame
+        // source — could never produce a visitor take and had to substitute the
+        // full-length canned recording. The tap subscribes to the same playback
+        // events every other consumer uses (OnPlaybackRawFrame /
+        // OnPlaybackBodies) and streams them into its own writer set + folder,
+        // leaving the transport, the loaded tracks and the Recording path
+        // untouched. Bodies pass straight through (the source take's bodies are
+        // already the converted v11s output, so a tapped take needs no further
+        // conversion). Alignment comes from the SOURCE take: its calibration
+        // sidecars are copied into the tap folder on stop.
+
+        private bool _tapActive;
+        private string _tapRoot, _tapHost, _tapSourceRoot;
+        private readonly Dictionary<string, StreamWriters> _tapWriters =
+            new Dictionary<string, StreamWriters>();
+        // Last timestamp written per serial: a loop wrap mid-tap would rewind
+        // the played timestamps, and RCSV index order must stay monotonic — the
+        // wrapped frames are dropped (the take just ends at the wrap).
+        private readonly Dictionary<string, ulong> _tapLastTsNs =
+            new Dictionary<string, ulong>();
+
+        public bool IsTapRecording => _tapActive;
+        public string LastTapRecordingRoot { get; private set; }
+
+        /// <summary>Start recording the currently playing take's stream into a
+        /// new timestamped folder under folderPath (same destination rules as
+        /// StartRecording). Returns false when playback is not running.</summary>
+        public bool StartPlaybackTapRecording()
+        {
+            if (_tapActive) return true;
+            if (CurrentState != State.Playing)
+            {
+                SetStatus("Tap-rec: playback is not running.", warn: true);
+                return false;
+            }
+            try
+            {
+                _tapRoot = StampedTakeFolder(ResolveRoot());
+                _tapHost = SafeMachineName();
+                Directory.CreateDirectory(_tapRoot);
+            }
+            catch (Exception e)
+            {
+                // The configured record root can be unavailable on the dev
+                // machine (typical Mac case: the record override points at an
+                // unplugged external SSD). Tap takes are disposable dev
+                // artifacts — fall back to persistentDataPath rather than
+                // failing the round.
+                try
+                {
+                    _tapRoot = StampedTakeFolder(
+                        Path.Combine(Application.persistentDataPath, "VisitorTakes"));
+                    _tapHost = SafeMachineName();
+                    Directory.CreateDirectory(_tapRoot);
+                    Debug.LogWarning($"[{nameof(SensorRecorder)}] tap-rec: record root unavailable " +
+                                     $"({e.Message}) — falling back to {_tapRoot}", this);
+                }
+                catch (Exception e2)
+                {
+                    SetStatus($"Tap-rec: no writable destination — {e2.Message}", warn: true);
+                    return false;
+                }
+            }
+            // Resolved NOW, not at stop: the playback root must be the take
+            // the tapped frames actually came from.
+            _tapSourceRoot = ResolvePlaybackRoot();
+            _tapLastTsNs.Clear();
+            OnPlaybackRawFrame += TapRawFrame;
+            OnPlaybackBodies += TapBodies;
+            _tapActive = true;
+            SetStatus($"Tap-recording playback → {_tapRoot}");
+            return true;
+        }
+
+        /// <summary>Close the tap take: finalize its writers, copy the source
+        /// take's calibration sidecars (the tapped frames' alignment) and write
+        /// the metadata. The finished root is LastTapRecordingRoot.</summary>
+        public void StopPlaybackTapRecording()
+        {
+            if (!_tapActive) return;
+            _tapActive = false;
+            OnPlaybackRawFrame -= TapRawFrame;
+            OnPlaybackBodies -= TapBodies;
+
+            int frames = 0;
+            foreach (var sw in _tapWriters.Values)
+            {
+                if (sw.Depth != null) frames += sw.Depth.FrameCount;
+                try { sw.Depth?.Dispose();  } catch (Exception e) { Debug.LogWarning($"[{nameof(SensorRecorder)}] tap depth writer dispose failed: {e.Message}",  this); }
+                try { sw.Color?.Dispose();  } catch (Exception e) { Debug.LogWarning($"[{nameof(SensorRecorder)}] tap color writer dispose failed: {e.Message}",  this); }
+                try { sw.IR?.Dispose();     } catch (Exception e) { Debug.LogWarning($"[{nameof(SensorRecorder)}] tap IR writer dispose failed: {e.Message}",     this); }
+                try { sw.Bodies?.Dispose(); } catch (Exception e) { Debug.LogWarning($"[{nameof(SensorRecorder)}] tap bodies writer dispose failed: {e.Message}", this); }
+                try { sw.BodiesV11s?.Dispose(); } catch (Exception e) { Debug.LogWarning($"[{nameof(SensorRecorder)}] tap bodies_v11s writer dispose failed: {e.Message}", this); }
+                sw.Depth = sw.Color = sw.IR = sw.Bodies = sw.BodiesV11s = null;
+            }
+            _tapWriters.Clear();
+            _tapLastTsNs.Clear();
+
+            try
+            {
+                // The tapped frames are raw sensor bytes — their world alignment
+                // is the SOURCE take's calibration, so copy its sidecars first,
+                // then write metadata with the recording-local yaml preserved
+                // (liveCalibrationWins: false — the live rig, if any, is NOT
+                // where these frames came from).
+                CopyCalibrationSidecars(_tapSourceRoot, _tapRoot);
+                WriteRecordingMetadata(_tapRoot, _tapHost, liveCalibrationWins: false);
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[{nameof(SensorRecorder)}] tap metadata write failed: {e}", this);
+            }
+
+            LastTapRecordingRoot = _tapRoot;
+            SetStatus($"Tap-recorded {frames} depth frame(s) → {_tapRoot}");
+        }
+
+        // Collision-safe timestamped take folder under `root` (same stamping
+        // rules as StartRecording; honours autoTimestampFolder).
+        private string StampedTakeFolder(string root)
+        {
+            if (!autoTimestampFolder) return root;
+            string stamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
+            string candidate = Path.Combine(root, stamp);
+            for (int i = 2; Directory.Exists(candidate); i++)
+                candidate = Path.Combine(root, stamp + "_" + i);
+            return candidate;
+        }
+
+        private static void CopyCalibrationSidecars(string fromRoot, string toRoot)
+        {
+            if (string.IsNullOrEmpty(fromRoot)) return;
+            string src = PointCloudRecording.CalibrationDir(fromRoot);
+            if (!Directory.Exists(src)) return;
+            string dst = PointCloudRecording.CalibrationDir(toRoot);
+            Directory.CreateDirectory(dst);
+            foreach (var f in Directory.GetFiles(src, "*.yaml"))
+                File.Copy(f, Path.Combine(dst, Path.GetFileName(f)), true);
+        }
+
+        private StreamWriters GetOrCreateTapWriters(string serial)
+        {
+            if (!_tapWriters.TryGetValue(serial, out var sw))
+            {
+                sw = new StreamWriters();
+                _tapWriters[serial] = sw;
+            }
+            return sw;
+        }
+
+        // Mirrors HandleRawFrame's stream-on-record writes, minus the live
+        // diagnostics and WITHOUT touching _tracks — those are the playback
+        // tracks the tapped frames are being read from.
+        private void TapRawFrame(string serial, ObCameraParam? camParam, Transform t, RawFrameData raw)
+        {
+            if (!_tapActive) return;
+            ulong tsNs = raw.TimestampUs * 1000UL;
+            if (_tapLastTsNs.TryGetValue(serial, out ulong last) && tsNs <= last)
+                return; // loop wrap (or duplicate emit) — keep the index monotonic
+            _tapLastTsNs[serial] = tsNs;
+
+            var sw = GetOrCreateTapWriters(serial);
+            if (raw.DepthByteCount > 0 && raw.DepthBytes != null)
+            {
+                sw.Depth ??= new PointCloudRecording.RcsvStreamWriter(
+                    PointCloudRecording.SensorFilePath(_tapRoot, _tapHost, serial, PointCloudRecording.DepthSensorName),
+                    PointCloudRecording.BuildDepthHeaderYaml(serial, raw.DepthWidth, raw.DepthHeight));
+                sw.Depth.WriteFrame(tsNs, raw.DepthBytes, raw.DepthByteCount);
+            }
+            if (raw.ColorByteCount > 0 && raw.ColorBytes != null)
+            {
+                sw.Color ??= new PointCloudRecording.RcsvStreamWriter(
+                    PointCloudRecording.SensorFilePath(_tapRoot, _tapHost, serial, PointCloudRecording.ColorSensorName),
+                    PointCloudRecording.BuildColorHeaderYaml(serial, raw.ColorWidth, raw.ColorHeight));
+                sw.Color.WriteFrame(tsNs, raw.ColorBytes, raw.ColorByteCount);
+            }
+            if (raw.IRByteCount > 0 && raw.IRBytes != null)
+            {
+                sw.IR ??= new PointCloudRecording.RcsvStreamWriter(
+                    PointCloudRecording.SensorFilePath(_tapRoot, _tapHost, serial, PointCloudRecording.IRSensorName),
+                    PointCloudRecording.BuildIRHeaderYaml(serial, raw.IRWidth, raw.IRHeight));
+                sw.IR.WriteFrame(tsNs, raw.IRBytes, raw.IRByteCount);
+            }
+        }
+
+        // Bodies pass through under the SAME stream kind the source take used —
+        // a v11s-owned source stays v11s-owned in the tap (that is what lets a
+        // tapped take skip re-conversion).
+        private void TapBodies(string serial, ulong tsNs, byte[] bytes, int byteCount, Transform t, ObCameraParam? camParam)
+        {
+            if (!_tapActive) return;
+            if (bytes == null || byteCount <= 0) return;
+            // The raw-frame guard owns the wrap detection; bodies ride the same
+            // clock, so apply the same monotonic rule against this serial's own
+            // last BODY timestamp (kept per stream via a suffixed key so a body
+            // frame between two depth frames is not mistaken for a rewind).
+            string key = serial + "/bodies";
+            if (_tapLastTsNs.TryGetValue(key, out ulong last) && tsNs <= last) return;
+            _tapLastTsNs[key] = tsNs;
+
+            var sw = GetOrCreateTapWriters(serial);
+            bool v11s = PlaybackBodiesAreV11s;
+            var writer = v11s ? sw.BodiesV11s : sw.Bodies;
+            if (writer == null)
+            {
+                string sensorName = v11s
+                    ? PointCloudRecording.BodiesV11sSensorName
+                    : PointCloudRecording.BodiesSensorName;
+                writer = new PointCloudRecording.RcsvStreamWriter(
+                    PointCloudRecording.SensorFilePath(_tapRoot, _tapHost, serial, sensorName),
+                    PointCloudRecording.BuildBodiesHeaderYaml(serial));
+                if (v11s) sw.BodiesV11s = writer; else sw.Bodies = writer;
+            }
+            writer.WriteFrame(tsNs, bytes, byteCount);
+        }
+
         // --- Playback ---
 
         private void StartPlayback()
@@ -2298,6 +2519,9 @@ namespace PointCloud
 
         private void StopPlayback()
         {
+            // The tap records the played stream — no playback, no source.
+            // Finalize what was written so the partial take is still readable.
+            if (_tapActive) StopPlaybackTapRecording();
             CurrentState = State.Idle;
             IsPaused = false;
             SetStatus("Playback stopped.");
@@ -2915,6 +3139,7 @@ namespace PointCloud
             // what flushes the trailing index chunk + patches the header. Skip
             // it and the just-written files become unreadable. Reuse the
             // normal StopRecording path so metadata writes also fire.
+            if (_tapActive) StopPlaybackTapRecording();
             if (CurrentState == State.Recording) StopRecording();
             else FinalizeAnyOpenStreamWriters();
             UnsubscribeAll();
@@ -2929,6 +3154,7 @@ namespace PointCloud
 
         private void OnDestroy()
         {
+            if (_tapActive) StopPlaybackTapRecording();
             if (CurrentState == State.Recording) StopRecording();
             else FinalizeAnyOpenStreamWriters();
             UnsubscribeAll();

@@ -2,12 +2,15 @@
 // sequence: Idle (unattended: just the floor grid, no attract content) →
 // Welcome (greeting on area entry, machine-owned timer) →
 // Calibrate (star pose → per-visitor bone profile for the fusion) →
-// FreeMove (free movement with the live sculpture) → Shoot (cue text →
+// TestMove1 / TestMove2 (practice rounds: intro → countdown → one second
+// recorded → converted → played back with the ribbons, no upload; wholly
+// director-owned, the machine waits on TestMoveDone) → Shoot (ほんばん cue →
 // countdown → ONE second recorded at zero) → Processing (v11s conversion +
-// capture of the final one-second curve window) → ResultShow (frozen finished
-// sculpture while glb/usdz export + upload run) → QrShow. No scene access —
-// the ExperienceDirector feeds an ExperienceInputs snapshot every Tick and
-// reacts to Changed. Pure so every transition rule is EditMode-testable.
+// capture of the final one-second curve window) → ResultShow (the take loops
+// with the ribbons + orbit while glb/usdz export + upload run; advance waits
+// on ResultShowDone) → QrShow. No scene access — the ExperienceDirector feeds
+// an ExperienceInputs snapshot every Tick and reacts to Changed. Pure so
+// every transition rule is EditMode-testable.
 //
 // Latching contracts (carried over from earlier machines' Codex reviews):
 //   - Per-state completion flags (CalibrationDone, RecordingDone,
@@ -23,10 +26,11 @@
 // Tick" — the state is still entered so side effects and the E2E transition
 // path stay exercised (dev-mode stage skipping).
 //
-// Duration ownership: Shoot's cue+countdown+capture and Processing's
-// timeout/fallback are DIRECTOR-owned (they wrap real device work and end in
-// RecordingDone / ProcessingDone); Calibrate's window, FreeMove's duration,
-// ResultShow's minimum dwell and QrShow's dwell are machine-owned timers.
+// Duration ownership: the TestMove mini-cycles, Shoot's cue+countdown+capture
+// and Processing's timeout/fallback are DIRECTOR-owned (they wrap real device
+// work and end in TestMoveDone / RecordingDone / ProcessingDone); Calibrate's
+// window, ResultShow's minimum dwell and QrShow's dwell are machine-owned
+// timers (ResultShow additionally waits on the director's ResultShowDone).
 
 using System;
 using UnityEngine;
@@ -35,7 +39,7 @@ namespace Experience
 {
     public enum ExperienceState
     {
-        Idle, Consent, Welcome, Calibrate, FreeMove, Shoot, Processing, ResultShow, QrShow, Fault
+        Idle, Consent, Welcome, Calibrate, TestMove1, TestMove2, Shoot, Processing, ResultShow, QrShow, Fault
     }
 
     /// <summary>Per-tick inputs from the director (already debounced where
@@ -46,11 +50,21 @@ namespace Experience
         public bool Present;
         public bool Fault;
         public bool CalibrationDone;   // star pose held + bone profile stored
+        public bool TestMoveDone;      // the practice mini-cycle (record→convert→playback) finished
+        // The practice presentation (recording stopped → conversion → load →
+        // looped playback) is in progress. LeftEarly is suspended while set:
+        // the take's ghost owns the merge there, so presence falls back to
+        // occupancy/live-fusion signals that flicker across the conversion and
+        // load gaps — a visitor standing still must not be reset mid-できたよ！.
+        // Director-owned and bounded (conversion timeout + playback deadline),
+        // so the machine can never be held here forever.
+        public bool TestMovePresenting;
         public bool RecordingDone;     // the one-second take is on disk
         public bool ProcessingDone;    // conversion + final capture finished
         public bool ProcessingFailed;  // unrecoverable (no take) — may be a pulse
         public bool ExportDone;
         public bool ExportFailed;      // may be a one-frame pulse
+        public bool ResultShowDone;    // the ResultShow playback loops finished
     }
 
     /// <summary>Timing + dev-skip knobs (plain POCO, filled from
@@ -72,15 +86,12 @@ namespace Experience
         public float calibrateSeconds = 10f;
         [Min(0f)]
         [Tooltip("How long はかれたよ！ (pose matched) stays on screen after the star " +
-                 "pose is held, before FreeMove replaces it. Without this the match is " +
+                 "pose is held, before TestMove1 replaces it. Without this the match is " +
                  "a single frame: the FSM latches CalibrationDone and advances on the " +
                  "very next tick. The ribbons also appear on this beat, so it doubles " +
                  "as the sculpture reveal. Only the HELD-pose path waits — window " +
                  "expiry (shy visitor) and skipCalibrate still advance immediately.")]
         public float calibrateMatchedSeconds = 1.5f;
-        [Min(1f)]
-        [Tooltip("Free-movement time with the live sculpture before the shoot.")]
-        public float freeMoveSeconds = 25f;
         [Min(5f)]
         [Tooltip("Director-enforced ceiling on Processing (conversion + capture); " +
                  "expiry falls back to whatever bodies the take carries.")]
@@ -105,11 +116,16 @@ namespace Experience
         public bool skipConsent;
         public bool skipWelcome;
         public bool skipCalibrate;   // default bone profile
-        public bool skipFreeMove;
+        [UnityEngine.Serialization.FormerlySerializedAs("skipFreeMove")]
+        [Tooltip("Skip BOTH practice rounds (TestMove1/TestMove2).")]
+        public bool skipTestMoves;
         public bool skipShoot;       // director substitutes devCannedTakeRoot
-        [Tooltip("Shoot plays out in full (cue, countdown, capture window) but no " +
-                 "recording happens — the director substitutes devCannedTakeRoot as " +
-                 "the take. For rigless (Mac) runs that still need the Shoot UX.")]
+        [Tooltip("Shoot/TestMove play out in full (cue, countdown, capture window). " +
+                 "With no cameras but a RUNNING playback (the entrance stand-in), the " +
+                 "capture window is REALLY recorded by tapping the playback stream — a " +
+                 "production-length take, bodies passed through, no conversion needed. " +
+                 "Only when nothing is playing does devCannedTakeRoot substitute. For " +
+                 "rigless (Mac) runs that still need the full UX.")]
         public bool dummyShoot;      // FSM-inert: advance still rides RecordingDone
         public bool skipProcessing;  // skip the v11s conversion (capture still runs)
         public bool skipQr;          // ResultShow success goes straight to Idle
@@ -136,6 +152,8 @@ namespace Experience
 
         private bool _calibLatched;
         private float _matchedElapsed; // time held in Calibrate AFTER the star match
+        private bool _testMoveLatched;
+        private bool _resultShowLatched;
         private bool _recordingLatched;
         private bool _processingLatched;
         private bool _processingFailLatched;
@@ -192,24 +210,39 @@ namespace Experience
                     // stall on a shy visitor, but a real match is not "shy").
                     if (t.skipCalibrate || (!_calibLatched && TimeInState >= t.calibrateSeconds))
                     {
-                        Go(ExperienceState.FreeMove);
+                        Go(ExperienceState.TestMove1);
                         break;
                     }
                     // A HELD star pose earns はかれたよ！ its own beat: hold Calibrate
                     // calibrateMatchedSeconds after the match so the matched text and
-                    // the freshly-revealed ribbons are readable before FreeMove's
+                    // the freshly-revealed ribbons are readable before TestMove1's
                     // message replaces them.
                     if (_calibLatched)
                     {
                         _matchedElapsed += dt;
                         if (_matchedElapsed >= t.calibrateMatchedSeconds)
-                            Go(ExperienceState.FreeMove);
+                            Go(ExperienceState.TestMove1);
                     }
                     break;
 
-                case ExperienceState.FreeMove:
-                    if (LeftEarly(inputs)) break;
-                    if (t.skipFreeMove || TimeInState >= t.freeMoveSeconds)
+                // The practice rounds are wholly director-owned (intro texts →
+                // countdown+record → conversion → looped playback) — like Shoot,
+                // the machine has no timeout of its own and rides the latched
+                // completion flag. The leave reset applies only to the LIVE half
+                // (intro/countdown/recording): once the presentation runs
+                // (TestMovePresenting) it plays to completion, same rationale as
+                // ResultShow's no-early-leave.
+                case ExperienceState.TestMove1:
+                    if (!inputs.TestMovePresenting && LeftEarly(inputs)) break;
+                    if (inputs.TestMoveDone) _testMoveLatched = true;
+                    if (t.skipTestMoves || _testMoveLatched)
+                        Go(ExperienceState.TestMove2);
+                    break;
+
+                case ExperienceState.TestMove2:
+                    if (!inputs.TestMovePresenting && LeftEarly(inputs)) break;
+                    if (inputs.TestMoveDone) _testMoveLatched = true;
+                    if (t.skipTestMoves || _testMoveLatched)
                         Go(ExperienceState.Shoot);
                     break;
 
@@ -244,7 +277,11 @@ namespace Experience
                             Go(ExperienceState.Idle);
                         break;
                     }
-                    if (inputs.ExportDone && TimeInState >= t.resultMinSeconds)
+                    // The result presentation (the take looping with the ribbons)
+                    // must finish alongside the export before the QR appears.
+                    if (inputs.ResultShowDone) _resultShowLatched = true;
+                    if (inputs.ExportDone && _resultShowLatched
+                        && TimeInState >= t.resultMinSeconds)
                         Go(t.skipQr ? ExperienceState.Idle : ExperienceState.QrShow);
                     break;
 
@@ -290,6 +327,8 @@ namespace Experience
             TimeInState = 0f;
             _calibLatched = false;
             _matchedElapsed = 0f;
+            _testMoveLatched = false;
+            _resultShowLatched = false;
             _recordingLatched = false;
             _processingLatched = false;
             _processingFailLatched = false;
@@ -313,6 +352,10 @@ namespace Experience
                     _calibLatched = false;
                     _matchedElapsed = 0f;
                     break;
+                case ExperienceState.TestMove1:
+                case ExperienceState.TestMove2:
+                    _testMoveLatched = false;
+                    break;
                 case ExperienceState.Shoot:
                     _recordingLatched = false;
                     break;
@@ -324,6 +367,7 @@ namespace Experience
                 case ExperienceState.ResultShow:
                     _exportFailLatched = false;
                     _exportFailElapsed = 0f;
+                    _resultShowLatched = false;
                     break;
             }
             Changed?.Invoke(from, to);

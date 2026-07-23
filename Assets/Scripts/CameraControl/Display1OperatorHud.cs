@@ -224,8 +224,8 @@ namespace CameraControl
                    "  Esc hold   quit (build only)\n" +
                    "EXPERIENCE (dev jump — mode auto-ON)\n" +
                    "  0          頭出し (run reset -> Idle)\n" +
-                   "  1 2 3 4    Consent / Welcome / Calibrate / FreeMove\n" +
-                   "  5 6 7 8    Shoot / Processing / ResultShow / QrShow\n" +
+                   "  1 2 3 4 5  Consent / Welcome / Calibrate / TestMove1 / TestMove2\n" +
+                   "  6 7 8 9    Shoot / Processing / ResultShow / QrShow\n" +
                    "TSDF DEBUG\n" +
                    "  Q W E R    single-cam view (cam 1-4)\n" +
                    "  A          all cams";

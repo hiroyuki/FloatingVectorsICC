@@ -1,6 +1,7 @@
 // EditMode tests for the one-second-take experience state machine: full happy
 // path, the privacy-consent gate, per-state latch clearing, calibrate-timeout
-// default path, FreeMove timer, processing fail path, ResultShow minimum dwell +
+// default path, the TestMove practice rounds (director-owned TestMoveDone),
+// processing fail path, ResultShow minimum dwell + ResultShowDone gate +
 // no-early-leave, one-frame failure pulses, the debounced leave grace
 // (chattering / brief step-outs never drop the run), skip flags, timeMultiplier.
 
@@ -25,7 +26,6 @@ namespace Calibration.Tests
                 welcomeSeconds = 4f,
                 calibrateSeconds = 10f,
                 calibrateMatchedSeconds = 1.5f,
-                freeMoveSeconds = 20f,
                 processingTimeoutSeconds = 60f,
                 resultMinSeconds = 4f,
                 exportFailNoticeSeconds = 5f,
@@ -64,12 +64,21 @@ namespace Calibration.Tests
             TickUntil(ExperienceState.Calibrate, dt: 1f); // welcomeSeconds timer
         }
 
-        // Star pose matched, then tick through the はかれたよ！ hold beat to FreeMove.
+        // Star pose matched, then tick through the はかれたよ！ hold beat to TestMove1.
         private void MatchStarPose()
         {
             _in.CalibrationDone = true;
-            TickUntil(ExperienceState.FreeMove, dt: 1f); // calibrateMatchedSeconds beat
+            TickUntil(ExperienceState.TestMove1, dt: 1f); // calibrateMatchedSeconds beat
             _in.CalibrationDone = false;
+        }
+
+        // Complete the current practice round (director-owned TestMoveDone pulse).
+        private void FinishTestMove(ExperienceState expectedNext)
+        {
+            _in.TestMoveDone = true;
+            Tick();
+            _in.TestMoveDone = false;
+            Assert.AreEqual(expectedNext, _sm.State);
         }
 
         // ---- happy path ----
@@ -80,9 +89,10 @@ namespace Calibration.Tests
             ReachCalibrate(); // Present → Consent → Welcome → Calibrate
 
             MatchStarPose();
-            Assert.AreEqual(ExperienceState.FreeMove, _sm.State);
+            Assert.AreEqual(ExperienceState.TestMove1, _sm.State);
 
-            TickUntil(ExperienceState.Shoot, dt: 2f); // freeMoveSeconds timer
+            FinishTestMove(ExperienceState.TestMove2); // practice 1 → practice 2
+            FinishTestMove(ExperienceState.Shoot);     // practice 2 → ほんばん
 
             _in.RecordingDone = true;
             Tick();
@@ -95,8 +105,10 @@ namespace Calibration.Tests
             _in.ProcessingDone = false;
 
             _in.ExportDone = true;
+            _in.ResultShowDone = true; // replay loops finished
             TickUntil(ExperienceState.QrShow, dt: 1f); // resultMinSeconds dwell
             _in.ExportDone = false;
+            _in.ResultShowDone = false;
 
             _in.Present = false; // walked off after scanning
             Tick();
@@ -184,11 +196,11 @@ namespace Calibration.Tests
         {
             ReachCalibrate();
             for (int i = 0; i < 25; i++) Tick(0.5f); // 12.5s > 10s
-            Assert.AreEqual(ExperienceState.FreeMove, _sm.State);
+            Assert.AreEqual(ExperienceState.TestMove1, _sm.State);
         }
 
         [Test]
-        public void Calibrate_MatchedPose_HeldForBeatBeforeFreeMove()
+        public void Calibrate_MatchedPose_HeldForBeatBeforeTestMove()
         {
             // The star match must linger so はかれたよ！ + the revealed ribbons are
             // readable — the FSM holds Calibrate calibrateMatchedSeconds after the
@@ -200,7 +212,7 @@ namespace Calibration.Tests
             Tick(0.5f); // 1.0s < 1.5s
             Assert.AreEqual(ExperienceState.Calibrate, _sm.State);
             Tick(0.6f); // 1.6s >= 1.5s → beat done
-            Assert.AreEqual(ExperienceState.FreeMove, _sm.State);
+            Assert.AreEqual(ExperienceState.TestMove1, _sm.State);
         }
 
         [Test]
@@ -215,7 +227,7 @@ namespace Calibration.Tests
             Tick(0.5f); // TimeInState now 10.0s (>= window) but latched → hold, not timeout
             Assert.AreEqual(ExperienceState.Calibrate, _sm.State);
             Tick(1.2f); // matched beat 1.7s >= 1.5s
-            Assert.AreEqual(ExperienceState.FreeMove, _sm.State);
+            Assert.AreEqual(ExperienceState.TestMove1, _sm.State);
         }
 
         [Test]
@@ -229,7 +241,7 @@ namespace Calibration.Tests
             _in.CalibrationDone = false; // flicker off mid-beat
             Assert.AreEqual(ExperienceState.Calibrate, _sm.State);
             Tick(1.2f); // 1.7s total >= 1.5s
-            Assert.AreEqual(ExperienceState.FreeMove, _sm.State);
+            Assert.AreEqual(ExperienceState.TestMove1, _sm.State);
         }
 
         [Test]
@@ -248,23 +260,83 @@ namespace Calibration.Tests
             Assert.AreEqual(ExperienceState.Calibrate, _sm.State);
         }
 
-        // ---- FreeMove ----
+        // ---- TestMove practice rounds ----
 
         [Test]
-        public void FreeMove_TimerAdvances_And_LeaveReturnsToIdle()
+        public void TestMove_AdvancesOnlyOnDone_And_LeaveReturnsToIdle()
         {
             ReachCalibrate();
             MatchStarPose();
-            Assert.AreEqual(ExperienceState.FreeMove, _sm.State);
-            Tick(5f);
-            Assert.AreEqual(ExperienceState.FreeMove, _sm.State); // 5s < 20s
+            Assert.AreEqual(ExperienceState.TestMove1, _sm.State);
+            for (int i = 0; i < 60; i++) Tick(1f); // no machine-side timeout
+            Assert.AreEqual(ExperienceState.TestMove1, _sm.State);
             _in.Present = false;
             TickUntil(ExperienceState.Idle, dt: 1f); // leave grace elapses
 
             _in.Present = true;
             ReachCalibrate();
             MatchStarPose();
-            TickUntil(ExperienceState.Shoot, dt: 2f);
+            FinishTestMove(ExperienceState.TestMove2);
+            FinishTestMove(ExperienceState.Shoot);
+        }
+
+        [Test]
+        public void TestMove_StaleDoneFlag_ClearedOnEachEntry()
+        {
+            // The latch from practice 1 must not fast-forward practice 2.
+            ReachCalibrate();
+            MatchStarPose();
+            _in.TestMoveDone = true;
+            Tick();
+            Assert.AreEqual(ExperienceState.TestMove2, _sm.State);
+            _in.TestMoveDone = false;
+            Tick(5f);
+            Assert.AreEqual(ExperienceState.TestMove2, _sm.State); // waits for its own Done
+            FinishTestMove(ExperienceState.Shoot);
+        }
+
+        [Test]
+        public void TestMove_PresentingSuspendsLeaveReset()
+        {
+            // Once the presentation stretch runs (recording stopped → convert →
+            // load → replay), a presence flicker must not reset the run — the
+            // ghost owns the merge there and the fallback presence signals blink
+            // across the conversion/load gaps.
+            ReachCalibrate();
+            MatchStarPose();
+            _in.TestMovePresenting = true;
+            _in.Present = false;
+            for (int i = 0; i < 20; i++) Tick(1f); // 20s absent >> 5s grace
+            Assert.AreEqual(ExperienceState.TestMove1, _sm.State);
+            // Presentation over, visitor genuinely gone → normal grace reset.
+            _in.TestMovePresenting = false;
+            TickUntil(ExperienceState.Idle, dt: 1f);
+        }
+
+        [Test]
+        public void TestMove_PresentingStillAdvancesOnDone()
+        {
+            ReachCalibrate();
+            MatchStarPose();
+            _in.TestMovePresenting = true;
+            _in.Present = false; // walked off mid-presentation
+            _in.TestMoveDone = true;
+            Tick();
+            _in.TestMoveDone = false;
+            Assert.AreEqual(ExperienceState.TestMove2, _sm.State); // presentation completed normally
+            _in.TestMovePresenting = false;
+            _in.Present = true;
+        }
+
+        [Test]
+        public void TestMove_SkipFlag_SkipsBothRounds()
+        {
+            _t.skipTestMoves = true;
+            ReachCalibrate();
+            MatchStarPose(); // lands in TestMove1
+            Tick(); // TestMove1 → TestMove2 (skip)
+            Tick(); // TestMove2 → Shoot (skip)
+            Assert.AreEqual(ExperienceState.Shoot, _sm.State);
         }
 
         // ---- leave grace (chattering / brief step-outs) ----
@@ -335,7 +407,8 @@ namespace Calibration.Tests
         {
             ReachCalibrate();
             MatchStarPose();
-            TickUntil(ExperienceState.Shoot, dt: 2f);
+            FinishTestMove(ExperienceState.TestMove2);
+            FinishTestMove(ExperienceState.Shoot);
         }
 
         [Test]
@@ -354,9 +427,10 @@ namespace Calibration.Tests
         {
             ReachCalibrate();
             _in.RecordingDone = true; // stale pulse long before Shoot
-            MatchStarPose();          // through the Calibrate beat → FreeMove
+            MatchStarPose();          // through the Calibrate beat → TestMove1
             _in.RecordingDone = false; // cleared before Shoot (latch clears on entry)
-            TickUntil(ExperienceState.Shoot, dt: 2f);
+            FinishTestMove(ExperienceState.TestMove2);
+            FinishTestMove(ExperienceState.Shoot);
             Tick();
             Assert.AreEqual(ExperienceState.Shoot, _sm.State); // did not skip ahead
         }
@@ -412,9 +486,25 @@ namespace Calibration.Tests
         {
             ReachResultShow();
             _in.ExportDone = true;
+            _in.ResultShowDone = true;
             Tick(1f);
             Assert.AreEqual(ExperienceState.ResultShow, _sm.State); // 1s < 4s dwell
             for (int i = 0; i < 8; i++) Tick(1f);
+            Assert.AreEqual(ExperienceState.QrShow, _sm.State);
+        }
+
+        [Test]
+        public void ResultShow_WaitsForReplayLoopsEvenWhenExportIsDone()
+        {
+            // The QR must not appear while the replay presentation still runs.
+            ReachResultShow();
+            _in.ExportDone = true;
+            for (int i = 0; i < 10; i++) Tick(1f); // dwell satisfied, loops not
+            Assert.AreEqual(ExperienceState.ResultShow, _sm.State);
+            _in.ResultShowDone = true; // pulse — latched
+            Tick();
+            _in.ResultShowDone = false;
+            Tick();
             Assert.AreEqual(ExperienceState.QrShow, _sm.State);
         }
 
@@ -446,6 +536,7 @@ namespace Calibration.Tests
             _t.skipQr = true;
             ReachResultShow();
             _in.ExportDone = true;
+            _in.ResultShowDone = true;
             _in.Present = false; // park the Idle that follows
             for (int i = 0; i < 10; i++) Tick(1f);
             Assert.AreEqual(ExperienceState.Idle, _sm.State);
@@ -458,6 +549,7 @@ namespace Calibration.Tests
         {
             ReachResultShow();
             _in.ExportDone = true;
+            _in.ResultShowDone = true;
             TickUntil(ExperienceState.QrShow, dt: 1f);
             // Present stays true — Idle must be reached by the TIMER.
             // TickUntil stops the moment Idle appears (before Idle could
@@ -489,20 +581,21 @@ namespace Calibration.Tests
             _t.skipConsent = true;
             _t.skipWelcome = true;
             _t.skipCalibrate = true;
-            _t.skipFreeMove = true;
+            _t.skipTestMoves = true;
             _t.skipShoot = true;
 
             var visited = new System.Collections.Generic.List<ExperienceState>();
             _sm.Changed += (from, to) => visited.Add(to);
 
-            for (int i = 0; i < 7; i++) Tick();
+            for (int i = 0; i < 8; i++) Tick();
             Assert.AreEqual(ExperienceState.Processing, _sm.State);
             CollectionAssert.AreEqual(
                 new[]
                 {
                     ExperienceState.Consent, ExperienceState.Welcome,
-                    ExperienceState.Calibrate, ExperienceState.FreeMove,
-                    ExperienceState.Shoot, ExperienceState.Processing,
+                    ExperienceState.Calibrate, ExperienceState.TestMove1,
+                    ExperienceState.TestMove2, ExperienceState.Shoot,
+                    ExperienceState.Processing,
                 },
                 visited);
 
@@ -527,7 +620,7 @@ namespace Calibration.Tests
             Tick(0.5f); // 0.5s * 10 = 5s > 4s welcome → Calibrate
             Assert.AreEqual(ExperienceState.Calibrate, _sm.State);
             for (int i = 0; i < 3; i++) Tick(0.5f); // 1.5s * 10 = 15s > 10s
-            Assert.AreEqual(ExperienceState.FreeMove, _sm.State);
+            Assert.AreEqual(ExperienceState.TestMove1, _sm.State);
         }
     }
 }

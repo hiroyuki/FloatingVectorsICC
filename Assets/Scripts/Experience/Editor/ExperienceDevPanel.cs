@@ -78,7 +78,7 @@ namespace Experience.EditorTools
             {
                 EditorGUILayout.Space(4);
                 EditorGUILayout.LabelField(
-                    "ステートジャンプ（このパネル or Game ビューでキー 0〜8 / 0=頭出し。mode OFF なら自動 ON）",
+                    "ステートジャンプ（このパネル or Game ビューでキー 0〜9 / 0=頭出し。mode OFF なら自動 ON）",
                     EditorStyles.miniBoldLabel);
                 using (new EditorGUILayout.HorizontalScope())
                 {
@@ -86,14 +86,15 @@ namespace Experience.EditorTools
                     if (GUILayout.Button("1 同意")) Jump(ExperienceState.Consent);
                     if (GUILayout.Button("2 挨拶")) Jump(ExperienceState.Welcome);
                     if (GUILayout.Button("3 計測")) Jump(ExperienceState.Calibrate);
-                    if (GUILayout.Button("4 自由")) Jump(ExperienceState.FreeMove);
+                    if (GUILayout.Button("4 練習1")) Jump(ExperienceState.TestMove1);
                 }
                 using (new EditorGUILayout.HorizontalScope())
                 {
-                    if (GUILayout.Button("5 撮影")) Jump(ExperienceState.Shoot);
-                    if (GUILayout.Button("6 処理")) Jump(ExperienceState.Processing);
-                    if (GUILayout.Button("7 結果")) Jump(ExperienceState.ResultShow);
-                    if (GUILayout.Button("8 QR")) Jump(ExperienceState.QrShow);
+                    if (GUILayout.Button("5 練習2")) Jump(ExperienceState.TestMove2);
+                    if (GUILayout.Button("6 撮影")) Jump(ExperienceState.Shoot);
+                    if (GUILayout.Button("7 処理")) Jump(ExperienceState.Processing);
+                    if (GUILayout.Button("8 結果")) Jump(ExperienceState.ResultShow);
+                    if (GUILayout.Button("9 QR")) Jump(ExperienceState.QrShow);
                 }
             }
 
@@ -171,7 +172,7 @@ namespace Experience.EditorTools
             _director.DevJumpTo(state);
         }
 
-        // The 0-8 jump keys, working while THIS WINDOW is focused — reaching the
+        // The 0-9 jump keys, working while THIS WINDOW is focused — reaching the
         // Game view needs a click first, and that click can land on the operator
         // HUD's toggles (which is how the mode got switched off unnoticed).
         // Same mapping as the director's in-game handler.
@@ -181,9 +182,9 @@ namespace Experience.EditorTools
             var e = Event.current;
             if (e.type != EventType.KeyDown) return;
             int idx = -1;
-            if (e.keyCode >= KeyCode.Alpha0 && e.keyCode <= KeyCode.Alpha8)
+            if (e.keyCode >= KeyCode.Alpha0 && e.keyCode <= KeyCode.Alpha9)
                 idx = e.keyCode - KeyCode.Alpha0;
-            else if (e.keyCode >= KeyCode.Keypad0 && e.keyCode <= KeyCode.Keypad8)
+            else if (e.keyCode >= KeyCode.Keypad0 && e.keyCode <= KeyCode.Keypad9)
                 idx = e.keyCode - KeyCode.Keypad0;
             if (idx < 0) return;
             Jump((ExperienceState)idx);
@@ -231,8 +232,9 @@ namespace Experience.EditorTools
                 }
                 using (new EditorGUILayout.HorizontalScope())
                 {
-                    if (GUILayout.Button("じゆうに (FreeMove)")) ui.ShowMessage(cfg.freeMoveText);
-                    if (GUILayout.Button("さつえい (Shoot cue)")) ui.ShowMessage(cfg.shootCueText);
+                    if (GUILayout.Button("れんしゅう1 (TestMove1)")) ui.ShowMessage(cfg.testMove1IntroText);
+                    if (GUILayout.Button("ヒント+CD (TestMove)")) ui.ShowCountdown(5, cfg.testMove1HintText);
+                    if (GUILayout.Button("ほんばん (Shoot cue)")) ui.ShowMessage(cfg.shootCueText);
                     if (GUILayout.Button("しょりちゅう (Processing)"))
                         ui.ShowProgress(0.4f, cfg.processingText);
                 }
