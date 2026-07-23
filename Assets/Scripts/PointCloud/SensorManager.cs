@@ -251,6 +251,42 @@ namespace PointCloud
         // OnApplicationQuit fallback that used to catch them.
         private bool _shutdownRequested;
 
+        [Tooltip("Staged startup: hard cap on waiting for a batch of device opens. Past " +
+                 "this the boot carries on with whatever came up, so a single dead camera " +
+                 "cannot hold the exhibition on the splash screen forever. Normal cost is " +
+                 "~1.6s for the whole batch (they open concurrently).")]
+        public float openTimeoutSeconds = 30f;
+
+        // Polls a batch of device opens without blocking the main thread, reporting the
+        // running count into the splash. Faults are logged per camera and do not stop the
+        // rest of the rig coming up: three working cameras beat none.
+        private System.Collections.IEnumerator WaitForOpens(
+            System.Collections.Generic.List<System.Threading.Tasks.Task> opens,
+            string label, System.Func<int, int> toOverallCount, int total)
+        {
+            if (opens.Count == 0) yield break;
+            float deadline = Time.realtimeSinceStartup + openTimeoutSeconds;
+            while (true)
+            {
+                int done = 0;
+                for (int i = 0; i < opens.Count; i++) if (opens[i].IsCompleted) done++;
+                global::Shared.BootOverlay.SetStatus(
+                    $"カメラを起動しています…  {toOverallCount(done)} / {total}");
+                if (done >= opens.Count) break;
+                if (Time.realtimeSinceStartup > deadline)
+                {
+                    Debug.LogError($"[{nameof(SensorManager)}] {opens.Count - done} {label} camera " +
+                                   $"open(s) did not finish within {openTimeoutSeconds:0}s — " +
+                                   "continuing without them.", this);
+                    break;
+                }
+                yield return null;
+            }
+            foreach (var t in opens)
+                if (t.IsFaulted && t.Exception != null) Debug.LogException(t.Exception, this);
+            global::Shared.StartupProfiler.Mark($"SensorManager: {label} open(s) joined");
+        }
+
         private System.Collections.IEnumerator StartLiveStaged()
         {
             // try/finally around the whole claimed lifetime: an exception anywhere below
@@ -288,6 +324,9 @@ namespace PointCloud
                     if (verboseLogging)
                         Debug.Log($"[{nameof(SensorManager)}] Found {devices.Count} device(s).");
 
+                    // Spawn every renderer first with deferOpen, so none of them opens a
+                    // device from its own Start(). The opens are then issued from here,
+                    // concurrently — serialised they cost ~1.6s each (6.4s for four).
                     for (int i = 0; i < devices.Count; i++)
                     {
                         // Quit arrived mid-boot: stop spawning. Anything opened so far is
@@ -301,36 +340,52 @@ namespace PointCloud
                             break;
                         }
 
-                        global::Shared.BootOverlay.SetStatus(
-                            $"カメラを起動しています…  {i + 1} / {devices.Count}");
-                        yield return new WaitForEndOfFrame();   // show that count before blocking
-
-                        // Re-check AFTER the yield, not only before it. A quit that arrives
-                        // during that frame would otherwise still get one more camera: the
-                        // renderer's Start() runs a synchronous OpenDevice() at the top of
-                        // the next frame, which both delays the stop by a full device-open
-                        // and — if that open wedges — freezes the player loop, so neither
-                        // the startup join deadline nor the quit watchdog could advance.
-                        if (_shutdownRequested)
-                        {
-                            Debug.Log($"[{nameof(SensorManager)}] staged startup cancelled at " +
-                                      $"{i}/{devices.Count} — shutdown requested.");
-                            break;
-                        }
-
                         var d = devices[i];
                         if (verboseLogging) Debug.Log($"  [{i}] {d}");
-                        var r = SpawnRenderer(d, i);
+                        var r = SpawnRenderer(d, i, deferOpen: true);
                         _renderers.Add(r);
                         if (view != null && r != null)
                         {
                             var mr = r.GetComponent<MeshRenderer>();
                             if (mr != null) view.Register(mr);
                         }
-                        // The renderer's own Start() — which is where OpenDevice blocks —
-                        // runs at the top of the next frame, so this is the yield that
-                        // actually pays for the camera.
-                        yield return null;
+                    }
+
+                    int n = _renderers.Count;
+                    if (n > 0)
+                    {
+                        global::Shared.BootOverlay.SetStatus($"カメラを起動しています…  0 / {n}");
+                        yield return new WaitForEndOfFrame();   // present the count first
+
+                        // Secondaries concurrently, Primary last — the same ordering the
+                        // teardown uses, and here it is what the sync topology requires:
+                        // ob_pipeline_start happens inside the open, so every Secondary has
+                        // to be up and waiting before the Primary (index 0, see
+                        // ResolveSyncMode) starts emitting triggers into the hub.
+                        var opens = new System.Collections.Generic.List<System.Threading.Tasks.Task>(n);
+                        for (int i = 1; i < n; i++)
+                            if (_renderers[i] != null) opens.Add(_renderers[i].OpenDeviceAsync());
+
+                        yield return WaitForOpens(opens, "secondary", done => done, n);
+
+                        if (!_shutdownRequested && _renderers[0] != null)
+                        {
+                            var primaryOpen = _renderers[0].OpenDeviceAsync();
+                            yield return WaitForOpens(
+                                new System.Collections.Generic.List<System.Threading.Tasks.Task> { primaryOpen },
+                                "primary", done => opens.Count + done, n);
+                        }
+
+                        // Mesh, transform and capture thread are Unity-side, so they land
+                        // back here on the main thread. A camera whose open faulted is left
+                        // alone — FinishOpen on a device that never opened would throw.
+                        for (int i = 0; i < n; i++)
+                        {
+                            var r = _renderers[i];
+                            if (r == null || !r.IsDeviceOpen) continue;
+                            try { r.FinishOpen(); }
+                            catch (Exception e) { Debug.LogException(e, r); r.StopCapture(); }
+                        }
                     }
 
                     if (applyExtrinsics) ApplyExtrinsicsToLive();
@@ -677,7 +732,8 @@ namespace PointCloud
             _renderers.Clear();
         }
 
-        private PointCloudRenderer SpawnRenderer(OrbbecDeviceDescriptor desc, int index)
+        private PointCloudRenderer SpawnRenderer(OrbbecDeviceDescriptor desc, int index,
+                                                 bool deferOpen = false)
         {
             var go = new GameObject($"PointCloud[{index}] {desc.Name} ({desc.Serial})");
             go.transform.SetParent(transform, worldPositionStays: false);
@@ -685,6 +741,7 @@ namespace PointCloud
             go.AddComponent<MeshRenderer>();
             var pcr = go.AddComponent<PointCloudRenderer>();
 
+            pcr.deferOpen = deferOpen;
             pcr.deviceSerial = desc.Serial;
             pcr.depthWidth = depthWidth;
             pcr.depthHeight = depthHeight;

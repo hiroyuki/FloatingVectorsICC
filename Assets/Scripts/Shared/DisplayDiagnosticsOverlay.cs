@@ -149,6 +149,13 @@ namespace Shared
                 sb.Append('\n');
             }
 
+            // renderingDisplaySize is the size Unity decided this canvas may occupy,
+            // and an overlay canvas is drawn from the bottom-left at one canvas pixel
+            // per device pixel — so when it is smaller than the display's rendering
+            // size the UI shrinks into the bottom-left corner while the 3D content
+            // still fills the screen. In the Editor that happens when two Game views
+            // share one display (see GameViewDisplayGuard); flag it here so the same
+            // symptom is diagnosable in a build too.
             sb.Append("\nCanvases:\n");
             foreach (var c in FindObjectsByType<Canvas>(FindObjectsSortMode.None))
             {
@@ -156,9 +163,19 @@ namespace Shared
                 int disp = c.renderMode == RenderMode.ScreenSpaceOverlay
                     ? c.targetDisplay
                     : (c.worldCamera != null ? c.worldCamera.targetDisplay : -1);
+                Vector2 rds = c.renderingDisplaySize;
                 sb.Append("  disp ").Append(disp)
                   .Append(c.enabled && c.gameObject.activeInHierarchy ? "  ON   " : "  off  ")
-                  .Append(c.name).Append("  ").Append(c.renderMode).Append('\n');
+                  .Append(c.name).Append("  ").Append(c.renderMode)
+                  .Append("  rendering ").Append(Mathf.RoundToInt(rds.x)).Append('x').Append(Mathf.RoundToInt(rds.y));
+                if (disp >= 0 && disp < Display.displays.Length)
+                {
+                    var d = Display.displays[disp];
+                    if (Mathf.RoundToInt(rds.x) != d.renderingWidth || Mathf.RoundToInt(rds.y) != d.renderingHeight)
+                        sb.Append("  <-- MISMATCH vs display ")
+                          .Append(d.renderingWidth).Append('x').Append(d.renderingHeight);
+                }
+                sb.Append('\n');
             }
 
             sb.Append("\nScreen: ").Append(Screen.width).Append('x').Append(Screen.height)

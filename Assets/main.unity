@@ -768,6 +768,7 @@ MonoBehaviour:
   alertFontSize: 80
   captionFontSize: 24
   qrSizePixels: 480
+  qrPosition: {x: 0, y: 60}
   alertBackdropAlpha: 0.75
   poseGuideDisplays: 01000000
   poseGuideSizePixels: 420
@@ -1159,6 +1160,9 @@ MonoBehaviour:
   loadSensingAreaFromCalibration: 1
   targetFrameRate: 30
   verboseLogging: 0
+  openTimeoutSeconds: 30
+  softStopTimeoutSeconds: 15
+  hardStopTimeoutSeconds: 60
 --- !u!4 &925702424
 Transform:
   m_ObjectHideFlags: 0
@@ -1682,6 +1686,7 @@ MonoBehaviour:
   syncReviewFusion: 0
   modelsDir: eval/models
   bodyProfilePath: eval/body_profile.json
+  assetRootOverride: 
   provider: 2
   confThreshold: 0.3
   captureVolumeFromRig: 1
@@ -2249,6 +2254,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::CameraControl.MultiDisplayActivator
   displayCount: 3
+  retryIntervalSeconds: 1
 --- !u!4 &1226484914
 Transform:
   m_ObjectHideFlags: 0
