@@ -100,6 +100,14 @@ namespace Experience
         [Tooltip("Point-cloud decimation (%) during the take replays.")]
         public float presentationDecimatePercent = 7.9f;
 
+        [Tooltip("Show the SOLID shaded TSDF mesh (with self-shadow) as part of the finished " +
+                 "できたよ！ model, alongside the ribbons. OFF (default) = the current look: the " +
+                 "mesh stays suppressed and ONLY the curves form the final model (the mesh is " +
+                 "still shown as the wireframe during the reveal replay either way). ON = the " +
+                 "solid body sits inside the ribbons. A/B this to decide the final look — it only " +
+                 "affects ResultShow/QrShow; every live/practice phase is unchanged.")]
+        public bool presentationSolidMesh = false;
+
         [Header("Sensing overrides (pushed into PresenceDetector on enter)")]
         [Min(0f)] public float insetMeters = 0f;
         [Tooltip("Ignore points below this world height (m). 0.15 skips the floor " +
@@ -431,6 +439,8 @@ namespace Experience
         [TextArea] public string shootCueText = "じゃぁ　ほんばんだよ";
         [TextArea] public string shootingText = "さつえいちゅう！";
         [TextArea] public string processingText = "きろくを　じゅんびしているよ　まってね";
+        [Tooltip("Shown over the TSDF wireframe replay, before できたよ！ (resultText).")]
+        [TextArea] public string analyzingText = "ぶんせきちゅう";
         [TextArea] public string resultText = "できたよ！";
         [TextArea] public string qrScanText = "にじげんコードの　しゃしんを　とったら\nおうちでも　みれるよ";
     }

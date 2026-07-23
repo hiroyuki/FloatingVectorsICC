@@ -1629,9 +1629,10 @@ namespace Experience
                     _ui.ShowProgress(_converter?.Progress ?? 0f, config.processingText);
                     break;
                 case ExperienceState.ResultShow:
-                    // Held blank through the wireframe replay: any repaint (crowd
-                    // notice clear) stays empty until the routine reveals the model.
-                    if (_deferResultText) { _ui.ClearAll(); break; }
+                    // Through the wireframe replay show ぶんせきちゅう (any repaint —
+                    // crowd notice clear, gap paint — keeps it) until the routine
+                    // finishes the replay and reveals the finished model with できたよ！.
+                    if (_deferResultText) { _ui.ShowMessage(config.analyzingText); break; }
                     // Same layout as the QR screen (headline already in place) so
                     // ResultShow→QrShow reads as ONE scene that gains the QR.
                     if (_exportFailed) _ui.ShowMessage(config.exportFailedText);
@@ -2745,6 +2746,7 @@ namespace Experience
                     // Wireframe replay: hide cloud + ribbons, show the TSDF as an edge
                     // net that re-forms with the motion (integrator follows the replay).
                     SetWireframeReplay(true);
+                    _ui.ShowMessage(config.analyzingText); // ぶんせきちゅう over the wireframe
                     StartVisitorPlayback(takeRoot, loop: true,
                                          rate: config.presentationPlaybackRate);
                     played = _visitorPlaybackActive && sensorRecorder != null && sensorRecorder.IsPlaying;
@@ -2766,9 +2768,11 @@ namespace Experience
                     yield return RunPlaybackLoops(state, startAt);
                     if (!Active()) yield break;
 
-                    // Replay done: hide the wireframe (re-freezes the sculpture), hold a
-                    // black beat, then paint できたよ！ and reveal the finished curve model.
+                    // Replay done: hide the wireframe (re-freezes the sculpture), clear
+                    // ぶんせきちゅう, hold a pure-black beat, then paint できたよ！ and
+                    // reveal the finished curve model.
                     SetWireframeReplay(false);
+                    _ui.ClearAll(); // black gap between ぶんせきちゅう and できたよ！
                     if (beat > 0f) yield return new WaitForSeconds(beat);
                     if (!Active()) yield break;
                     Shader.SetGlobalFloat(PcFadeCullId, 0f);
@@ -2867,6 +2871,7 @@ namespace Experience
             // we paint できたよ！ and reveal the finished curve model. The stage was
             // blanked at entry (cloud hidden, ribbons suppressed, ring cleared).
             SetWireframeReplay(true);
+            _ui.ShowMessage(config.analyzingText); // ぶんせきちゅう over the wireframe
             if (poseHistory != null) poseHistory.ReleaseHoldAndClear(); // grow the ring from empty
 
             // Restart the take from the top, looping. Processing left the transport
@@ -2907,10 +2912,13 @@ namespace Experience
             { _resultShowRoutine = null; yield break; }
 
             // ---- phase 2: できたよ！ + finished model ----
-            // Hide the wireframe (re-freezes the sculpture), hold a black beat, then
-            // paint できたよ！ and reveal the finished curve model (history-30 ring,
-            // frozen). Freeze BEFORE the orbit so the pivot reads the settled skeleton.
+            // Hide the wireframe (re-freezes the sculpture) AND clear ぶんせきちゅう, hold
+            // a pure-black beat, then paint できたよ！ and reveal the finished curve model
+            // (history-30 ring, frozen). Freeze BEFORE the orbit so the pivot reads the
+            // settled skeleton. _deferResultText stays true across the gap so a repaint
+            // (crowd notice clear) shows ぶんせきちゅう, not an early できたよ！.
             SetWireframeReplay(false);
+            _ui.ClearAll(); // black gap between ぶんせきちゅう and できたよ！
             if (revealDelay > 0f) yield return new WaitForSeconds(revealDelay);
             if (!_active || _fsm.State != ExperienceState.ResultShow)
             { _resultShowRoutine = null; yield break; }
