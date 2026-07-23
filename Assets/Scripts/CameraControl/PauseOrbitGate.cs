@@ -60,6 +60,44 @@ namespace CameraControl
             if (orbit == null) orbit = GetComponent<CameraOrbitController>();
         }
 
+        // ---- presentation camera work (Shared.IOrbitOverride) ----
+        // The show swaps the orbit target to a person-tracking anchor and
+        // speeds the sweep up; the dev pivot (boundingBox) / speed / bob come
+        // back when it hands over (null pivot).
+        private BoundingVolume _savedBBox;
+        private Transform _savedPivotTf;
+        private float _savedYawSpeed, _savedBobAmp;
+        private bool _presentationApplied;
+
+        public void SetPresentationOrbit(Transform pivot, float yawSpeedDeg, float bobAmpMeters)
+        {
+            ResolveOrbit();
+            if (orbit == null) return;
+            if (pivot != null)
+            {
+                if (!_presentationApplied)
+                {
+                    _savedBBox = orbit.boundingBox;
+                    _savedPivotTf = orbit.pivot;
+                    _savedYawSpeed = orbit.autoOrbitYawSpeedDeg;
+                    _savedBobAmp = orbit.autoOrbitBobAmpMeters;
+                    _presentationApplied = true;
+                }
+                orbit.boundingBox = null; // boundingBox outranks pivot — clear it
+                orbit.pivot = pivot;
+                orbit.autoOrbitYawSpeedDeg = yawSpeedDeg;
+                orbit.autoOrbitBobAmpMeters = bobAmpMeters;
+            }
+            else if (_presentationApplied)
+            {
+                orbit.boundingBox = _savedBBox;
+                orbit.pivot = _savedPivotTf;
+                orbit.autoOrbitYawSpeedDeg = _savedYawSpeed;
+                orbit.autoOrbitBobAmpMeters = _savedBobAmp;
+                _presentationApplied = false;
+            }
+        }
+
         /// <summary>Immediate off-edge: disable the controller and restore the
         /// saved pose without waiting for the next Update. Used by the
         /// ExperienceDirector's mode exit, where the deferred Update would run

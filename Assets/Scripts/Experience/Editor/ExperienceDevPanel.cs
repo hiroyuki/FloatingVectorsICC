@@ -233,7 +233,6 @@ namespace Experience.EditorTools
                 using (new EditorGUILayout.HorizontalScope())
                 {
                     if (GUILayout.Button("れんしゅう1 (TestMove1)")) ui.ShowMessage(cfg.testMove1IntroText);
-                    if (GUILayout.Button("ヒント+CD (TestMove)")) ui.ShowCountdown(5, cfg.testMove1HintText);
                     if (GUILayout.Button("ほんばん (Shoot cue)")) ui.ShowMessage(cfg.shootCueText);
                     if (GUILayout.Button("しょりちゅう (Processing)"))
                         ui.ShowProgress(0.4f, cfg.processingText);

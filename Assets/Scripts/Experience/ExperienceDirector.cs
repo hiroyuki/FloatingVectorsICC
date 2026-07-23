@@ -11,12 +11,12 @@
 //                and become the PER-VISITOR fusion profile — applied to the
 //                live fusion immediately and to the take conversion later.
 //                Window expiry proceeds with the default profile.
-//   TestMove1/2 — practice rounds: intro message(s) → countdown with a hint →
+//   TestMove1/2 — practice rounds: intro message(s) → countdown →
 //                ONE second recorded → v11s conversion → できたよ！ +
 //                playbackLoops looped play-throughs with the ribbons and the
 //                orbit cameras. No capture, no export, no upload; the take
 //                stays on disk unused. Ends in TestMoveDone.
-//   Shoot      — ほんばん cue → countdown with a hint → at zero ONE second is
+//   Shoot      — ほんばん cue → countdown → at zero ONE second is
 //                the take → recording stops.
 //   Processing — FusedTakeConverter (v11s, per-visitor profile) on a worker
 //                thread with a progress bar, then a single play-through of
@@ -159,6 +159,7 @@ namespace Experience
             // Push it immediately: UpdateLiveRenderSync clears the delay on the next tick
             // when it goes off, but turning it ON should not wait for a state change.
             UpdateLiveRenderSync();
+            if (_orbitOn) UpdatePresentationPivot();
         }
         public float TunableMin(int i) => 0f;
         public float TunableMax(int i) => 1f;
@@ -243,6 +244,7 @@ namespace Experience
         private bool _takeHasBodies = true;
         private int _savedRenderDelay;
         private bool _savedLoop;
+        private float _savedPlaybackRate;
 
         // body-source snapshot (EnterMode) — restored on Exit
         private bool _savedIgnoreRecorded;
@@ -296,6 +298,10 @@ namespace Experience
         }
         private readonly List<OrbitGateSnap> _orbitGates = new List<OrbitGateSnap>();
         private bool _orbitOn;
+        // Person-tracking orbit anchor (chest↔waist midpoint of the merged
+        // skeleton). The presentation camera looks here while it circles.
+        private Transform _presentationPivot;
+        private bool _pivotSeeded;
         private bool _savedTsdfSuppress; // mesh hidden for the whole session
         private Coroutine _gapPaintRoutine; // deferred state paint (stateGapSeconds)
         private CancellationTokenSource _cts;
@@ -405,6 +411,7 @@ namespace Experience
             }
 
             UpdateLiveRenderSync();
+            if (_orbitOn) UpdatePresentationPivot();
         }
 
         // --- live cloud <-> skeleton timestamp sync (curve-quality knob) ---
@@ -942,6 +949,11 @@ namespace Experience
                 s.gate.AutoOrbit = s.savedAutoOrbit;
             }
             _orbitGates.Clear();
+            if (_presentationPivot != null)
+            {
+                Destroy(_presentationPivot.gameObject);
+                _presentationPivot = null;
+            }
 
             Debug.Log($"[{nameof(ExperienceDirector)}] experience mode OFF (dev values restored).", this);
         }
@@ -1282,10 +1294,11 @@ namespace Experience
             ShowStateMessage(state);
         }
 
-        // The per-screen audio cue. Fires once as each state is entered (from
+        // The audio cue for the message each state paints on entry (from
         // ApplyStateSideEffects, NOT the crowd-notice repaint), so a clip plays
-        // exactly when its screen appears. Idle is silent by design. The pose-
-        // matched / countdown / shutter cues are sub-state events fired from the
+        // exactly when its message appears. Idle is silent by design. Mid-state
+        // message changes (TestMove1's second intro, さつえいちゅう！, pose
+        // matched, failures, countdown/shutter) fire their own cues from the
         // routines, not here.
         private void PlayStateEnterSe(ExperienceState state)
         {
@@ -1294,8 +1307,8 @@ namespace Experience
                 case ExperienceState.Consent: PlaySe(config.consentSe); break;
                 case ExperienceState.Welcome: PlaySe(config.welcomeSe); break;
                 case ExperienceState.Calibrate: PlaySe(config.calibrateSe); break;
-                case ExperienceState.TestMove1:
-                case ExperienceState.TestMove2: PlaySe(config.testMoveSe); break;
+                case ExperienceState.TestMove1: PlaySe(config.testMove1IntroSe); break;
+                case ExperienceState.TestMove2: PlaySe(config.testMove2IntroSe); break;
                 case ExperienceState.Shoot: PlaySe(config.shootCueSe); break;
                 case ExperienceState.Processing: PlaySe(config.processingSe); break;
                 case ExperienceState.ResultShow: PlaySe(config.resultSe); break;
@@ -1837,7 +1850,7 @@ namespace Experience
                 int remain = Mathf.Max(1, Mathf.CeilToInt(zeroAt - _fsm.TimeInState));
                 if (remain != shown)
                 {
-                    _ui.ShowCountdown(remain, config.shootHintText);
+                    _ui.ShowCountdown(remain);
                     PlaySe(config.countdownTickSe);
                     shown = remain;
                 }
@@ -1850,6 +1863,7 @@ namespace Experience
             if (!recStarted) StartVisitorRecording();
 
             PlaySe(config.recordEndSe); // shutter at zero
+            PlaySe(config.shootingSe);
             _ui.ShowMessage(config.shootingText);
             while (_active && _fsm.State == ExperienceState.Shoot && _fsm.TimeInState < shootEnd)
                 yield return null;
@@ -1918,7 +1932,7 @@ namespace Experience
             {
                 Debug.LogError($"[{nameof(ExperienceDirector)}] no take to process ('{_takeRoot}').", this);
                 _processingFailed = true;
-                _ui.ShowMessage(config.exportFailedText);
+                ShowExportFailed();
                 _processingRoutine = null;
                 yield break;
             }
@@ -1944,7 +1958,7 @@ namespace Experience
             {
                 Debug.LogError($"[{nameof(ExperienceDirector)}] take play-through failed to start.", this);
                 _processingFailed = true;
-                _ui.ShowMessage(config.exportFailedText);
+                ShowExportFailed();
                 _processingRoutine = null;
                 yield break;
             }
@@ -2011,7 +2025,7 @@ namespace Experience
             {
                 Debug.LogError($"[{nameof(ExperienceDirector)}] final capture failed: {err}", this);
                 _processingFailed = true;
-                _ui.ShowMessage(config.exportFailedText);
+                ShowExportFailed();
                 _processingRoutine = null;
                 yield break;
             }
@@ -2171,9 +2185,59 @@ namespace Experience
         {
             if (_orbitOn == on) return;
             _orbitOn = on;
+            if (on)
+            {
+                // Seed the anchor at the person (or stage centre) BEFORE the
+                // controllers switch to it, so the first orbit frame already
+                // looks at the body and Update keeps it tracking.
+                EnsurePresentationPivot();
+                _pivotSeeded = false;
+                UpdatePresentationPivot();
+            }
             foreach (var s in _orbitGates)
-                if (s.gate is MonoBehaviour mb && mb != null)
-                    s.gate.OrbitOverride = on;
+            {
+                if (s.gate is not MonoBehaviour mb || mb == null) continue;
+                s.gate.SetPresentationOrbit(on ? _presentationPivot : null,
+                                            config.presentationOrbitYawSpeedDeg,
+                                            config.presentationOrbitBobMeters);
+                s.gate.OrbitOverride = on;
+            }
+        }
+
+        private void EnsurePresentationPivot()
+        {
+            if (_presentationPivot != null) return;
+            var go = new GameObject("_PresentationPivot");
+            go.transform.SetParent(transform, false);
+            _presentationPivot = go.transform;
+        }
+
+        // Track the chest↔waist midpoint of whoever is on stage (live body or
+        // the replay ghost — TryGetLiveSkeleton reads the merged output either
+        // way). Smoothed so BT jitter doesn't shake the whole camera; when the
+        // skeleton drops (frozen QR frame, tracking gap) the anchor simply
+        // stays where it was.
+        private void UpdatePresentationPivot()
+        {
+            if (_presentationPivot == null) return;
+            const int Pelvis = 0, SpineChest = 2; // k4abt joint ids
+            if (TryGetLiveSkeleton(out var joints, out var valid)
+                && joints != null && joints.Length > SpineChest
+                && valid[Pelvis] && valid[SpineChest])
+            {
+                Vector3 target = (joints[Pelvis] + joints[SpineChest]) * 0.5f;
+                _presentationPivot.position = _pivotSeeded
+                    ? Vector3.Lerp(_presentationPivot.position, target, Time.deltaTime * 5f)
+                    : target;
+                _pivotSeeded = true;
+            }
+            else if (!_pivotSeeded)
+            {
+                Vector3 fallback = boundingVolume != null
+                    ? boundingVolume.transform.position : Vector3.zero;
+                fallback.y = config.floorY + 1.0f;
+                _presentationPivot.position = fallback;
+            }
         }
 
         // -------------- shared v11s conversion (Processing + practice) --------------
@@ -2282,7 +2346,8 @@ namespace Experience
             };
             sensorRecorder.OnPlaybackLooped += onLoop;
             double duration = Math.Max(0.1, sensorRecorder.PlaybackDurationSeconds);
-            float deadline = Time.realtimeSinceStartup + (float)(duration * target) + 15f;
+            float rate = Mathf.Max(0.05f, sensorRecorder.playbackRate);
+            float deadline = Time.realtimeSinceStartup + (float)(duration * target / rate) + 15f;
             while (_active && _fsm != null && _fsm.State == owner
                    && sensorRecorder.IsPlaying
                    && Time.realtimeSinceStartup < deadline)
@@ -2305,7 +2370,7 @@ namespace Experience
         // ---------------- TestMove (practice mini-cycle) ----------------
 
         // The whole practice round for TestMove1 (round=1) / TestMove2 (round=2):
-        // intro message(s) → clear → countdown with a hint above the digits
+        // intro message(s) → clear → countdown
         // (recording starts recordPreRollSeconds before zero) → ONE second
         // recorded → v11s conversion (progress bar, same pipeline as the real
         // take) → できたよ！ + playbackLoops looped play-throughs with the
@@ -2316,7 +2381,6 @@ namespace Experience
         {
             var t = config.timings;
             var state = round == 1 ? ExperienceState.TestMove1 : ExperienceState.TestMove2;
-            string hint = round == 1 ? config.testMove1HintText : config.testMove2HintText;
 
             // Timeline on the state clock — TimeInState freezes while the
             // visitor is absent, so all of this measures real attendance.
@@ -2333,6 +2397,7 @@ namespace Experience
             {
                 if (round == 1 && !secondShown && _fsm.TimeInState >= config.testIntroSeconds)
                 {
+                    PlaySe(config.testMove1Intro2Se);
                     _ui.ShowMessage(config.testMove1Intro2Text);
                     secondShown = true;
                 }
@@ -2341,7 +2406,7 @@ namespace Experience
             if (!Active()) yield break;
             _ui.ClearAll(); // 消してから — the countdown lands on a cleared screen
 
-            // -- countdown with hint (+ recording pre-roll) --
+            // -- countdown (+ recording pre-roll) --
             int shown = -1;
             bool recStarted = false;
             while (Active() && _fsm.TimeInState < zeroAt)
@@ -2354,7 +2419,7 @@ namespace Experience
                 int remain = Mathf.Max(1, Mathf.CeilToInt(zeroAt - _fsm.TimeInState));
                 if (remain != shown)
                 {
-                    _ui.ShowCountdown(remain, hint);
+                    _ui.ShowCountdown(remain);
                     PlaySe(config.countdownTickSe);
                     shown = remain;
                 }
@@ -2364,6 +2429,7 @@ namespace Experience
             if (!t.skipShoot && !recStarted) StartVisitorRecording();
 
             PlaySe(config.recordEndSe); // shutter at zero
+            PlaySe(config.shootingSe);
             _ui.ShowMessage(config.shootingText);
             while (Active() && _fsm.TimeInState < shootEnd) yield return null;
             if (!Active()) yield break;
@@ -2417,7 +2483,8 @@ namespace Experience
                             Mathf.Clamp(Mathf.RoundToInt(config.captureSeconds * 30f), 2, 32);
                         poseHistory.ReleaseHoldAndClear();
                     }
-                    StartVisitorPlayback(takeRoot, loop: true);
+                    StartVisitorPlayback(takeRoot, loop: true,
+                                         rate: config.presentationPlaybackRate);
                     played = _visitorPlaybackActive && sensorRecorder != null && sensorRecorder.IsPlaying;
                 }
                 if (played)
@@ -2514,7 +2581,8 @@ namespace Experience
             // transport loaded and stopped at the final frame; a dev jump
             // straight here starts from nothing — StartVisitorPlayback covers
             // both (Load is idempotent over a loaded take).
-            StartVisitorPlayback(_takeRoot, loop: true);
+            StartVisitorPlayback(_takeRoot, loop: true,
+                                 rate: config.presentationPlaybackRate);
             if (!_visitorPlaybackActive || !sensorRecorder.IsPlaying)
             {
                 Debug.LogWarning($"[{nameof(ExperienceDirector)}] result replay failed to start — " +
@@ -2551,7 +2619,7 @@ namespace Experience
         // (the recorder stops itself at the end and the scene freezes on the
         // final state); the practice/result play-throughs run loop ON and count
         // wraps via OnPlaybackLooped (RunPlaybackLoops).
-        private void StartVisitorPlayback(string takeRoot, bool loop = false)
+        private void StartVisitorPlayback(string takeRoot, bool loop = false, float rate = 1f)
         {
             if (sensorRecorder == null) return;
             if (string.IsNullOrEmpty(takeRoot) || !Directory.Exists(takeRoot))
@@ -2571,9 +2639,11 @@ namespace Experience
             {
                 _savedRenderDelay = sensorRecorder.playbackRenderDelayFrames;
                 _savedLoop = sensorRecorder.loop;
+                _savedPlaybackRate = sensorRecorder.playbackRate;
             }
             sensorRecorder.playbackRenderDelayFrames = config.playbackRenderDelayFrames;
             sensorRecorder.loop = loop;
+            sensorRecorder.playbackRate = Mathf.Clamp(rate, 0.05f, 2f);
             if (HasLiveRenderers())
             {
                 sensorManager?.SetLiveSuppressedAsSource(true);
@@ -2619,6 +2689,7 @@ namespace Experience
                 sensorRecorder.StopAndUnload();
                 sensorRecorder.playbackRenderDelayFrames = _savedRenderDelay;
                 sensorRecorder.loop = _savedLoop;
+                sensorRecorder.playbackRate = _savedPlaybackRate;
                 // playbackFolderPath stays until Exit (see Idle side effects), but
                 // the mac override must revert NOW: it outranks playbackFolderPath
                 // on Mac, and the next visitor's entrance playback (Mac dev loop)
@@ -2915,7 +2986,14 @@ namespace Experience
             _exportRoutine = null;
         }
 
-        private void ShowExportFailed() => _ui.ShowMessage(config.exportFailedText);
+        // Every failure path (Processing and export/publish) lands here, so the
+        // 文言 and its cue stay paired. The ResultShow repaint (ShowStateMessage)
+        // re-shows the text without replaying the cue.
+        private void ShowExportFailed()
+        {
+            PlaySe(config.exportFailedSe);
+            _ui.ShowMessage(config.exportFailedText);
+        }
 
         private void CancelPublish()
         {
@@ -2958,6 +3036,7 @@ namespace Experience
             bool crowd = eligible && _presence != null && _presence.CrowdActive;
             if (crowd && !_crowdShowing)
             {
+                PlaySe(config.crowdSe); // rising edge only — not the per-frame hold
                 _ui.ShowMessage(config.crowdText);
                 _crowdShowing = true;
             }

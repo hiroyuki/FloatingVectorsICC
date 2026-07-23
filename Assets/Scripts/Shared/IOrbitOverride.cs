@@ -7,6 +7,8 @@
 // restores the saved camera pose when the orbit turns off (the controller
 // leaves the camera wherever the orbit ended).
 
+using UnityEngine;
+
 namespace Shared
 {
     public interface IOrbitOverride
@@ -36,5 +38,12 @@ namespace Shared
         /// and the camera would be stranded at the orbit pose. Call this
         /// BEFORE restoring the saved flags.</summary>
         void ReleaseOrbit();
+
+        /// <summary>Presentation camera work: orbit around <paramref name="pivot"/>
+        /// (the show feeds a chest-height anchor that tracks the person) at
+        /// <paramref name="yawSpeedDeg"/> with a vertical bob of
+        /// <paramref name="bobAmpMeters"/>. Pass a null pivot to restore the
+        /// controller's own pivot/speed/bob (dev values). Idempotent.</summary>
+        void SetPresentationOrbit(Transform pivot, float yawSpeedDeg, float bobAmpMeters);
     }
 }

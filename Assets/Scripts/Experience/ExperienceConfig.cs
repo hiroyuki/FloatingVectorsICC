@@ -40,8 +40,23 @@ namespace Experience
 
         [Min(1)]
         [Tooltip("How many times the recorded second plays back after できたよ！ — " +
-                 "practice rounds AND the ResultShow presentation.")]
-        public int playbackLoops = 3;
+                 "practice rounds AND the ResultShow presentation. 1 = single slow " +
+                 "pass (see presentationPlaybackRate), ending frozen on the final frame.")]
+        public int playbackLoops = 1;
+
+        [Range(0.05f, 1f)]
+        [Tooltip("Playback speed of the できたよ！ replays (1/3 = slow motion). The " +
+                 "Processing play-through keeps 1x — only the presentation slows down.")]
+        public float presentationPlaybackRate = 1f / 3f;
+
+        [Min(0f)]
+        [Tooltip("Orbit speed (yaw °/s) during the replays and the QR screen. The dev " +
+                 "pause-orbit keeps the camera's own slower value.")]
+        public float presentationOrbitYawSpeedDeg = 30f;
+
+        [Min(0f)]
+        [Tooltip("Vertical bob amplitude (m) of the presentation orbit.")]
+        public float presentationOrbitBobMeters = 0.4f;
 
         [Header("Playback presentation look (できたよ！ replay → QrShow)")]
         // The LIVE phases use the scene's own (lighter) values — tuned so the
@@ -259,11 +274,14 @@ namespace Experience
         [Tooltip("Run the catch-up smoothing post-pass (the \"s\" in v11s).")]
         public bool runCatchupSmooth = true;
 
-        // One clip per visitor-facing screen, played ONCE the instant that screen
-        // appears (state entry — not on the crowd-notice repaint). null = silent.
-        // Idle is deliberately silent (unattended). The countdown tick / shutter
-        // below are sub-state event cues, not screen changes.
-        [Header("Audio — per-screen cue (optional; null = silent)")]
+        // One clip per visitor-facing MESSAGE (文言), played ONCE the moment that
+        // message first appears — mid-state message changes (TestMove1's second
+        // intro, さつえいちゅう！, failures, the crowd alert) each have their own
+        // slot, not just state entries. Idempotent repaints (crowd-notice clear)
+        // never replay. null = silent. Idle is deliberately silent (unattended).
+        // The countdown tick / shutter below are sub-state event cues, not
+        // messages.
+        [Header("Audio — per-message cue (optional; null = silent)")]
         [Tooltip("Privacy consent screen (consentText).")]
         public AudioClip consentSe;
         [Tooltip("Greeting screen (welcomeText).")]
@@ -272,17 +290,28 @@ namespace Experience
         public AudioClip calibrateSe;
         [Tooltip("Star pose matched — はかれたよ！ (calibrateMatchedText).")]
         public AudioClip poseMatchedSe;
+        [UnityEngine.Serialization.FormerlySerializedAs("testMoveSe")]
         [UnityEngine.Serialization.FormerlySerializedAs("freeMoveSe")]
-        [Tooltip("Practice-round intro screens (TestMove1/TestMove2).")]
-        public AudioClip testMoveSe;
+        [Tooltip("TestMove1 first intro (testMove1IntroText).")]
+        public AudioClip testMove1IntroSe;
+        [Tooltip("TestMove1 second intro (testMove1Intro2Text).")]
+        public AudioClip testMove1Intro2Se;
+        [Tooltip("TestMove2 intro (testMove2IntroText).")]
+        public AudioClip testMove2IntroSe;
         [Tooltip("Shoot cue screen (shootCueText), before the countdown.")]
         public AudioClip shootCueSe;
+        [Tooltip("さつえいちゅう！ (shootingText), alongside the shutter.")]
+        public AudioClip shootingSe;
         [Tooltip("Processing / progress screen (processingText).")]
         public AudioClip processingSe;
-        [Tooltip("Result screen — できたよ！ (resultText).")]
+        [Tooltip("できたよ！ (resultText) — the real result AND the practice replays.")]
         public AudioClip resultSe;
         [Tooltip("QR screen (qrScanText).")]
         public AudioClip qrShowSe;
+        [Tooltip("Processing/export/publish failure (exportFailedText).")]
+        public AudioClip exportFailedSe;
+        [Tooltip("Crowd alert (crowdText), on each appearance.")]
+        public AudioClip crowdSe;
 
         [Header("Audio — countdown / shutter (event cues)")]
         [Tooltip("Played on each countdown digit during Shoot.")]
@@ -371,17 +400,8 @@ namespace Experience
         [TextArea]
         [Tooltip("TestMove2 single intro message.")]
         public string testMove2IntroText = "どうだった？\nもういちど　れんしゅうするよ";
-        [TextArea]
-        [Tooltip("Hint shown above the TestMove1 countdown digits.")]
-        public string testMove1HintText = "ヒント\nすきな　どうぶつに\nなってみよう";
-        [TextArea]
-        [Tooltip("Hint shown above the TestMove2 countdown digits.")]
-        public string testMove2HintText = "ヒント\nすきな　キャラクターに\nなってみよう";
         [Header("Visitor texts — the real take (hiragana)")]
         [TextArea] public string shootCueText = "じゃぁ　ほんばんだよ";
-        [TextArea]
-        [Tooltip("Hint shown above the Shoot (ほんばん) countdown digits.")]
-        public string shootHintText = "じぶんの　すきな\nうごきを　してみよう";
         [TextArea] public string shootingText = "さつえいちゅう！";
         [TextArea] public string processingText = "きろくを　じゅんびしているよ　まってね";
         [TextArea] public string resultText = "できたよ！";
