@@ -141,12 +141,24 @@ lfks-upload-guide.md
 
 # ONNX Runtime native binaries in the embedded asus4 package — too large for git
 # (whole package is 657MB; providers_cuda alone 294MB). The managed C# layer and
-# .meta files ARE committed. Restore steps: eval/INSTALL_cuda13.md
+# Windows/x64 の .meta ARE committed（DLL 復元時に GUID と PluginImporter 設定を保つため）。
+# Restore steps: eval/INSTALL_cuda13.md
 /Packages/com.github.asus4.onnxruntime/Plugins/**/*.dll
 /Packages/com.github.asus4.onnxruntime/Plugins/**/*.aar
 /Packages/com.github.asus4.onnxruntime/Plugins/**/*.dylib
 /Packages/com.github.asus4.onnxruntime/Plugins/**/*.so
 /Packages/com.github.asus4.onnxruntime/Plugins/iOS~/
+# 未使用プラットフォーム: 本プロジェクトは Windows x64 専用で、これらのバイナリは
+# どのマシンでも復元しない。.meta を残すと Unity が孤児 meta として削除しにいき
+# 各マシンで削除差分が出るので、フォルダごと（フォルダの .meta も含め）除外する。
+/Packages/com.github.asus4.onnxruntime/Plugins/Android/
+/Packages/com.github.asus4.onnxruntime/Plugins/Android.meta
+/Packages/com.github.asus4.onnxruntime/Plugins/Linux/
+/Packages/com.github.asus4.onnxruntime/Plugins/Linux.meta
+/Packages/com.github.asus4.onnxruntime/Plugins/macOS/
+/Packages/com.github.asus4.onnxruntime/Plugins/macOS.meta
+/Packages/com.github.asus4.onnxruntime/Plugins/Windows/arm64/
+/Packages/com.github.asus4.onnxruntime/Plugins/Windows/arm64.meta
 
 # Python bytecode caches (eval/tools scripts)
 __pycache__/
