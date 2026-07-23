@@ -118,7 +118,7 @@ Unity上でリアルタイムにポイントクラウドとして描画する。
 - **YamlDotNet** 16.3.0: `Assets\Plugins\YamlDotNet\YamlDotNet.dll` (managed, netstandard2.1)
   - 取得元 / SHA-256 は `Assets\Plugins\YamlDotNet\CHECKSUMS.txt`
   - 用途: extrinsics.yaml の安全パース (`YamlStream` ノード走査、型自動 deserialization 禁止)
-- 動作確認: Unity Editor メニュー `Window > Calibration > Check Dependencies` で OpenCV for Unity と YamlDotNet ロードを確認
+- 依存が欠けている場合はコンパイルエラーになるのでそれで判別する（専用チェックツールは 2026-07-23 に削除済み）
 
 ### 外部 SDK（リポジトリには含めない）
 - Orbbec K4A Wrapper:
