@@ -205,6 +205,7 @@ namespace Experience
         private PointCloudView _pcView;
         private bool _savedShowClouds;
         private bool _cloudsShown;
+        private bool _cloudRevealed; // sweep finished — the bones hand over to the cloud
         private Coroutine _cloudRevealRoutine;
         private static readonly int PcRevealModeId = Shader.PropertyToID("_PcRevealMode");
         private static readonly int PcRevealYId = Shader.PropertyToID("_PcRevealY");
@@ -609,6 +610,7 @@ namespace Experience
                 _pcView.showPointClouds = false;
             }
             _cloudsShown = false;
+            _cloudRevealed = false;
             Shader.SetGlobalFloat(PcRevealModeId, 0f);
             _cumulative = FindFirstObjectByType<PointCloudCumulative>();
             if (_cumulative != null)
@@ -1021,8 +1023,11 @@ namespace Experience
             }
             if (state != ExperienceState.Fault) _ui.ClearAlert();
             ApplyCurvesVisibility(state);
-            ApplyBonesVisibility(state);
+            // Cloud BEFORE bones: hiding the cloud clears _cloudRevealed, and the
+            // bones read that flag — a jump from a revealed state back into the
+            // intro must land with the bones already back on.
             ApplyCloudVisibility(state);
+            ApplyBonesVisibility(state);
             // The TSDF mesh + ribbons stay OFF SCREEN for the whole interactive
             // run now (bones-only intro, then the raw cloud is the content — see
             // ApplyBonesVisibility / ApplyCloudVisibility) and through Processing,
@@ -1112,10 +1117,14 @@ namespace Experience
         /// The intro (Consent through the pose guide) shows the visitor as a bare
         /// skeleton — bone lines only, no TSDF mesh, no clouds — so the privacy
         /// notice and このポーズをとってね are read against exactly the body data
-        /// being captured. The bones then STAY on over the revealed point cloud
-        /// through FreeMove and Shoot. Off from Processing on (progress bar, then
-        /// the frozen sculpture own those screens) and in Idle/Fault. EnterMode
-        /// snapshots the operator's showBones; ExitMode restores it.
+        /// being captured. The bones stay on while the point cloud rises, then
+        /// HAND OVER: the instant the reveal sweep completes (_cloudRevealed) the
+        /// bones go out and the cloud alone is the content through FreeMove and
+        /// Shoot. Off from Processing on (progress bar, then the frozen sculpture
+        /// own those screens) and in Idle/Fault. Re-evaluated on every state entry
+        /// AND on reveal completion (CloudRevealRoutine); a backward jump or run
+        /// reset hides the cloud, which clears _cloudRevealed and brings the bones
+        /// back. EnterMode snapshots the operator's showBones; ExitMode restores it.
         /// </summary>
         private void ApplyBonesVisibility(ExperienceState state)
         {
@@ -1124,7 +1133,8 @@ namespace Experience
                                      or ExperienceState.Welcome
                                      or ExperienceState.Calibrate
                                      or ExperienceState.FreeMove
-                                     or ExperienceState.Shoot;
+                                     or ExperienceState.Shoot
+                            && !_cloudRevealed;
         }
 
         /// <summary>
@@ -1145,6 +1155,7 @@ namespace Experience
                      || (state == ExperienceState.Calibrate && _calibrationDone);
             if (show == _cloudsShown) return;
             _cloudsShown = show;
+            _cloudRevealed = false; // hand-back: bones return until the next sweep lands
             StopRoutine(ref _cloudRevealRoutine);
             Shader.SetGlobalFloat(PcRevealModeId, 0f);
             SetCloudRenderersVisible(show);
@@ -1161,7 +1172,10 @@ namespace Experience
         // Sweep the reveal plane from the floor to overhead, then drop the clip
         // entirely (mode 0) so the fully-shown cloud pays nothing per vertex.
         // Survives the Calibrate→FreeMove transition because ApplyCloudVisibility
-        // only restarts it on a hidden→shown edge.
+        // only restarts it on a hidden→shown edge. Completion is the bones'
+        // exit cue: the skeleton that carried the intro hands the stage to the
+        // fully-risen cloud (an interrupted sweep never sets _cloudRevealed, so
+        // the bones stay up on every abort path).
         private IEnumerator CloudRevealRoutine()
         {
             float dur = config.cloudRevealSeconds
@@ -1177,7 +1191,9 @@ namespace Experience
                 }
                 Shader.SetGlobalFloat(PcRevealModeId, 0f);
             }
+            _cloudRevealed = true;
             _cloudRevealRoutine = null;
+            if (_fsm != null) ApplyBonesVisibility(_fsm.State);
         }
 
         /// <summary>
