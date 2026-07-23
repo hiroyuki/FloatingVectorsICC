@@ -200,6 +200,14 @@ namespace Experience
         private bool _savedIgnoreRecorded;
         private bool _savedUseExternal;
         private bool _savedShowBones;
+
+        // point-cloud content (calibration finish → Shoot) + bottom-up reveal
+        private PointCloudView _pcView;
+        private bool _savedShowClouds;
+        private bool _cloudsShown;
+        private Coroutine _cloudRevealRoutine;
+        private static readonly int PcRevealModeId = Shader.PropertyToID("_PcRevealMode");
+        private static readonly int PcRevealYId = Shader.PropertyToID("_PcRevealY");
         private bool _savedLfbsSubmit;
         private bool _savedLfbsLiveOnly;
 
@@ -590,6 +598,18 @@ namespace Experience
                 }
                 sensorManager.SetLiveVisualsVisible(false);
             }
+            // Cloud visibility is per-state from here (ApplyCloudVisibility):
+            // hidden through the bones-only intro, revealed bottom-up when
+            // calibration finishes. PointCloudView is the single owner of every
+            // cloud MR (live + playback), so the show drives that one knob.
+            _pcView = FindFirstObjectByType<PointCloudView>();
+            if (_pcView != null)
+            {
+                _savedShowClouds = _pcView.showPointClouds;
+                _pcView.showPointClouds = false;
+            }
+            _cloudsShown = false;
+            Shader.SetGlobalFloat(PcRevealModeId, 0f);
             _cumulative = FindFirstObjectByType<PointCloudCumulative>();
             if (_cumulative != null)
             {
@@ -627,6 +647,8 @@ namespace Experience
             StopRoutine(ref _processingRoutine);
             StopRoutine(ref _exportRoutine);
             StopRoutine(ref _gapPaintRoutine);
+            StopRoutine(ref _cloudRevealRoutine);
+            Shader.SetGlobalFloat(PcRevealModeId, 0f); // never leak the clip into dev
             // Camera recovery must not outlive the mode: left running it would call
             // StartLive() partway through the dev/playback restore below.
             if (_recoveryRoutine != null)
@@ -731,6 +753,14 @@ namespace Experience
                         _savedLiveVisible.TryGetValue(r.deviceSerial, out bool vis))
                         mr.enabled = vis;
                 }
+            }
+            // PointCloudView owns every cloud MR in dev; putting its flag back
+            // makes its next Update reapply the operator's own visibility over
+            // whatever per-state value the show left on the renderers.
+            if (_pcView != null)
+            {
+                _pcView.showPointClouds = _savedShowClouds;
+                _pcView = null;
             }
             if (_cumulative != null)
             {
@@ -992,13 +1022,18 @@ namespace Experience
             if (state != ExperienceState.Fault) _ui.ClearAlert();
             ApplyCurvesVisibility(state);
             ApplyBonesVisibility(state);
-            // Sculpture hidden during Consent (the notice reads against the bare
-            // skeleton — see ApplyBonesVisibility) and for the whole of Processing,
-            // revealed on entering ResultShow. Driven off the state (not the
-            // routine) so every exit path — fault, visitor walked off, processing
-            // failure — brings it back.
-            SetSculptureVisible(state != ExperienceState.Processing
-                             && state != ExperienceState.Consent);
+            ApplyCloudVisibility(state);
+            // The TSDF mesh + ribbons stay OFF SCREEN for the whole interactive
+            // run now (bones-only intro, then the raw cloud is the content — see
+            // ApplyBonesVisibility / ApplyCloudVisibility) and through Processing,
+            // so the finished sculpture is a REVEAL at ResultShow. Draw-only:
+            // production keeps running underneath for the capture/export. Driven
+            // off the state (not the routines) so every exit path — fault, visitor
+            // walked off, processing failure — lands on the right visibility.
+            SetSculptureVisible(state is ExperienceState.Idle
+                                     or ExperienceState.ResultShow
+                                     or ExperienceState.QrShow
+                                     or ExperienceState.Fault);
 
             // The beat between screens (stateGapSeconds): blank now, then the new
             // screen and its cue land together after the gap. Fault must alert
@@ -1074,16 +1109,75 @@ namespace Experience
         }
 
         /// <summary>
-        /// Consent shows the visitor as a bare skeleton — bone lines only, no TSDF
-        /// mesh, no clouds — so the privacy notice is read against exactly the body
-        /// data being captured, before the sculpture takes over from Welcome on.
-        /// Every other state forces the bones off — the sculpture is the content
-        /// there. EnterMode snapshots the operator's showBones; ExitMode restores it.
+        /// The intro (Consent through the pose guide) shows the visitor as a bare
+        /// skeleton — bone lines only, no TSDF mesh, no clouds — so the privacy
+        /// notice and このポーズをとってね are read against exactly the body data
+        /// being captured. The bones then STAY on over the revealed point cloud
+        /// through FreeMove and Shoot. Off from Processing on (progress bar, then
+        /// the frozen sculpture own those screens) and in Idle/Fault. EnterMode
+        /// snapshots the operator's showBones; ExitMode restores it.
         /// </summary>
         private void ApplyBonesVisibility(ExperienceState state)
         {
             if (merger == null) return;
-            merger.showBones = state == ExperienceState.Consent;
+            merger.showBones = state is ExperienceState.Consent
+                                     or ExperienceState.Welcome
+                                     or ExperienceState.Calibrate
+                                     or ExperienceState.FreeMove
+                                     or ExperienceState.Shoot;
+        }
+
+        /// <summary>
+        /// The visitor's raw point cloud is the visible content from the
+        /// はかれたよ！ beat through Shoot. Hidden during the bones-only intro;
+        /// when calibration finishes it rises out of the floor over
+        /// cloudRevealSeconds (a global shader clip on PointCloudUnlit sweeping
+        /// _PcRevealY from the feet up — see the shader note on why globals).
+        /// The window-expiry and skipCalibrate paths land here too, via the
+        /// FreeMove entry. Hidden again from Processing on. Display-only on both
+        /// halves: PointCloudView toggles MeshRenderers and the clip lives in the
+        /// vertex shader, so BT, TSDF integration, curves and the capture always
+        /// consume the full cloud.
+        /// </summary>
+        private void ApplyCloudVisibility(ExperienceState state)
+        {
+            bool show = state is ExperienceState.FreeMove or ExperienceState.Shoot
+                     || (state == ExperienceState.Calibrate && _calibrationDone);
+            if (show == _cloudsShown) return;
+            _cloudsShown = show;
+            StopRoutine(ref _cloudRevealRoutine);
+            Shader.SetGlobalFloat(PcRevealModeId, 0f);
+            SetCloudRenderersVisible(show);
+            if (show && isActiveAndEnabled)
+                _cloudRevealRoutine = StartCoroutine(CloudRevealRoutine());
+        }
+
+        private void SetCloudRenderersVisible(bool visible)
+        {
+            if (_pcView != null) _pcView.showPointClouds = visible;
+            else sensorManager?.SetLiveVisualsVisible(visible);
+        }
+
+        // Sweep the reveal plane from the floor to overhead, then drop the clip
+        // entirely (mode 0) so the fully-shown cloud pays nothing per vertex.
+        // Survives the Calibrate→FreeMove transition because ApplyCloudVisibility
+        // only restarts it on a hidden→shown edge.
+        private IEnumerator CloudRevealRoutine()
+        {
+            float dur = config.cloudRevealSeconds
+                        / Mathf.Max(0.01f, config.timings.timeMultiplier);
+            if (dur > 0f)
+            {
+                Shader.SetGlobalFloat(PcRevealModeId, 1f);
+                for (float e = 0f; e < dur; e += Time.deltaTime)
+                {
+                    Shader.SetGlobalFloat(PcRevealYId,
+                        config.floorY + config.cloudRevealHeight * (e / dur));
+                    yield return null;
+                }
+                Shader.SetGlobalFloat(PcRevealModeId, 0f);
+            }
+            _cloudRevealRoutine = null;
         }
 
         /// <summary>
@@ -1294,7 +1388,8 @@ namespace Experience
                     }
 
                     _calibrationDone = true;
-                    ApplyCurvesVisibility(_fsm.State); // ribbons appear on the match
+                    ApplyCurvesVisibility(_fsm.State); // curve BUILD starts on the match
+                    ApplyCloudVisibility(_fsm.State);  // the cloud rises from the feet
                     PlaySe(config.poseMatchedSe);
                     _ui.ShowMessage(config.calibrateMatchedText);
                     Debug.Log($"[{nameof(ExperienceDirector)}] star pose matched: arm " +

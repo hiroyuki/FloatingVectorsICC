@@ -155,6 +155,18 @@ namespace Experience
                  "~150ms-lagged mirror, so this is a look trade, not a fix.")]
         public bool liveRenderSync = false;
 
+        [Header("Cloud reveal (はかれたよ！ → the point cloud rises from the feet)")]
+        [Min(0f)]
+        [Tooltip("How long the visitor's point cloud takes to rise from the floor to " +
+                 "full height when calibration finishes. 0 = pop in instantly.")]
+        public float cloudRevealSeconds = 1f;
+
+        [Min(0.1f)]
+        [Tooltip("Height (m above floorY) the reveal sweeps up to before the clip " +
+                 "switches off. Keep above head height with arms raised, or the top " +
+                 "pops in at the end of the sweep.")]
+        public float cloudRevealHeight = 2.6f;
+
         [Header("Pose detection")]
         [Min(0f)] public float starHoldSeconds = 0.5f;
 
