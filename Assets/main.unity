@@ -2190,8 +2190,8 @@ MonoBehaviour:
   loopSeamBlackoutSeconds: 0.4
   showBones: 0
   jointRadius: 0.03
-  skeletonColor: {r: 0.094645746, g: 0.22020026, b: 0.23773581, a: 1}
-  boneWidth: 0.03
+  skeletonColor: {r: 0.7317106, g: 0.7597672, b: 0.764151, a: 1}
+  boneWidth: 0.0149
   useOneEuroFilter: 1
   oneEuroMinCutoff: 0.5
   oneEuroBeta: 0.5

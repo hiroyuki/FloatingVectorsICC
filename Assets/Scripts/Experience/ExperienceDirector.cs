@@ -199,6 +199,7 @@ namespace Experience
         // body-source snapshot (EnterMode) — restored on Exit
         private bool _savedIgnoreRecorded;
         private bool _savedUseExternal;
+        private bool _savedShowBones;
         private bool _savedLfbsSubmit;
         private bool _savedLfbsLiveOnly;
 
@@ -541,6 +542,7 @@ namespace Experience
             {
                 _savedIgnoreRecorded = merger.ignoreRecordedBodies;
                 _savedUseExternal = merger.useExternalBodies;
+                _savedShowBones = merger.showBones;
             }
             if (liveFusedSource != null)
             {
@@ -677,6 +679,7 @@ namespace Experience
                 merger.ignoreRecordedBodies = _savedIgnoreRecorded;
                 merger.muteWorkerIngest = false;
                 merger.useExternalBodies = _savedUseExternal;
+                merger.showBones = _savedShowBones;
             }
 
             if (_fsm != null) { _fsm.Changed -= OnStateChanged; _fsm = null; }
@@ -988,10 +991,14 @@ namespace Experience
             }
             if (state != ExperienceState.Fault) _ui.ClearAlert();
             ApplyCurvesVisibility(state);
-            // Sculpture hidden for the whole of Processing, revealed on entering
-            // ResultShow. Driven off the state (not the routine) so every exit path —
-            // fault, visitor walked off, processing failure — brings it back.
-            SetSculptureVisible(state != ExperienceState.Processing);
+            ApplyBonesVisibility(state);
+            // Sculpture hidden during Consent (the notice reads against the bare
+            // skeleton — see ApplyBonesVisibility) and for the whole of Processing,
+            // revealed on entering ResultShow. Driven off the state (not the
+            // routine) so every exit path — fault, visitor walked off, processing
+            // failure — brings it back.
+            SetSculptureVisible(state != ExperienceState.Processing
+                             && state != ExperienceState.Consent);
 
             // The beat between screens (stateGapSeconds): blank now, then the new
             // screen and its cue land together after the gap. Fault must alert
@@ -1064,6 +1071,19 @@ namespace Experience
                                         or ExperienceState.Processing
                                         or ExperienceState.ResultShow
                                         or ExperienceState.QrShow;
+        }
+
+        /// <summary>
+        /// Consent shows the visitor as a bare skeleton — bone lines only, no TSDF
+        /// mesh, no clouds — so the privacy notice is read against exactly the body
+        /// data being captured, before the sculpture takes over from Welcome on.
+        /// Every other state forces the bones off — the sculpture is the content
+        /// there. EnterMode snapshots the operator's showBones; ExitMode restores it.
+        /// </summary>
+        private void ApplyBonesVisibility(ExperienceState state)
+        {
+            if (merger == null) return;
+            merger.showBones = state == ExperienceState.Consent;
         }
 
         /// <summary>
