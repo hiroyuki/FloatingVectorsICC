@@ -34,17 +34,35 @@ namespace BodyTracking.Eval.Rtmpose
     {
         private static bool s_done;
 
-        // onnxruntime goes first because it is the one competing with a copy that is
-        // already reachable by name (System32); the rest only compete with whatever a
-        // machine happens to have on PATH. Beyond that the order is cosmetic — the
-        // loader resolves each DLL's static imports from the same directory via
-        // LOAD_WITH_ALTERED_SEARCH_PATH, so any order links correctly.
+        // The CUDA stack goes first and onnxruntime LAST: loading onnxruntime.dll before
+        // its CUDA dependencies are resident fails its init routine outright
+        // (ERROR_DLL_INIT_FAILED), and a failed pin means the bare-name lookup later finds
+        // the System32 inbox copy — the exact outcome this is meant to prevent. Order
+        // within the CUDA group is cosmetic; the loader resolves each DLL's static imports
+        // from the same directory via LOAD_WITH_ALTERED_SEARCH_PATH.
+        //
+        // TensorRT is deliberately absent: its provider DLL needs nvinfer*, which is not
+        // shipped, so preloading it only ever logs a spurious ERROR_MOD_NOT_FOUND that
+        // buries the failures worth reading.
         private static readonly string[] Prefixes =
         {
-            "onnxruntime",
             "cudart64_", "nvrtc-builtins", "nvrtc64_", "cublasLt64_",
             "cublas64_", "cufft64_", "cudnn",
+            "onnxruntime",
         };
+
+        private static readonly string[] SkipContains = { "tensorrt" };
+
+        /// <summary>Whether the ONNX Runtime now resident in this process is the one from
+        /// our plugin directory. False means a foreign copy won (the Windows inbox build in
+        /// System32 is the one that does this), and calling into the managed binding would
+        /// take the process down rather than fail — so callers must skip ORT entirely.</summary>
+        public static bool OrtPinned { get; private set; }
+
+        /// <summary>Full path of the loaded onnxruntime.dll, or null if none is resident.
+        /// Worth logging verbatim: it is the single fact that distinguishes "our 1.26" from
+        /// "the OS's 1.17".</summary>
+        public static string OrtPath { get; private set; }
 
         [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern IntPtr LoadLibraryExW(string path, IntPtr reserved, uint flags);
@@ -76,16 +94,49 @@ namespace BodyTracking.Eval.Rtmpose
             {
                 foreach (string path in Directory.GetFiles(dir, prefix + "*.dll"))
                 {
+                    bool skip = false;
+                    foreach (string s in SkipContains)
+                        if (path.IndexOf(s, StringComparison.OrdinalIgnoreCase) >= 0) { skip = true; break; }
+                    if (skip) continue;
+
                     if (LoadLibraryExW(path, IntPtr.Zero, LoadWithAlteredSearchPath) != IntPtr.Zero) ok++;
                     else
                     {
                         fail++;
-                        Debug.LogWarning($"[rtmpose] CUDA preload failed (err={Marshal.GetLastWin32Error()}): {path}");
+                        Debug.LogWarning($"[rtmpose] preload failed (err={Marshal.GetLastWin32Error()}): {path}");
                     }
                 }
             }
-            if (ok > 0 || fail > 0)
-                Debug.Log($"[rtmpose] ORT/CUDA preload from {dir}: {ok} loaded, {fail} failed");
+
+            // Verify rather than trust the return code: a successful LoadLibrary only means
+            // SOME module of that name is resident, and if a foreign copy got there first
+            // the loader hands back that one. The resident path is the only proof.
+            OrtPath = FindLoadedModule("onnxruntime.dll");
+            OrtPinned = OrtPath != null
+                && OrtPath.StartsWith(dir, StringComparison.OrdinalIgnoreCase);
+
+            Debug.Log($"[rtmpose] ORT/CUDA preload from {dir}: {ok} loaded, {fail} failed; " +
+                      $"onnxruntime resident at {OrtPath ?? "(none)"} -> pinned={OrtPinned}");
+            if (!OrtPinned && OrtPath != null)
+                Debug.LogError("[rtmpose] a foreign onnxruntime.dll won the load — the ORT managed " +
+                               "binding would crash the process against it, so RTMPose will be skipped.");
+        }
+
+        private static string FindLoadedModule(string moduleName)
+        {
+            try
+            {
+                foreach (System.Diagnostics.ProcessModule m in
+                         System.Diagnostics.Process.GetCurrentProcess().Modules)
+                    if (string.Equals(m.ModuleName, moduleName, StringComparison.OrdinalIgnoreCase))
+                        return m.FileName;
+            }
+            catch (Exception e)
+            {
+                // Module enumeration is a diagnostic, never a reason to fail startup.
+                Debug.LogWarning($"[rtmpose] could not enumerate modules: {e.Message}");
+            }
+            return null;
         }
 
         private static string FindPluginDir()

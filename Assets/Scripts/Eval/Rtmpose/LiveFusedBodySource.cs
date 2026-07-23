@@ -577,7 +577,30 @@ namespace BodyTracking.Eval.Rtmpose
                 string models = Path.Combine(root, modelsDir);
                 string yolox = FirstOnnx(Path.Combine(models, "yolox-m"));
                 string rtm = FirstOnnx(Path.Combine(models, "rtmpose-m"));
+                global::Shared.StartupProfiler.Mark("LiveFusedBodySource: model paths resolved");
+
+                // Checked BEFORE constructing the backend, because by then it is too late to
+                // fail gracefully: OrtRtmposeBackend has a `new RunOptions()` field
+                // initializer, and instance field initializers run ahead of the constructor
+                // body — so merely reaching that constructor already binds the ONNX Runtime
+                // native library. Against a foreign build (the Windows inbox 1.17 in System32)
+                // that binding is an access violation, not an exception: the process dies on
+                // startup. Bailing out here degrades to k4abt instead, which is what an
+                // unattended installation needs from a startup fault.
+                CudaDllPreload.EnsureLoaded();
+                if (!CudaDllPreload.OrtPinned)
+                {
+                    Debug.LogError($"[{nameof(LiveFusedBodySource)}] the resident ONNX Runtime is not " +
+                                   $"our bundled build ({CudaDllPreload.OrtPath ?? "none loaded"}) — " +
+                                   "disabling instead of crashing. The merger will fall back to k4abt.", this);
+                    s.Wake.Dispose();
+                    enabled = false;
+                    return;
+                }
+
                 s.Backend = new OrtRtmposeBackend(yolox, rtm, provider);
+                global::Shared.StartupProfiler.Mark(
+                    $"LiveFusedBodySource: ORT sessions built ({s.Backend.ActiveProvider})");
                 s.Fused = new FusedRtmposeAdapter(s.Backend) { ConfThreshold = confThreshold, medianLagFilter = medianLagFilter, AsyncDetect = true };
                 string profile = Path.Combine(root, bodyProfilePath);
                 if (!string.IsNullOrEmpty(bodyProfilePath) && File.Exists(profile))
@@ -598,6 +621,7 @@ namespace BodyTracking.Eval.Rtmpose
                 return;
             }
 
+            global::Shared.StartupProfiler.Mark("LiveFusedBodySource: adapter configured");
             if (!LoadCalibration(s))
             {
                 s.Backend?.Dispose();
@@ -619,6 +643,7 @@ namespace BodyTracking.Eval.Rtmpose
             s.Worker.Start();
             s.Reader = new Thread(() => ReaderLoop(s)) { IsBackground = true, Name = "LiveFusedTap" };
             s.Reader.Start();
+            global::Shared.StartupProfiler.Mark("LiveFusedBodySource.OnEnable done");
         }
 
         private void OnDisable()
