@@ -31,9 +31,17 @@ namespace Shared
         /// Calibration.RuntimeUI.CalibrationRuntimeUI.</summary>
         public static bool FloorTuneActive;
 
+        /// <summary>True while the boot / shutdown splash covers every display.
+        /// Owned by Shared.BootOverlay. The splash is a uGUI canvas at the top
+        /// sorting order and IMGUI draws under those, so this is belt-and-braces —
+        /// but "起動中" with an operator HUD punched through it would read as a
+        /// half-started app, and the Editor's Game view does not order IMGUI the
+        /// same way a player does.</summary>
+        public static bool BootActive;
+
         /// <summary>Whatever the reason, Display 1 is spoken for: IMGUI overlays
         /// on the primary display check this at the top of OnGUI and skip
         /// drawing.</summary>
-        public static bool Suppressed => AlertActive || FloorTuneActive;
+        public static bool Suppressed => AlertActive || FloorTuneActive || BootActive;
     }
 }

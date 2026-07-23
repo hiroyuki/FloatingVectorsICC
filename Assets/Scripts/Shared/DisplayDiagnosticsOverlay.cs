@@ -87,7 +87,9 @@ namespace Shared
             _canvas = go.AddComponent<Canvas>();
             _canvas.renderMode = RenderMode.ScreenSpaceOverlay;
             _canvas.targetDisplay = targetDisplay;
-            _canvas.sortingOrder = short.MaxValue;   // above every other overlay canvas
+            // Above every other overlay canvas except the boot / shutdown splash,
+            // which owns the screen outright while it is up (see BootOverlay).
+            _canvas.sortingOrder = short.MaxValue - 1;
             var scaler = go.AddComponent<CanvasScaler>();
             scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
             scaler.referenceResolution = new Vector2(1920, 1080);

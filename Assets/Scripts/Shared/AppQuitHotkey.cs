@@ -13,6 +13,7 @@
 // the scene — the whole point is a way out of a build that has no window chrome,
 // and that must not depend on someone remembering to add a component.
 
+using System.Collections;
 using UnityEngine;
 
 namespace Shared
@@ -23,11 +24,21 @@ namespace Shared
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
         private static void Install()
         {
-            if (FindFirstObjectByType<AppQuitHotkey>() != null) return; // scene copy wins
+            var existing = FindFirstObjectByType<AppQuitHotkey>();
+            if (existing != null) { s_instance = existing; return; } // scene copy wins
             var go = new GameObject("[AppQuitHotkey]");
-            go.AddComponent<AppQuitHotkey>();
+            s_instance = go.AddComponent<AppQuitHotkey>();
             DontDestroyOnLoad(go);
         }
+
+        private static AppQuitHotkey s_instance;
+        // Two states, not one flag: "started" must REJECT every further quit request
+        // (a second Alt+F4, the window close button, another component calling
+        // Application.Quit) because accepting one mid-teardown kills the process with
+        // camera pipelines still open. Only the coroutine's own final request, made
+        // after setting "complete", is allowed through.
+        private static bool s_teardownStarted;
+        private static bool s_teardownComplete;
 
         [Tooltip("Key to hold to quit the built application.")]
         public KeyCode quitKey = KeyCode.Escape;
@@ -39,10 +50,107 @@ namespace Shared
         [Tooltip("Show a 'hold to quit' progress hint while the key is down.")]
         public bool showHint = true;
 
+        [Tooltip("Last-resort bound on the staged teardown. Must sit above whatever the " +
+                 "staged subsystems allow themselves (SensorManager caps its pipeline " +
+                 "stops at hardStopTimeoutSeconds) — this only fires when one of them " +
+                 "never returns at all.")]
+        public float teardownWatchdogSeconds = 90f;
+
         private float _heldFor;
+        private float _teardownElapsed;
+
+        // Every quit route — the Esc hold, Alt+F4, the window's close button, a
+        // Application.Quit() from anywhere else — funnels through wantsToQuit, so the
+        // "終了中" splash is armed here rather than next to the hotkey. Returning false
+        // once postpones the quit by a frame; that frame is what puts the splash on
+        // screen before ~4.5s of ob_pipeline_stop freezes everything.
+        private void OnEnable()
+        {
+            // A scene copy's OnEnable runs before Install() gets to set this.
+            if (s_instance == null) s_instance = this;
+            Application.wantsToQuit -= OnWantsToQuit;
+            Application.wantsToQuit += OnWantsToQuit;
+        }
+
+        private void OnDisable() => Application.wantsToQuit -= OnWantsToQuit;
+
+        private static bool OnWantsToQuit()
+        {
+            if (s_teardownComplete) return true;  // our own final request
+            if (s_teardownStarted) return false;  // teardown running — reject, don't race it
+            if (s_instance == null) return true;  // nobody to run the coroutine
+            s_teardownStarted = true;
+            ShutdownProfiler.Mark("quit requested — showing the shutdown splash");
+            BootOverlay.ShowShutdown("停止しています…");
+            s_instance.StartCoroutine(s_instance.QuitAfterPresent());
+            return false;
+        }
+
+        private IEnumerator QuitAfterPresent()
+        {
+            // Two frames, not one: the first WaitForEndOfFrame lands at the end of the
+            // frame the splash was enabled in, and a canvas enabled mid-frame is not
+            // guaranteed to have been rebuilt for that frame's render.
+            yield return new WaitForEndOfFrame();
+            yield return new WaitForEndOfFrame();
+            ShutdownProfiler.Mark("shutdown splash presented");
+
+            // Tear the staged subsystems down HERE rather than leaving it all to
+            // OnApplicationQuit: once Application.Quit() is called the player loop
+            // never runs again, so a progress count set during that teardown could
+            // never be drawn. Yielding through it is the only way the operator sees
+            // anything but a frozen frame for the next few seconds.
+            foreach (var mb in FindObjectsByType<MonoBehaviour>(FindObjectsSortMode.None))
+            {
+                if (mb is not IStagedShutdown staged) continue;
+                yield return StartCoroutine(staged.StopStaged((done, total) =>
+                    BootOverlay.SetStatus($"カメラを停止しています…  {done} / {total}")));
+            }
+
+            ShutdownProfiler.Mark("staged teardown done — quitting for real");
+            s_teardownComplete = true;
+            Application.Quit();
+        }
 
         private void Update()
         {
+            // Once the quit is armed the app KEEPS RUNNING for the few seconds of
+            // staged teardown (wantsToQuit returned false), and the operator is
+            // naturally still holding the key. Without this the hold would re-arm and
+            // put the "hold to quit" bar back over 終了中 (and, before wantsToQuit
+            // learned to reject mid-teardown requests, fire a second quit that killed
+            // the process with the pipelines still open).
+            if (s_teardownStarted)
+            {
+                _heldFor = 0f;
+                if (s_teardownComplete) return;
+                // Watchdog. Every quit request is now rejected until the coroutine
+                // finishes, so a teardown that dies (an exception in a StopStaged
+                // implementation) or wedges would leave an installation that CANNOT be
+                // closed. Force the exit rather than strand the operator.
+                _teardownElapsed += Time.unscaledDeltaTime;
+                if (_teardownElapsed > teardownWatchdogSeconds)
+                {
+                    Debug.LogError($"[AppQuitHotkey] staged teardown did not finish within " +
+                                   $"{teardownWatchdogSeconds:0}s — quitting anyway.");
+                    ShutdownProfiler.Mark("teardown watchdog fired — forcing the quit");
+                    // This bound and each subsystem's own bounds are set independently, so
+                    // the watchdog can fire BEFORE an implementation reached its own safety
+                    // path. Tell them the exit is being forced rather than assume they got
+                    // there — for the rig that is what stops the SDK context being disposed
+                    // under a native call that never returned.
+                    foreach (var mb in FindObjectsByType<MonoBehaviour>(FindObjectsSortMode.None))
+                    {
+                        if (mb is not IStagedShutdown staged) continue;
+                        try { staged.AbandonForForcedExit(); }
+                        catch (System.Exception e) { Debug.LogException(e); }
+                    }
+                    s_teardownComplete = true;
+                    Application.Quit();
+                }
+                return;
+            }
+
             if (Input.GetKey(quitKey)) _heldFor += Time.unscaledDeltaTime;
             else _heldFor = 0f;
 
@@ -63,6 +171,9 @@ namespace Shared
         private void OnGUI()
         {
             if (!showHint || _heldFor <= 0f) return;
+            // The splash (or an alert / floor tune) owns the screen — stand down, same
+            // contract every other IMGUI overlay on Display 1 follows.
+            if (OperatorOverlayGate.Suppressed) return;
 
             float t = Mathf.Clamp01(_heldFor / Mathf.Max(0.01f, holdSeconds));
             const float w = 320f, h = 46f;

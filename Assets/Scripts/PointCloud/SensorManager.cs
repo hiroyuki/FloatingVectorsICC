@@ -11,7 +11,7 @@ using UnityEngine;
 
 namespace PointCloud
 {
-    public class SensorManager : MonoBehaviour
+    public class SensorManager : MonoBehaviour, global::Shared.IStagedShutdown
     {
         [Header("Mode")]
         [Tooltip("When ON, Start() does NOT enumerate Femto Bolt devices or spawn live " +
@@ -210,8 +210,10 @@ namespace PointCloud
 
         private void Start()
         {
+            global::Shared.StartupProfiler.Mark("SensorManager.Start");
             LoadFloorYFromCalibration();
             ApplySensingAreaFromCalibration();
+            global::Shared.StartupProfiler.Mark("SensorManager: floor + sensing area loaded");
             if (playbackOnly)
             {
                 if (verboseLogging)
@@ -219,7 +221,127 @@ namespace PointCloud
                               "SensorRecorder will drive playback from its folderPath.");
                 return;
             }
-            StartLive();
+            // Staged, NOT StartLive() straight through: opening the rig costs ~1.6s per
+            // camera and every one of those seconds would land inside this first frame's
+            // Start phase, so the player would present nothing at all until the whole rig
+            // was up (measured: first frame at 8.9s). Yielding first lets the boot splash
+            // reach the screen, and yielding between cameras keeps its counter moving.
+            _startingLive = true;
+            global::Shared.BootOverlay.Claim();
+            StartCoroutine(StartLiveStaged());
+        }
+
+        // Boot-time StartLive: same work, spread over frames so the screen is alive
+        // while it happens. StartLive() itself stays synchronous — SwitchToLive()
+        // calls it mid-session, where there is no splash and no reason to wait.
+        // True from the moment the staged coroutine is launched until it has finished (or
+        // failed). The `_renderers.Count == 0` test alone cannot guard this: the staged path
+        // yields for whole frames BEFORE it spawns anything, so during that window the list
+        // is still empty and a second staged run — or a SwitchToLive()/StartLive() call —
+        // sails past the check and enumerates the same USB devices again. Two opens of one
+        // Femto Bolt is not a duplicate-and-recover situation; the second fails and the rig
+        // comes up short a camera.
+        private bool _startingLive;
+
+        // Set the moment staged shutdown begins. Boot and teardown genuinely overlap: the
+        // operator can quit while the rig is still coming up, and the staged start spends
+        // seconds spawning cameras one per frame. Without this the teardown would snapshot
+        // the renderer list as it stood, then boot would keep adding cameras behind it that
+        // nothing ever stops — and _stoppedStaged has already switched off the
+        // OnApplicationQuit fallback that used to catch them.
+        private bool _shutdownRequested;
+
+        private System.Collections.IEnumerator StartLiveStaged()
+        {
+            // try/finally around the whole claimed lifetime: an exception anywhere below
+            // (context creation, enumeration, a camera that refuses to open) aborts the
+            // coroutine on the spot, and without this the splash would stay up over every
+            // display until its own safety timeout — an unattended installation showing a
+            // boot screen for two minutes.
+            try
+            {
+                global::Shared.BootOverlay.SetStatus("カメラを検出しています…");
+                // End of frame, not just "next frame": the splash has to be PRESENTED
+                // before we block, otherwise it is only ever a queued draw call.
+                yield return new WaitForEndOfFrame();
+
+                // Same re-check as in the spawn loop, for the same reason: a quit landing
+                // during the yield above must not be followed by context creation and a
+                // synchronous QueryDevices(). Both block the main thread, so a slow or
+                // wedged enumeration would stall the very loop that drives the startup-join
+                // deadline and the quit watchdog. Nothing has been opened yet at this
+                // point, so there is nothing for the teardown to clean up.
+                if (_shutdownRequested)
+                {
+                    Debug.Log($"[{nameof(SensorManager)}] staged startup cancelled before " +
+                              "device enumeration — shutdown requested.");
+                    yield break;
+                }
+
+                _renderers.RemoveAll(r => r == null);
+                if (_renderers.Count == 0)
+                {
+                    var ctx = OrbbecRuntime.Context;
+                    global::Shared.StartupProfiler.Mark("SensorManager: Orbbec context ready");
+                    var devices = ctx.QueryDevices();
+                    global::Shared.StartupProfiler.Mark($"SensorManager: QueryDevices -> {devices.Count}");
+                    if (verboseLogging)
+                        Debug.Log($"[{nameof(SensorManager)}] Found {devices.Count} device(s).");
+
+                    for (int i = 0; i < devices.Count; i++)
+                    {
+                        // Quit arrived mid-boot: stop spawning. Anything opened so far is
+                        // already in _renderers and the teardown waiting on us will stop it;
+                        // opening MORE cameras now would hand it a rig it has already
+                        // enumerated past, leaving those pipelines running into the exit.
+                        if (_shutdownRequested)
+                        {
+                            Debug.Log($"[{nameof(SensorManager)}] staged startup cancelled at " +
+                                      $"{i}/{devices.Count} — shutdown requested.");
+                            break;
+                        }
+
+                        global::Shared.BootOverlay.SetStatus(
+                            $"カメラを起動しています…  {i + 1} / {devices.Count}");
+                        yield return new WaitForEndOfFrame();   // show that count before blocking
+
+                        // Re-check AFTER the yield, not only before it. A quit that arrives
+                        // during that frame would otherwise still get one more camera: the
+                        // renderer's Start() runs a synchronous OpenDevice() at the top of
+                        // the next frame, which both delays the stop by a full device-open
+                        // and — if that open wedges — freezes the player loop, so neither
+                        // the startup join deadline nor the quit watchdog could advance.
+                        if (_shutdownRequested)
+                        {
+                            Debug.Log($"[{nameof(SensorManager)}] staged startup cancelled at " +
+                                      $"{i}/{devices.Count} — shutdown requested.");
+                            break;
+                        }
+
+                        var d = devices[i];
+                        if (verboseLogging) Debug.Log($"  [{i}] {d}");
+                        var r = SpawnRenderer(d, i);
+                        _renderers.Add(r);
+                        if (view != null && r != null)
+                        {
+                            var mr = r.GetComponent<MeshRenderer>();
+                            if (mr != null) view.Register(mr);
+                        }
+                        // The renderer's own Start() — which is where OpenDevice blocks —
+                        // runs at the top of the next frame, so this is the yield that
+                        // actually pays for the camera.
+                        yield return null;
+                    }
+
+                    if (applyExtrinsics) ApplyExtrinsicsToLive();
+                    global::Shared.StartupProfiler.Mark("SensorManager.StartLive done (staged)");
+                }
+            }
+            finally
+            {
+                _startingLive = false;
+                global::Shared.BootOverlay.Hide();
+            }
         }
 
         // The floor height belongs to the room, not the scene: the floor-tune mode
@@ -273,11 +395,22 @@ namespace PointCloud
         /// </summary>
         public void StartLive()
         {
+            // The staged boot path owns the rig until it finishes. It spends whole frames
+            // yielding before the first spawn, so `_renderers.Count` is still 0 then and
+            // would let this run enumerate and open the very same devices a second time.
+            if (_startingLive)
+            {
+                if (verboseLogging)
+                    Debug.Log($"[{nameof(SensorManager)}] StartLive ignored: staged startup already in progress.");
+                return;
+            }
             _renderers.RemoveAll(r => r == null);
             if (_renderers.Count > 0) return;
 
             var ctx = OrbbecRuntime.Context;
+            global::Shared.StartupProfiler.Mark("SensorManager: Orbbec context ready");
             var devices = ctx.QueryDevices();
+            global::Shared.StartupProfiler.Mark($"SensorManager: QueryDevices -> {devices.Count}");
             if (verboseLogging)
                 Debug.Log($"[{nameof(SensorManager)}] Found {devices.Count} device(s).");
 
@@ -296,11 +429,177 @@ namespace PointCloud
             }
 
             if (applyExtrinsics) ApplyExtrinsicsToLive();
+            global::Shared.StartupProfiler.Mark("SensorManager.StartLive done");
         }
 
         // Quitting fires before the scene's GameObjects are destroyed, which is the
-        // only place we still control the ORDER the rig stops in.
-        private void OnApplicationQuit() => StopCaptureSecondariesFirst();
+        // only place we still control the ORDER the rig stops in. Skipped when the
+        // staged path already stopped the rig before Application.Quit() was called
+        // (see StopStaged) — that is the normal route out of the build now, and this
+        // stays as the fallback for a quit that bypasses it.
+        private void OnApplicationQuit()
+        {
+            // Not a bare `if (_stoppedStaged) return`: the staged stop records how many
+            // renderers it actually handled, and a boot that was still unwinding past the
+            // join timeout can have added more behind it. Those are exactly the pipelines
+            // nothing else will close, so the fallback has to run for them even though the
+            // staged path "already stopped the rig".
+            _renderers.RemoveAll(r => r == null);
+            if (_stoppedStaged && _renderers.Count <= _stagedStopCount) return;
+            if (_stoppedStaged)
+                Debug.LogWarning($"[{nameof(SensorManager)}] {_renderers.Count - _stagedStopCount} " +
+                                 "renderer(s) appeared after the staged stop — stopping them now.", this);
+            StopCaptureSecondariesFirst();
+        }
+
+        private bool _stoppedStaged;
+        // Renderer count the staged stop covered; see OnApplicationQuit.
+        private int _stagedStopCount;
+
+        [Tooltip("Staged shutdown: how long a secondary pipeline stop may take before " +
+                 "the splash says it is taking a while. Waiting continues either way — " +
+                 "the normal cost is ~1.3s per camera, all four in parallel.")]
+        public float softStopTimeoutSeconds = 15f;
+
+        [Tooltip("Staged shutdown: hard cap on waiting for pipeline stops. Past this the " +
+                 "exit gives up on disposing the Orbbec context (a native stop is still " +
+                 "running and disposing under it would be a use-after-free) and quits " +
+                 "anyway — an installation that cannot be quit is worse than a leak.")]
+        public float hardStopTimeoutSeconds = 60f;
+
+        /// <summary>
+        /// <see cref="StopCaptureSecondariesFirst"/> spread over frames: same order,
+        /// same concurrency, but the main thread returns to the player loop between
+        /// polls so the shutdown splash can show how many cameras are down. The
+        /// blocking version stays for every non-quit caller (DestroyAllRenderers,
+        /// mode switches) where there is no screen to keep alive.
+        /// </summary>
+        /// <summary>The quit watchdog gave up on this teardown. Whatever state the
+        /// pipeline stops are in, the context must not be disposed behind them.</summary>
+        public void AbandonForForcedExit()
+        {
+            OrbbecRuntime.SuppressShutdown("forced exit while the staged teardown was still running");
+        }
+
+        public System.Collections.IEnumerator StopStaged(System.Action<int, int> progress)
+        {
+            // Cancel and JOIN a staged startup before looking at _renderers. The list is
+            // only a valid picture of the rig once boot has stopped adding to it; snapshot
+            // it while the start coroutine is still running and every camera opened after
+            // this point is one nothing will ever stop.
+            _shutdownRequested = true;
+            if (_startingLive)
+            {
+                global::Shared.ShutdownProfiler.Mark("SensorManager: waiting for staged startup to unwind");
+                // Bounded: the start coroutine yields between cameras so it unwinds within
+                // a frame or two of the flag, but a camera open blocks the main thread for
+                // ~1.6s and a wedged one would never return. Proceeding with a partial rig
+                // beats never quitting — the fallback below still catches stragglers.
+                float deadline = Time.realtimeSinceStartup + hardStopTimeoutSeconds;
+                while (_startingLive && Time.realtimeSinceStartup < deadline) yield return null;
+                if (_startingLive)
+                    Debug.LogError($"[{nameof(SensorManager)}] staged startup did not unwind within " +
+                                   $"{hardStopTimeoutSeconds:0}s — stopping the rig as it stands.", this);
+            }
+
+            _stoppedStaged = true;
+            _renderers.RemoveAll(r => r == null);
+            int total = _renderers.Count;
+            _stagedStopCount = total;
+            if (total == 0) yield break;
+
+            global::Shared.ShutdownProfiler.Mark(
+                $"SensorManager: staged stop of {total} renderer(s), Secondaries first");
+
+            // Secondaries concurrently, Primary last — the ordering rationale is in
+            // StopCaptureSecondariesFirst and applies unchanged here.
+            var tasks = new System.Collections.Generic.List<System.Threading.Tasks.Task>(total);
+            for (int i = total - 1; i >= 1; i--)
+            {
+                var r = _renderers[i];
+                if (r != null) tasks.Add(r.StopCaptureAsync());
+            }
+            // Hold the Primary by reference, not by index: this coroutine yields, and a
+            // renderer can be destroyed while it waits (teardown, a health-monitor
+            // restart), which shrinks the list. Indexing it afterwards threw
+            // IndexOutOfRange and abandoned the rest of the shutdown. The Unity null
+            // check below also covers the destroyed-but-still-referenced case.
+            var primary = _renderers.Count > 0 ? _renderers[0] : null;
+
+            // Poll instead of Task.WaitAll: waiting is exactly the part that used to
+            // freeze the picture.
+            //
+            // Unlike the blocking version, a timeout here must NOT simply carry on to
+            // the quit. These tasks are native ob_pipeline_stop calls; returning lets
+            // the caller quit, and the exit path disposes the shared Orbbec context —
+            // under a stop that is still running that is a use-after-free. So the soft
+            // bound only changes what the splash says, the hard bound gives up on
+            // disposing the context at all, and neither one abandons the wait quietly.
+            float softDeadline = Time.realtimeSinceStartup + softStopTimeoutSeconds;
+            float hardDeadline = Time.realtimeSinceStartup + hardStopTimeoutSeconds;
+            bool warned = false, abandoned = false;
+            int done = 0;
+            while (true)
+            {
+                done = 0;
+                for (int i = 0; i < tasks.Count; i++) if (tasks[i].IsCompleted) done++;
+                progress?.Invoke(done, total);
+                if (done >= tasks.Count) break;
+
+                float now = Time.realtimeSinceStartup;
+                if (!warned && now > softDeadline)
+                {
+                    warned = true;
+                    Debug.LogWarning($"[SensorManager] {tasks.Count - done} secondary pipeline stop(s) " +
+                                     $"still running after {softStopTimeoutSeconds:0}s — still waiting.", this);
+                    global::Shared.BootOverlay.SetStatus("カメラの停止に時間がかかっています…");
+                }
+                if (now > hardDeadline)
+                {
+                    abandoned = true;
+                    Debug.LogError($"[SensorManager] {tasks.Count - done} secondary pipeline stop(s) never " +
+                                   $"returned within {hardStopTimeoutSeconds:0}s. Giving up on a clean exit.", this);
+                    break;
+                }
+                yield return null;
+            }
+            foreach (var t in tasks)
+                if (t.IsFaulted && t.Exception != null) Debug.LogException(t.Exception, this);
+            // A stop that never returned owns native state we cannot account for, so the
+            // context must outlive the process rather than be disposed out from under it.
+            if (abandoned)
+                OrbbecRuntime.SuppressShutdown($"{tasks.Count - done} pipeline stop(s) still in flight");
+            global::Shared.ShutdownProfiler.Mark($"SensorManager: {tasks.Count} secondary stop(s) joined (staged)");
+
+            // Let the "secondaries done" count reach the screen before the Primary goes.
+            yield return new WaitForEndOfFrame();
+
+            // The Primary goes through StopCaptureAsync too, even though nothing else is
+            // waiting on it. A synchronous stop here blocks the main thread with no
+            // bound, and the quit watchdog lives in Update() — so a wedged primary stop
+            // would freeze the very loop that is supposed to rescue the exit, and the
+            // app could never be closed. Off-thread it stays pollable.
+            var primaryTask = primary != null ? primary.StopCaptureAsync() : null;
+            if (primaryTask != null)
+            {
+                float primaryDeadline = Time.realtimeSinceStartup + hardStopTimeoutSeconds;
+                while (!primaryTask.IsCompleted)
+                {
+                    if (Time.realtimeSinceStartup > primaryDeadline)
+                    {
+                        Debug.LogError("[SensorManager] the primary pipeline stop never returned " +
+                                       $"within {hardStopTimeoutSeconds:0}s. Giving up on a clean exit.", this);
+                        OrbbecRuntime.SuppressShutdown("primary pipeline stop still in flight");
+                        break;
+                    }
+                    yield return null;
+                }
+                if (primaryTask.IsFaulted && primaryTask.Exception != null)
+                    Debug.LogException(primaryTask.Exception, this);
+            }
+            progress?.Invoke(total, total);
+            global::Shared.ShutdownProfiler.Mark("SensorManager: primary stopped (staged)");
+        }
 
         /// <summary>
         /// Stop every renderer's pipeline, Secondaries first and the Primary (index 0,

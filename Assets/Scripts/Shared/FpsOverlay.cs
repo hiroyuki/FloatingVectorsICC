@@ -153,7 +153,8 @@ namespace Shared
             canvas.renderMode = RenderMode.ScreenSpaceOverlay;
             canvas.targetDisplay = display;
             // Just under DisplayDiagnosticsOverlay, above the operator/visitor UI.
-            canvas.sortingOrder = short.MaxValue - 1;
+            // Order at the top: BootOverlay > DisplayDiagnosticsOverlay > this.
+            canvas.sortingOrder = short.MaxValue - 2;
             var scaler = go.AddComponent<CanvasScaler>();
             scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
             scaler.referenceResolution = new Vector2(1920, 1080);

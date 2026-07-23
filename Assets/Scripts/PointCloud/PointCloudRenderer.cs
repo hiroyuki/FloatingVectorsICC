@@ -457,9 +457,11 @@ namespace PointCloud
             try
             {
                 OpenDevice();
+                global::Shared.StartupProfiler.Mark($"PointCloudRenderer[{deviceSerial}].OpenDevice");
                 BuildMesh();
                 ApplyAxisConvention();
                 StartCaptureThread();
+                global::Shared.StartupProfiler.Mark($"PointCloudRenderer[{deviceSerial}].StartCaptureThread");
                 if (timerSyncWithHost && timerSyncIntervalSec > 0f)
                     _timerSyncCoro = StartCoroutine(PeriodicTimerSync());
             }

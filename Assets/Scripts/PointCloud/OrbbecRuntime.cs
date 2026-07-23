@@ -13,6 +13,20 @@ namespace PointCloud
         private static OrbbecContext s_context;
         private static readonly object s_lock = new object();
         private static bool s_shutdownHooked;
+        private static bool s_shutdownSuppressed;
+
+        /// <summary>Never dispose the shared context, whatever happens next.
+        /// Called when a pipeline stop timed out and its native call may still be
+        /// running on a worker thread: disposing the context under a live
+        /// ob_pipeline_stop is a use-after-free, whereas leaking it costs nothing —
+        /// the process is on its way out either way.</summary>
+        public static void SuppressShutdown(string reason)
+        {
+            lock (s_lock) s_shutdownSuppressed = true;
+            Debug.LogError($"[OrbbecRuntime] context shutdown SUPPRESSED: {reason}. " +
+                           "The context is deliberately leaked so the exit cannot race a " +
+                           "native call that never returned.");
+        }
 
         public static OrbbecContext Context
         {
@@ -57,6 +71,11 @@ namespace PointCloud
         {
             lock (s_lock)
             {
+                if (s_shutdownSuppressed)
+                {
+                    global::Shared.ShutdownProfiler.Mark("OrbbecRuntime.Shutdown skipped (suppressed)");
+                    return;
+                }
                 if (s_context != null)
                 {
                     global::Shared.ShutdownProfiler.Mark("OrbbecRuntime.Shutdown enter");
