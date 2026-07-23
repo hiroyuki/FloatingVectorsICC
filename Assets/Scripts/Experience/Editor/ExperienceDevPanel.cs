@@ -357,10 +357,15 @@ namespace Experience.EditorTools
                 new GUIContent("timeMultiplier", "全タイミングの早回し倍率"),
                 cfg.timings.timeMultiplier, 0.5f, 5f);
 
-            string canned = cfg.devCannedTakeRoot;
+            // The asset is shared with a Mac dev machine, so the field edited here
+            // is the platform's own (same split as DrawPlaybackFolderRow).
+            bool cannedMac = Application.platform == RuntimePlatform.OSXEditor;
+            string canned = cannedMac ? cfg.devCannedTakeRootMacOverride : cfg.devCannedTakeRoot;
             using (new EditorGUILayout.HorizontalScope())
             {
-                canned = EditorGUILayout.TextField("缶詰テイク (skip/dummyShoot)", canned);
+                canned = EditorGUILayout.TextField(
+                    cannedMac ? "缶詰テイク (skip/dummyShoot, Mac)" : "缶詰テイク (skip/dummyShoot)",
+                    canned);
                 if (GUILayout.Button("選択…", GUILayout.Width(60)))
                 {
                     string picked = EditorUtility.OpenFolderPanel("缶詰テイクのルート", canned, "");
@@ -378,14 +383,15 @@ namespace Experience.EditorTools
                 cfg.timings.skipQr = sq;
                 cfg.devLoopEntrancePlayback = lp;
                 cfg.timings.timeMultiplier = tm;
-                cfg.devCannedTakeRoot = canned;
+                if (cannedMac) cfg.devCannedTakeRootMacOverride = canned;
+                else cfg.devCannedTakeRoot = canned;
                 EditorUtility.SetDirty(cfg);
             }
             if ((cfg.timings.skipShoot || cfg.timings.dummyShoot)
-                && !System.IO.Directory.Exists(cfg.devCannedTakeRoot))
+                && !System.IO.Directory.Exists(cfg.DevCannedTakeRoot))
                 EditorGUILayout.HelpBox(
                     "skipShoot/dummyShoot ON ですが缶詰テイクのフォルダが存在しません: " +
-                    cfg.devCannedTakeRoot, MessageType.Warning);
+                    cfg.DevCannedTakeRoot, MessageType.Warning);
         }
 
         private void DrawPlaybackFolderRow()
@@ -431,7 +437,7 @@ namespace Experience.EditorTools
                     MessageType.Info);
             }
             var cfg = _director.config;
-            if (cfg != null && !cfg.dryRunPublish)
+            if (cfg != null && !cfg.DryRunPublish)
                 EditorGUILayout.HelpBox(
                     "dryRunPublish が OFF — ResultShow で実際に LFKS アップロードが走ります。",
                     MessageType.Warning);

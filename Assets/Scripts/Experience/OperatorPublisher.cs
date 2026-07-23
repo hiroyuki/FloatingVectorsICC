@@ -274,7 +274,7 @@ namespace Experience
             // -- publish (same trust boundary as the visitor flow) --
             var cfg = config != null ? config : ScriptableObject.CreateInstance<ExperienceConfig>();
             ISculptureResultPublisher publisher;
-            if (cfg.dryRunPublish)
+            if (cfg.DryRunPublish)
             {
                 publisher = new DryRunPublisher(cfg.dryRunDelaySeconds);
                 SetStatus("upload (DRY RUN)…");
@@ -319,7 +319,7 @@ namespace Experience
             var tex = new QrUrlPresenter().Present(url);
             if (tex != null) qrOverlay?.Show(tex, $"t{trailSamples} {stamp}");
             SetStatus($"done in {sw.ElapsedMilliseconds / 1000.0:0.0}s" +
-                      (cfg.dryRunPublish ? " (DRY RUN)" : "") + $" — {url}");
+                      (cfg.DryRunPublish ? " (DRY RUN)" : "") + $" — {url}");
             _routine = null;
         }
 

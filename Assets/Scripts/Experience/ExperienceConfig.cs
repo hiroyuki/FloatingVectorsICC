@@ -119,9 +119,32 @@ namespace Experience
 
         [Tooltip("Dev: pre-recorded take used when timings.skipShoot or " +
                  "timings.dummyShoot is on (no cameras needed). Point at a full " +
-                 "RCSV take root.")]
+                 "RCSV take root. Read through DevCannedTakeRoot, never directly — " +
+                 "on macOS devCannedTakeRootMacOverride wins.")]
         public string devCannedTakeRoot =
             @"D:\Dropbox\projects\ICC\Recordings\RecordingBase\2026-07-14_15-50-24";
+
+        [Tooltip("Optional override used only when running on macOS — this asset is " +
+                 "git-tracked and shared between the Windows rigs and a Mac dev " +
+                 "machine, so a single field would always be wrong on one of them " +
+                 "(same rationale as SensorRecorder.folderPathMacOverride). Empty = " +
+                 "use devCannedTakeRoot on every platform.")]
+        public string devCannedTakeRootMacOverride = "";
+
+        /// <summary>Platform-resolved <see cref="devCannedTakeRoot"/>. Always read
+        /// the canned take through this — the raw field holds the Windows path and
+        /// is meaningless on a Mac.</summary>
+        public string DevCannedTakeRoot
+        {
+            get
+            {
+#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+                if (!string.IsNullOrWhiteSpace(devCannedTakeRootMacOverride))
+                    return devCannedTakeRootMacOverride;
+#endif
+                return devCannedTakeRoot;
+            }
+        }
 
         [Tooltip("Dev: number keys (top row / keypad) jump the show — 0=Idle(頭出し/" +
                  "run reset) 1=Consent 2=Welcome 3=Calibrate 4=TestMove1 5=TestMove2 " +
@@ -259,8 +282,26 @@ namespace Experience
 
         [Header("Publishing")]
         [Tooltip("Use the dry-run publisher (fake URLs, no network). Off = real LFKS " +
-                 "upload via the pinned StreamingAssets/lfks/upload.ps1.")]
+                 "upload via the pinned StreamingAssets/lfks/upload.ps1. Windows only — " +
+                 "macOS ignores this and always dry-runs (see DryRunPublish). Read " +
+                 "through DryRunPublish, never directly.")]
         public bool dryRunPublish = true;
+
+        /// <summary>Platform-resolved <see cref="dryRunPublish"/>. The real publisher
+        /// shells out to <c>powershell.exe</c> (LfksUploadPublisher), which does not
+        /// exist on a Mac, so macOS is pinned to the dry run no matter how the
+        /// git-shared asset is set on the show rigs.</summary>
+        public bool DryRunPublish
+        {
+            get
+            {
+#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+                return true;
+#else
+                return dryRunPublish;
+#endif
+            }
+        }
         [Min(0f)] public float dryRunDelaySeconds = 1f;
         public QrUrlKind qrUrlKind = QrUrlKind.First;
 

@@ -1004,7 +1004,7 @@ namespace Experience
                     _processingDone = _processingFailed = false;
                     if (string.IsNullOrEmpty(_takeRoot))
                     {
-                        _takeRoot = config.devCannedTakeRoot;
+                        _takeRoot = config.DevCannedTakeRoot;
                         _takeIsTapped = false;
                     }
                     break;
@@ -1013,7 +1013,7 @@ namespace Experience
                     _resultShowDone = false;
                     // A direct jump has no play-through behind it — borrow the
                     // canned take so the replay presentation can be checked.
-                    if (string.IsNullOrEmpty(_takeRoot)) _takeRoot = config.devCannedTakeRoot;
+                    if (string.IsNullOrEmpty(_takeRoot)) _takeRoot = config.DevCannedTakeRoot;
                     break;
             }
             Debug.Log($"[{nameof(ExperienceDirector)}] dev jump → {target}.", this);
@@ -1186,7 +1186,7 @@ namespace Experience
                 case ExperienceState.Shoot:
                     if (t.skipShoot)
                     {
-                        _takeRoot = config.devCannedTakeRoot; // pre-recorded dev take
+                        _takeRoot = config.DevCannedTakeRoot; // pre-recorded dev take
                         _takeIsTapped = false;
                     }
                     else
@@ -1857,7 +1857,7 @@ namespace Experience
             }
             else if (t.dummyShoot)
             {
-                _takeRoot = config.devCannedTakeRoot; // canned take stands in for the shot
+                _takeRoot = config.DevCannedTakeRoot; // canned take stands in for the shot
                 _takeIsTapped = false;
             }
             PlaySe(config.recordEndSe);
@@ -2151,7 +2151,7 @@ namespace Experience
                           "v11s conversion.", this);
                 yield break;
             }
-            bool cannedTake = takeRoot == config.devCannedTakeRoot;
+            bool cannedTake = takeRoot == config.DevCannedTakeRoot;
             bool convert = !t.skipProcessing
                 && !(cannedTake && !config.allowCannedTakeConversion);
             if (cannedTake && !config.allowCannedTakeConversion && !t.skipProcessing)
@@ -2342,7 +2342,7 @@ namespace Experience
                 {
                     // no recording ran (skipShoot, or dummyShoot without a
                     // tappable source) — the canned take stands in
-                    takeRoot = config.devCannedTakeRoot;
+                    takeRoot = config.DevCannedTakeRoot;
                     _takeIsTapped = false;
                 }
                 PlaySe(config.recordEndSe);
@@ -2386,7 +2386,7 @@ namespace Experience
                     // tapped take is capture-window-sized and never triggers this.)
                     double startAt = 0;
                     double duration = sensorRecorder.PlaybackDurationSeconds;
-                    if (takeRoot == config.devCannedTakeRoot && config.devCannedTakeTailSeconds > 0f
+                    if (takeRoot == config.DevCannedTakeRoot && config.devCannedTakeTailSeconds > 0f
                         && duration > config.devCannedTakeTailSeconds)
                         startAt = duration - config.devCannedTakeTailSeconds;
                     yield return RunPlaybackLoops(state, startAt);
@@ -2482,7 +2482,7 @@ namespace Experience
             SetOrbit(true);
             double startAt = 0;
             double duration = sensorRecorder.PlaybackDurationSeconds;
-            bool canned = _takeRoot == config.devCannedTakeRoot;
+            bool canned = _takeRoot == config.DevCannedTakeRoot;
             if (canned && config.devCannedTakeTailSeconds > 0f
                 && duration > config.devCannedTakeTailSeconds)
                 startAt = duration - config.devCannedTakeTailSeconds;
@@ -2816,7 +2816,7 @@ namespace Experience
             }
 
             ISculptureResultPublisher publisher;
-            if (config.dryRunPublish)
+            if (config.DryRunPublish)
             {
                 publisher = new DryRunPublisher(config.dryRunDelaySeconds);
             }
