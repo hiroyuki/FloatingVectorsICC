@@ -24,7 +24,7 @@ namespace TSDF
     [AddComponentMenu("TSDF/View")]
     [DefaultExecutionOrder(10)]
     public sealed class TSDFView : MonoBehaviour, Shared.IViewToggle, Shared.IPanelTunable,
-                                   Shared.ITriangleSeedSource
+                                   Shared.ITriangleSeedSource, Shared.ISdfShadowVolume
     {
         public enum ViewMode
         {
@@ -72,20 +72,49 @@ namespace TSDF
             isActiveAndEnabled && showMesh && mode == ViewMode.Mesh
             && _meshTrianglesBuffer != null && _meshArgsBuffer != null && _lastPublishVersion >= 0;
 
+        // ---- Shared.ISdfShadowVolume (motion curves receive the body's self-shadow) ----
+        // Exposes the same front SDF buffer + march parameters the mesh shades from, so
+        // the curves cast the body's shadow onto themselves and read as one lit scene.
+        // Ready whenever the SDF volume is live and current (showMesh keeps the front
+        // buffer being produced — same gate as TrianglesReady). Deliberately NOT gated on
+        // meshShadowStrength or suppressDraw: the experience draws only the CURVES as the
+        // final model (the mesh is suppressed / wireframe), so the curves must still
+        // receive the body shadow even when the solid mesh — and its own shadow — is off.
+        // The consumer's own strength knob decides whether it applies.
+        public bool SdfShadowReady =>
+            isActiveAndEnabled && showMesh && mode == ViewMode.Mesh
+            && volume != null && volume.FrontBuffer != null;
+        public ComputeBuffer SdfBuffer => volume != null ? volume.FrontBuffer : null;
+        public Matrix4x4 SdfVoxelFromWorld => volume != null ? volume.WorldFromVoxel.inverse : Matrix4x4.identity;
+        public Vector3Int SdfDim => volume != null ? volume.Dim : Vector3Int.zero;
+        public float SdfMinWeight => meshMinWeight;
+        public float SdfVoxelSize => volume != null ? volume.voxelSize : 0f;
+        public float SdfTau => volume != null ? volume.Tau : 0f;
+        public Vector3 ShadowLightDir => meshLightDir;
+        public float ShadowSteps => meshShadowSteps;
+        public float ShadowBiasVox => meshShadowBiasVox;
+        public float ShadowIsoFrac => meshShadowIsoFrac;
+
         // ---- Shared.IPanelTunable (one-stop Control Panel) ----
         // Mesh look knobs so the surface can be graded at runtime, not just the Inspector.
         public string TuningLabel => "TSDF mesh";
-        public int TunableCount => 5;
+        public int TunableCount => 8;
         public string TunableName(int i) =>
             i == 0 ? "Brightness" :
             i == 1 ? "Saturation" :
             i == 2 ? "Gamma" :
-            i == 3 ? "Gradient normals" : "Rim Boost";
+            i == 3 ? "Gradient normals" :
+            i == 4 ? "Rim Boost" :
+            i == 5 ? "Shadow Strength" :
+            i == 6 ? "Shadow Reach" : "Shadow Bias";
         public float TunableValue(int i) =>
             i == 0 ? meshBrightness :
             i == 1 ? meshSaturation :
             i == 2 ? meshGamma :
-            i == 3 ? meshGradNormals : meshRimBoost;
+            i == 3 ? meshGradNormals :
+            i == 4 ? meshRimBoost :
+            i == 5 ? meshShadowStrength :
+            i == 6 ? meshShadowSteps : meshShadowBiasVox;
         public void SetTunableValue(int i, float value)
         {
             switch (i)
@@ -94,16 +123,22 @@ namespace TSDF
                 case 1: meshSaturation = Mathf.Clamp(value, 0f, 3f); break;
                 case 2: meshGamma = Mathf.Clamp(value, 0.2f, 3f); break;
                 case 3: meshGradNormals = Mathf.Clamp01(value); break;
-                default: meshRimBoost = Mathf.Clamp(value, 0f, 2f); break;
+                case 4: meshRimBoost = Mathf.Clamp(value, 0f, 2f); break;
+                case 5: meshShadowStrength = Mathf.Clamp01(value); break;
+                case 6: meshShadowSteps = Mathf.Clamp(Mathf.RoundToInt(value), 1, 64); break;
+                default: meshShadowBiasVox = Mathf.Clamp(value, 0f, 12f); break;
             }
         }
-        public float TunableMin(int i) => i == 2 ? 0.2f : 0f;
+        public float TunableMin(int i) => i == 2 ? 0.2f : i == 6 ? 1f : 0f;
         public float TunableMax(int i) =>
             i == 0 ? 3f :
             i == 1 ? 3f :
             i == 2 ? 3f :
-            i == 3 ? 1f : 2f;
-        public bool TunableIsInt(int i) => false;
+            i == 3 ? 1f :
+            i == 4 ? 2f :
+            i == 5 ? 1f :
+            i == 6 ? 64f : 12f;
+        public bool TunableIsInt(int i) => i == 6;
 
         // ---------- Voxel mode ----------
         [Header("Voxel view")]
@@ -160,6 +195,35 @@ namespace TSDF
         [Tooltip("Rim boost. Brightens the silhouette in the surface's own colour " +
                  "(no white wash) so shading stays saturated instead of greying out.")]
         public float meshRimBoost = 0.5f;
+
+        [Header("Mesh self-shadow")]
+        [Tooltip("Direction the light comes FROM, used for both the diffuse shading " +
+                 "and the self-shadow march (so the cast direction always matches the " +
+                 "shading). Need not be normalised. Default matches the shader's old " +
+                 "hardcoded light (up-front-right).")]
+        public Vector3 meshLightDir = new Vector3(0.35f, 0.85f, 0.40f);
+        [Range(0f, 1f)]
+        [Tooltip("Self-shadow strength. 0 = off (original flat-lit look); 1 = fully " +
+                 "darken occluded fragments toward the ambient floor. Parts of the body " +
+                 "hidden from the light by another part (arm over torso) go darker.")]
+        public float meshShadowStrength = 0.7f;
+        [Range(1, 64)]
+        [Tooltip("Self-shadow reach in voxel steps: how far along the light ray to look " +
+                 "for an occluding body part. Reach in metres = this × voxelSize. Higher " +
+                 "catches more distant occluders but costs more per fragment.")]
+        public int meshShadowSteps = 24;
+        [Range(0f, 12f)]
+        [Tooltip("Self-shadow start bias in voxels: how far along the light ray to skip " +
+                 "before testing, so a surface doesn't shadow its OWN shell (the TSDF is a " +
+                 "±tau band, not a hard surface). Raise if you see shadow acne on lit faces; " +
+                 "lower to let near-touching parts (arm resting on torso) shadow sooner.")]
+        public float meshShadowBiasVox = 3f;
+        [Range(0f, 1f)]
+        [Tooltip("Occluder threshold as a fraction of tau: the SDF value at which the march " +
+                 "counts a sampled voxel as 'inside another surface'. ~0.3 catches the shell " +
+                 "as the ray enters it; 0 requires reaching the exact iso surface (can miss " +
+                 "thin shells between steps).")]
+        public float meshShadowIsoFrac = 0.3f;
         [Tooltip("Max triangles the MC output buffer can hold. 333k tris = 1 M " +
                  "vertices, ~12 MB at 36 bytes per triangle (= 3 × float3).")]
         [Min(1024)] public int meshMaxTriangles = 333_333;
@@ -174,6 +238,23 @@ namespace TSDF
         [Tooltip("Run MC every Nth frame. 1 = every frame. Draws keep using the " +
                  "last extracted vertex buffer on skip frames.")]
         [Min(1)] public int mcEveryNFrames = 1;
+
+        [Header("Wireframe")]
+        [Tooltip("Draw the mesh as an edge net (interior discarded) instead of the " +
+                 "shaded surface. Not serialized: a stray true in a scene would leave " +
+                 "the sculpture a wireframe. The experience flips this on for the " +
+                 "ResultShow / practice replay and back off for the frozen model.")]
+        [System.NonSerialized] public bool wireframe;
+        [Tooltip("Wireframe line colour.")]
+        public Color wireColor = Color.white;
+        [Range(0.2f, 4f)]
+        [Tooltip("Wireframe line width in pixels (screen-space, distance-independent).")]
+        public float wireThickness = 1.2f;
+        [Range(1, 32)]
+        [Tooltip("Thin the net by drawing only every Nth marching-cubes triangle. The " +
+                 "MC mesh is far denser than a pixel, so a 1:1 wireframe reads as a solid " +
+                 "silhouette; raise this until the edges read as a net.")]
+        public int wireStride = 8;
 
         [Header("Perf / A-B (Phase 0)")]
         [Tooltip("Reference path: force the OLD full-grid Marching Cubes dispatch over " +
@@ -487,6 +568,21 @@ namespace TSDF
             meshMaterial.SetMatrix("_VoxelFromWorld", volume.WorldFromVoxel.inverse);
             meshMaterial.SetVector("_VDim", new Vector4(volume.Dim.x, volume.Dim.y, volume.Dim.z, 0f));
             meshMaterial.SetFloat("_MinWeight", meshMinWeight);
+            // Lighting + self-shadow: same L drives both, and the march steps in voxels
+            // (metres reach = steps × voxelSize) sampling the front SDF bound above.
+            meshMaterial.SetVector("_LightDir", meshLightDir == Vector3.zero ? Vector3.up : meshLightDir);
+            meshMaterial.SetFloat("_VoxelSize", volume.voxelSize);
+            meshMaterial.SetFloat("_Tau", volume.Tau);
+            meshMaterial.SetFloat("_ShadowStrength", meshShadowStrength);
+            meshMaterial.SetFloat("_ShadowSteps", meshShadowSteps);
+            meshMaterial.SetFloat("_ShadowBiasVox", meshShadowBiasVox);
+            meshMaterial.SetFloat("_ShadowIsoFrac", meshShadowIsoFrac);
+            // Wireframe toggle — always set so it never leaks a stale 1 from a
+            // previous replay into the shaded model reveal.
+            meshMaterial.SetFloat("_Wireframe", wireframe ? 1f : 0f);
+            meshMaterial.SetColor("_WireColor", wireColor);
+            meshMaterial.SetFloat("_WireThickness", wireThickness);
+            meshMaterial.SetFloat("_WireStride", Mathf.Max(1, wireStride));
             Graphics.DrawProceduralIndirect(meshMaterial, BuildBounds(1.0f),
                 MeshTopology.Triangles, _meshArgsBuffer, 0,
                 camera: null, properties: null,

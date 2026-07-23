@@ -21,6 +21,21 @@ Shader "TSDF/TSDFMesh"
         // (original), 1 = smooth. Falls back to flat when the volume is unbound
         // or a neighbour voxel is unobserved, so print export etc. stay untouched.
         _GradNormals ("Gradient normals", Range(0, 1)) = 1.0
+        // Self-shadow: darken fragments occluded from the light by another part of
+        // the body (arm over torso, etc). 0 = off (original flat-lit look).
+        _ShadowStrength ("Self-shadow strength", Range(0, 1)) = 0.7
+        _ShadowSteps    ("Self-shadow reach (voxel steps)", Range(1, 64)) = 24
+        _ShadowBiasVox  ("Self-shadow start bias (voxels)", Range(0, 12)) = 3
+        _ShadowIsoFrac  ("Self-shadow occluder threshold (x tau)", Range(0, 1)) = 0.3
+        // Wireframe: draw only the triangle edges (interior discarded) so the
+        // marching-cubes surface reads as a mesh net over the black stage. Driven
+        // by the experience during the ResultShow / practice replay.
+        [Toggle] _Wireframe  ("Wireframe", Float) = 0
+        _WireColor     ("Wire colour", Color)  = (1, 1, 1, 1)
+        _WireThickness ("Wire thickness (px)", Range(0.2, 4)) = 1.2
+        // Thin the net by drawing only every Nth marching-cubes triangle (the mesh
+        // is far denser than a pixel, so a 1:1 wireframe reads as a solid fill).
+        _WireStride    ("Wire triangle stride (1 = all)", Range(1, 32)) = 8
     }
     SubShader
     {
@@ -64,12 +79,34 @@ Shader "TSDF/TSDFMesh"
             float    _MinWeight;
             float    _GradNormals;
 
+            // Lighting + self-shadow (bound by TSDFView). _LightDir is the shared
+            // light direction used for BOTH the diffuse term and the shadow march,
+            // so the cast direction always matches the shading. _VoxelSize / _Tau
+            // give the march its step length and occluder threshold in metres.
+            float3   _LightDir;
+            float    _VoxelSize;
+            float    _Tau;
+            float    _ShadowStrength;
+            float    _ShadowSteps;
+            float    _ShadowBiasVox;
+            float    _ShadowIsoFrac;
+
+            // Wireframe. Each MC triangle is 3 consecutive procedural vertices, so
+            // a per-corner barycentric ((1,0,0)/(0,1,0)/(0,0,1)) interpolates to the
+            // distance-to-edge across the face — no geometry shader, no vertex attrs.
+            float    _Wireframe;
+            float4   _WireColor;
+            float    _WireThickness;
+            float    _WireStride;
+
             struct V2F
             {
                 float4 pos      : SV_POSITION;
                 float3 worldPos : TEXCOORD0;
                 float3 viewDir  : TEXCOORD1;
                 float3 vcol     : TEXCOORD2;
+                float3 bary     : TEXCOORD3;
+                nointerpolation float wireKeep : TEXCOORD4; // 1 = draw this tri's edges
             };
 
             V2F vert(uint vid : SV_VertexID)
@@ -84,6 +121,12 @@ Shader "TSDF/TSDFMesh"
                 o.worldPos = wp;
                 o.viewDir = normalize(_WorldSpaceCameraPos.xyz - wp);
                 o.vcol = col;
+                o.bary = (cornerIdx == 0u) ? float3(1, 0, 0)
+                       : (cornerIdx == 1u) ? float3(0, 1, 0) : float3(0, 0, 1);
+                // Keep only every Nth triangle for the wireframe (thinning). Flat so
+                // all three corners agree on whether the triangle is drawn.
+                uint stride = (uint)max(1.0, _WireStride);
+                o.wireKeep = ((triIdx % stride) == 0u) ? 1.0 : 0.0;
                 return o;
             }
 
@@ -120,8 +163,50 @@ Shader "TSDF/TSDFMesh"
                 return true;
             }
 
+            // Self-shadow by marching the TSDF toward the light. The TSDF is only
+            // valid in a thin ±tau shell around each surface (interior and free
+            // space are unobserved, weight 0), so this is NOT sphere tracing: it
+            // fixed-steps along L one voxel at a time and darkens as soon as the ray
+            // enters ANOTHER observed surface shell (sdf <= isoFrac*tau, weight ok).
+            // The ray starts biased along L past the fragment's own shell so a
+            // surface can't shadow itself; nearer occluders darken more (soft ramp).
+            // Returns occlusion in [0,1]; 0 when shadows are off or the volume is
+            // unbound (SampleSdf fails everywhere -> stays lit).
+            float SelfShadow(float3 worldPos, float3 L)
+            {
+                if (_ShadowStrength <= 0.0 || _VoxelSize <= 0.0) return 0.0;
+                int steps = (int)_ShadowSteps;
+                float stepLen = _VoxelSize;                 // one voxel per step
+                float iso = _ShadowIsoFrac * _Tau;          // enter-shell threshold (m)
+                float3 ro = worldPos + L * (_VoxelSize * _ShadowBiasVox);
+                [loop] for (int s = 1; s <= steps; s++)
+                {
+                    float3 wp = ro + L * (stepLen * (float)s);
+                    float3 vc = mul(_VoxelFromWorld, float4(wp, 1.0)).xyz;
+                    int3 ib = int3(floor(vc));
+                    float sdf;
+                    if (SampleSdf(ib, sdf) && sdf <= iso)
+                        return 1.0 - (float)(s - 1) / (float)steps; // nearer = darker
+                }
+                return 0.0;
+            }
+
             fixed4 frag(V2F i) : SV_Target
             {
+                // Wireframe: keep only the fragments near a triangle edge; discard
+                // the interior so the black stage shows through and the surface
+                // reads as an edge net. Screen-space AA via fwidth keeps the line a
+                // constant pixel width regardless of distance.
+                if (_Wireframe > 0.5)
+                {
+                    if (i.wireKeep < 0.5) discard;       // thinned-out triangle
+                    float3 d = fwidth(i.bary) * max(0.1, _WireThickness);
+                    float3 s = smoothstep(float3(0, 0, 0), d, i.bary);
+                    float edge = min(s.x, min(s.y, s.z)); // ~0 on an edge, ~1 interior
+                    if (edge > 0.5) discard;
+                    return fixed4(_WireColor.rgb, 1.0);
+                }
+
                 // Flat normal from screen-space derivatives — no per-vertex
                 // normal buffer needed, and stable across MC reconnections.
                 float3 dx = ddx(i.worldPos);
@@ -139,12 +224,17 @@ Shader "TSDF/TSDFMesh"
                 // Always face the camera (because we Cull Off both sides).
                 if (dot(N, i.viewDir) < 0) N = -N;
 
-                float3 L = normalize(float3(0.35, 0.85, 0.40));
+                float3 L = normalize(_LightDir);
                 // Value-only shading: RGB * scalar preserves HSV saturation, and
                 // the rim lifts the silhouette in the surface's own colour (no
                 // white add), so smooth normals read as form without washing to
                 // grey. Higher ambient floor (0.4) keeps the shaded side vivid.
                 float shade = saturate(dot(N, L)) * 0.6 + 0.4;   // 0.4..1.0
+                // Self-shadow: parts occluded from the light (arm over torso) go
+                // darker. Multiplies the diffuse term so an unshadowed fragment is
+                // unchanged and a fully shadowed one drops toward the ambient floor.
+                float occ = SelfShadow(i.worldPos, L);
+                shade *= (1.0 - occ * _ShadowStrength);
                 float rim = pow(1.0 - saturate(dot(N, i.viewDir)), _RimPower);
 
                 // Per-vertex camera colour (baked at integration), colour-graded
