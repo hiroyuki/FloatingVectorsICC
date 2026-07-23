@@ -43,6 +43,21 @@ namespace Experience
                  "practice rounds AND the ResultShow presentation.")]
         public int playbackLoops = 3;
 
+        [Header("Playback presentation look (できたよ！ replay → QrShow)")]
+        // The LIVE phases use the scene's own (lighter) values — tuned so the
+        // point cloud stays readable next to the curves. The replay
+        // presentation switches to this richer look and the director restores
+        // the scene values when the stage goes back to live.
+        [Min(64)]
+        [Tooltip("Curve seed count during the take replays (scene value stays for live).")]
+        public int presentationSeedCount = 60000;
+        [Range(0f, 1f)]
+        [Tooltip("Curve tail alpha during the take replays.")]
+        public float presentationTailAlpha = 1f;
+        [Range(0f, 100f)]
+        [Tooltip("Point-cloud decimation (%) during the take replays.")]
+        public float presentationDecimatePercent = 7.9f;
+
         [Header("Sensing overrides (pushed into PresenceDetector on enter)")]
         [Min(0f)] public float insetMeters = 0f;
         [Tooltip("Ignore points below this world height (m). 0.15 skips the floor " +
