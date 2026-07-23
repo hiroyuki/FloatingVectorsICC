@@ -1079,12 +1079,48 @@ namespace BodyTracking.Eval.Rtmpose
                     lastFreshEmits = 0; lastHeldEmits = 0; // fresh adapter, counters restart
                 }
 
+                // One mode decision per drain. PlaybackActive is written by the main
+                // thread (Update) with no lock, so re-reading it per slot — or again for
+                // the heartbeat / gap-bridge below — lets a live<->playback transition
+                // land MID-DRAIN: backlog dropped for one camera but kept for the next,
+                // or recorded frames judged under the live discipline. Everything in this
+                // iteration keys off this snapshot instead.
+                bool playbackNow = s.PlaybackActive;
+
                 drained.Clear();
                 lock (s.SlotLock)
                 {
                     foreach (var kv in s.Slots)
                     {
                         var slot = kv.Value;
+
+                        // LIVE: infer the NEWEST frame only and throw the backlog away.
+                        // Inferring it instead is what turns a momentary stall into
+                        // permanent latency: each queued frame costs a full inference, so
+                        // the worker keeps emitting poses for moments that have already
+                        // passed and never catches up. Measured in FreeMove, where drawing
+                        // the curves loads the GPU: up to 9 frames queued and the tracked
+                        // skeleton 340ms behind the body, against 150ms in the states that
+                        // draw no curves. A skeleton for the wrong instant is worse than
+                        // no skeleton — it drags the motion curves backwards and trips
+                        // BonePoseHistory's teleport gate, which cuts the trail.
+                        //
+                        // Playback keeps every frame: there the take's own timing IS the
+                        // subject, the worker is expected to run behind the playhead, and
+                        // dropping frames would make the offline result non-deterministic.
+                        if (!playbackNow)
+                        {
+                            while (slot.Count > 1)
+                            {
+                                var stale = slot.Ring[slot.Tail];
+                                slot.Ring[slot.Tail] = null;
+                                slot.Tail = (slot.Tail + 1) % Slot.QueueDepth;
+                                slot.Count--;
+                                slot.DroppedOldest++;
+                                if (stale != null) slot.Free.Push(stale);
+                            }
+                        }
+
                         while (slot.Count > 0)
                         {
                             var pf = slot.Ring[slot.Tail];
@@ -1101,7 +1137,7 @@ namespace BodyTracking.Eval.Rtmpose
                     // sensor hiccup / GPU starved: keep the output cadence steady.
                     // Playback-driven sessions skip this — see Session.PlaybackActive.
                     long idle = Environment.TickCount - lastFrameWallMs;
-                    if (!s.PlaybackActive && lastTsNs != 0 && idle > heartbeatMs)
+                    if (!playbackNow && lastTsNs != 0 && idle > heartbeatMs)
                     {
                         lastFrameWallMs = Environment.TickCount;
                         try { s.Fused.Heartbeat(lastTsNs + (ulong)idle * 1_000_000UL); }
@@ -1136,7 +1172,7 @@ namespace BodyTracking.Eval.Rtmpose
                     // same way FusedBodiesExport does offline. Bounded by the next
                     // REAL frame's timestamp, so unlike a wall-clock heartbeat it
                     // can never overrun the stream.
-                    if (s.PlaybackActive && prevTsNs != 0)
+                    if (playbackNow && prevTsNs != 0)
                     {
                         ulong nextTs = ulong.MaxValue;
                         foreach (var it in items) if (it.TsNs < nextTs) nextTs = it.TsNs;

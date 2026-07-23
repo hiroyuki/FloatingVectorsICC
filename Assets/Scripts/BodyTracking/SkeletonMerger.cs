@@ -122,6 +122,16 @@ namespace BodyTracking
         [UnityEngine.Serialization.FormerlySerializedAs("showSkeleton")]
         public bool showBones = true;
 
+        [Tooltip("Draw the bone tubes with the ZTest-Always overlay shader, so WHENEVER the " +
+                 "skeleton is shown it reads through the point cloud / TSDF surface instead " +
+                 "of being occluded by the visitor's own body. Visibility itself is NOT " +
+                 "forced: the experience sequence stages showBones per state (bones-only " +
+                 "intro, hidden from Processing on) and must keep that authority — an " +
+                 "earlier version of this flag pinned showBones on and silently defeated " +
+                 "the choreography. For lag diagnosis just keep the sequence in a " +
+                 "bones-visible state (Consent..Shoot) or flip showBones by hand.")]
+        public bool overlayBoneShader = true;
+
         // ---- Shared.IViewToggle (unified Views panel) ----
         public string ViewLabel => "BT skeleton";
         public bool Visible { get => showBones; set => showBones = value; }
@@ -810,6 +820,13 @@ namespace BodyTracking
 
             // Late-binding for renderers spawned mid-Play by SensorManager.
             BindNewRenderers();
+
+            // Shader policy only — visibility stays with its owners (the experience
+            // sequence's ApplyBonesVisibility, the Views panel, the operator). Set every
+            // frame rather than in OnEnable because BodyVisual reads the static when it
+            // builds a visual's materials, and visuals are created on demand as bodies
+            // appear.
+            BodyVisual.OverlayBones = overlayBoneShader;
 
             // Always merge/update the skeleton so data consumers (BonePoseHistory / TSDF trail) keep
             // getting current poses. showBones no longer gates the compute — it flows into the visual
