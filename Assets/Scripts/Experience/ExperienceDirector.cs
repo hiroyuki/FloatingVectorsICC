@@ -3487,12 +3487,10 @@ namespace Experience
             else
             {
                 var r = _publishTask.Result;
-                _qrUrl = config.qrUrlKind switch
-                {
-                    QrUrlKind.Glb => r.GlbUrl,
-                    QrUrlKind.Usdz => r.UsdzUrl,
-                    _ => string.IsNullOrEmpty(r.UsdzUrl) ? r.GlbUrl : r.UsdzUrl,
-                };
+                // The model uploads to LFKS as before; the QR points at the ICC
+                // viewer page for the upload API's file id (?id=…), not the raw
+                // download link.
+                _qrUrl = config.BuildQrUrl(r.GlbId, r.UsdzId, r.GlbUrl, r.UsdzUrl);
                 _exportDone = true;
             }
             _exportRoutine = null;

@@ -310,13 +310,10 @@ namespace Experience
             }
 
             // -- QR --
+            // Same as the visitor flow: upload to LFKS, but point the QR at the
+            // ICC viewer page for the upload API's file id (?id=…).
             var r = task.Result;
-            string url = cfg.qrUrlKind switch
-            {
-                QrUrlKind.Glb => r.GlbUrl,
-                QrUrlKind.Usdz => r.UsdzUrl,
-                _ => string.IsNullOrEmpty(r.UsdzUrl) ? r.GlbUrl : r.UsdzUrl,
-            };
+            string url = cfg.BuildQrUrl(r.GlbId, r.UsdzId, r.GlbUrl, r.UsdzUrl);
             var tex = new QrUrlPresenter().Present(url);
             if (tex != null) qrOverlay?.Show(tex, $"t{trailSamples} {stamp}");
             SetStatus($"done in {sw.ElapsedMilliseconds / 1000.0:0.0}s" +
