@@ -27,7 +27,7 @@ MonoBehaviour:
     skipConsent: 0
     skipWelcome: 0
     skipCalibrate: 0
-    skipTestMoves: 0
+    skipTestMoves: 1
     skipShoot: 0
     dummyShoot: 0
     skipProcessing: 0
@@ -99,7 +99,7 @@ MonoBehaviour:
   shootingSe: {fileID: 8300000, guid: 537429de4cecb4c4f93df294be47b7e3, type: 3}
   processingSe: {fileID: 8300000, guid: 550e33b36405140a4bb1ee651c1d90fa, type: 3}
   resultSe: {fileID: 8300000, guid: 5fdde94a6f475e845824dd446a167473, type: 3}
-  qrShowSe: {fileID: 8300000, guid: cdbb28b1dce6342d49f18862609edc41, type: 3}
+  qrShowSe: {fileID: 8300000, guid: 91c4190147ddab84488ad3063ef51380, type: 3}
   exportFailedSe: {fileID: 8300000, guid: dc885d19d34ee486c815973e3da4ecdc, type: 3}
   crowdSe: {fileID: 8300000, guid: ce17e0059052147ebab1852c173dcc2d, type: 3}
   countdownTickSe: {fileID: 8300000, guid: 38e147a450fe57c4abc082e7a83d6ccf, type: 3}
