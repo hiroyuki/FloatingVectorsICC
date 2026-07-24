@@ -3154,7 +3154,7 @@ MonoBehaviour:
   debugForceFault: 0
   debugPoseDiagnostics: 1
   compareCurveSources: 0
-  debugCurveTrace: 0
+  debugCurveTrace: 1
 --- !u!114 &1565704635
 MonoBehaviour:
   m_ObjectHideFlags: 0
