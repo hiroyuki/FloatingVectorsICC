@@ -47,6 +47,7 @@ MonoBehaviour:
   presentationOrbitYawSpeedDeg: 30
   presentationOrbitEaseInSeconds: 1.5
   presentationOrbitBobMeters: 0.4
+  presentationOrbitSeconds: 15
   presentationSeedCount: 60000
   presentationTailAlpha: 1
   presentationDecimatePercent: 7.9
@@ -67,7 +68,7 @@ MonoBehaviour:
   captureStartOffsetSeconds: 0.25
   recordPreRollSeconds: 0.3
   devCannedTakeRoot: D:\Dropbox\projects\ICC\Recordings\RecordingBase\2026-07-14_15-50-24
-  devCannedTakeRootMacOverride: 
+  devCannedTakeRootMacOverride: /Users/horihiroyuki/Dropbox/projects/ICC/Recordings/RecordingBase/2026-07-14_15-09-52
   devStateJumpHotkeys: 1
   devLoopEntrancePlayback: 1
   devCannedTakeTailSeconds: 6
