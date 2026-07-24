@@ -167,6 +167,16 @@ namespace Experience
                  "interrupt a visitor mid-experience.")]
         public bool autoRecoverCameras = true;
 
+        [Tooltip("Spawn the k4abt LiveSkeletonFeed as a fallback when the live RTMPose " +
+                 "fusion (LiveFusedBodySource) is inactive or dies mid-session. OFF: the " +
+                 "show never runs k4abt — RTMPose is the only skeleton pipeline, and if it " +
+                 "is down there is simply no live tracking (calibration/presence use the " +
+                 "remaining signals; a fault recovers through RTMPose). Default OFF because " +
+                 "spawning k4abt workers alongside/after RTMPose has only caused trouble " +
+                 "(orphaned worker processes, GPU contention). Turn ON only to restore the " +
+                 "old k4abt-fallback safety net.")]
+        public bool k4abtFallbackEnabled = false;
+
         [Min(0.5f)]
         [Tooltip("Pause between destroying the renderers and re-opening them, so the " +
                  "OrbbecSDK pipelines finish releasing the USB devices. Re-opening " +

@@ -89,6 +89,25 @@ namespace BodyTracking
         /// crash can't strand it true.</summary>
         [System.NonSerialized] public bool muteWorkerIngest;
 
+        /// <summary>Hard-disable the k4abt worker path. While true, DispatchRawFrame
+        /// never spawns or feeds a worker — regardless of <see cref="useExternalBodies"/>
+        /// — and setting it true stops any workers already running. The experience flow
+        /// sets this when its k4abt fallback is disabled (ExperienceConfig
+        /// k4abtFallbackEnabled=false) so RTMPose is the ONLY skeleton pipeline: even
+        /// when RTMPose is inactive/dies (which clears useExternalBodies), the merger
+        /// must not fall back to k4abt. Runtime-only, restored by the director on exit.</summary>
+        [System.NonSerialized] private bool _suppressWorkers;
+        public bool SuppressWorkers
+        {
+            get => _suppressWorkers;
+            set
+            {
+                if (_suppressWorkers == value) return;
+                _suppressWorkers = value;
+                if (value) StopAllWorkers();
+            }
+        }
+
         [Tooltip("External body source mode (e.g. LiveFusedBodySource running the RTMPose " +
                  "fusion). While true, skeletons arrive exclusively through " +
                  "SubmitExternalBodies: k4abt workers are never spawned and recorded " +
@@ -825,6 +844,19 @@ namespace BodyTracking
             Debug.Log($"[{nameof(SkeletonMerger)}] workers restarted (attract→live handoff).", this);
         }
 
+        /// <summary>Stop every running k4abt worker and drop the worker slots, without
+        /// touching subscriptions. Called when <see cref="SuppressWorkers"/> is turned
+        /// on: DispatchRawFrame's early return then keeps them from respawning (unlike
+        /// RestartWorkers, which lets bound sources respawn fresh ones).</summary>
+        private void StopAllWorkers()
+        {
+            foreach (var serial in new List<string>(_latestBySerial.Keys))
+            {
+                if (workerHost != null) workerHost.StopWorker(serial);
+            }
+            _latestBySerial.Clear();
+        }
+
         /// <summary>Current merged WORLD position of one joint (single-person: first visual),
         /// read straight from the per-frame smoothed pose — NOT the fading-trail buffer. Returns
         /// false if no body or the joint isn't currently valid. Used by the TSDF trail capture so
@@ -1192,6 +1224,12 @@ namespace BodyTracking
             // Data ingestion is independent of showBones now — that toggle only controls whether the
             // skeleton is DRAWN (bones + joints), so consumers like BonePoseHistory keep getting poses
             // while the skeleton is hidden.
+
+            // Hard k4abt suppression (experience flow, k4abtFallbackEnabled=false):
+            // never spawn or feed a worker regardless of useExternalBodies. RTMPose is
+            // the only pipeline; if it is down there is simply no k4abt fallback. Placed
+            // FIRST so a cleared useExternalBodies (RTMPose OnDisable) can't slip through.
+            if (_suppressWorkers) return;
 
             // External-source mode: skeletons arrive through SubmitExternalBodies;
             // never spawn or feed k4abt workers.

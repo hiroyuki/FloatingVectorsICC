@@ -279,6 +279,7 @@ namespace Experience
         private bool _savedIgnoreRecorded;
         private bool _savedUseExternal;
         private bool _savedShowBones;
+        private bool _savedMergerSuppressWorkers;
 
         // point-cloud content (calibration finish → Shoot) + bottom-up reveal
         private PointCloudView _pcView;
@@ -427,7 +428,7 @@ namespace Experience
             // two live pipelines would fight for the GPU — and reassert the
             // current state's body-source mode (the recovered component
             // re-enabled with its own serialized flags).
-            if (_liveFeed == null && !LfbsActive)
+            if (_liveFeed == null && !LfbsActive && config.k4abtFallbackEnabled)
             {
                 Debug.LogWarning($"[{nameof(ExperienceDirector)}] live fused source inactive — " +
                                  "spawning the k4abt LiveSkeletonFeed fallback.", this);
@@ -707,14 +708,20 @@ namespace Experience
             _presence.yBandMin = config.yBandMin;
             _presence.yBandMax = config.yBandMax;
             _presence.occupancyThreshold = config.occupancyThreshold;
-            // k4abt live-skeleton feed: only when no live CUDA fusion runs — with
-            // LiveFusedBodySource active, pose detection reads the fused skeleton
-            // and spawning k4abt workers would just fight it for the GPU. Update()
-            // watches for a mid-session fused-source death and spawns the feed
-            // then, so the k4abt fallback branches always have a provider.
-            if (!LfbsActive) SpawnLiveFeed();
-            else Debug.Log($"[{nameof(ExperienceDirector)}] live fused source active — " +
-                           "k4abt LiveSkeletonFeed dormant unless the fusion stops.", this);
+            // k4abt live-skeleton feed: only when no live CUDA fusion runs AND the
+            // k4abt fallback is enabled. With LiveFusedBodySource active, pose detection
+            // reads the fused skeleton and spawning k4abt workers would just fight it for
+            // the GPU. The fallback is OFF by default (config.k4abtFallbackEnabled) —
+            // k4abt has only caused trouble (orphaned workers, contention), so the show
+            // runs RTMPose-only. When enabled, Update() also watches for a mid-session
+            // fused-source death and spawns the feed then.
+            if (!LfbsActive && config.k4abtFallbackEnabled) SpawnLiveFeed();
+            else if (LfbsActive)
+                Debug.Log($"[{nameof(ExperienceDirector)}] live fused source active — " +
+                          "k4abt LiveSkeletonFeed dormant.", this);
+            else
+                Debug.Log($"[{nameof(ExperienceDirector)}] live fused source inactive and k4abt " +
+                          "fallback disabled — running without a live skeleton provider.", this);
 
             // body-source snapshot (restored on Exit)
             if (merger != null)
@@ -722,6 +729,12 @@ namespace Experience
                 _savedIgnoreRecorded = merger.ignoreRecordedBodies;
                 _savedUseExternal = merger.useExternalBodies;
                 _savedShowBones = merger.showBones;
+                // Hard-disable the merger's own k4abt worker path for the session unless
+                // the fallback is explicitly enabled. Without this the merger respawns
+                // workers the instant RTMPose clears useExternalBodies (its OnDisable),
+                // regardless of the director-side fallback gate.
+                _savedMergerSuppressWorkers = merger.SuppressWorkers;
+                merger.SuppressWorkers = !config.k4abtFallbackEnabled;
             }
             if (liveFusedSource != null)
             {
@@ -880,6 +893,7 @@ namespace Experience
                 merger.muteWorkerIngest = false;
                 merger.useExternalBodies = _savedUseExternal;
                 merger.showBones = _savedShowBones;
+                merger.SuppressWorkers = _savedMergerSuppressWorkers;
             }
 
             if (_fsm != null) { _fsm.Changed -= OnStateChanged; _fsm = null; }
@@ -1232,7 +1246,8 @@ namespace Experience
             // interactive state now, so the restart happens on entering it.
             if (from == ExperienceState.Idle && to == ExperienceState.Consent)
             {
-                if (merger != null && !LfbsActive && HasLiveRenderers()) merger.RestartWorkers();
+                if (merger != null && !LfbsActive && config.k4abtFallbackEnabled && HasLiveRenderers())
+                    merger.RestartWorkers();
             }
 
             if (to == ExperienceState.Idle || from == ExperienceState.QrShow)
@@ -1415,7 +1430,7 @@ namespace Experience
             // every other screen uses the standard inter-state gap.
             float gapSeconds = state == ExperienceState.ResultShow
                 ? config.resultBlackGapSeconds : t.stateGapSeconds;
-            float gap = gapSeconds / Mathf.Max(0.01f, t.timeMultiplier);
+            float gap = gapSeconds;
             if (gap <= 0f || state == ExperienceState.Fault || state == ExperienceState.Idle)
             {
                 if (state != ExperienceState.Fault)
@@ -1603,8 +1618,7 @@ namespace Experience
                                     or ExperienceState.TestMove1)
                 PlaySe(config.cloudRevealSe);
 
-            float dur = config.cloudRevealSeconds
-                        / Mathf.Max(0.01f, config.timings.timeMultiplier);
+            float dur = config.cloudRevealSeconds;
             if (dur > 0f)
             {
                 Shader.SetGlobalFloat(PcRevealModeId, 1f);
@@ -1625,8 +1639,7 @@ namespace Experience
             // Idle / Exit restore the dev value via RestoreHistorySamples).
             if (growCurves)
             {
-                float grow = config.curveGrowSeconds
-                             / Mathf.Max(0.01f, config.timings.timeMultiplier);
+                float grow = config.curveGrowSeconds;
                 for (float e = 0f; e < grow; e += Time.deltaTime)
                 {
                     poseHistory.historySamples =
@@ -2142,7 +2155,7 @@ namespace Experience
             // Sit out the inter-state beat — this routine paints the progress bar
             // every frame, which would otherwise pop in during the blank that the
             // deferred state paint (GapPaintRoutine) owns.
-            float beat = t.stateGapSeconds / Mathf.Max(0.01f, t.timeMultiplier);
+            float beat = t.stateGapSeconds;
             if (beat > 0f) yield return new WaitForSeconds(beat);
             if (string.IsNullOrEmpty(_takeRoot) || !Directory.Exists(_takeRoot))
             {
@@ -2674,8 +2687,7 @@ namespace Experience
             if (motionCurves != null) motionCurves.freeze = true;
             if (poseHistory != null) poseHistory.hold = true;
 
-            float mult = Mathf.Max(0.01f, config.timings.timeMultiplier);
-            float hold = config.shootEndFreezeHoldSeconds / mult;
+            float hold = config.shootEndFreezeHoldSeconds;
             if (hold > 0f) yield return new WaitForSeconds(hold);
 
 #if UNITY_EDITOR
@@ -2728,8 +2740,7 @@ namespace Experience
         // ensures only ONE of them is on stage while it ramps.
         private IEnumerator RampFadeCull(float from, float to)
         {
-            float mult = Mathf.Max(0.01f, config.timings.timeMultiplier);
-            float dur = Mathf.Max(0.01f, config.shootEndDissolveSeconds / mult);
+            float dur = Mathf.Max(0.01f, config.shootEndDissolveSeconds);
             int totalFrames = Mathf.Max(1, Mathf.RoundToInt(dur * 30f));
             for (int f = 1; f <= totalFrames; f++)
             {
@@ -3203,9 +3214,8 @@ namespace Experience
                         poseHistory.ReleaseHoldAndClear();
                     }
 
-                    float mult = Mathf.Max(0.01f, config.timings.timeMultiplier);
-                    float blackGap = config.resultBlackGapSeconds / mult;
-                    float revealHold = config.resultRevealDelaySeconds / mult;
+                    float blackGap = config.resultBlackGapSeconds;
+                    float revealHold = config.resultRevealDelaySeconds;
 
                     // Pure black after the dissolve, BEFORE できたよ！ (resultBlackGapSeconds).
                     if (blackGap > 0f) yield return new WaitForSeconds(blackGap);
@@ -3270,8 +3280,7 @@ namespace Experience
                     if (tsdfView != null && config.presentationSolidMesh)
                     { tsdfView.whitePointCloud = false; tsdfView.suppressDraw = false; }
                     SetOrbit(true, easeIn: true);
-                    float orbitHold = config.presentationOrbitSeconds
-                                      / Mathf.Max(0.01f, config.timings.timeMultiplier);
+                    float orbitHold = config.presentationOrbitSeconds;
                     float orbitUntil = Time.realtimeSinceStartup + orbitHold;
                     while (Active() && Time.realtimeSinceStartup < orbitUntil) yield return null;
                     if (!Active()) yield break;
@@ -3331,8 +3340,7 @@ namespace Experience
         {
             // Sit out the pure-black beat before できたよ！ (parity with the deferred
             // paint, which also uses resultBlackGapSeconds for ResultShow). 0.5s black.
-            float beat = config.resultBlackGapSeconds
-                         / Mathf.Max(0.01f, config.timings.timeMultiplier);
+            float beat = config.resultBlackGapSeconds;
             if (beat > 0f) yield return new WaitForSeconds(beat);
             if (!_active || _fsm.State != ExperienceState.ResultShow)
             { _resultShowRoutine = null; yield break; }
@@ -3349,8 +3357,7 @@ namespace Experience
             // Hold the できたよ！text ALONE on the blank stage for a moment first (the
             // gap paint lands the text at the beat; the model follows resultReveal-
             // DelaySeconds later), so the reveal reads as "done! … and here it is".
-            float revealDelay = config.resultRevealDelaySeconds
-                                / Mathf.Max(0.01f, config.timings.timeMultiplier);
+            float revealDelay = config.resultRevealDelaySeconds;
             if (revealDelay > 0f) yield return new WaitForSeconds(revealDelay);
             if (!_active || _fsm.State != ExperienceState.ResultShow)
             { _resultShowRoutine = null; yield break; }
@@ -3469,8 +3476,7 @@ namespace Experience
             // Orbit the frozen sculpture for presentationOrbitSeconds before the QR
             // appears — the FSM gates QrShow on _resultShowDone, so hold it down for
             // the orbit window. The orbit keeps running under the QR afterwards.
-            float orbitHold = config.presentationOrbitSeconds
-                              / Mathf.Max(0.01f, config.timings.timeMultiplier);
+            float orbitHold = config.presentationOrbitSeconds;
             float orbitUntil = Time.realtimeSinceStartup + orbitHold;
             while (_active && _fsm.State == ExperienceState.ResultShow
                    && Time.realtimeSinceStartup < orbitUntil) yield return null;

@@ -198,6 +198,11 @@ namespace Experience
         private bool WeFeedWorker(string serial) =>
             PlaybackHasSerial(serial)
             && merger != null
+            // Hard k4abt suppression (experience flow, k4abtFallbackEnabled=false): this
+            // feed spawns/feeds workerHost directly, bypassing DispatchRawFrame, so it
+            // must honour the same kill-switch — otherwise visitor playback (which clears
+            // useExternalBodies) would still start k4abt while the fallback is disabled.
+            && !merger.SuppressWorkers
             && !merger.IgnoreRecordedBodiesActive
             && !merger.useExternalBodies;
 
