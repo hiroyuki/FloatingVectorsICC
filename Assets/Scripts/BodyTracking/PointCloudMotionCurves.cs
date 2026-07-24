@@ -459,6 +459,26 @@ namespace BodyTracking
         /// exported trail window is guaranteed rebuilt (Phase 5 readiness).</summary>
         public int BuildVersion { get; private set; }
 
+        /// <summary>Discard the last built curve so the next Update rebuilds from the
+        /// CURRENT ring instead of drawing the stale buffer. Call at a reveal right
+        /// after <see cref="BonePoseHistory.ReleaseHoldAndClear"/>: the build keeps
+        /// running while <see cref="suppressDraw"/> hides the ぶんせきちゅう white point
+        /// cloud, so <c>_outBuf</c> still holds the full analysed curve — and the
+        /// auto-hold path would draw that stale full-length curve until the replay's
+        /// first new pose lands ("the line snaps to full, then grows"). Resetting
+        /// _hasBuilt forces the empty-ring rebuild so the trail grows from nothing.</summary>
+        public void InvalidateBuild()
+        {
+            // Full re-init, equivalent to disabling+re-enabling this GameObject: releasing the
+            // GPU buffers forces EnsureBuffers to rebuild them from the CURRENT params next frame.
+            // A flag-only reset left stale build state behind (the "stretched/exploded curves that
+            // a MotionCurves GO toggle clears" symptom) — the draw-suppressed builds through the
+            // ぶんせきちゅう white point cloud can leave the output/collect buffers in a state the
+            // reveal then keeps drawing. ReleaseBuffers also clears _hasBuilt.
+            ReleaseBuffers();
+            _lastBuildPoseVersion = ulong.MaxValue; // never equal to a real pose version
+        }
+
         private int _lastBuildParamHash;
         private ulong _lastBuildPoseVersion;
 

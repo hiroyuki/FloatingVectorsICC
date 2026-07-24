@@ -101,6 +101,13 @@ namespace Experience
         [Tooltip("Vertical bob amplitude (m) of the presentation orbit.")]
         public float presentationOrbitBobMeters = 0.4f;
 
+        [Min(0f)]
+        [Tooltip("できたよ！ result: after the replay freezes on the final decisive frame, the " +
+                 "camera orbits the held sculpture for this long. ResultShow then advances to " +
+                 "the QR (the orbit keeps running under it); each practice round hands back to " +
+                 "the live body afterwards. Applies to BOTH the practice replays and ResultShow.")]
+        public float presentationOrbitSeconds = 15f;
+
         [Header("Playback presentation look (できたよ！ replay → QrShow)")]
         // The LIVE phases use the scene's own (lighter) values — tuned so the
         // point cloud stays readable next to the curves. The replay

@@ -998,6 +998,11 @@ namespace Experience
             if (_visitorPlaybackActive || HasLiveRenderers()) return;
             if (_fsm.State == ExperienceState.Fault
                 || _fsm.State == ExperienceState.Processing) return;
+            // The practice presentation (ぶんせきちゅう white point cloud → できたよ！replay)
+            // OWNS the recorder — if the visitor take's single pass momentarily idles the
+            // transport, the entrance loop must not grab it and restart from 0 (a visible
+            // 頭出し mid white point cloud). Processing is already excluded above.
+            if (_testMovePresenting) return;
             if (sensorRecorder.CurrentState != SensorRecorder.State.Idle) return;
             if (Time.realtimeSinceStartup < _entranceRetryAt) return;
             _entranceRetryAt = Time.realtimeSinceStartup + 3f; // don't thrash a failing Load
@@ -1136,6 +1141,10 @@ namespace Experience
                 _testMovePresenting = false;
                 AbortShootEndDissolve(); // stopped mid dissolve: no half-dissolved/frozen leak
                 SetProcessingWhitePointCloud(false); // stopped mid ぶんせきちゅう: hide the white point cloud
+                // Stopped mid できたよ！replay/orbit: the reveal un-suppressed the solid
+                // mesh directly (not via the flag above), so re-hide it here too — the
+                // mesh is session-suppressed everywhere but the presentation.
+                if (tsdfView != null) { tsdfView.whitePointCloud = false; tsdfView.suppressDraw = true; }
             }
             if (from == ExperienceState.Shoot)
             {
@@ -1214,6 +1223,11 @@ namespace Experience
                     // the floor grid (ExperienceSpaceBuilder) and, as someone
                     // steps in, their live sculpture.
                     UnfreezeSculpture(); // drop the previous run's frozen result → live-follow
+                    // Re-assert the session mesh-hide: the presentation (ResultShow /
+                    // practice reveal) un-suppresses the solid TSDF mesh directly, and
+                    // that must not leak into the next visitor's live phases — the mesh
+                    // is hidden for the whole session except the できたよ！moment.
+                    if (tsdfView != null) { tsdfView.whitePointCloud = false; tsdfView.suppressDraw = true; }
                     StopVisitorPlayback();
                     // A playback session that predates Experience mode (dev
                     // session running, or loaded-and-stopped with its _Playback_*
@@ -1339,7 +1353,12 @@ namespace Experience
             // screen and its cue land together after the gap. Fault must alert
             // instantly and Idle is blank by definition — both paint immediately.
             StopRoutine(ref _gapPaintRoutine);
-            float gap = t.stateGapSeconds / Mathf.Max(0.01f, t.timeMultiplier);
+            // ResultShow holds a shorter pure-black beat before できたよ！(0.5s,
+            // resultBlackGapSeconds — matched by ResultShowRoutine's own beat);
+            // every other screen uses the standard inter-state gap.
+            float gapSeconds = state == ExperienceState.ResultShow
+                ? config.resultBlackGapSeconds : t.stateGapSeconds;
+            float gap = gapSeconds / Mathf.Max(0.01f, t.timeMultiplier);
             if (gap <= 0f || state == ExperienceState.Fault || state == ExperienceState.Idle)
             {
                 if (state != ExperienceState.Fault)
@@ -2509,46 +2528,63 @@ namespace Experience
 
             if (!(config.processingWhitePointCloud && tsdfView != null)) yield break;
 
-            // Loop the (now-converted) take as a white point cloud for the guaranteed window so
-            // it repeats visibly. Long/canned takes loop only their tail.
-            SetProcessingWhitePointCloud(true);
-            StartVisitorPlayback(takeRoot, loop: true, rate: 1f);
+            // Play the (now-converted) take ONCE at the presentation rate (1/3 =
+            // slow motion) as a white point cloud — a single slow pass, NOT a loop:
+            // the sculpture forms with the motion once, then the caller cuts to
+            // black for the reveal. Long/canned takes play only their tail (the last
+            // processingWhitePointCloudMinSeconds) so a full-length dev recording
+            // doesn't crawl for minutes at 1/3 speed.
+            // Black stage while the take spins up: hide the live cloud + suppress the
+            // curves now, but keep the TSDF MESH suppressed a moment longer. The mesh
+            // draws the LAST published volume — the frozen pre-shoot body — so
+            // un-suppressing it here flashes that stale body until the take integrates
+            // (the "plays a little, then 頭出し"). Reveal it only after the take has
+            // published a fresh volume below.
+            SetCloudRenderersVisible(false);
+            if (motionCurves != null) motionCurves.suppressDraw = true;
+            // Wipe the live residue so the white point cloud forms FROM the take, not on
+            // top of the pre-shoot body (the touched-block clear alone leaves a ghost).
+            if (tsdfIntegrator != null) tsdfIntegrator.RequestFullClearNextBatch();
+            float rate = Mathf.Clamp(config.presentationPlaybackRate, 0.05f, 2f);
+            StartVisitorPlayback(takeRoot, loop: false, rate: rate);
             if (!_visitorPlaybackActive || sensorRecorder == null || !sensorRecorder.IsPlaying) yield break;
+            // The white point cloud is MESH-ONLY (the point cloud renderers are hidden), so there
+            // is no skeleton to align to — the playback render delay only pins the mesh on
+            // frame 0 for its first playbackRenderDelayFrames frames and truncates the tail.
+            // Play it frame-exact. The reveal replay's StartVisitorPlayback re-asserts
+            // config.playbackRenderDelayFrames for the cloud.
+            sensorRecorder.playbackRenderDelayFrames = 0;
 
             double dur = Math.Max(0.1, sensorRecorder.PlaybackDurationSeconds);
-            double loopStart = dur > config.processingWhitePointCloudMinSeconds
+            double startAt = dur > config.processingWhitePointCloudMinSeconds
                 ? dur - config.processingWhitePointCloudMinSeconds : 0;
-            bool seekPending = loopStart > 0;
-            Action onWrap = () => { if (loopStart > 0) seekPending = true; };
-            sensorRecorder.OnPlaybackLooped += onWrap;
-            try
+            if (startAt > 0 && sensorRecorder.SeekToPlayheadSeconds(startAt))
+                sensorRecorder.ResumePlayback();
+
+            // Hold black until the take has integrated a fresh volume (PublishVersion
+            // advances), so the mesh appears already showing the take instead of the
+            // stale pre-shoot body. Capped so a stalled integrator can't hang the phase.
+            int startPub = tsdfVolume != null ? tsdfVolume.PublishVersion : 0;
+            int warm = 0;
+            while (warm++ < 15 && _active && sensorRecorder != null && sensorRecorder.IsPlaying
+                   && tsdfVolume != null && tsdfVolume.PublishVersion == startPub)
             {
-                if (seekPending)
-                {
-                    seekPending = false;
-                    if (sensorRecorder.SeekToPlayheadSeconds(loopStart)) sensorRecorder.ResumePlayback();
-                }
-                float minLoop = config.processingWhitePointCloudMinSeconds
-                                / Mathf.Max(0.01f, config.timings.timeMultiplier);
-                float until = Time.realtimeSinceStartup + minLoop;
-                while (_active && sensorRecorder != null && sensorRecorder.IsPlaying
-                       && Time.realtimeSinceStartup < until)
-                {
-                    if (seekPending)
-                    {
-                        seekPending = false;
-                        if (sensorRecorder.SeekToPlayheadSeconds(loopStart)) sensorRecorder.ResumePlayback();
-                    }
-                    if (showProgressBar) _ui.ShowProgress(progressTo, caption);
-                    else _ui.ShowMessage(caption);
-                    yield return null;
-                }
+                if (!showProgressBar) _ui.ShowMessage(caption);
+                yield return null;
             }
-            finally
+            SetProcessingWhitePointCloud(true); // reveal the mesh — now the take's, not the residue
+
+            // Wait for the single pass to finish: loop is off, so the recorder stops
+            // itself at the last frame (IsPlaying → false). Safety deadline guards a
+            // stalled transport (slow disk / stuck clock).
+            double passSeconds = (dur - startAt) / Mathf.Max(0.01f, rate);
+            float deadline = Time.realtimeSinceStartup + (float)passSeconds + 2f;
+            while (_active && sensorRecorder != null && sensorRecorder.IsPlaying
+                   && Time.realtimeSinceStartup < deadline)
             {
-                // Runs even if the coroutine is stopped mid-loop (StopRoutine disposes
-                // the iterator) — never leak the OnPlaybackLooped subscription.
-                if (sensorRecorder != null) sensorRecorder.OnPlaybackLooped -= onWrap;
+                if (showProgressBar) _ui.ShowProgress(progressTo, caption);
+                else _ui.ShowMessage(caption);
+                yield return null;
             }
         }
 
@@ -2865,6 +2901,16 @@ namespace Experience
                     SetCloudRenderersVisible(true);
                     if (motionCurves != null) { motionCurves.freeze = false; motionCurves.suppressDraw = false; }
                     if (poseHistory != null) poseHistory.ReleaseHoldAndClear();
+                    // The curve build kept running (draw-suppressed) through the white
+                    // point cloud, so _outBuf holds the full analysed curve — drop it so
+                    // the reveal grows the trail from nothing instead of flashing it full.
+                    if (motionCurves != null) motionCurves.InvalidateBuild();
+                    // Solid shaded TSDF mesh (config.presentationSolidMesh) is DEFERRED to
+                    // the freeze below, NOT shown here: it is frozen at the take's final
+                    // accumulated pose, so revealing it now would stand the finished figure
+                    // at its end position while the cloud + ribbons still grow from zero
+                    // ("動いた先の自分に、カーブ付きの人間が向かっていく"). The replay grows
+                    // clean; the solid model completes when the take freezes.
                     StartVisitorPlayback(takeRoot, loop: true,
                                          rate: config.presentationPlaybackRate);
                     played = _visitorPlaybackActive && sensorRecorder != null && sensorRecorder.IsPlaying;
@@ -2872,9 +2918,7 @@ namespace Experience
                 if (played)
                 {
                     // Camera stays STILL through the replay (same as ResultShow) — the
-                    // model appears and its ribbons grow with a fixed camera. Practice
-                    // hands straight back to live afterwards, so there is no post-replay
-                    // orbit ease-in here (that belongs to ResultShow's held QR frame).
+                    // model appears and its ribbons grow with a fixed camera.
                     SetPresentationLook(true);
                     // Canned dev take: replay only its tail — a full-length entrance
                     // recording would otherwise loop for minutes. (A recorded or
@@ -2887,11 +2931,33 @@ namespace Experience
                     yield return RunPlaybackLoops(state, startAt);
                     if (!Active()) yield break;
 
+                    // Freeze on the final decisive frame, then orbit the camera around
+                    // the held sculpture for presentationOrbitSeconds (parity with
+                    // ResultShow's できたよ！moment), before handing back to live.
+                    if (poseHistory != null) poseHistory.hold = true;
+                    if (motionCurves != null) motionCurves.freeze = true;
+                    // NOW reveal the solid shaded TSDF mesh (config.presentationSolidMesh):
+                    // the replay has landed on its final pose, so the frozen sculpture and
+                    // the cloud/ribbons line up instead of the mesh pre-standing at the end.
+                    // The hand-back below re-hides it for live.
+                    if (tsdfView != null && config.presentationSolidMesh)
+                    { tsdfView.whitePointCloud = false; tsdfView.suppressDraw = false; }
+                    SetOrbit(true, easeIn: true);
+                    float orbitHold = config.presentationOrbitSeconds
+                                      / Mathf.Max(0.01f, config.timings.timeMultiplier);
+                    float orbitUntil = Time.realtimeSinceStartup + orbitHold;
+                    while (Active() && Time.realtimeSinceStartup < orbitUntil) yield return null;
+                    if (!Active()) yield break;
+
                     // hand the stage back to the live body for the next round
                     // (the ribbons keep drawing — point cloud + curves is the
                     // live look now too, just with the scene's lighter values)
                     SetOrbit(false);
                     SetPresentationLook(false);
+                    if (motionCurves != null) motionCurves.freeze = false;
+                    // Re-hide the solid mesh the reveal un-suppressed — live is
+                    // point cloud + ribbons only (the mesh is session-suppressed).
+                    if (tsdfView != null) { tsdfView.whitePointCloud = false; tsdfView.suppressDraw = true; }
                     StopVisitorPlayback();
                     ApplyBodySource(BodySource.Live);
                     if (HasLiveRenderers())
@@ -2936,8 +3002,9 @@ namespace Experience
         // ResultShowDone — the FSM waits for it alongside ExportDone.
         private IEnumerator ResultShowRoutine()
         {
-            // Sit out the inter-state beat (parity with the deferred paint).
-            float beat = config.timings.stateGapSeconds
+            // Sit out the pure-black beat before できたよ！ (parity with the deferred
+            // paint, which also uses resultBlackGapSeconds for ResultShow). 0.5s black.
+            float beat = config.resultBlackGapSeconds
                          / Mathf.Max(0.01f, config.timings.timeMultiplier);
             if (beat > 0f) yield return new WaitForSeconds(beat);
             if (!_active || _fsm.State != ExperienceState.ResultShow)
@@ -2972,17 +3039,17 @@ namespace Experience
             SetCloudRenderersVisible(true);
             if (motionCurves != null) { motionCurves.freeze = false; motionCurves.suppressDraw = false; }
             if (poseHistory != null) poseHistory.ReleaseHoldAndClear();
+            // Drop the stale full curve the Processing white point cloud left in _outBuf
+            // (draw-suppressed build) so the ribbons grow from nothing here too.
+            if (motionCurves != null) motionCurves.InvalidateBuild();
             // Optional solid-mesh final model (A/B knob, config.presentationSolidMesh):
             // by default the mesh stays suppressed and the finished model is cloud +
             // ribbons; when on, draw the solid shaded TSDF mesh (with self-shadow) inside
-            // the ribbons. The Processing white point cloud left it suppressed — override here so
-            // the choice sticks through the ResultShow/QrShow orbit. The exit restore
-            // (EnterMode's _savedTsdfSuppress) puts it back for the next visitor.
-            if (tsdfView != null && config.presentationSolidMesh)
-            {
-                tsdfView.whitePointCloud = false;
-                tsdfView.suppressDraw = false;
-            }
+            // the ribbons. DEFERRED to the freeze after the replay (below), NOT revealed
+            // here: the mesh is frozen at the take's final accumulated pose, so showing it
+            // now would stand the finished figure at its end position while the cloud +
+            // ribbons still grow from zero ("動いた先の自分に、カーブ付きの人間が向かって
+            // いく"). Revealed at the freeze so the solid model completes with the replay.
 
             // Restart the take from the top, looping. Processing left the
             // transport loaded and stopped at the final frame; a dev jump
@@ -2996,6 +3063,12 @@ namespace Experience
                                  "holding the frozen frame instead.", this);
                 if (poseHistory != null) poseHistory.hold = true;
                 if (motionCurves != null) motionCurves.freeze = true;
+                // No replay to grow into — the frozen frame IS the final accumulated
+                // pose, so reveal the solid mesh here too (the freeze path below never
+                // runs on this branch). Without it presentationSolidMesh would show
+                // cloud+ribbons only through QR when playback fails to start.
+                if (tsdfView != null && config.presentationSolidMesh)
+                { tsdfView.whitePointCloud = false; tsdfView.suppressDraw = false; }
                 _resultShowDone = true;
                 _resultShowRoutine = null;
                 yield break;
@@ -3022,7 +3095,24 @@ namespace Experience
             // final skeleton.
             if (poseHistory != null) poseHistory.hold = true;
             if (motionCurves != null) motionCurves.freeze = true;
+            // NOW reveal the solid shaded TSDF mesh (config.presentationSolidMesh): the
+            // replay has settled on its final pose, so the frozen sculpture lines up with
+            // the cloud/ribbons instead of pre-standing at the end. Sticks through the
+            // ResultShow/QrShow orbit; EnterMode's _savedTsdfSuppress restores it on exit.
+            if (tsdfView != null && config.presentationSolidMesh)
+            {
+                tsdfView.whitePointCloud = false;
+                tsdfView.suppressDraw = false;
+            }
             SetOrbit(true, easeIn: true);
+            // Orbit the frozen sculpture for presentationOrbitSeconds before the QR
+            // appears — the FSM gates QrShow on _resultShowDone, so hold it down for
+            // the orbit window. The orbit keeps running under the QR afterwards.
+            float orbitHold = config.presentationOrbitSeconds
+                              / Mathf.Max(0.01f, config.timings.timeMultiplier);
+            float orbitUntil = Time.realtimeSinceStartup + orbitHold;
+            while (_active && _fsm.State == ExperienceState.ResultShow
+                   && Time.realtimeSinceStartup < orbitUntil) yield return null;
             _resultShowDone = true;
             _resultShowRoutine = null;
         }
