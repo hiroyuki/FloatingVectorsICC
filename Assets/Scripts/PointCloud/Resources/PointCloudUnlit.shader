@@ -14,6 +14,7 @@ Shader "Orbbec/PointCloudUnlit"
 {
     Properties
     {
+        _Brightness ("Brightness", Range(0, 3)) = 1
         _ObbMode    ("OBB Mode (0=Disabled 1=KeepInside 2=KeepOutside)", Float) = 0
         _DecimKeep  ("Decimation Keep Ratio [0..1]", Float) = 1
         _DecimFrame ("Decimation Frame Counter",   Float) = 0
@@ -112,6 +113,7 @@ Shader "Orbbec/PointCloudUnlit"
             // 1 = fully dissolved. Each point gets a STABLE per-vertex threshold, so
             // it thins out in a fixed order rather than sparkling frame to frame.
             float    _PcFadeCull;
+            float    _Brightness;
 
             struct appdata
             {
@@ -298,7 +300,7 @@ Shader "Orbbec/PointCloudUnlit"
                     ? mul(UNITY_MATRIX_VP, float4(wpOut, 1.0))
                     : UnityObjectToClipPos(v.vertex);
                 o.vertex = keep ? clipPos : float4(2.0, 2.0, 2.0, 1.0);
-                o.color = outColor;
+                o.color = outColor * _Brightness;
                 o.psize = 1.0;
                 return o;
             }

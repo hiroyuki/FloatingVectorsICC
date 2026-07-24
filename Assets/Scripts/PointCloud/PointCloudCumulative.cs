@@ -107,6 +107,29 @@ namespace PointCloud
         }
         private bool _snapshotsVisible = true;
 
+        /// <summary>Brightness shared by existing and future snapshot renderers.
+        /// PointCloudView owns this value so Live, Playback, and accumulated clouds
+        /// stay visually consistent.</summary>
+        public float Brightness
+        {
+            get => _brightness;
+            set
+            {
+                value = Mathf.Clamp(value, 0f, 3f);
+                if (Mathf.Approximately(_brightness, value)) return;
+                _brightness = value;
+                for (int i = 0; i < _snapshots.Count; i++)
+                {
+                    var go = _snapshots[i];
+                    if (go == null) continue;
+                    ApplyBrightness(go.GetComponent<MeshRenderer>());
+                }
+            }
+        }
+        private float _brightness = 1f;
+        private static readonly int BrightnessId = Shader.PropertyToID("_Brightness");
+        private MaterialPropertyBlock _appearanceBlock;
+
         // --- Diagnostics state ---
         // Per-second window counters / timers. _diagSw is shared because the three
         // bracketed regions (readback, filter, mesh) never nest.
@@ -405,6 +428,7 @@ namespace PointCloud
 
             var mat = snapshotMaterial != null ? snapshotMaterial : fallbackMaterial;
             if (mat != null) mr.sharedMaterial = mat;
+            ApplyBrightness(mr);
 
             go.transform.SetParent(rendererTransform, worldPositionStays: false);
             go.transform.SetParent(transform, worldPositionStays: true);
@@ -556,6 +580,7 @@ namespace PointCloud
 
             var mat = snapshotMaterial != null ? snapshotMaterial : fallbackMaterial;
             if (mat != null) mr.sharedMaterial = mat;
+            ApplyBrightness(mr);
 
             // Freeze the snapshot's world transform to the renderer's current world transform,
             // then reparent to this cumulative GO preserving that world transform. Future
@@ -581,6 +606,15 @@ namespace PointCloud
             if (_sharedIndices.IsCreated) _sharedIndices.Dispose();
             _sharedIndices = new NativeArray<uint>(count, Allocator.Persistent, NativeArrayOptions.UninitializedMemory);
             for (int i = 0; i < count; i++) _sharedIndices[i] = (uint)i;
+        }
+
+        private void ApplyBrightness(MeshRenderer mr)
+        {
+            if (mr == null) return;
+            if (_appearanceBlock == null) _appearanceBlock = new MaterialPropertyBlock();
+            mr.GetPropertyBlock(_appearanceBlock);
+            _appearanceBlock.SetFloat(BrightnessId, _brightness);
+            mr.SetPropertyBlock(_appearanceBlock);
         }
 
         private void EnsureFilterScratch(int capacity)
