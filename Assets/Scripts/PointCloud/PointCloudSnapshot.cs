@@ -48,9 +48,12 @@ namespace PointCloud
 
             // Capsule person-mask (PassCapsules). Mode 1 keeps inside the
             // capsule union, mode 2 keeps outside; radius rides in CapsuleA.w.
+            // Deliberately active even with ZERO capsules — the shader is too:
+            // KeepInside with an empty union (tracking gap, feeder cleared)
+            // hides the whole cloud on screen, so the export must go empty as
+            // well, not fall back to the unmasked cloud.
             bool useCaps = capsules != null
-                && capsules.Mode != PointCloudCapsuleFilter.FilterMode.Disabled
-                && capsules.CapsuleCount > 0;
+                && capsules.Mode != PointCloudCapsuleFilter.FilterMode.Disabled;
             bool capsKeepInside = useCaps
                 && capsules.Mode == PointCloudCapsuleFilter.FilterMode.KeepInside;
             int capsCount = useCaps ? capsules.CapsuleCount : 0;
