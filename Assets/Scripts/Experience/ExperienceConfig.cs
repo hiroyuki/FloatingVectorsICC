@@ -432,6 +432,43 @@ namespace Experience
         [Min(0f)] public float dryRunDelaySeconds = 1f;
         public QrUrlKind qrUrlKind = QrUrlKind.First;
 
+        [Tooltip("Viewer page the QR points at. The sculpture id — the uploaded " +
+                 "glb's file name without extension, e.g. exp_20260723_225648 — is " +
+                 "appended as ?id=…, so the model still uploads to LFKS but the QR " +
+                 "opens the ICC viewer instead of the raw file. Empty = fall back to " +
+                 "the raw LFKS download link per qrUrlKind.")]
+        public string viewerBaseUrl = "https://hyper.ntticc.or.jp/kids2026/unknown-but-yours/";
+
+        /// <summary>The URL the QR encodes. When <see cref="viewerBaseUrl"/> is set,
+        /// it is the viewer page for the sculpture's server-assigned id (the upload
+        /// API's <c>id</c> — same value the download link is built from), selected by
+        /// <see cref="qrUrlKind"/> just like the raw link. Falls back to the raw LFKS
+        /// download link when the base is blank or no id came back.</summary>
+        public string BuildQrUrl(string glbId, string usdzId, string glbUrl, string usdzUrl)
+        {
+            string baseUrl = (viewerBaseUrl ?? "").Trim();
+            if (baseUrl.Length > 0)
+            {
+                string id = qrUrlKind switch
+                {
+                    QrUrlKind.Glb => glbId,
+                    QrUrlKind.Usdz => usdzId,
+                    _ => string.IsNullOrEmpty(usdzId) ? glbId : usdzId,
+                };
+                if (!string.IsNullOrEmpty(id))
+                {
+                    string joiner = baseUrl.Contains("?") ? "&" : "?";
+                    return $"{baseUrl}{joiner}id={System.Uri.EscapeDataString(id)}";
+                }
+            }
+            return qrUrlKind switch
+            {
+                QrUrlKind.Glb => glbUrl,
+                QrUrlKind.Usdz => usdzUrl,
+                _ => string.IsNullOrEmpty(usdzUrl) ? glbUrl : usdzUrl,
+            };
+        }
+
         [Tooltip("SHA-256 (hex) of StreamingAssets/lfks/upload.ps1 — the publisher " +
                  "refuses to run a script whose bytes changed. Not a secret.")]
         public string uploadScriptSha256 =

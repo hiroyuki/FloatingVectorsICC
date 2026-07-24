@@ -26,6 +26,10 @@ namespace Experience.Publishing
                 Success = true,
                 GlbUrl = $"https://dry.run/files/{Path.GetFileName(glbPath)}",
                 UsdzUrl = $"https://dry.run/files/{Path.GetFileName(usdzPath)}",
+                // No server id offline — stand in with the file-name stem so the
+                // viewer URL is still well-formed (?id=exp_{stamp}) for dev checks.
+                GlbId = Path.GetFileNameWithoutExtension(glbPath),
+                UsdzId = Path.GetFileNameWithoutExtension(usdzPath),
             };
         }
     }

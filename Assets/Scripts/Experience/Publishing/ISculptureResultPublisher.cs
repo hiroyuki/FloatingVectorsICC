@@ -13,6 +13,11 @@ namespace Experience.Publishing
         public bool Success;
         public string GlbUrl;
         public string UsdzUrl;
+        // Server-assigned file ids from the upload API (LfksResult.id). The QR's
+        // viewer URL keys off these (?id=…), not the local file name. Empty from
+        // the dry-run publisher, which has no server round-trip.
+        public string GlbId;
+        public string UsdzId;
         public string Error;
     }
 

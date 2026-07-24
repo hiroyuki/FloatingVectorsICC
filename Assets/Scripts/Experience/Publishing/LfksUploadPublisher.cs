@@ -67,12 +67,16 @@ namespace Experience.Publishing
             if (!VerifyScript(out string why))
                 return Fail(why);
 
-            var (glbUrl, glbErr) = await UploadWithRetryAsync(glbPath, ct);
+            var (glbUrl, glbId, glbErr) = await UploadWithRetryAsync(glbPath, ct);
             if (glbUrl == null) return Fail($"glb upload failed: {glbErr}");
-            var (usdzUrl, usdzErr) = await UploadWithRetryAsync(usdzPath, ct);
+            var (usdzUrl, usdzId, usdzErr) = await UploadWithRetryAsync(usdzPath, ct);
             if (usdzUrl == null) return Fail($"usdz upload failed: {usdzErr}");
 
-            return new PublishResult { Success = true, GlbUrl = glbUrl, UsdzUrl = usdzUrl };
+            return new PublishResult
+            {
+                Success = true, GlbUrl = glbUrl, UsdzUrl = usdzUrl,
+                GlbId = glbId, UsdzId = usdzId,
+            };
         }
 
         private static PublishResult Fail(string error) =>
@@ -97,18 +101,18 @@ namespace Experience.Publishing
             return true;
         }
 
-        private async Task<(string url, string error)> UploadWithRetryAsync(string filePath, CancellationToken ct)
+        private async Task<(string url, string id, string error)> UploadWithRetryAsync(string filePath, CancellationToken ct)
         {
-            var (url, error) = await UploadOnceAsync(filePath, ct);
-            if (url != null) return (url, null);
+            var (url, id, error) = await UploadOnceAsync(filePath, ct);
+            if (url != null) return (url, id, null);
             ct.ThrowIfCancellationRequested();
             UnityEngine.Debug.LogWarning($"[LfksUploadPublisher] retrying {Path.GetFileName(filePath)}: {error}");
             return await UploadOnceAsync(filePath, ct);
         }
 
-        private async Task<(string url, string error)> UploadOnceAsync(string filePath, CancellationToken ct)
+        private async Task<(string url, string id, string error)> UploadOnceAsync(string filePath, CancellationToken ct)
         {
-            if (!File.Exists(filePath)) return (null, $"file missing: {filePath}");
+            if (!File.Exists(filePath)) return (null, null, $"file missing: {filePath}");
             // Injection guard for every value interpolated into the command:
             // a single quote would escape the PowerShell string, a DOUBLE quote
             // would terminate the outer Windows -Command argument itself, and
@@ -116,7 +120,7 @@ namespace Experience.Publishing
             // contain any of these — a hostile config must not build a shell.
             if (!IsSafeArgument(_scriptPath) || !IsSafeArgument(filePath) || !IsSafeArgument(_remoteDirectory)
                 || !IsSafeArgument(_apiUrl))
-                return (null, "path, remote directory or api url contains a quote/control character");
+                return (null, null, "path, remote directory or api url contains a quote/control character");
 
             string dirArg = _remoteDirectory.Length > 0 ? $" -Directory '{_remoteDirectory}'" : "";
             // Empty = the script's own baked-in origin (the domain it was pinned
@@ -138,7 +142,7 @@ namespace Experience.Publishing
 
             using var proc = new Process { StartInfo = psi };
             try { proc.Start(); }
-            catch (Exception e) { return (null, $"could not start powershell: {e.Message}"); }
+            catch (Exception e) { return (null, null, $"could not start powershell: {e.Message}"); }
 
             // Start draining BOTH pipes before waiting — a full pipe would
             // otherwise deadlock the child.
@@ -154,7 +158,7 @@ namespace Experience.Publishing
                     try { proc.WaitForExit(3000); } catch { }
                     await Task.WhenAll(stdoutTask, stderrTask); // explicit post-kill drain
                     if (ct.IsCancellationRequested) ct.ThrowIfCancellationRequested();
-                    return (null, $"timed out after {_timeoutSeconds:0}s: {Tail(stderrTask.Result)}");
+                    return (null, null, $"timed out after {_timeoutSeconds:0}s: {Tail(stderrTask.Result)}");
                 }
                 await Task.Delay(100, CancellationToken.None);
             }
@@ -162,7 +166,7 @@ namespace Experience.Publishing
             string stdout = await stdoutTask;
             string stderr = await stderrTask;
             if (proc.ExitCode != 0)
-                return (null, $"upload.ps1 exited {proc.ExitCode}: {Tail(stderr)}");
+                return (null, null, $"upload.ps1 exited {proc.ExitCode}: {Tail(stderr)}");
 
             // stdout carries exactly one JSON line, but progress/blank lines
             // must not break us — take the last {...}-shaped line.
@@ -172,14 +176,14 @@ namespace Experience.Publishing
                 string line = raw.Trim();
                 if (line.StartsWith("{") && line.EndsWith("}")) json = line;
             }
-            if (json == null) return (null, $"no JSON result in output: {Tail(stdout)}");
+            if (json == null) return (null, null, $"no JSON result in output: {Tail(stdout)}");
 
             LfksResult result;
             try { result = UnityEngine.JsonUtility.FromJson<LfksResult>(json); }
-            catch (Exception e) { return (null, $"result parse failed: {e.Message}"); }
+            catch (Exception e) { return (null, null, $"result parse failed: {e.Message}"); }
             if (result == null || string.IsNullOrEmpty(result.downloadUrl))
-                return (null, $"no downloadUrl in result: {json}");
-            return (result.downloadUrl, null);
+                return (null, null, $"no downloadUrl in result: {json}");
+            return (result.downloadUrl, result.id, null);
         }
 
         /// <summary>
