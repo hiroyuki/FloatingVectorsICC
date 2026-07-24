@@ -13,6 +13,7 @@
 // Verified targets: three.js / <model-viewer> / Babylon.js / macOS Quick Look.
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Text;
@@ -22,17 +23,28 @@ namespace TSDF
 {
     internal static class GlbWriter
     {
-        /// <summary>Writes the .glb and returns its size in bytes.</summary>
-        public static long Write(string path, Vector3[] pos, Vector3[] nrm, Vector3[] col, int[] tri)
+        /// <summary>Writes the .glb and returns its size in bytes. When
+        /// <paramref name="pcPos"/> is non-empty, a second primitive of GL_POINTS
+        /// (mode 0, POSITION + COLOR_0, no indices) is emitted in the same mesh —
+        /// the decimated point cloud rendered as points alongside the curve/mesh
+        /// triangles. Point colours follow the same sRGB→linear packing.</summary>
+        public static long Write(string path, Vector3[] pos, Vector3[] nrm, Vector3[] col, int[] tri,
+                                 Vector3[] pcPos = null, Vector3[] pcCol = null)
         {
             int vc = pos.Length;
+            int pcc = pcPos != null ? pcPos.Length : 0;
+            bool hasPc = pcc > 0;
             int posBytes = vc * 12, nrmBytes = vc * 12, colBytes = vc * 4, idxBytes = tri.Length * 4;
+            int pcPosBytes = pcc * 12, pcColBytes = pcc * 4;
             int binLen = Pad4(posBytes) + Pad4(nrmBytes) + Pad4(colBytes) + Pad4(idxBytes);
+            if (hasPc) binLen += Pad4(pcPosBytes) + Pad4(pcColBytes);
 
             Vector3 min = Vector3.positiveInfinity, max = Vector3.negativeInfinity;
             foreach (var p in pos) { min = Vector3.Min(min, p); max = Vector3.Max(max, p); }
+            Vector3 pcMin = Vector3.positiveInfinity, pcMax = Vector3.negativeInfinity;
+            if (hasPc) foreach (var p in pcPos) { pcMin = Vector3.Min(pcMin, p); pcMax = Vector3.Max(pcMax, p); }
 
-            // ---- BIN chunk: positions | normals | colours | indices ----
+            // ---- BIN chunk: positions | normals | colours | indices [| pc pos | pc col] ----
             var bin = new MemoryStream(binLen);
             var bw = new BinaryWriter(bin);
             foreach (var p in pos) { bw.Write(p.x); bw.Write(p.y); bw.Write(p.z); }
@@ -47,31 +59,72 @@ namespace TSDF
             PadTo4(bw);
             foreach (var i in tri) bw.Write((uint)i);
             PadTo4(bw);
+            if (hasPc)
+            {
+                foreach (var p in pcPos) { bw.Write(p.x); bw.Write(p.y); bw.Write(p.z); }
+                PadTo4(bw);
+                foreach (var c in pcCol)
+                {
+                    bw.Write(LinearByte(c.x)); bw.Write(LinearByte(c.y)); bw.Write(LinearByte(c.z));
+                    bw.Write((byte)255);
+                }
+                PadTo4(bw);
+            }
             bw.Flush();
 
             // ---- JSON chunk ----
+            // Built dynamically so a points-only GLB (no mesh/curve triangles, vc==0)
+            // stays valid: the triangle primitive + its accessors/bufferViews are
+            // emitted only when there is mesh geometry, otherwise the point cloud is
+            // the sole primitive. An empty-mesh triangle accessor would carry the
+            // Vector3.positiveInfinity min/max and fail validators.
             var inv = CultureInfo.InvariantCulture;
+            bool hasMesh = vc > 0;
             int o0 = 0, o1 = Pad4(posBytes), o2 = o1 + Pad4(nrmBytes), o3 = o2 + Pad4(colBytes);
+            int o4 = o3 + Pad4(idxBytes), o5 = o4 + Pad4(pcPosBytes);
+            var accessors = new List<string>();
+            var bufferViews = new List<string>();
+            var primitives = new List<string>();
+            if (hasMesh)
+            {
+                accessors.Add($"{{\"bufferView\":{bufferViews.Count},\"componentType\":5126,\"count\":{vc}," +
+                    $"\"type\":\"VEC3\",\"min\":[{F(min.x, inv)},{F(min.y, inv)},{F(min.z, inv)}]," +
+                    $"\"max\":[{F(max.x, inv)},{F(max.y, inv)},{F(max.z, inv)}]}}");
+                bufferViews.Add($"{{\"buffer\":0,\"byteOffset\":{o0},\"byteLength\":{posBytes},\"target\":34962}}");
+                int posA = accessors.Count - 1;
+                accessors.Add($"{{\"bufferView\":{bufferViews.Count},\"componentType\":5126,\"count\":{vc},\"type\":\"VEC3\"}}");
+                bufferViews.Add($"{{\"buffer\":0,\"byteOffset\":{o1},\"byteLength\":{nrmBytes},\"target\":34962}}");
+                int nrmA = accessors.Count - 1;
+                accessors.Add($"{{\"bufferView\":{bufferViews.Count},\"componentType\":5121,\"count\":{vc},\"type\":\"VEC4\",\"normalized\":true}}");
+                bufferViews.Add($"{{\"buffer\":0,\"byteOffset\":{o2},\"byteLength\":{colBytes},\"target\":34962}}");
+                int colA = accessors.Count - 1;
+                accessors.Add($"{{\"bufferView\":{bufferViews.Count},\"componentType\":5125,\"count\":{tri.Length},\"type\":\"SCALAR\"}}");
+                bufferViews.Add($"{{\"buffer\":0,\"byteOffset\":{o3},\"byteLength\":{idxBytes},\"target\":34963}}");
+                int idxA = accessors.Count - 1;
+                primitives.Add($"{{\"attributes\":{{\"POSITION\":{posA},\"NORMAL\":{nrmA},\"COLOR_0\":{colA}}}," +
+                    $"\"indices\":{idxA},\"material\":0,\"mode\":4}}");
+            }
+            if (hasPc)
+            {
+                accessors.Add($"{{\"bufferView\":{bufferViews.Count},\"componentType\":5126,\"count\":{pcc}," +
+                    $"\"type\":\"VEC3\",\"min\":[{F(pcMin.x, inv)},{F(pcMin.y, inv)},{F(pcMin.z, inv)}]," +
+                    $"\"max\":[{F(pcMax.x, inv)},{F(pcMax.y, inv)},{F(pcMax.z, inv)}]}}");
+                bufferViews.Add($"{{\"buffer\":0,\"byteOffset\":{o4},\"byteLength\":{pcPosBytes},\"target\":34962}}");
+                int pcPosA = accessors.Count - 1;
+                accessors.Add($"{{\"bufferView\":{bufferViews.Count},\"componentType\":5121,\"count\":{pcc},\"type\":\"VEC4\",\"normalized\":true}}");
+                bufferViews.Add($"{{\"buffer\":0,\"byteOffset\":{o5},\"byteLength\":{pcColBytes},\"target\":34962}}");
+                int pcColA = accessors.Count - 1;
+                primitives.Add($"{{\"attributes\":{{\"POSITION\":{pcPosA},\"COLOR_0\":{pcColA}}},\"material\":0,\"mode\":0}}");
+            }
             string json =
                 "{\"asset\":{\"version\":\"2.0\",\"generator\":\"FloatingVectorsICC print export\"}," +
                 "\"scene\":0,\"scenes\":[{\"nodes\":[0]}]," +
                 "\"nodes\":[{\"mesh\":0,\"name\":\"Sculpture\"}]," +
-                "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"NORMAL\":1,\"COLOR_0\":2}," +
-                "\"indices\":3,\"material\":0,\"mode\":4}]}]," +
+                "\"meshes\":[{\"primitives\":[" + string.Join(",", primitives) + "]}]," +
                 "\"materials\":[{\"name\":\"VertexColour\",\"pbrMetallicRoughness\":" +
                 "{\"baseColorFactor\":[1,1,1,1],\"metallicFactor\":0,\"roughnessFactor\":0.9}}]," +
-                "\"accessors\":[" +
-                $"{{\"bufferView\":0,\"componentType\":5126,\"count\":{vc},\"type\":\"VEC3\"," +
-                $"\"min\":[{F(min.x, inv)},{F(min.y, inv)},{F(min.z, inv)}]," +
-                $"\"max\":[{F(max.x, inv)},{F(max.y, inv)},{F(max.z, inv)}]}}," +
-                $"{{\"bufferView\":1,\"componentType\":5126,\"count\":{vc},\"type\":\"VEC3\"}}," +
-                $"{{\"bufferView\":2,\"componentType\":5121,\"count\":{vc},\"type\":\"VEC4\",\"normalized\":true}}," +
-                $"{{\"bufferView\":3,\"componentType\":5125,\"count\":{tri.Length},\"type\":\"SCALAR\"}}]," +
-                "\"bufferViews\":[" +
-                $"{{\"buffer\":0,\"byteOffset\":{o0},\"byteLength\":{posBytes},\"target\":34962}}," +
-                $"{{\"buffer\":0,\"byteOffset\":{o1},\"byteLength\":{nrmBytes},\"target\":34962}}," +
-                $"{{\"buffer\":0,\"byteOffset\":{o2},\"byteLength\":{colBytes},\"target\":34962}}," +
-                $"{{\"buffer\":0,\"byteOffset\":{o3},\"byteLength\":{idxBytes},\"target\":34963}}]," +
+                "\"accessors\":[" + string.Join(",", accessors) + "]," +
+                "\"bufferViews\":[" + string.Join(",", bufferViews) + "]," +
                 $"\"buffers\":[{{\"byteLength\":{binLen}}}]}}";
             var jsonBytes = Encoding.UTF8.GetBytes(json);
             int jsonPadded = Pad4(jsonBytes.Length); // JSON chunk pads with spaces

@@ -344,6 +344,37 @@ namespace TSDF
         public float stlFloorRaise = 0.05f;
 
         [Header("Web export (GLB + USDZ)")]
+        [Tooltip("Include the TSDF surface mesh in the web files. OFF (spec 2026-07-24) = " +
+                 "curves-only export: the sculpture ships as its motion strokes. The mesh is " +
+                 "still captured (registration metadata + operator preview) and comes back " +
+                 "automatically when a capture has no curves.")]
+        public bool webIncludeMesh = false;
+
+        [Min(0f)]
+        [Tooltip("Approximate GLB size budget (MB) for the curve tubes. Curves are picked " +
+                 "longest-first until 85% of the budget is spent, then the shorter rest is " +
+                 "sampled evenly into the last 15% — many long strokes, few short accents. " +
+                 "0 = no budget (Web Curve Stride thins instead). USDZ tracks GLB when " +
+                 "binary usdc conversion is available; the ASCII usda fallback runs ~4x.")]
+        public float webCurveBudgetMB = 9f;
+
+        [Range(0.25f, 4f)]
+        [Tooltip("Multiply the web-export curve-tube radius by this (1 = as drawn). Fatter " +
+                 "tubes read stronger against the dark background but cost no extra file size " +
+                 "(vertex count is unchanged — only the ring is pushed out).")]
+        public float webCurveRadiusScale = 1.5f;
+
+        [Tooltip("Also write the displayed point cloud (BoundingVolume region + the Point cloud " +
+                 "decimater's %) into the web files. GLB gets a real POINTS primitive; USDZ gets " +
+                 "a tiny octahedron per point (AR Quick Look can't render true points). Registered " +
+                 "to the same frame as the curves. NOTE: floor/person masks not yet applied — the " +
+                 "cloud is wider than on-screen (floor/background survive).")]
+        public bool webIncludePointCloud = true;
+
+        [Range(0.002f, 0.02f)]
+        [Tooltip("Point size in metres (USDZ octahedron diameter). ~0.008 m reads as a dot at body scale.")]
+        public float webPointCloudSize = 0.008f;
+
         [Tooltip("Include the curved lines in the web files as real tube meshes tessellated " +
                  "from the drawn polylines (full display resolution). Unlike the print path " +
                  "there is NO voxel fuse — Fuse curves is not needed and would double them up.")]
@@ -376,6 +407,32 @@ namespace TSDF
                  "The Catmull-Rom polylines are oversampled where motion is slow; 1.5 mm halves " +
                  "the tube triangles with no visible change at 6 mm ribbons. 0 = off.")]
         public float webCurveTolerance = 0.0015f;
+
+        [Range(0f, 1f)]
+        [Tooltip("Bake ambient occlusion into the web-export vertex colours (0 = off). " +
+                 "Hemisphere raycast per vertex, multiplied in linear space — crevices " +
+                 "(armpits, chin, where tubes meet the body) darken so the shape reads under " +
+                 "the viewer's flat environment light. AO is directionless, so viewer PBR " +
+                 "lighting composes on top without double-lighting. 0.5-0.7 = visible but " +
+                 "faithful. STL/print output is unaffected.")]
+        public float webAoStrength = 0.6f;
+
+        [Range(8, 128)]
+        [Tooltip("AO rays per vertex (cosine-weighted hemisphere). 32 is smooth after the " +
+                 "built-in neighbour smoothing; raise only if banding shows. Cost is linear.")]
+        public int webAoSamples = 32;
+
+        [Range(0.05f, 1f)]
+        [Tooltip("AO search radius (m). Occluders beyond this don't darken. 0.15 m accents " +
+                 "folds and contact areas; 0.35 m adds body-scale shadowing but the TSDF's " +
+                 "edge frills and ghost shells sink the WHOLE figure (A/B tested 2026-07-24 " +
+                 "on a real take: 0.35 dims globally, 0.08 is barely visible, 0.15 is the " +
+                 "crevice-accent sweet spot).")]
+        public float webAoMaxDistance = 0.15f;
+
+        [Tooltip("Also darken the curve tubes. OFF = tubes occlude the body but keep their " +
+                 "own colour (light-stroke look). ON = tubes shade like solid geometry.")]
+        public bool webAoOnCurves = false;
 
         [Tooltip("Python with the pxr module (pip: usd-core), used to convert the .usdz payload " +
                  "to binary usdc (3-4x smaller). Empty = auto-detect: ~/.venvs/usd, then system " +
@@ -2123,10 +2180,38 @@ namespace TSDF
             triangleBudgetPerSlab = triangleBudgetPerSlab,
             meshTargetTris = webMeshTargetTris,
             includeCurves = webIncludeCurves,
-            curveStride = webCurveStride,
+            // A size budget picks from ALL drawn curves (longest-first); the
+            // stride only thins the read when no budget is set.
+            curveStride = webCurveBudgetMB > 0f ? 1 : webCurveStride,
             curveSides = webCurveSides,
             curveTipTaper = webCurveTipTaper,
             curveTolerance = webCurveTolerance,
+            includePointCloud = webIncludePointCloud,
+        };
+
+        /// <summary>The web/AR file options (AO bake, curves-only, size budget)
+        /// from the panel-tuned fields — shared by ExportWeb, the visitor flow
+        /// and the operator publish flow.</summary>
+        public TSDFSnapshotBuilder.WebFileOptions WebExportOptions() => new TSDFSnapshotBuilder.WebFileOptions
+        {
+            ao = WebAoOptions(),
+            omitMesh = !webIncludeMesh,
+            curveBudgetBytes = (long)(webCurveBudgetMB * 1048576),
+            shortCurveShare = 0.15f,
+            curveRadiusScale = webCurveRadiusScale,
+            includePointCloud = webIncludePointCloud,
+            pointCloudSize = webPointCloudSize,
+        };
+
+        /// <summary>The web/AR AO bake options from the panel-tuned fields —
+        /// shared by ExportWeb, the visitor flow (ExperienceDirector) and the
+        /// operator publish flow (OperatorPublisher).</summary>
+        public MeshAO.Options WebAoOptions() => new MeshAO.Options
+        {
+            strength = webAoStrength,
+            samples = webAoSamples,
+            maxDistance = webAoMaxDistance,
+            affectCurves = webAoOnCurves,
         };
 
         /// <summary>Web/AR export: .glb (vertex colours, web viewers) and .usdz
@@ -2147,7 +2232,7 @@ namespace TSDF
             string glbPath = Path.Combine(dir, $"web_{stamp}.glb");
             string usdzPath = Path.Combine(dir, $"web_{stamp}.usdz");
             if (!TSDFSnapshotBuilder.ExportFiles(snap, glbPath, usdzPath, usdPythonPath,
-                                                 out var st, out err))
+                                                 out var st, out err, WebExportOptions()))
             { Fail(err); return; }
 
             if (!st.usdzBinary)
@@ -2158,13 +2243,13 @@ namespace TSDF
                                  "%USERPROFILE%\\.venvs\\usd\\Scripts\\pip install usd-core — " +
                                  "or set Usd Python Path on the exporter.", this);
             _status = $"Web: {st.finalTris} tris / {st.finalVerts} verts " +
-                      $"(mesh {snap.MeshTris} + {st.curveCount} tubes) — " +
+                      $"(mesh {snap.MeshTris} + {st.curveCount} tubes + {st.pointCount} pts) — " +
                       $"GLB {st.glbBytes / 1048576.0:0.0} MB + USDZ {st.usdzBytes / 1048576.0:0.0} MB " +
                       $"({(st.usdzBinary ? "usdc" : "usda fallback")}, atlas {st.usdzTexSize}px) -> {dir} | " +
                       $"time: MC {snap.mcMs / 1000.0:0.0}s, weld {snap.weldMs / 1000.0:0.0}s, " +
                       $"smooth {snap.smoothMs / 1000.0:0.0}s, decimate {snap.decimateMs / 1000.0:0.0}s " +
                       $"({snap.trisBeforeDecimate / 1000}k->{snap.MeshTris / 1000}k), curves {st.curveMs / 1000.0:0.0}s, " +
-                      $"GLB {st.glbMs / 1000.0:0.0}s, USDZ {st.usdzMs / 1000.0:0.0}s" +
+                      $"AO {st.aoMs / 1000.0:0.0}s, GLB {st.glbMs / 1000.0:0.0}s, USDZ {st.usdzMs / 1000.0:0.0}s" +
                       $"{(st.usdzBinary ? $" (usdc conv {st.usdzConvertMs / 1000.0:0.0}s)" : "")}, " +
                       $"total {sw.ElapsedMilliseconds / 1000.0:0.0}s";
             Debug.Log("[TSDFPrintExporter] " + _status, this);

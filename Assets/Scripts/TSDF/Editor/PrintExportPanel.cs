@@ -194,6 +194,28 @@ namespace TSDF.EditorTools
 
             EditorGUILayout.Space(4);
             EditorGUILayout.LabelField("Web export (GLB + USDZ)", EditorStyles.miniBoldLabel);
+            bool webMesh = EditorGUILayout.ToggleLeft(
+                new GUIContent("Include TSDF Mesh (OFF=カーブのみ)",
+                    "OFF: web ファイルは体のメッシュを含まず、モーションカーブのチューブだけになる" +
+                    "（2026-07-24 仕様）。キャプチャにカーブが無い場合は自動でメッシュに戻る。"),
+                pe.webIncludeMesh);
+            float webBudget = EditorGUILayout.FloatField(
+                new GUIContent("Web Curve Budget (MB)", "カーブチューブの GLB サイズ予算。長い順に85%まで詰め、" +
+                    "残り15%は短いカーブから均等サンプル（長いのが多く短いのは少なく）。0=予算なし（Stride で間引き）。"),
+                pe.webCurveBudgetMB);
+            float webRadScale = EditorGUILayout.Slider(
+                new GUIContent("Web Curve Radius x", "書き出しカーブの太さ倍率（1=描画どおり）。太くしても頂点数は" +
+                    "変わらないのでファイルサイズは増えない（リングを外へ押し出すだけ）。"),
+                pe.webCurveRadiusScale, 0.25f, 4f);
+            bool webPC = EditorGUILayout.ToggleLeft(
+                new GUIContent("Include Point Cloud (点群同梱)",
+                    "表示中の点群（BoundingVolume領域＋Point cloud decimaterの%）を web ファイルに同梱。" +
+                    "GLB は真の POINTS、USDZ は点ごとに小さな八面体（Quick Look は真の点群を描けないため）。" +
+                    "カーブと同一フレーム登録。※床/人マスクは未適用（床・背景が残り画面より広い）。"),
+                pe.webIncludePointCloud);
+            float webPCSize = EditorGUILayout.Slider(
+                new GUIContent("Point Size (m)", "点のサイズ（USDZ八面体の直径）。0.008m で体スケールの点に見える。"),
+                pe.webPointCloudSize, 0.002f, 0.02f);
             bool webCurves = EditorGUILayout.ToggleLeft(
                 new GUIContent("Include Curves (表示解像度のチューブで同梱)",
                     "カーブを描画バッファから読み戻してチューブメッシュ化し、TSDF mesh と一緒に書き出す。" +
@@ -215,6 +237,24 @@ namespace TSDF.EditorTools
                 new GUIContent("Web Curve Tolerance (m)", "チューブ化前のポリライン簡略化の許容誤差" +
                     "（Douglas-Peucker）。1.5mm で三角形数が半分以下、見た目は変わらない。0=OFF。"),
                 pe.webCurveTolerance, 0f, 0.01f);
+            float aoStrength = EditorGUILayout.Slider(
+                new GUIContent("Web AO Strength", "頂点色にアンビエントオクルージョンを焼き込む強さ（0=OFF）。" +
+                    "窪みやチューブが体に接する部分が沈んで、ビューアの平坦な環境光でも立体感が出る。" +
+                    "AO は無方向なのでビューア照明と二重掛けにならない。0.5-0.7 が目安。STL には影響しない。"),
+                pe.webAoStrength, 0f, 1f);
+            int aoSamples = EditorGUILayout.IntSlider(
+                new GUIContent("Web AO Samples", "頂点あたりのレイ数（コサイン重み半球）。" +
+                    "近傍平滑込みで 32 あれば滑らか。計算時間はレイ数に比例。"),
+                pe.webAoSamples, 8, 128);
+            float aoDist = EditorGUILayout.Slider(
+                new GUIContent("Web AO Max Distance (m)", "遮蔽を探す半径。0.15m がスイートスポット" +
+                    "（実データA/B済: 0.35m はフリル/ゴースト殻の遮蔽で全身が沈む、0.08m は効果が薄い）。"),
+                pe.webAoMaxDistance, 0.05f, 1f);
+            bool aoCurves = EditorGUILayout.ToggleLeft(
+                new GUIContent("Web AO on Curves (チューブも暗くする)",
+                    "OFF: チューブは体を遮蔽するが自身の色は保つ（光の筆致として見せる）。" +
+                    "ON: チューブにも実体として陰影が付く。"),
+                pe.webAoOnCurves);
             string usdPy = EditorGUILayout.TextField(
                 new GUIContent("Usd Python Path", "usd-core 入り python のパス（空=自動検出: ~/.venvs/usd → " +
                     "システム python）。見つかれば USDZ をバイナリ usdc に変換（3-4倍小さい）、" +
@@ -245,11 +285,20 @@ namespace TSDF.EditorTools
                 pe.stlFloorThickness = stlFloorTh;
                 pe.stlFloorRaise = stlFloorRaise;
                 pe.stlBuryTubeHeads = buryHeads;
+                pe.webIncludeMesh = webMesh;
+                pe.webCurveBudgetMB = Mathf.Max(0f, webBudget);
+                pe.webCurveRadiusScale = webRadScale;
+                pe.webIncludePointCloud = webPC;
+                pe.webPointCloudSize = webPCSize;
                 pe.webIncludeCurves = webCurves;
                 pe.webCurveStride = webStride;
                 pe.webCurveSides = webSides;
                 pe.webMeshTargetTris = Mathf.Max(0, webTris);
                 pe.webCurveTolerance = webTol;
+                pe.webAoStrength = aoStrength;
+                pe.webAoSamples = aoSamples;
+                pe.webAoMaxDistance = aoDist;
+                pe.webAoOnCurves = aoCurves;
                 pe.usdPythonPath = usdPy;
                 EditorUtility.SetDirty(pe);
             }

@@ -265,7 +265,8 @@ namespace Experience
             string glbPath = Path.Combine(dir, $"web_{stamp}_t{trailSamples}.glb");
             string usdzPath = Path.Combine(dir, $"web_{stamp}_t{trailSamples}.usdz");
             if (!TSDFSnapshotBuilder.ExportFiles(snap, glbPath, usdzPath,
-                                                 printExporter.usdPythonPath, out _, out err))
+                                                 printExporter.usdPythonPath, out _, out err,
+                                                 printExporter.WebExportOptions()))
             {
                 Fail($"export failed: {err}");
                 yield break;
