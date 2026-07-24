@@ -67,7 +67,7 @@ namespace Experience
     [DefaultExecutionOrder(-20)]
     [DisallowMultipleComponent]
     public class ExperienceDirector : MonoBehaviour, Shared.IViewToggle, Shared.IStartupActivatable,
-                                      Shared.IPanelTunable
+                                      Shared.IPanelTunable, Shared.IPublishDryRunToggle
     {
         [Tooltip("Experience configuration asset. A default instance is created " +
                  "at runtime when left empty (dev convenience).")]
@@ -132,6 +132,16 @@ namespace Experience
         {
             get => activateOnPlay;
             set => activateOnPlay = value;
+        }
+
+        // ---- IPublishDryRunToggle (Control Panel: QR dry-run switch beside the
+        // Experience-mode button). Edits the serialized flag on the SHARED config
+        // asset; the platform-resolved read stays in ExperienceConfig.DryRunPublish.
+        public UnityEngine.Object DryRunUndoTarget => config;
+        public bool DryRunPublish
+        {
+            get => config != null && config.dryRunPublish;
+            set { if (config != null) config.dryRunPublish = value; }
         }
 
         // ---- IViewToggle ("Experience mode" in the Views panel) ----

@@ -120,10 +120,39 @@ namespace Shared.EditorTools
                         sa.ActivateOnPlay = now;
                         if (comp != null) EditorUtility.SetDirty(comp);
                     }
+                    // Same-size sibling: the two big toggles split the row evenly.
+                    DrawDryRunToggle(sa as IPublishDryRunToggle);
                     DrawSelectButton(comp);
                 }
             }
             EditorGUILayout.HelpBox("ON = 次の Play で自動的に体験モードへ入る（展示用）。OFF = Dev セッション。", MessageType.None);
+        }
+
+        // The QR publish dry-run switch, drawn beside the Experience-mode toggle
+        // at the same size (the two split the row). The flag lives on the shared
+        // config asset, so Undo/SetDirty target DryRunUndoTarget, not the component.
+        private void DrawDryRunToggle(IPublishDryRunToggle pub)
+        {
+            if (pub == null) return;
+            Object target = pub.DryRunUndoTarget;
+            using (new EditorGUI.DisabledScope(target == null))
+            {
+                bool dry = target != null && pub.DryRunPublish;
+                Color saved = GUI.backgroundColor;
+                // Red = the dangerous state: OFF means ResultShow really uploads to LFKS.
+                if (target != null && !dry) GUI.backgroundColor = new Color(1f, 0.5f, 0.4f);
+                bool now = GUILayout.Toggle(dry,
+                    dry ? "⦿ QR Dry Run: ON（フェイク URL）"
+                        : "○ QR Dry Run: OFF（実アップロード）",
+                    _bigToggleStyle);
+                GUI.backgroundColor = saved;
+                if (target != null && now != dry)
+                {
+                    Undo.RecordObject(target, "QR Dry Run publish");
+                    pub.DryRunPublish = now;
+                    EditorUtility.SetDirty(target);
+                }
+            }
         }
 
         // ---------------- Recorder ----------------
