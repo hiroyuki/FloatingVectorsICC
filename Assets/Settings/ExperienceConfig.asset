@@ -27,7 +27,7 @@ MonoBehaviour:
     skipConsent: 0
     skipWelcome: 0
     skipCalibrate: 0
-    skipTestMoves: 1
+    skipTestMoves: 0
     skipShoot: 0
     dummyShoot: 0
     skipProcessing: 0
