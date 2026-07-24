@@ -1300,6 +1300,17 @@ namespace Experience
             {
                 SetOrbit(false);
                 SetPresentationLook(false);
+                // The presentationSolidMesh reveal (ResultShowRoutine) un-suppresses the
+                // TSDF mesh for the result orbit, and only ExitMode used to put it back —
+                // with the mode left ON, the next visitor's whole intro (Idle..TestMove1)
+                // showed the live-follow solid mesh over their point cloud. Any state
+                // outside the presentation hides it again. Guarded so a transition while
+                // the Processing white point cloud owns the view doesn't blank it.
+                if (tsdfView != null && !_processingWhitePointCloudOn)
+                {
+                    tsdfView.whitePointCloud = false;
+                    tsdfView.suppressDraw = true;
+                }
             }
             ApplyCurvesVisibility(state);
             // Cloud BEFORE bones: hiding the cloud clears _cloudRevealed, and the
