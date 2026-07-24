@@ -521,7 +521,7 @@ MonoBehaviour:
   sourceMeshes: []
   autoSourcePrefix: _Playback_
   seedFromTsdfMesh: 1
-  seedCount: 1000
+  seedCount: 1500
   radiusScale: 0.8
   surfaceMargin: 0.07
   lagCompSeconds: 0.07
@@ -532,9 +532,9 @@ MonoBehaviour:
   bboxPadding: 0.1
   boneBlendCount: 2
   blendSharpness: 0.05
-  smoothSubdiv: 7
+  smoothSubdiv: 6
   bakeVertexColors: 1
-  brightness: 2.5
+  brightness: 2.294
   ribbonWidth: 0.006
   round: 1
   rimBoost: 0.5
@@ -667,8 +667,8 @@ MonoBehaviour:
   cellCubeScale: 0.3
   cellColor: {r: 1, g: 1, b: 1, a: 1}
   meshMaterial: {fileID: 0}
-  meshSaturation: 1.4
-  meshBrightness: 1
+  meshSaturation: 1.541
+  meshBrightness: 2.283
   meshGamma: 1
   meshGradNormals: 1
   meshRimBoost: 0.5
@@ -1764,7 +1764,7 @@ MonoBehaviour:
   visible: 1
   position: {x: 24, y: 24}
   width: 420
-  uiScale: 1.5
+  uiScale: 2
   orbits: []
   exporter: {fileID: 0}
   debugView: {fileID: 0}
@@ -2563,7 +2563,7 @@ MonoBehaviour:
   discardMaskRadiusMeters: 0.35
   showPerWorkerSkeletons: 0
   perWorkerVisualScale: 0.5
-  showDebugHud: 0
+  showDebugHud: 1
   mirrorDebugHudToStage: 0
   showCrowdAlert: 0
   alertOnDelaySeconds: 0.5
@@ -2587,6 +2587,7 @@ MonoBehaviour:
   recorder: {fileID: 86788058}
   historySamples: 32
   freshWindowFrames: 30
+  bodyLossGraceSeconds: 0.5
   maxEndpointSpeed: 15
   handExtension: 0.18
   crownExtension: 0.18
@@ -3153,6 +3154,7 @@ MonoBehaviour:
   debugForceFault: 0
   debugPoseDiagnostics: 1
   compareCurveSources: 0
+  debugCurveTrace: 0
 --- !u!114 &1565704635
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -3620,6 +3622,64 @@ MonoBehaviour:
   recorder: {fileID: 86788058}
   deviceSerialFilter: 
   autoProcessOnRead: 0
+--- !u!1 &2137757491
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 2137757493}
+  - component: {fileID: 2137757492}
+  m_Layer: 0
+  m_Name: BoneVerify
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!114 &2137757492
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2137757491}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: dc469d5fdfca3b54bba16b2a854ccae2, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: BodyTracking.Eval.Rtmpose::BodyTracking.Eval.Rtmpose.BoneVerifyController
+  gridDisplay: 2
+  sceneDisplay: 1
+  liveKey: 289
+  reviewKey: 288
+  stepForwardKey: 275
+  stepBackwardKey: 276
+  reviewTakePath: 
+  enableLiveRenderSync: 1
+  extraDelayMs: 0
+  sensorManager: {fileID: 0}
+  recorder: {fileID: 0}
+  merger: {fileID: 0}
+  fused: {fileID: 0}
+  curves: {fileID: 0}
+--- !u!4 &2137757493
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2137757491}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0
@@ -3633,3 +3693,4 @@ SceneRoots:
   - {fileID: 2064251120}
   - {fileID: 1168916135}
   - {fileID: 1016277182}
+  - {fileID: 2137757493}
