@@ -3,7 +3,7 @@
 // default path, the TestMove practice rounds (director-owned TestMoveDone),
 // processing fail path, ResultShow minimum dwell + ResultShowDone gate +
 // no-early-leave, one-frame failure pulses, the debounced leave grace
-// (chattering / brief step-outs never drop the run), skip flags, timeMultiplier.
+// (chattering / brief step-outs never drop the run), and skip flags.
 
 using Experience;
 using NUnit.Framework;
@@ -607,20 +607,5 @@ namespace Calibration.Tests
             Assert.AreEqual(ExperienceState.ResultShow, _sm.State);
         }
 
-        // ---- time multiplier ----
-
-        [Test]
-        public void TimeMultiplier_ScalesConsentAndWelcomeTimeouts()
-        {
-            _t.timeMultiplier = 10f;
-            Tick(); // Idle → Consent (presence)
-            Assert.AreEqual(ExperienceState.Consent, _sm.State);
-            Tick(0.7f); // 0.7s * 10 = 7s > 6s consent → Welcome
-            Assert.AreEqual(ExperienceState.Welcome, _sm.State);
-            Tick(0.5f); // 0.5s * 10 = 5s > 4s welcome → Calibrate
-            Assert.AreEqual(ExperienceState.Calibrate, _sm.State);
-            for (int i = 0; i < 3; i++) Tick(0.5f); // 1.5s * 10 = 15s > 10s
-            Assert.AreEqual(ExperienceState.TestMove1, _sm.State);
-        }
     }
 }

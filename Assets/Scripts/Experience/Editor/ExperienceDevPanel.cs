@@ -157,6 +157,9 @@ namespace Experience.EditorTools
             DrawLayoutSection();
 
             EditorGUILayout.Space(8);
+            DrawTimingSection();
+
+            EditorGUILayout.Space(8);
             DrawConfigSection();
 
             EditorGUILayout.Space(8);
@@ -331,6 +334,101 @@ namespace Experience.EditorTools
 
         // Edits the SHARED ExperienceConfig asset (goes into git) — meant for the
         // Mac dev loop; restore skips before a Windows production run.
+        private bool _timingFoldout = true;
+
+        private void DrawTimingSection()
+        {
+            var cfg = _director.config;
+            if (cfg == null) return;
+
+            _timingFoldout = EditorGUILayout.Foldout(
+                _timingFoldout, "各シーンの時間設定（秒）", true, EditorStyles.foldoutHeader);
+            if (!_timingFoldout) return;
+
+            var serialized = new SerializedObject(cfg);
+            serialized.Update();
+
+            EditorGUILayout.HelpBox(
+                "設定値はそのまま実時間として使われます。処理と結果は、ここで設定した時間に加えて" +
+                "変換・アップロード・再生の完了待ちが入る場合があります。",
+                MessageType.None);
+
+            TimingHeading("共通");
+            TimingField(serialized, "timings.stateGapSeconds", "画面間の黒画面",
+                "各画面を切り替える間の空白時間");
+            TimingField(serialized, "timings.leaveGraceSeconds", "退出判定の猶予",
+                "来場者が範囲外に出てから体験をリセットするまで");
+
+            TimingHeading("1. 同意（Consent）");
+            TimingField(serialized, "timings.consentSeconds", "表示時間");
+
+            TimingHeading("2. ようこそ（Welcome）");
+            TimingField(serialized, "timings.welcomeSeconds", "表示時間");
+
+            TimingHeading("3. 計測（Calibrate）");
+            TimingField(serialized, "timings.calibrateSeconds", "ポーズ待ち時間",
+                "時間切れになるまでの最大時間");
+            TimingField(serialized, "timings.calibrateMatchedSeconds", "計測完了の表示時間");
+            TimingField(serialized, "cloudRevealSeconds", "点群の出現");
+            TimingField(serialized, "curveGrowSeconds", "ラインの成長");
+
+            TimingHeading("4–5. 練習（TestMove 1 / 2）");
+            TimingField(serialized, "testIntroSeconds", "説明1枚あたり",
+                "練習1は2枚、練習2は1枚表示");
+            TimingField(serialized, "countdownSeconds", "カウントダウン",
+                "練習と本番撮影で共通");
+            TimingField(serialized, "captureSeconds", "撮影時間",
+                "練習と本番撮影で共通");
+
+            TimingHeading("6. 本番撮影（Shoot）");
+            TimingField(serialized, "shootCueSeconds", "撮影前メッセージ");
+            TimingField(serialized, "captureStartOffsetSeconds", "撮影開始オフセット");
+            TimingField(serialized, "recordPreRollSeconds", "録画プリロール");
+
+            TimingHeading("撮影後の共通演出（練習 / 結果）");
+            TimingField(serialized, "shootEndFreezeHoldSeconds", "静止");
+            TimingField(serialized, "shootEndDissolveSeconds", "消滅");
+            TimingField(serialized, "resultBlackGapSeconds", "消滅後の黒画面");
+            TimingField(serialized, "resultRevealDelaySeconds", "完成メッセージ後の出現待ち");
+            TimingField(serialized, "presentationOrbitEaseInSeconds", "回転の加速");
+            TimingField(serialized, "presentationOrbitSeconds", "完成形の回転表示");
+
+            TimingHeading("7. 処理（Processing）");
+            TimingField(serialized, "timings.processingTimeoutSeconds", "処理タイムアウト");
+            TimingField(serialized, "processingWhitePointCloudMinSeconds", "処理後の点群再生");
+
+            TimingHeading("8. 結果（ResultShow）");
+            TimingField(serialized, "timings.resultMinSeconds", "最小表示時間");
+
+            TimingHeading("9. QR");
+            TimingField(serialized, "timings.qrShowSeconds", "表示時間");
+
+            TimingHeading("エラー");
+            TimingField(serialized, "timings.exportFailNoticeSeconds", "書き出し失敗の表示時間");
+
+            serialized.ApplyModifiedProperties();
+        }
+
+        private static void TimingHeading(string label)
+        {
+            EditorGUILayout.Space(5);
+            EditorGUILayout.LabelField(label, EditorStyles.miniBoldLabel);
+        }
+
+        private static void TimingField(
+            SerializedObject serialized, string propertyPath, string label, string tooltip = null)
+        {
+            var property = serialized.FindProperty(propertyPath);
+            if (property == null)
+            {
+                EditorGUILayout.HelpBox($"時間設定が見つかりません: {propertyPath}", MessageType.Error);
+                return;
+            }
+
+            EditorGUILayout.PropertyField(
+                property, new GUIContent(label + "（秒）", tooltip ?? label));
+        }
+
         private void DrawConfigSection()
         {
             var cfg = _director.config;
@@ -352,10 +450,6 @@ namespace Experience.EditorTools
             bool lp = EditorGUILayout.ToggleLeft(
                 "devLoopEntrancePlayback（入場再生をループ維持 / 退場テスト時は OFF）",
                 cfg.devLoopEntrancePlayback);
-            float tm = EditorGUILayout.Slider(
-                new GUIContent("timeMultiplier", "全タイミングの早回し倍率"),
-                cfg.timings.timeMultiplier, 0.5f, 5f);
-
             // The asset is shared with a Mac dev machine, so the field edited here
             // is the platform's own (same split as DrawPlaybackFolderRow).
             bool cannedMac = Application.platform == RuntimePlatform.OSXEditor;
@@ -381,7 +475,6 @@ namespace Experience.EditorTools
                 cfg.timings.skipProcessing = sp;
                 cfg.timings.skipQr = sq;
                 cfg.devLoopEntrancePlayback = lp;
-                cfg.timings.timeMultiplier = tm;
                 if (cannedMac) cfg.devCannedTakeRootMacOverride = canned;
                 else cfg.devCannedTakeRoot = canned;
                 EditorUtility.SetDirty(cfg);

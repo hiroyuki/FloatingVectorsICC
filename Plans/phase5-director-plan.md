@@ -34,7 +34,7 @@ public sealed class ExperienceStateMachine
 }
 ```
 
-- **ExperienceTimings** = 純 POCO（ScriptableObject から詰め替え）: welcomeSeconds / freePlaySeconds / readySeconds / promptSeconds / selectTimeoutSeconds(0=無限) / exportFailNoticeSeconds / qrShowSeconds / **skip フラグ**（skipAttract, skipWelcome, skipFreePlay, captureCount 1..3, skipExportUpload, skipQr）/ **timeMultiplier**（開発用、Tick の dt に乗算）
+- **ExperienceTimings** = 純 POCO（ScriptableObject から詰め替え）: welcomeSeconds / freePlaySeconds / readySeconds / promptSeconds / selectTimeoutSeconds(0=無限) / exportFailNoticeSeconds / qrShowSeconds / **skip フラグ**（skipAttract, skipWelcome, skipFreePlay, captureCount 1..3, skipExportUpload, skipQr）
 - 遷移規則（FSM 内に実装、テスト対象）:
   - Fault=true → どこからでも Fault。Fault 中 Fault=false → Attract
   - Attract: Present → Welcome（skipAttract は「初回起動時も Attract を飛ばして Welcome へ」）
@@ -104,8 +104,8 @@ public struct PublishResult { public bool Success; public string GlbUrl, UsdzUrl
 
 ## 検証（E2E dry、Unity MCP、録画 12-50-09 再生下）
 
-1. EditMode: ExperienceStateMachineTests（全遷移 / skip 各種 / 離脱 / Fault 割り込み / captureCount 1..3 / timeMultiplier）全 green + 既存 35 テスト green
-2. Play + 再生 + `debugForcePresence` + `debugForceDwell`: director.Visible=true → Attract→…→QrShow→Attract の**フル 1 周**をログで assert（timeMultiplier 高速化）
+1. EditMode: ExperienceStateMachineTests（全遷移 / skip 各種 / 離脱 / Fault 割り込み / captureCount 1..3）全 green + 既存 35 テスト green
+2. Play + 再生 + `debugForcePresence` + `debugForceDwell`: director.Visible=true → Attract→…→QrShow→Attract の**フル 1 周**をログで assert
 3. 3 キャプチャ: 各 Prompt で snapshot 取得（tris>0）、historySamples が 15→復元されること、BuildVersion 待ちが機能すること（待ち中に固まらない）
 4. Select: 表示 GO 3 体 + 球 3 個、debugForceDwell 成立 → Exporting
 5. Exporting: exp_*.glb/.usdz が書かれ、DryRunPublisher の URL が返り、QR Texture2D 非 null、ShowQr 表示（スクリーンショット）

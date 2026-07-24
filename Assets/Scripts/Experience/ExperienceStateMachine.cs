@@ -141,9 +141,6 @@ namespace Experience
                  "FSM-inert — consumed by the director.")]
         public float stateGapSeconds = 1f;
 
-        [Min(0.01f)]
-        [Tooltip("Dev time multiplier applied to Tick dt (2 = twice as fast).")]
-        public float timeMultiplier = 1f;
     }
 
     public sealed class ExperienceStateMachine
@@ -170,7 +167,6 @@ namespace Experience
 
         public void Tick(float dt, in ExperienceInputs inputs, ExperienceTimings t)
         {
-            dt *= Mathf.Max(0.01f, t.timeMultiplier);
             TimeInState += dt;
 
             // Fault preempts everything (full-screen red alert + show stops).
