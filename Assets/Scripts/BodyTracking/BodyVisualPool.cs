@@ -111,6 +111,21 @@ namespace BodyTracking
             }
         }
 
+        /// <summary>
+        /// Destroy one visual immediately (no idle-GC wait). Returns false when
+        /// the id has no visual. <paramref name="onEvicted"/> fires so callers
+        /// can clean their per-id state, same contract as GcStale.
+        /// </summary>
+        public bool Remove(uint id, Action<uint> onEvicted = null)
+        {
+            if (!_bodies.TryGetValue(id, out var visual)) return false;
+            visual.Destroy();
+            _bodies.Remove(id);
+            _lastSeenFrame.Remove(id);
+            onEvicted?.Invoke(id);
+            return true;
+        }
+
         public void DestroyAll()
         {
             foreach (var v in _bodies.Values) v.Destroy();

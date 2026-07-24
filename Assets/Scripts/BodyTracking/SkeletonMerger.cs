@@ -273,6 +273,20 @@ namespace BodyTracking
                  "bystander this gate exists for stood ~3 m outside, far beyond any margin.")]
         [Min(0f)] public float volumeGateMarginMeters = 0.25f;
 
+        [Header("Primary selection")]
+        [Tooltip("When more than one merged person is inside the sensing area, keep only the " +
+                 "one whose pelvis is horizontally closest to the sensing-area center " +
+                 "(trackingVolume transform position) and discard the rest — they get no " +
+                 "visual and no PersonSample, so every consumer sees one person at most. " +
+                 "Per CLAUDE.md this installation " +
+                 "is single-person; the crowd alert still fires off the pre-discard count.")]
+        public bool selectClosestToCenter = true;
+
+        [Tooltip("Hysteresis for the closest-to-center pick: the current primary keeps its " +
+                 "status unless a challenger is closer to the center by at least this margin. " +
+                 "Prevents the target from flapping between two near-equidistant people.")]
+        [Min(0f)] public float primarySwitchMarginMeters = 0.25f;
+
         [Header("Debug")]
         [Tooltip("Also render each worker's raw skeleton (pre-merge) in a hue derived " +
                  "from the camera serial. Useful for comparing per-camera tracking quality " +
@@ -555,6 +569,7 @@ namespace BodyTracking
         private int _diagDroppedOutsideVolume;
         private int _diagFreshIterations; // CollectCandidates: slot non-empty AND not stale (= candidate built)
         private int _diagClustersFormed;
+        private int _diagDroppedExtraPersons; // eligible clusters discarded by the closest-to-center pick
         private int _diagPersonsOutput;
         private int _diagContinuityCarryOver;
         private float _diagMaxObservedAgeMs;
@@ -859,7 +874,11 @@ namespace BodyTracking
         {
             if (!showCrowdAlert) { _alertActive = false; return; }
 
-            int merged = _pool != null ? _pool.Count : 0;
+            // Pre-discard count: with selectClosestToCenter on, the pool only
+            // ever holds the primary, so the alert must look at how many people
+            // were detected BEFORE the extras were thrown away. An empty pool
+            // means nobody is tracked anymore — treat the stale count as 0.
+            int merged = _pool != null && _pool.Count > 0 ? _lastEligiblePersonCount : 0;
             float now = Time.realtimeSinceStartup;
 
             if (merged > 1)
@@ -929,7 +948,7 @@ namespace BodyTracking
             // pulling in UnityEditor.* (which would break player builds).
             bool paused = Time.timeScale <= 0.0001f;
             _hudSb.AppendLine($"<b>[SkeletonMerger Debug]</b> {(paused ? "PAUSED" : "running")}  frame={Time.frameCount}");
-            _hudSb.AppendLine($"workers={_latestBySerial.Count} candidates={_candidateCount} clusters={_clusterCount} merged={_pool.Count}");
+            _hudSb.AppendLine($"workers={_latestBySerial.Count} candidates={_candidateCount} clusters={_clusterCount} merged={_pool.Count} eligible={_lastEligiblePersonCount} primaryId={_primaryPersonId}");
 
             // Per-worker bodies
             foreach (var kv in _latestBySerial)
@@ -1282,6 +1301,7 @@ namespace BodyTracking
                 $"dropped_outside/s={_diagDroppedOutsideVolume} " +
                 $"fresh_iter/s={_diagFreshIterations} max_age_ms={_diagMaxObservedAgeMs:F0} " +
                 $"clusters/s={_diagClustersFormed} persons/s={_diagPersonsOutput} " +
+                $"dropped_extra_persons/s={_diagDroppedExtraPersons} " +
                 $"continuity_carry_over/s={_diagContinuityCarryOver} " +
                 $"alive_visuals={_pool.Count} bodies_now={totalBodiesNow}",
                 this);
@@ -1292,6 +1312,7 @@ namespace BodyTracking
             _diagMaxObservedAgeMs = 0f;
             _diagClustersFormed = 0;
             _diagPersonsOutput = 0;
+            _diagDroppedExtraPersons = 0;
             _diagContinuityCarryOver = 0;
             _diagWindowStart = now;
         }
@@ -1441,10 +1462,31 @@ namespace BodyTracking
         {
             var cfg = BuildVisualConfig();
             _persons.Clear();
+
+            // Pre-discard person count. Stashed for the crowd alert, which must
+            // keep firing on the people we are about to throw away (after the
+            // closest-to-center pick at most one person survives, so _pool.Count
+            // can no longer tell "crowd" apart from "solo").
+            int eligible = 0;
+            for (int c = 0; c < _clusterCount; c++)
+                if (_clusterPool[c].MemberIndices.Count >= requireMinWorkerCount) eligible++;
+            if (_clusterCount > 0) _lastEligiblePersonCount = eligible;
+
+            int primaryIdx = selectClosestToCenter && eligible > 0
+                ? SelectPrimaryClusterIndex()
+                : -1;
+
             for (int c = 0; c < _clusterCount; c++)
             {
                 var cluster = _clusterPool[c];
                 if (cluster.MemberIndices.Count < requireMinWorkerCount) continue;
+                if (primaryIdx >= 0 && c != primaryIdx)
+                {
+                    // Extra person inside the sensing area: single-person
+                    // installation, keep only the one nearest the area center.
+                    _diagDroppedExtraPersons++;
+                    continue;
+                }
                 BuildMergedSkeleton(cluster, ref _mergedSkel);
                 if (JointRefiner != null) RefineMergedJoints(cluster.Id, ref _mergedSkel);
                 _pool.Apply(cluster.Id, in _mergedSkel, cfg, OnVisualEvicted);
@@ -1452,7 +1494,68 @@ namespace BodyTracking
                 RecordPersonSample(cluster.Id, in _mergedSkel);
                 _diagPersonsOutput++;
             }
+
+            // A discarded person may still own a visual from before the pick
+            // moved off them (primary switch, or a second person who was briefly
+            // emitted). Without an immediate remove it stays rendered until the
+            // idle GC fires (unseenFramesBeforeDestroy Update ticks).
+            if (primaryIdx >= 0)
+            {
+                uint keepId = _clusterPool[primaryIdx].Id;
+                _visualEvictScratch.Clear();
+                foreach (var kv in _pool.Visuals)
+                    if (kv.Key != keepId) _visualEvictScratch.Add(kv.Key);
+                for (int i = 0; i < _visualEvictScratch.Count; i++)
+                    _pool.Remove(_visualEvictScratch[i], OnVisualEvicted);
+            }
+
             LogGateDiagnosticsIfDue();
+        }
+
+        // Scratch id list for the non-primary visual purge (Visuals must not be
+        // mutated while iterated).
+        private readonly List<uint> _visualEvictScratch = new List<uint>(4);
+
+        // --- primary selection (closest to sensing-area center) ---
+
+        // Cluster id of the current primary person (0 = none picked yet). Kept
+        // across frames so primarySwitchMarginMeters can bias the pick toward
+        // the incumbent; cleared when their visual is evicted.
+        private uint _primaryPersonId;
+
+        // Pre-discard person count from the last Update that actually formed
+        // clusters (worker output is slower than Update, so most Updates form
+        // none — same reasoning as StashPriorState). Read by UpdateCrowdAlert.
+        private int _lastEligiblePersonCount;
+
+        /// <summary>Index into _clusterPool of the person to keep, or -1 when no
+        /// eligible cluster exists. Picks the pelvis horizontally closest to the
+        /// sensing-area center; the incumbent primary wins ties within
+        /// primarySwitchMarginMeters.</summary>
+        private int SelectPrimaryClusterIndex()
+        {
+            Vector3 center = trackingVolume != null
+                ? trackingVolume.transform.position
+                : Vector3.zero;
+
+            int best = -1, incumbent = -1;
+            float bestDist = float.MaxValue, incumbentDist = 0f;
+            for (int c = 0; c < _clusterCount; c++)
+            {
+                var cluster = _clusterPool[c];
+                if (cluster.MemberIndices.Count < requireMinWorkerCount) continue;
+                Vector3 p = cluster.Seed.PelvisWorld;
+                float dx = p.x - center.x;
+                float dz = p.z - center.z;
+                float dist = Mathf.Sqrt(dx * dx + dz * dz);
+                if (dist < bestDist) { bestDist = dist; best = c; }
+                if (cluster.Id == _primaryPersonId) { incumbent = c; incumbentDist = dist; }
+            }
+            if (incumbent >= 0 && best != incumbent
+                && bestDist > incumbentDist - primarySwitchMarginMeters)
+                best = incumbent;
+            if (best >= 0) _primaryPersonId = _clusterPool[best].Id;
+            return best;
         }
 
         /// <summary>
@@ -1521,6 +1624,7 @@ namespace BodyTracking
             _priorMaxConfById.Remove(id);
             _prevMergedPosByCluster.Remove(id);
             _gateStateById.Remove(id);
+            if (_primaryPersonId == id) _primaryPersonId = 0;
         }
 
         private void StashPriorState()
