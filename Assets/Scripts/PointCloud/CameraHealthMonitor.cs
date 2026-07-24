@@ -76,7 +76,8 @@ namespace PointCloud
         public event Action<bool> OnHealthChanged;
 
         /// <summary>Text for the full-screen fault alert (operator/adult-facing,
-        /// so kanji): names the first faulty camera as "カメラ（ID n）が異常です".</summary>
+        /// so kanji): names the first faulty camera by serial, e.g.
+        /// "カメラ（CL8F253004L）が異常です".</summary>
         public string FaultAlertText =>
             _alerts.Count == 0 ? "" : $"カメラ（{_firstFaultyLabel}）が異常です";
 
@@ -226,15 +227,15 @@ namespace PointCloud
                 foreach (var cam in _expected)
                 {
                     var r = FindRenderer(renderers, cam.Serial);
-                    string name = $"{cam.Label} ({PointCloudUtil.TailSerial(cam.Serial, 2)})";
+                    string name = cam.Serial;
                     if (r == null)
                     {
                         _alerts.Add($"カメラ {name} が異常です。接続を確認してください。（未検出）");
-                        NoteFault(cam.Label);
+                        NoteFault(cam.Serial);
                         streamingAll = false;
                         continue;
                     }
-                    if (!CheckStreaming(r, name, cam.Label)) streamingAll = false;
+                    if (!CheckStreaming(r, name, cam.Serial)) streamingAll = false;
                 }
             }
             else if (expectedCameraCount > 0)
@@ -252,8 +253,8 @@ namespace PointCloud
                 {
                     var r = renderers[i];
                     if (r == null) continue;
-                    string tail = PointCloudUtil.TailSerial(r.deviceSerial, 2);
-                    if (!CheckStreaming(r, tail, tail)) streamingAll = false;
+                    string serial = r.deviceSerial;
+                    if (!CheckStreaming(r, serial, serial)) streamingAll = false;
                 }
             }
 
