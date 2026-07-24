@@ -1101,8 +1101,8 @@ namespace Experience
             if (poseHistory != null) poseHistory.ReleaseHoldAndClear();
             // Belt-and-suspenders: a shoot-end dissolve that never reached its reveal
             // (Processing failure, dev jump) can leave _PcFadeCull at 1 / the decimate
-            // pinned / frames frozen. Clear it here — this runs on Idle entry BEFORE
-            // ApplyCloudVisibility shows the live cloud, so the stage can't come up black.
+            // pinned / frames frozen. Clear it here on Idle entry — Idle itself is
+            // cloud-free, but a stale cull would black out the NEXT run's cloud reveal.
             AbortShootEndDissolve();
         }
 
@@ -1464,12 +1464,14 @@ namespace Experience
             // Clouds carry every phase that has stage content now: the live body
             // from the はかれたよ！ beat through the practice rounds and the shoot,
             // the take replays (TestMove playback / ResultShow) and the frozen
-            // final frame under the QR. Idle too — with the TSDF mesh session-
-            // hidden, the raw cloud is what a walk-in visitor sees of themselves.
-            // Hidden only for the bones-only intro (Consent..Calibrate pre-match)
-            // and Processing (progress bar owns the screen).
-            bool show = state is ExperienceState.Idle
-                             or ExperienceState.TestMove1
+            // final frame under the QR. Idle is cloud-free (floor grid only,
+            // 2026-07-24): a visitor stepping over the stage rim used to see
+            // their raw cloud for the presence-debounce beat before the
+            // bones-only intro took over — the run now opens on bones, never
+            // cloud. Hidden also for the rest of the bones-only intro
+            // (Consent..Calibrate pre-match) and Processing (progress bar owns
+            // the screen).
+            bool show = state is ExperienceState.TestMove1
                              or ExperienceState.TestMove2
                              or ExperienceState.Shoot
                              or ExperienceState.ResultShow
