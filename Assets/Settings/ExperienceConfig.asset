@@ -17,7 +17,7 @@ MonoBehaviour:
     consentSeconds: 8
     welcomeSeconds: 4
     calibrateSeconds: 10
-    calibrateMatchedSeconds: 1.5
+    calibrateMatchedSeconds: 3
     processingTimeoutSeconds: 90
     resultMinSeconds: 5
     exportFailNoticeSeconds: 5
@@ -39,15 +39,20 @@ MonoBehaviour:
   playbackLoops: 1
   presentationPlaybackRate: 0.33333334
   resultRevealDelaySeconds: 0.5
+  resultBlackGapSeconds: 0.5
   shootEndFreezeHoldSeconds: 0.3
   shootEndDissolveSeconds: 0.5
   debugPauseAtShootDissolve: 0
+  debugPauseAtReveal: 0
   presentationOrbitYawSpeedDeg: 30
   presentationOrbitEaseInSeconds: 1.5
   presentationOrbitBobMeters: 0.4
   presentationSeedCount: 60000
   presentationTailAlpha: 1
   presentationDecimatePercent: 7.9
+  presentationSolidMesh: 1
+  processingWireframe: 1
+  processingWireframeMinSeconds: 5
   insetMeters: 0
   yBandMin: 0.15
   yBandMax: 100
@@ -62,7 +67,7 @@ MonoBehaviour:
   captureStartOffsetSeconds: 0.25
   recordPreRollSeconds: 0.3
   devCannedTakeRoot: D:\Dropbox\projects\ICC\Recordings\RecordingBase\2026-07-14_15-50-24
-  devCannedTakeRootMacOverride: /Users/horihiroyuki/Dropbox/projects/ICC/Recordings/RecordingBase/2026-07-14_15-50-24
+  devCannedTakeRootMacOverride: 
   devStateJumpHotkeys: 1
   devLoopEntrancePlayback: 1
   devCannedTakeTailSeconds: 6
@@ -71,6 +76,7 @@ MonoBehaviour:
   liveRenderSync: 1
   cloudRevealSeconds: 1
   cloudRevealHeight: 2.6
+  curveGrowSeconds: 1.5
   starHoldSeconds: 0.5
   starArmAngleFromUpMaxDeg: 135
   starLegAngleFromDownMinDeg: 12
@@ -98,7 +104,7 @@ MonoBehaviour:
   countdownTickSe: {fileID: 0}
   recordEndSe: {fileID: 0}
   poseGuideTexture: {fileID: 0}
-  dryRunPublish: 0
+  dryRunPublish: 1
   dryRunDelaySeconds: 1
   qrUrlKind: 2
   uploadScriptSha256: 46d660b6ae081b648fdbcead21bfeb44419df78410c3e89cb55302c65dfac687
@@ -118,5 +124,6 @@ MonoBehaviour:
   shootCueText: "\u3058\u3083\u3041\u3000\u307B\u3093\u3070\u3093\u3060\u3088"
   shootingText: "\u3055\u3064\u3048\u3044\u3061\u3085\u3046\uFF01"
   processingText: "\u304D\u308D\u304F\u3092\u3000\u3058\u3085\u3093\u3073\u3057\u3066\u3044\u308B\u3088\u3000\u307E\u3063\u3066\u306D"
+  analyzingText: "\u3076\u3093\u305B\u304D\u3061\u3085\u3046"
   resultText: "\u3067\u304D\u305F\u3088\uFF01"
   qrScanText: "\u306B\u3058\u3052\u3093\u30B3\u30FC\u30C9\u306E\u3000\u3057\u3083\u3057\u3093\u3092\u3000\u3068\u3063\u305F\u3089\n\u304A\u3046\u3061\u3067\u3082\u3000\u307F\u308C\u308B\u3088"

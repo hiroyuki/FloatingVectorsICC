@@ -78,7 +78,7 @@ namespace TSDF
         // Ready whenever the SDF volume is live and current (showMesh keeps the front
         // buffer being produced — same gate as TrianglesReady). Deliberately NOT gated on
         // meshShadowStrength or suppressDraw: the experience draws only the CURVES as the
-        // final model (the mesh is suppressed / wireframe), so the curves must still
+        // final model (the mesh is suppressed / white point cloud), so the curves must still
         // receive the body shadow even when the solid mesh — and its own shadow — is off.
         // The consumer's own strength knob decides whether it applies.
         public bool SdfShadowReady =>
@@ -239,22 +239,26 @@ namespace TSDF
                  "last extracted vertex buffer on skip frames.")]
         [Min(1)] public int mcEveryNFrames = 1;
 
-        [Header("Wireframe")]
+        [Header("White point cloud")]
         [Tooltip("Draw the mesh as an edge net (interior discarded) instead of the " +
-                 "shaded surface. Not serialized: a stray true in a scene would leave " +
-                 "the sculpture a wireframe. The experience flips this on for the " +
-                 "ResultShow / practice replay and back off for the frozen model.")]
-        [System.NonSerialized] public bool wireframe;
-        [Tooltip("Wireframe line colour.")]
-        public Color wireColor = Color.white;
+                 "shaded surface — the white-point-cloud look. Not serialized: a stray " +
+                 "true in a scene would leave the sculpture as the point cloud. The " +
+                 "experience flips this on for the ResultShow / practice replay and back " +
+                 "off for the frozen model.")]
+        [System.NonSerialized] public bool whitePointCloud;
+        [Tooltip("White point cloud line colour.")]
+        [UnityEngine.Serialization.FormerlySerializedAs("wireColor")]
+        public Color whitePointCloudColor = Color.white;
         [Range(0.2f, 4f)]
-        [Tooltip("Wireframe line width in pixels (screen-space, distance-independent).")]
-        public float wireThickness = 1.2f;
+        [Tooltip("White point cloud line width in pixels (screen-space, distance-independent).")]
+        [UnityEngine.Serialization.FormerlySerializedAs("wireThickness")]
+        public float whitePointCloudThickness = 1.2f;
         [Range(1, 32)]
         [Tooltip("Thin the net by drawing only every Nth marching-cubes triangle. The " +
-                 "MC mesh is far denser than a pixel, so a 1:1 wireframe reads as a solid " +
-                 "silhouette; raise this until the edges read as a net.")]
-        public int wireStride = 8;
+                 "MC mesh is far denser than a pixel, so a 1:1 net reads as a solid " +
+                 "silhouette; raise this until the edges read as a point cloud.")]
+        [UnityEngine.Serialization.FormerlySerializedAs("wireStride")]
+        public int whitePointCloudStride = 8;
 
         [Header("Perf / A-B (Phase 0)")]
         [Tooltip("Reference path: force the OLD full-grid Marching Cubes dispatch over " +
@@ -577,12 +581,12 @@ namespace TSDF
             meshMaterial.SetFloat("_ShadowSteps", meshShadowSteps);
             meshMaterial.SetFloat("_ShadowBiasVox", meshShadowBiasVox);
             meshMaterial.SetFloat("_ShadowIsoFrac", meshShadowIsoFrac);
-            // Wireframe toggle — always set so it never leaks a stale 1 from a
+            // White-point-cloud toggle — always set so it never leaks a stale 1 from a
             // previous replay into the shaded model reveal.
-            meshMaterial.SetFloat("_Wireframe", wireframe ? 1f : 0f);
-            meshMaterial.SetColor("_WireColor", wireColor);
-            meshMaterial.SetFloat("_WireThickness", wireThickness);
-            meshMaterial.SetFloat("_WireStride", Mathf.Max(1, wireStride));
+            meshMaterial.SetFloat("_WhitePointCloud", whitePointCloud ? 1f : 0f);
+            meshMaterial.SetColor("_WhitePointCloudColor", whitePointCloudColor);
+            meshMaterial.SetFloat("_WhitePointCloudThickness", whitePointCloudThickness);
+            meshMaterial.SetFloat("_WhitePointCloudStride", Mathf.Max(1, whitePointCloudStride));
             Graphics.DrawProceduralIndirect(meshMaterial, BuildBounds(1.0f),
                 MeshTopology.Triangles, _meshArgsBuffer, 0,
                 camera: null, properties: null,

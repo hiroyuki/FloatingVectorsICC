@@ -67,6 +67,61 @@ Shader "Orbbec/MotionCurves"
             // the ribbons melt away with the cloud.
             float _PcFadeCull;
 
+            // Body self-shadow received from the TSDF volume (bound by
+            // PointCloudMotionCurves from Shared.ISdfShadowVolume when the mesh is drawn).
+            // A curve fragment marches this SDF toward the light and darkens when the body
+            // occludes it, so the ribbons sit in the same shadow as the sculpture instead
+            // of glowing through it. Same volume + parameters the mesh shades from, so the
+            // two agree; _CurveShadowStrength is the curves' own darkening amount (0 = off).
+            StructuredBuffer<float2> _Voxels;   // x = sdf (m), y = weight
+            float4x4 _VoxelFromWorld;
+            float4   _VDim;
+            float    _SdfMinWeight;
+            float    _VoxelSize;
+            float    _Tau;
+            float3   _LightDir;
+            float    _CurveShadowStrength;
+            float    _ShadowSteps;
+            float    _ShadowBiasVox;
+            float    _ShadowIsoFrac;
+
+            // Sample the SDF at an integer voxel corner; false if out of range or
+            // unobserved (weight below the gate). Matches TSDFMesh.shader.
+            bool SampleSdf(int3 c, out float sdf)
+            {
+                sdf = 0;
+                if (any(c < 0) || c.x >= (int)_VDim.x || c.y >= (int)_VDim.y || c.z >= (int)_VDim.z)
+                    return false;
+                int idx = c.x + (int)_VDim.x * (c.y + (int)_VDim.y * c.z);
+                float2 v = _Voxels[idx];
+                if (v.y < _SdfMinWeight) return false;
+                sdf = v.x;
+                return true;
+            }
+
+            // March the TSDF from a curve fragment toward the light: darken when the body
+            // occludes it (fixed-step, one voxel at a time, enter-shell test — the TSDF is
+            // a ±tau band, not a global distance field). Returns occlusion in [0,1]; 0 when
+            // shadows are off or the volume is unbound (SampleSdf fails -> stays lit).
+            float BodyShadow(float3 worldPos)
+            {
+                if (_CurveShadowStrength <= 0.0 || _VoxelSize <= 0.0) return 0.0;
+                float3 L = normalize(_LightDir);
+                int steps = (int)_ShadowSteps;
+                float iso = _ShadowIsoFrac * _Tau;
+                float3 ro = worldPos + L * (_VoxelSize * _ShadowBiasVox);
+                [loop] for (int s = 1; s <= steps; s++)
+                {
+                    float3 wp = ro + L * (_VoxelSize * (float)s);
+                    float3 vc = mul(_VoxelFromWorld, float4(wp, 1.0)).xyz;
+                    int3 ib = int3(floor(vc));
+                    float sdf;
+                    if (SampleSdf(ib, sdf) && sdf <= iso)
+                        return 1.0 - (float)(s - 1) / (float)steps;
+                }
+                return 0.0;
+            }
+
             struct V2F
             {
                 float4 pos  : SV_POSITION;
@@ -178,6 +233,12 @@ Shader "Orbbec/MotionCurves"
                 float3 rounded = albedo * _Brightness * (shade + rim * _RimBoost);
 
                 float3 rgb = lerp(flatCol, rounded, saturate(_Round));
+                // Received body shadow: darken the ribbon where the sculpture blocks the
+                // light, so the curves live in the same shadow as the mesh (not glowing
+                // through it). Multiplies the colour AFTER the tube shading so an
+                // unshadowed ribbon is unchanged.
+                float bocc = BodyShadow(i.worldPos);
+                rgb *= (1.0 - bocc * saturate(_CurveShadowStrength));
                 // Tail fade: coverage ramps from _TailAlpha at the oldest history
                 // point up to full at the newest, so the trail dissolves into
                 // the past instead of ending in a hard cut. The exponent shapes

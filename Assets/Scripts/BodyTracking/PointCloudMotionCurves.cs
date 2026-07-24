@@ -42,7 +42,7 @@ namespace BodyTracking
         // ---- Shared.IPanelTunable (one-stop Control Panel) ----
         // Look knobs so the curves can be dialled in at runtime, not just the Inspector.
         public string TuningLabel => "Motion lines";
-        public int TunableCount => 9;
+        public int TunableCount => 10;
         public string TunableName(int i) =>
             i == 0 ? "Brightness" :
             i == 1 ? "Ribbon Width (m)" :
@@ -51,7 +51,8 @@ namespace BodyTracking
             i == 4 ? "Lag Comp (s)" :
             i == 5 ? "Tail Alpha" :
             i == 6 ? "Tail Fade Length" :
-            i == 7 ? "Smooth Subdiv" : "Seed Count";
+            i == 7 ? "Smooth Subdiv" :
+            i == 8 ? "Seed Count" : "Body Shadow";
         public float TunableValue(int i) =>
             i == 0 ? brightness :
             i == 1 ? ribbonWidth :
@@ -60,7 +61,8 @@ namespace BodyTracking
             i == 4 ? lagCompSeconds :
             i == 5 ? tailAlpha :
             i == 6 ? tailFadePow :
-            i == 7 ? smoothSubdiv : seedCount;
+            i == 7 ? smoothSubdiv :
+            i == 8 ? seedCount : shadowStrength;
         public void SetTunableValue(int i, float value)
         {
             switch (i)
@@ -77,7 +79,10 @@ namespace BodyTracking
                 // seedCount additionally reallocates via EnsureBuffers on the
                 // next build (live-safe).
                 case 7: smoothSubdiv = Mathf.Clamp(Mathf.RoundToInt(value), 1, 8); break;
-                default: seedCount = Mathf.Clamp(Mathf.RoundToInt(value), 500, 60000); break;
+                case 8: seedCount = Mathf.Clamp(Mathf.RoundToInt(value), 500, 60000); break;
+                // shadowStrength is a draw-time material knob (not in BuildParamsHash) —
+                // applies to the held buffer immediately, no rebuild needed.
+                default: shadowStrength = Mathf.Clamp01(value); break;
             }
         }
         public float TunableMin(int i) => i == 6 ? 0.5f : i == 7 ? 1f : i == 8 ? 500f : 0f;
@@ -89,7 +94,8 @@ namespace BodyTracking
             i == 4 ? 0.2f :
             i == 5 ? 1f :
             i == 6 ? 6f :
-            i == 7 ? 8f : 60000f;
+            i == 7 ? 8f :
+            i == 8 ? 60000f : 1f;
         public bool TunableIsInt(int i) => i == 7 || i == 8;
 
         [Tooltip("Bone pose history source. Auto-resolves the first BonePoseHistory at OnEnable.")]
@@ -224,6 +230,16 @@ namespace BodyTracking
                  "dissolved and pushes full coverage toward the newest end — a longer gradient.")]
         public float tailFadePow = 2.5f;
 
+        [Header("Body shadow")]
+        [Range(0f, 1f)]
+        [Tooltip("How much the ribbons are darkened where the TSDF body blocks the light " +
+                 "(received self-shadow, marched through the displayed mesh's SDF volume). " +
+                 "0 = off (curves glow through the body, the original look); 1 = fully " +
+                 "shadowed. Inherits the mesh's light direction / reach / bias from " +
+                 "Shared.ISdfShadowVolume (TSDFView) so the curves sit in the SAME shadow " +
+                 "as the sculpture. Ignored while the TSDF mesh view is hidden.")]
+        public float shadowStrength = 0.7f;
+
         [Header("Freeze")]
         [Tooltip("Hard hold: stop rebuilding and keep drawing the last curves, ignoring parameter and " +
                  "pose changes. For holding the sculpture during live play. NOTE: pausing playback " +
@@ -248,6 +264,9 @@ namespace BodyTracking
         // assembly — a direct TSDFView reference would be circular. Re-resolved lazily when
         // the cached component dies (scene reload).
         private global::Shared.ITriangleSeedSource _triSource;
+        // Displayed TSDF volume to receive the body's self-shadow from (Shared.ISdfShadowVolume,
+        // also TSDFView). Same discovery pattern / reason as _triSource.
+        private global::Shared.ISdfShadowVolume _shadowVolume;
         private Material _mat;
         private GraphicsBuffer _outBuf;      // LineVert[seedCount*(K-1)*2]
         private GraphicsBuffer _argsBuf;     // 4-uint indirect args
@@ -325,6 +344,18 @@ namespace BodyTracking
         private static readonly int kBakeColors = Shader.PropertyToID("_BakeColors");
         private static readonly int kColorClearBase = Shader.PropertyToID("_ColorClearBase");
         private static readonly int kColorClearCount = Shader.PropertyToID("_ColorClearCount");
+        // Body-shadow (received from the TSDF volume) draw-material bindings.
+        private static readonly int kSdfVoxels = Shader.PropertyToID("_Voxels");
+        private static readonly int kSdfVoxelFromWorld = Shader.PropertyToID("_VoxelFromWorld");
+        private static readonly int kSdfVDim = Shader.PropertyToID("_VDim");
+        private static readonly int kSdfMinWeight = Shader.PropertyToID("_SdfMinWeight");
+        private static readonly int kSdfVoxelSize = Shader.PropertyToID("_VoxelSize");
+        private static readonly int kSdfTau = Shader.PropertyToID("_Tau");
+        private static readonly int kShadowLightDir = Shader.PropertyToID("_LightDir");
+        private static readonly int kCurveShadowStrength = Shader.PropertyToID("_CurveShadowStrength");
+        private static readonly int kShadowSteps = Shader.PropertyToID("_ShadowSteps");
+        private static readonly int kShadowBiasVox = Shader.PropertyToID("_ShadowBiasVox");
+        private static readonly int kShadowIsoFrac = Shader.PropertyToID("_ShadowIsoFrac");
 
         private void OnEnable()
         {
@@ -590,6 +621,17 @@ namespace BodyTracking
             return _triSource;
         }
 
+        // Find the scene's TSDF shadow volume (Shared.ISdfShadowVolume). Same lazy
+        // re-scan-when-dead pattern as ResolveTriSource; usually the same TSDFView.
+        private global::Shared.ISdfShadowVolume ResolveShadowVolume()
+        {
+            if (_shadowVolume is MonoBehaviour alive && alive != null) return _shadowVolume;
+            _shadowVolume = null;
+            foreach (var mb in FindObjectsByType<MonoBehaviour>(FindObjectsSortMode.None))
+                if (mb is global::Shared.ISdfShadowVolume sv) { _shadowVolume = sv; break; }
+            return _shadowVolume;
+        }
+
         // Bind the collect/history/radius inputs + classify/reproject scalars shared
         // by CSBuild and CSEmitSegs. CollectSeeds() must have succeeded this frame.
         private void BindBuildParams(int kernel)
@@ -754,11 +796,39 @@ namespace BodyTracking
             _mat.SetFloat(kRimBoost, rimBoost);
             _mat.SetFloat(kTailAlpha, tailAlpha);
             _mat.SetFloat(kTailFadePow, tailFadePow);
+            BindBodyShadow();
             var bounds = new Bounds(Vector3.zero, Vector3.one * 50f);
             Graphics.DrawProceduralIndirect(_mat, bounds, MeshTopology.Triangles, _argsBuf, 0,
                 camera: null, properties: null,
                 castShadows: ShadowCastingMode.Off, receiveShadows: false,
                 layer: gameObject.layer);
+        }
+
+        // Bind the received-body-shadow inputs on the draw material. When the TSDF
+        // volume isn't available/ready (mesh hidden, no volume, or strength 0) the
+        // shader's _CurveShadowStrength is set to 0 so the march early-outs and the
+        // ribbons draw at full brightness — the original look.
+        private void BindBodyShadow()
+        {
+            var sv = shadowStrength > 0f ? ResolveShadowVolume() : null;
+            if (sv == null || !sv.SdfShadowReady || sv.SdfBuffer == null)
+            {
+                _mat.SetFloat(kCurveShadowStrength, 0f);
+                return;
+            }
+            _mat.SetBuffer(kSdfVoxels, sv.SdfBuffer);
+            _mat.SetMatrix(kSdfVoxelFromWorld, sv.SdfVoxelFromWorld);
+            var d = sv.SdfDim;
+            _mat.SetVector(kSdfVDim, new Vector4(d.x, d.y, d.z, 0f));
+            _mat.SetFloat(kSdfMinWeight, sv.SdfMinWeight);
+            _mat.SetFloat(kSdfVoxelSize, sv.SdfVoxelSize);
+            _mat.SetFloat(kSdfTau, sv.SdfTau);
+            Vector3 l = sv.ShadowLightDir;
+            _mat.SetVector(kShadowLightDir, l == Vector3.zero ? Vector3.up : l);
+            _mat.SetFloat(kCurveShadowStrength, shadowStrength);
+            _mat.SetFloat(kShadowSteps, sv.ShadowSteps);
+            _mat.SetFloat(kShadowBiasVox, sv.ShadowBiasVox);
+            _mat.SetFloat(kShadowIsoFrac, sv.ShadowIsoFrac);
         }
 
         private List<MeshFilter> ResolveSources()

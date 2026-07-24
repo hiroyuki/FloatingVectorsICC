@@ -119,25 +119,27 @@ namespace Experience
         [Tooltip("Show the SOLID shaded TSDF mesh (with self-shadow) as part of the finished " +
                  "できたよ！ model, alongside the ribbons. OFF (default) = the current look: the " +
                  "mesh stays suppressed and ONLY the curves form the final model (the mesh is " +
-                 "still shown as the wireframe during the reveal replay either way). ON = the " +
+                 "still shown as the white point cloud during the reveal replay either way). ON = the " +
                  "solid body sits inside the ribbons. A/B this to decide the final look — it only " +
                  "affects ResultShow/QrShow; every live/practice phase is unchanged.")]
         public bool presentationSolidMesh = false;
 
-        [Tooltip("Processing screen: play the TSDF as a looping wireframe (mesh forming " +
+        [Tooltip("Processing screen: play the TSDF as a looping white point cloud (mesh forming " +
                  "with the motion) behind the progress bar, instead of a black stage. The " +
                  "mesh loops through the v11s conversion wait too. Turn OFF on machines " +
                  "where the wait is GPU-bound (Windows v11s/ONNX) and the extra render " +
                  "competes — Processing then falls back to the plain progress bar on black. " +
                  "The export is unaffected either way (a clean capture pass runs regardless).")]
-        public bool processingWireframe = true;
+        [UnityEngine.Serialization.FormerlySerializedAs("processingWireframe")]
+        public bool processingWhitePointCloud = true;
 
         [Min(0f)]
-        [Tooltip("processingWireframe: seconds to LOOP the recorded take as the wireframe " +
-                 "AFTER the v11s conversion finishes (the wireframe runs post-conversion " +
+        [Tooltip("processingWhitePointCloud: seconds to LOOP the recorded take as the white point cloud " +
+                 "AFTER the v11s conversion finishes (the white point cloud runs post-conversion " +
                  "so the playback file handle can't block the converter). Long takes loop " +
-                 "only their last processingWireframeMinSeconds. Adds this long to Processing.")]
-        public float processingWireframeMinSeconds = 5f;
+                 "only their last processingWhitePointCloudMinSeconds. Adds this long to Processing.")]
+        [UnityEngine.Serialization.FormerlySerializedAs("processingWireframeMinSeconds")]
+        public float processingWhitePointCloudMinSeconds = 5f;
 
         [Header("Sensing overrides (pushed into PresenceDetector on enter)")]
         [Min(0f)] public float insetMeters = 0f;
@@ -478,7 +480,7 @@ namespace Experience
         [TextArea] public string shootCueText = "じゃぁ　ほんばんだよ";
         [TextArea] public string shootingText = "さつえいちゅう！";
         [TextArea] public string processingText = "きろくを　じゅんびしているよ　まってね";
-        [Tooltip("Shown over the looping wireframe during the practice (TestMove) analysis " +
+        [Tooltip("Shown over the looping white point cloud during the practice (TestMove) analysis " +
                  "phase. The real-take Processing screen uses processingText instead.")]
         [TextArea] public string analyzingText = "ぶんせきちゅう";
         [TextArea] public string resultText = "できたよ！";

@@ -942,9 +942,9 @@ namespace Experience
             // Leaving mode mid-Processing must not strand the ribbons hidden.
             SetSculptureVisible(true);
             // Session-long TSDF hide + orbit ownership — hand both back. An exit mid
-            // Processing-wireframe must not strand the dev view as a wireframe.
-            _processingWireframeOn = false;
-            if (tsdfView != null) { tsdfView.wireframe = false; tsdfView.suppressDraw = _savedTsdfSuppress; }
+            // Processing white point cloud must not strand the dev view as a white point cloud.
+            _processingWhitePointCloudOn = false;
+            if (tsdfView != null) { tsdfView.whitePointCloud = false; tsdfView.suppressDraw = _savedTsdfSuppress; }
             SetPresentationLook(false); // scene (live) values back before dev restore
             SetOrbit(false);
             foreach (var s in _orbitGates)
@@ -1125,7 +1125,7 @@ namespace Experience
                 _converter?.Abort();
                 _testMovePresenting = false;
                 AbortShootEndDissolve(); // stopped mid dissolve: no half-dissolved/frozen leak
-                SetProcessingWireframe(false); // stopped mid ぶんせきちゅう: hide the wireframe
+                SetProcessingWhitePointCloud(false); // stopped mid ぶんせきちゅう: hide the white point cloud
             }
             if (from == ExperienceState.Shoot)
             {
@@ -1147,11 +1147,11 @@ namespace Experience
                     _converter?.Abort();
                     RestoreHistorySamples(); // the capture may have been mid-flight
                 }
-                // Belt-and-suspenders for the Processing wireframe: every exit path —
+                // Belt-and-suspenders for the Processing white point cloud: every exit path —
                 // the normal reveal (routine already turned it off), a failure yield
                 // break, or a mid-conversion walk-off — must hide the mesh so no state
-                // inherits a stray wireframe. No-ops when it wasn't armed.
-                SetProcessingWireframe(false);
+                // inherits a stray white point cloud. No-ops when it wasn't armed.
+                SetProcessingWhitePointCloud(false);
                 // MUST run even when the routine already nulled itself on a failure path
                 // (no take / playback / capture failure): every Processing exit that
                 // isn't the ResultShow reveal has to clear the shoot-end dissolve, or
@@ -2056,23 +2056,23 @@ namespace Experience
             }
 
             // ---- stage 1: v11s conversion (skippable, shared with TestMove) ----
-            // Behind the progress bar, LOOP the recorded take (1x) as a wireframe that
+            // Behind the progress bar, LOOP the recorded take (1x) as a white point cloud that
             // forms with the motion — through the conversion wait AND a guaranteed
             // minimum window, so it visibly repeats even when the conversion is fast /
             // skipped (Mac). This is VISUAL only: stage 2 runs a clean capture pass on a
-            // reset volume, so the export is never affected. Gated on processingWireframe
+            // reset volume, so the export is never affected. Gated on processingWhitePointCloud
             // (turn OFF where the conversion is GPU-bound). The real take keeps the
             // processingText caption (ぶんせきちゅう is the practice-round wording).
             bool cannedTake = t.skipShoot || t.dummyShoot;
-            bool wireframe = config.processingWireframe && tsdfView != null;
-            yield return WireframeConvertLoop(_takeRoot, 0f, 0.8f, config.processingText);
+            bool whitePointCloud = config.processingWhitePointCloud && tsdfView != null;
+            yield return WhitePointCloudConvertLoop(_takeRoot, 0f, 0.8f, config.processingText);
             if (!_active || _fsm.State != ExperienceState.Processing)
-            { SetProcessingWireframe(false); _processingRoutine = null; yield break; }
+            { SetProcessingWhitePointCloud(false); _processingRoutine = null; yield break; }
 
             // ---- stage 2: single play-through of the take (loop off) ----
             // Reset the volume so the capture rebuilds cleanly from THIS play-through —
-            // ALWAYS (both processingWireframe on and off), so the export is identical
-            // regardless of the flag AND free of the wireframe loop's writes or any
+            // ALWAYS (both processingWhitePointCloud on and off), so the export is identical
+            // regardless of the flag AND free of the white point cloud loop's writes or any
             // pre-Shoot residue. The exported sculpture is exactly the take's window.
             if (tsdfIntegrator != null) ResumeIntegratorLiveFollow();
             // Apply the dense presentation look (seedCount 60000, presentation
@@ -2085,7 +2085,7 @@ namespace Experience
             if (!_visitorPlaybackActive || sensorRecorder == null || !sensorRecorder.IsPlaying)
             {
                 Debug.LogError($"[{nameof(ExperienceDirector)}] take play-through failed to start.", this);
-                SetProcessingWireframe(false); // don't leave the wireframe under the failure notice
+                SetProcessingWhitePointCloud(false); // don't leave the white point cloud under the failure notice
                 _processingFailed = true;
                 ShowExportFailed();
                 _processingRoutine = null;
@@ -2153,7 +2153,7 @@ namespace Experience
             if (snap == null)
             {
                 Debug.LogError($"[{nameof(ExperienceDirector)}] final capture failed: {err}", this);
-                SetProcessingWireframe(false); // don't leave the wireframe under the failure notice
+                SetProcessingWhitePointCloud(false); // don't leave the white point cloud under the failure notice
                 _processingFailed = true;
                 ShowExportFailed();
                 _processingRoutine = null;
@@ -2202,10 +2202,10 @@ namespace Experience
             // next Idle (live-follow again) and on mode exit.
             FreezeSculpture();
 
-            // Hide the Processing wireframe now that the capture is done — the stage
+            // Hide the Processing white point cloud now that the capture is done — the stage
             // goes black for the Processing→ResultShow reveal (ResultShow un-hides the
             // finished cloud + ribbons). FreezeSculpture already closed the gate.
-            if (wireframe) SetProcessingWireframe(false);
+            if (whitePointCloud) SetProcessingWhitePointCloud(false);
 
             _snapshot = snap;
             _ui.ShowProgress(1f, config.processingText);
@@ -2446,68 +2446,68 @@ namespace Experience
             sensorRecorder?.ResumeFrames();
         }
 
-        // Processing-screen wireframe (2026-07-24). The TSDF mesh is drawn as an edge
-        // net (config.processingWireframe) behind the progress bar while the take
+        // Processing-screen white point cloud (2026-07-24). The TSDF mesh is drawn as an edge
+        // net (config.processingWhitePointCloud) behind the progress bar while the take
         // replays — the sculpture forms with the motion instead of a black stage. The
-        // point cloud + ribbons stay hidden (the wireframe is the only content); the
+        // ribbons stay hidden (the white point cloud is the only content); the
         // TSDF mesh is un-suppressed just for this. off=false hides the mesh again,
         // leaving the black stage the Processing→ResultShow reveal expects. Integration
         // is owned by the routine (building through the play-through, frozen after the
         // capture), NOT here.
-        private bool _processingWireframeOn;
-        private void SetProcessingWireframe(bool on)
+        private bool _processingWhitePointCloudOn;
+        private void SetProcessingWhitePointCloud(bool on)
         {
-            if (_processingWireframeOn == on) return;
-            _processingWireframeOn = on;
+            if (_processingWhitePointCloudOn == on) return;
+            _processingWhitePointCloudOn = on;
             if (on)
             {
                 SetCloudRenderersVisible(false);
                 if (motionCurves != null) motionCurves.suppressDraw = true;
-                if (tsdfView != null) { tsdfView.wireframe = true; tsdfView.suppressDraw = false; }
+                if (tsdfView != null) { tsdfView.whitePointCloud = true; tsdfView.suppressDraw = false; }
             }
             else if (tsdfView != null)
             {
-                tsdfView.wireframe = false;
+                tsdfView.whitePointCloud = false;
                 tsdfView.suppressDraw = true;
             }
         }
 
         // Shared by Processing and practice: run ConvertTakeRoutine FIRST (caption on a
         // black stage — a progress bar for the real take, the ぶんせきちゅう message for
-        // practice), THEN loop the converted take (1x) as a Processing-style wireframe
-        // for processingWireframeMinSeconds so it repeats visibly. Conversion runs before
+        // practice), THEN loop the converted take (1x) as a Processing-style white point cloud
+        // for processingWhitePointCloudMinSeconds so it repeats visibly. Conversion runs before
         // any playback because SensorRecorder.Load() holds bodies_main open, which would
         // block the converter's File.Move promotion on Windows (see below). Long/canned
         // takes loop only their tail. Assumes the stage is already black. Leaves the
-        // wireframe ON and the take looping — the caller turns it off
-        // (SetProcessingWireframe(false)) and transitions. When config.processingWireframe
+        // white point cloud ON and the take looping — the caller turns it off
+        // (SetProcessingWhitePointCloud(false)) and transitions. When config.processingWhitePointCloud
         // is off it just runs the conversion (no loop, black stage).
-        private IEnumerator WireframeConvertLoop(string takeRoot, float progressFrom,
+        private IEnumerator WhitePointCloudConvertLoop(string takeRoot, float progressFrom,
                                                  float progressTo, string caption,
                                                  bool showProgressBar = true)
         {
             // Caption up front so the conversion phase isn't blank (also covers the
-            // skipped-conversion / wireframe-off case).
+            // skipped-conversion / white-point-cloud-off case).
             if (!showProgressBar) _ui.ShowMessage(caption);
 
             // Convert FIRST, with NO playback open. SensorRecorder.Load() holds
             // bodies_main open (FileShare.Read), and FusedTakeConverter promotes its
             // result via File.Move(bodies_main, ...) — on Windows the open handle would
             // fail that move with a sharing violation, silently dropping the conversion.
-            // So the wireframe loop only starts AFTER the converter has promoted the file.
+            // So the white point cloud loop only starts AFTER the converter has promoted the file.
             yield return ConvertTakeRoutine(takeRoot, progressFrom, progressTo, caption, showProgressBar);
 
-            if (!(config.processingWireframe && tsdfView != null)) yield break;
+            if (!(config.processingWhitePointCloud && tsdfView != null)) yield break;
 
-            // Loop the (now-converted) take as a wireframe for the guaranteed window so
+            // Loop the (now-converted) take as a white point cloud for the guaranteed window so
             // it repeats visibly. Long/canned takes loop only their tail.
-            SetProcessingWireframe(true);
+            SetProcessingWhitePointCloud(true);
             StartVisitorPlayback(takeRoot, loop: true, rate: 1f);
             if (!_visitorPlaybackActive || sensorRecorder == null || !sensorRecorder.IsPlaying) yield break;
 
             double dur = Math.Max(0.1, sensorRecorder.PlaybackDurationSeconds);
-            double loopStart = dur > config.processingWireframeMinSeconds
-                ? dur - config.processingWireframeMinSeconds : 0;
+            double loopStart = dur > config.processingWhitePointCloudMinSeconds
+                ? dur - config.processingWhitePointCloudMinSeconds : 0;
             bool seekPending = loopStart > 0;
             Action onWrap = () => { if (loopStart > 0) seekPending = true; };
             sensorRecorder.OnPlaybackLooped += onWrap;
@@ -2518,7 +2518,7 @@ namespace Experience
                     seekPending = false;
                     if (sensorRecorder.SeekToPlayheadSeconds(loopStart)) sensorRecorder.ResumePlayback();
                 }
-                float minLoop = config.processingWireframeMinSeconds
+                float minLoop = config.processingWhitePointCloudMinSeconds
                                 / Mathf.Max(0.01f, config.timings.timeMultiplier);
                 float until = Time.realtimeSinceStartup + minLoop;
                 while (_active && sensorRecorder != null && sensorRecorder.IsPlaying
@@ -2800,10 +2800,10 @@ namespace Experience
                 }
                 PlaySe(config.recordEndSe);
 
-                // -- shoot-end dissolve → ぶんせきちゅう wireframe (v11s conversion) →
+                // -- shoot-end dissolve → ぶんせきちゅう white point cloud (v11s conversion) →
                 //    black → できたよ！ → model reveal + growth. Order mirrors the real
                 //    take (Shoot→Processing→ResultShow): dissolve the live model away
-                //    FIRST, then loop the recording as a wireframe behind ぶんせきちゅう
+                //    FIRST, then loop the recording as a white point cloud behind ぶんせきちゅう
                 //    while the conversion runs, then reveal the finished replay.
                 bool haveTake = !string.IsNullOrEmpty(takeRoot) && Directory.Exists(takeRoot);
                 bool played = false;
@@ -2815,13 +2815,13 @@ namespace Experience
                     yield return DissolveShootEndToBlack();
                     if (!Active()) yield break;
 
-                    // ぶんせきちゅう: loop the take as a wireframe while it converts. Practice
+                    // ぶんせきちゅう: loop the take as a white point cloud while it converts. Practice
                     // shows the plain ぶんせきちゅう TEXT (no progress bar — that "processing"
                     // UI is the real-take screen only); the conversion runs the same pipeline.
-                    yield return WireframeConvertLoop(takeRoot, 0f, 1f, config.analyzingText,
+                    yield return WhitePointCloudConvertLoop(takeRoot, 0f, 1f, config.analyzingText,
                                                       showProgressBar: false);
                     if (!Active()) yield break;
-                    SetProcessingWireframe(false); // hide the wireframe → black for the reveal
+                    SetProcessingWhitePointCloud(false); // hide the white point cloud → black for the reveal
                     _ui.ClearAll();                // clear ぶんせきちゅう so the gap is truly black
 
                     // Prep the ring for the growing replay: widen to the one-second
@@ -2965,12 +2965,12 @@ namespace Experience
             // Optional solid-mesh final model (A/B knob, config.presentationSolidMesh):
             // by default the mesh stays suppressed and the finished model is cloud +
             // ribbons; when on, draw the solid shaded TSDF mesh (with self-shadow) inside
-            // the ribbons. The Processing wireframe left it suppressed — override here so
+            // the ribbons. The Processing white point cloud left it suppressed — override here so
             // the choice sticks through the ResultShow/QrShow orbit. The exit restore
             // (EnterMode's _savedTsdfSuppress) puts it back for the next visitor.
             if (tsdfView != null && config.presentationSolidMesh)
             {
-                tsdfView.wireframe = false;
+                tsdfView.whitePointCloud = false;
                 tsdfView.suppressDraw = false;
             }
 

@@ -27,15 +27,15 @@ Shader "TSDF/TSDFMesh"
         _ShadowSteps    ("Self-shadow reach (voxel steps)", Range(1, 64)) = 24
         _ShadowBiasVox  ("Self-shadow start bias (voxels)", Range(0, 12)) = 3
         _ShadowIsoFrac  ("Self-shadow occluder threshold (x tau)", Range(0, 1)) = 0.3
-        // Wireframe: draw only the triangle edges (interior discarded) so the
-        // marching-cubes surface reads as a mesh net over the black stage. Driven
+        // White point cloud: draw only the triangle edges (interior discarded) so the
+        // marching-cubes surface reads as a net of white points over the black stage. Driven
         // by the experience during the ResultShow / practice replay.
-        [Toggle] _Wireframe  ("Wireframe", Float) = 0
-        _WireColor     ("Wire colour", Color)  = (1, 1, 1, 1)
-        _WireThickness ("Wire thickness (px)", Range(0.2, 4)) = 1.2
+        [Toggle] _WhitePointCloud  ("White point cloud", Float) = 0
+        _WhitePointCloudColor     ("White point cloud colour", Color)  = (1, 1, 1, 1)
+        _WhitePointCloudThickness ("White point cloud thickness (px)", Range(0.2, 4)) = 1.2
         // Thin the net by drawing only every Nth marching-cubes triangle (the mesh
-        // is far denser than a pixel, so a 1:1 wireframe reads as a solid fill).
-        _WireStride    ("Wire triangle stride (1 = all)", Range(1, 32)) = 8
+        // is far denser than a pixel, so a 1:1 net reads as a solid fill).
+        _WhitePointCloudStride    ("White point cloud triangle stride (1 = all)", Range(1, 32)) = 8
     }
     SubShader
     {
@@ -91,13 +91,13 @@ Shader "TSDF/TSDFMesh"
             float    _ShadowBiasVox;
             float    _ShadowIsoFrac;
 
-            // Wireframe. Each MC triangle is 3 consecutive procedural vertices, so
+            // White point cloud. Each MC triangle is 3 consecutive procedural vertices, so
             // a per-corner barycentric ((1,0,0)/(0,1,0)/(0,0,1)) interpolates to the
             // distance-to-edge across the face — no geometry shader, no vertex attrs.
-            float    _Wireframe;
-            float4   _WireColor;
-            float    _WireThickness;
-            float    _WireStride;
+            float    _WhitePointCloud;
+            float4   _WhitePointCloudColor;
+            float    _WhitePointCloudThickness;
+            float    _WhitePointCloudStride;
 
             struct V2F
             {
@@ -106,7 +106,7 @@ Shader "TSDF/TSDFMesh"
                 float3 viewDir  : TEXCOORD1;
                 float3 vcol     : TEXCOORD2;
                 float3 bary     : TEXCOORD3;
-                nointerpolation float wireKeep : TEXCOORD4; // 1 = draw this tri's edges
+                nointerpolation float pointKeep : TEXCOORD4; // 1 = draw this tri's edges
             };
 
             V2F vert(uint vid : SV_VertexID)
@@ -123,10 +123,10 @@ Shader "TSDF/TSDFMesh"
                 o.vcol = col;
                 o.bary = (cornerIdx == 0u) ? float3(1, 0, 0)
                        : (cornerIdx == 1u) ? float3(0, 1, 0) : float3(0, 0, 1);
-                // Keep only every Nth triangle for the wireframe (thinning). Flat so
+                // Keep only every Nth triangle for the white point cloud (thinning). Flat so
                 // all three corners agree on whether the triangle is drawn.
-                uint stride = (uint)max(1.0, _WireStride);
-                o.wireKeep = ((triIdx % stride) == 0u) ? 1.0 : 0.0;
+                uint stride = (uint)max(1.0, _WhitePointCloudStride);
+                o.pointKeep = ((triIdx % stride) == 0u) ? 1.0 : 0.0;
                 return o;
             }
 
@@ -193,18 +193,18 @@ Shader "TSDF/TSDFMesh"
 
             fixed4 frag(V2F i) : SV_Target
             {
-                // Wireframe: keep only the fragments near a triangle edge; discard
+                // White point cloud: keep only the fragments near a triangle edge; discard
                 // the interior so the black stage shows through and the surface
-                // reads as an edge net. Screen-space AA via fwidth keeps the line a
+                // reads as a net of white points. Screen-space AA via fwidth keeps the line a
                 // constant pixel width regardless of distance.
-                if (_Wireframe > 0.5)
+                if (_WhitePointCloud > 0.5)
                 {
-                    if (i.wireKeep < 0.5) discard;       // thinned-out triangle
-                    float3 d = fwidth(i.bary) * max(0.1, _WireThickness);
+                    if (i.pointKeep < 0.5) discard;       // thinned-out triangle
+                    float3 d = fwidth(i.bary) * max(0.1, _WhitePointCloudThickness);
                     float3 s = smoothstep(float3(0, 0, 0), d, i.bary);
                     float edge = min(s.x, min(s.y, s.z)); // ~0 on an edge, ~1 interior
                     if (edge > 0.5) discard;
-                    return fixed4(_WireColor.rgb, 1.0);
+                    return fixed4(_WhitePointCloudColor.rgb, 1.0);
                 }
 
                 // Flat normal from screen-space derivatives — no per-vertex

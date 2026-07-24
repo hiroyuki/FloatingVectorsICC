@@ -88,10 +88,13 @@ namespace Experience
         [Tooltip("How long はかれたよ！ (pose matched) stays on screen after the star " +
                  "pose is held, before TestMove1 replaces it. Without this the match is " +
                  "a single frame: the FSM latches CalibrationDone and advances on the " +
-                 "very next tick. The ribbons also appear on this beat, so it doubles " +
-                 "as the sculpture reveal. Only the HELD-pose path waits — window " +
-                 "expiry (shy visitor) and skipCalibrate still advance immediately.")]
-        public float calibrateMatchedSeconds = 1.5f;
+                 "very next tick. This beat also carries the sculpture reveal — the " +
+                 "point cloud rises (cloudRevealSeconds) and the ribbons grow in " +
+                 "(curveGrowSeconds) — so keep it >= cloudRevealSeconds + curveGrowSeconds " +
+                 "or はかれたよ！ is replaced before the reveal finishes. Only the HELD-pose " +
+                 "path waits — window expiry (shy visitor) and skipCalibrate still " +
+                 "advance immediately.")]
+        public float calibrateMatchedSeconds = 3f;
         [Min(5f)]
         [Tooltip("Director-enforced ceiling on Processing (conversion + capture); " +
                  "expiry falls back to whatever bodies the take carries.")]
