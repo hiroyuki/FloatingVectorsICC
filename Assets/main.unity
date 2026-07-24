@@ -2428,7 +2428,8 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: PointCloud::PointCloud.PointCloudView
   showPointClouds: 0
-  cumulative: {fileID: 0}
+  brightness: 1.519
+  cumulative: {fileID: 18533122}
 --- !u!4 &1168113567
 Transform:
   m_ObjectHideFlags: 0
