@@ -356,7 +356,7 @@ namespace TSDF
                  "sampled evenly into the last 15% — many long strokes, few short accents. " +
                  "0 = no budget (Web Curve Stride thins instead). USDZ tracks GLB when " +
                  "binary usdc conversion is available; the ASCII usda fallback runs ~4x.")]
-        public float webCurveBudgetMB = 9f;
+        public float webCurveBudgetMB = 12f;
 
         [Range(0.25f, 4f)]
         [Tooltip("Multiply the web-export curve-tube radius by this (1 = as drawn). Fatter " +

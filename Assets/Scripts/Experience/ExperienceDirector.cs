@@ -3343,7 +3343,7 @@ namespace Experience
                 {
                     ao = new MeshAO.Options { strength = 0.6f, samples = 32, maxDistance = 0.15f },
                     omitMesh = true,
-                    curveBudgetBytes = 9L * 1048576,
+                    curveBudgetBytes = 12L * 1048576,
                     shortCurveShare = 0.15f,
                     curveRadiusScale = 1.5f,
                     includePointCloud = true,
