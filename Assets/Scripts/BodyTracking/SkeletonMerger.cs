@@ -274,18 +274,54 @@ namespace BodyTracking
         [Min(0f)] public float volumeGateMarginMeters = 0.25f;
 
         [Header("Primary selection")]
-        [Tooltip("When more than one merged person is inside the sensing area, keep only the " +
-                 "one whose pelvis is horizontally closest to the sensing-area center " +
-                 "(trackingVolume transform position) and discard the rest — they get no " +
-                 "visual and no PersonSample, so every consumer sees one person at most. " +
-                 "Per CLAUDE.md this installation " +
-                 "is single-person; the crowd alert still fires off the pre-discard count.")]
-        public bool selectClosestToCenter = true;
+        [Tooltip("When more than one merged person is inside the sensing area, keep only ONE " +
+                 "and discard the rest — they get no visual and no PersonSample, so every " +
+                 "consumer sees one person at most. Per CLAUDE.md this installation is " +
+                 "single-person; the crowd alert still fires off the pre-discard count.")]
+        public bool enablePrimarySelection = true;
 
-        [Tooltip("Hysteresis for the closest-to-center pick: the current primary keeps its " +
-                 "status unless a challenger is closer to the center by at least this margin. " +
-                 "Prevents the target from flapping between two near-equidistant people.")]
+        public enum PrimaryPolicy
+        {
+            // Whoever has focus keeps it until they leave the area (or tracking
+            // loses them for longer than primaryLossGraceSeconds). New focus is
+            // only assigned when there is none.
+            FirstPersonSticky = 0,
+            // Focus follows the person closest to the sensing-area center, with
+            // primarySwitchMarginMeters of incumbent hysteresis.
+            ClosestToCenter = 1,
+        }
+
+        [Tooltip("FirstPersonSticky: the first tracked person keeps focus until they leave; " +
+                 "nobody can take it from them. ClosestToCenter: focus follows whoever is " +
+                 "nearest the sensing-area center (with the switch margin below). When no one " +
+                 "has focus, both policies hand it to the person nearest the center.")]
+        public PrimaryPolicy primaryPolicy = PrimaryPolicy.FirstPersonSticky;
+
+        [Tooltip("ClosestToCenter only. Hysteresis: the current primary keeps focus unless a " +
+                 "challenger is closer to the center by at least this margin. Prevents the " +
+                 "target from flapping between two near-equidistant people.")]
         [Min(0f)] public float primarySwitchMarginMeters = 0.25f;
+
+        [Tooltip("If the focused person drops out of tracking (occlusion, worker hiccup), " +
+                 "hold focus vacant for this long before giving it to someone else. Stops a " +
+                 "sub-second dropout from permanently handing focus to the other person. " +
+                 "During the hold nobody is emitted.")]
+        [Min(0f)] public float primaryLossGraceSeconds = 1f;
+
+        [Tooltip("Also hide discarded people from the POINT CLOUD: their raw skeleton bones " +
+                 "are published as KeepOutside capsules through a runtime-created " +
+                 "PointCloudCapsuleFilter, which is wired into every bound renderer (and the " +
+                 "recorder's playback meshes) whose capsuleFilter slot is unassigned. A " +
+                 "renderer with an explicitly assigned capsuleFilter is left alone — the " +
+                 "shader has a single capsule slot, so an existing filter (e.g. a KeepInside " +
+                 "trail tube) wins and this mask stays inert there.")]
+        public bool maskDiscardedFromPointCloud = true;
+
+        [Tooltip("Capsule radius (meters) around each discarded person's bones for the point-" +
+                 "cloud mask. Generous enough to swallow the whole silhouette (clothing, " +
+                 "hair); too large starts eating the environment and, if the two people " +
+                 "stand shoulder to shoulder, the primary's own points.")]
+        [Min(0f)] public float discardMaskRadiusMeters = 0.35f;
 
         [Header("Debug")]
         [Tooltip("Also render each worker's raw skeleton (pre-merge) in a hue derived " +
@@ -385,7 +421,10 @@ namespace BodyTracking
         private int _candidateCount;
         private readonly List<Cluster> _clusterPool = new();
         private int _clusterCount;
-        private readonly List<(uint id, int conf)> _priorSorted = new();
+        // Continuity-pass scratch: candidate pairs within radius sorted by
+        // distance, and the priors that already claimed a candidate this frame.
+        private readonly List<(uint id, int cand, float dist)> _continuityPairs = new();
+        private readonly HashSet<uint> _claimedPriors = new();
 
         // Persistent state across frames. Per-body visuals + GC live in
         // BodyVisualPool (Phase 5b); priorPelvis/priorMaxConf are MultiLive-specific
@@ -624,6 +663,20 @@ namespace BodyTracking
             _gateStateById.Clear();
             _pool.DestroyAll();
             foreach (var kv in _latestBySerial) kv.Value.BodyCount = 0;
+            ResetPrimarySelection();
+        }
+
+        // Hard-reset of the focus state. Must accompany every path that wipes
+        // continuity data (OnDisable / RestartWorkers / playback loop): visual
+        // eviction deliberately preserves _primaryPersonId for the loss-grace
+        // window, so without this a fresh first visitor arriving inside the old
+        // grace window would be treated as a challenger and nobody emitted.
+        private void ResetPrimarySelection()
+        {
+            _primaryPersonId = 0;
+            _primaryLastSeenTime = -1f;
+            _lastEligiblePersonCount = 0;
+            _lastEligibleSeenTime = -999f;
         }
 
         private void OnPlaybackRawFrame(string serial, ObCameraParam? camParam, Transform sourceTransform, RawFrameData frame)
@@ -734,6 +787,10 @@ namespace BodyTracking
             _gateStateById.Clear();
             ClearPerWorkerSkeletons();
             _boundRenderers.Clear();
+            _discardedBones.Clear();
+            if (_discardMask != null) _discardMask.Clear();
+            ResetPrimarySelection();
+            global::Shared.StageHudOverlay.Hide();
         }
 
         private void OnDestroy() => OnDisable();
@@ -755,6 +812,9 @@ namespace BodyTracking
             _priorPelvisById.Clear();
             _priorMaxConfById.Clear();
             _gateStateById.Clear();
+            _discardedBones.Clear();
+            if (_discardMask != null) _discardMask.Clear();
+            ResetPrimarySelection();
             Debug.Log($"[{nameof(SkeletonMerger)}] workers restarted (attract→live handoff).", this);
         }
 
@@ -866,19 +926,51 @@ namespace BodyTracking
             }
 
             UpdateCrowdAlert();
+            UpdateStageHud();
 
             if (diagnosticLogging) PerSecondDiag();
+        }
+
+        // Compact mirror of the debug HUD on the stage-side displays (2 + 3):
+        // the operator PC is physically away from the sensing area, so the
+        // OnGUI HUD on Display 1 is unreadable while standing inside the space.
+        private readonly System.Text.StringBuilder _stageSb = new System.Text.StringBuilder(512);
+
+        private void UpdateStageHud()
+        {
+            if (!showDebugHud)
+            {
+                global::Shared.StageHudOverlay.Hide();
+                return;
+            }
+            _stageSb.Clear();
+            _stageSb.AppendLine($"<b>SkeletonMerger</b>  eligible={_lastEligiblePersonCount}  " +
+                                $"primaryId={_primaryPersonId}  merged={(_pool != null ? _pool.Count : 0)}");
+            for (int c = 0; c < _clusterCount; c++)
+            {
+                var cl = _clusterPool[c];
+                if (cl.MemberIndices.Count < requireMinWorkerCount) continue;
+                _stageSb.AppendLine($"id={cl.Id}  cams={cl.MemberIndices.Count}  " +
+                                    $"distC={DistToCenterXZ(cl.Seed.PelvisWorld):F2}m" +
+                                    (cl.Id == _primaryPersonId ? "  <color=#66ff66>PRIMARY</color>" : ""));
+            }
+            if (_lastSwitchTime >= 0f)
+                _stageSb.AppendLine($"<color=#ffcc66>switch {_lastSwitchMsg}, " +
+                                    $"{Time.realtimeSinceStartup - _lastSwitchTime:F0}s ago</color>");
+            global::Shared.StageHudOverlay.Show(_stageSb.ToString());
         }
 
         private void UpdateCrowdAlert()
         {
             if (!showCrowdAlert) { _alertActive = false; return; }
 
-            // Pre-discard count: with selectClosestToCenter on, the pool only
+            // Pre-discard count: with enablePrimarySelection on, the pool only
             // ever holds the primary, so the alert must look at how many people
-            // were detected BEFORE the extras were thrown away. An empty pool
-            // means nobody is tracked anymore — treat the stale count as 0.
-            int merged = _pool != null && _pool.Count > 0 ? _lastEligiblePersonCount : 0;
+            // were detected BEFORE the extras were thrown away. Presence is
+            // judged from the last eligible-cluster observation, not the visual
+            // pool — the grace hold empties the pool while people are present.
+            int merged = Time.realtimeSinceStartup - _lastEligibleSeenTime <= kPresenceTimeoutSeconds
+                ? _lastEligiblePersonCount : 0;
             float now = Time.realtimeSinceStartup;
 
             if (merged > 1)
@@ -902,6 +994,7 @@ namespace BodyTracking
 
         private void OnGUI()
         {
+            if (showDebugHud) DrawDebugHud();
             if (!_alertActive) return;
             if (_alertStyleCache == null)
             {
@@ -922,8 +1015,6 @@ namespace BodyTracking
             GUI.DrawTexture(rect, Texture2D.whiteTexture);
             GUI.color = prev;
             GUI.Label(rect, alertMessage, _alertStyleCache);
-
-            if (showDebugHud) DrawDebugHud();
         }
 
         private GUIStyle _hudStyleCache;
@@ -968,7 +1059,9 @@ namespace BodyTracking
             for (int c = 0; c < _clusterCount; c++)
             {
                 var cl = _clusterPool[c];
-                _hudSb.AppendLine($"<color=#fc9>cluster[{c}]</color> id={cl.Id} carryOver={cl.IsCarryOver} members={cl.MemberIndices.Count}");
+                _hudSb.AppendLine($"<color=#fc9>cluster[{c}]</color> id={cl.Id} carryOver={cl.IsCarryOver} members={cl.MemberIndices.Count}" +
+                                  $" distC={DistToCenterXZ(cl.Seed.PelvisWorld):F2}" +
+                                  (cl.Id == _primaryPersonId ? " <color=#6f6>PRIMARY</color>" : ""));
                 for (int m = 0; m < cl.MemberIndices.Count; m++)
                 {
                     var cand = _candidatePool[cl.MemberIndices[m]];
@@ -1413,28 +1506,43 @@ namespace BodyTracking
         {
             _clusterCount = 0;
 
-            // Continuity pass: prior persons sorted by their last-frame max
-            // confidence (descending) each claim the nearest unconsumed
-            // candidate within continuityRadiusMeters as a seed, then absorb
-            // other workers' bodies within mergeRadiusMeters.
-            _priorSorted.Clear();
-            foreach (var kv in _priorMaxConfById) _priorSorted.Add((kv.Key, kv.Value));
-            _priorSorted.Sort((a, b) => b.conf.CompareTo(a.conf));
-
-            for (int p = 0; p < _priorSorted.Count; p++)
+            // Continuity pass: globally-nearest greedy matching between prior
+            // persons and candidates. Every (prior, candidate) pair within
+            // continuityRadiusMeters is sorted by distance and claimed in that
+            // order, one candidate per prior. This is deliberately NOT the old
+            // per-prior nearest-claim in confidence order: with two people
+            // inside the radius, a VANISHED prior (e.g. the focused person
+            // dropping out) could claim the other person's detection before
+            // their own prior did — handing the absent person's id, and with it
+            // the sticky focus, to whoever stood closest. Distance-greedy lets
+            // each detection go to the prior it actually matches best.
+            _continuityPairs.Clear();
+            foreach (var kv in _priorPelvisById)
             {
-                uint priorId = _priorSorted[p].id;
-                if (!_priorPelvisById.TryGetValue(priorId, out Vector3 priorPelvis)) continue;
-                int seedIdx = NearestUnconsumed(priorPelvis, continuityRadiusMeters);
-                if (seedIdx < 0) continue;
+                for (int i = 0; i < _candidateCount; i++)
+                {
+                    var cand = _candidatePool[i];
+                    if (cand.Consumed) continue;
+                    float d = Vector3.Distance(kv.Value, cand.PelvisWorld);
+                    if (d <= continuityRadiusMeters) _continuityPairs.Add((kv.Key, i, d));
+                }
+            }
+            _continuityPairs.Sort((a, b) => a.dist.CompareTo(b.dist));
+            _claimedPriors.Clear();
+            for (int p = 0; p < _continuityPairs.Count; p++)
+            {
+                var (priorId, candIdx, _) = _continuityPairs[p];
+                if (_claimedPriors.Contains(priorId)) continue;
+                if (_candidatePool[candIdx].Consumed) continue;
+                _claimedPriors.Add(priorId);
                 var cluster = AcquireCluster();
                 cluster.Id = priorId;
                 cluster.IsCarryOver = true;
-                cluster.Seed = _candidatePool[seedIdx];
+                cluster.Seed = _candidatePool[candIdx];
                 cluster.MemberIndices.Clear();
-                cluster.MemberIndices.Add(seedIdx);
-                _candidatePool[seedIdx].Consumed = true;
-                AbsorbNeighbors(cluster, _candidatePool[seedIdx]);
+                cluster.MemberIndices.Add(candIdx);
+                _candidatePool[candIdx].Consumed = true;
+                AbsorbNeighbors(cluster, _candidatePool[candIdx]);
                 _diagContinuityCarryOver++;
             }
 
@@ -1471,19 +1579,27 @@ namespace BodyTracking
             for (int c = 0; c < _clusterCount; c++)
                 if (_clusterPool[c].MemberIndices.Count >= requireMinWorkerCount) eligible++;
             if (_clusterCount > 0) _lastEligiblePersonCount = eligible;
+            if (eligible > 0) _lastEligibleSeenTime = Time.realtimeSinceStartup;
 
-            int primaryIdx = selectClosestToCenter && eligible > 0
+            int primaryIdx = enablePrimarySelection && eligible > 0
                 ? SelectPrimaryClusterIndex()
                 : -1;
+
+            // The discarded-bone list is rewritten only on Updates that actually
+            // formed clusters; in-between Updates hold the previous mask so the
+            // second person doesn't flicker back in during worker-output gaps.
+            if (_clusterCount > 0) _discardedBones.Clear();
 
             for (int c = 0; c < _clusterCount; c++)
             {
                 var cluster = _clusterPool[c];
                 if (cluster.MemberIndices.Count < requireMinWorkerCount) continue;
-                if (primaryIdx >= 0 && c != primaryIdx)
+                if (primaryIdx == kHoldAll || (primaryIdx >= 0 && c != primaryIdx))
                 {
-                    // Extra person inside the sensing area: single-person
-                    // installation, keep only the one nearest the area center.
+                    // Extra person inside the sensing area (or everyone, while
+                    // the lost-primary grace hold is open): single-person
+                    // installation, only the focused person is emitted.
+                    AddDiscardedBoneCapsules(cluster);
                     _diagDroppedExtraPersons++;
                     continue;
                 }
@@ -1498,18 +1614,109 @@ namespace BodyTracking
             // A discarded person may still own a visual from before the pick
             // moved off them (primary switch, or a second person who was briefly
             // emitted). Without an immediate remove it stays rendered until the
-            // idle GC fires (unseenFramesBeforeDestroy Update ticks).
-            if (primaryIdx >= 0)
+            // idle GC fires (unseenFramesBeforeDestroy Update ticks). During the
+            // lost-primary grace hold everything is purged — the vacant focus
+            // must not keep showing the dropped-out person's frozen skeleton —
+            // but WITHOUT the per-id state cleanup: the prior-pelvis entry is
+            // what lets the returning person reclaim their cluster id (and with
+            // it the focus) inside the grace window.
+            if (primaryIdx >= 0 || primaryIdx == kHoldAll)
             {
-                uint keepId = _clusterPool[primaryIdx].Id;
+                uint keepId = primaryIdx >= 0 ? _clusterPool[primaryIdx].Id : 0u;
                 _visualEvictScratch.Clear();
                 foreach (var kv in _pool.Visuals)
                     if (kv.Key != keepId) _visualEvictScratch.Add(kv.Key);
                 for (int i = 0; i < _visualEvictScratch.Count; i++)
-                    _pool.Remove(_visualEvictScratch[i], OnVisualEvicted);
+                    _pool.Remove(_visualEvictScratch[i],
+                        primaryIdx >= 0 ? OnVisualEvicted : (System.Action<uint>)null);
             }
 
+            PublishDiscardMask();
             LogGateDiagnosticsIfDue();
+        }
+
+        // --- discarded-person point-cloud mask ---
+
+        // Runtime-created KeepOutside capsule filter carrying the discarded
+        // people's bones. Null until the first discard happens.
+        private PointCloudCapsuleFilter _discardMask;
+
+        // World-space bone segments of every discarded person, held across the
+        // Updates between worker frames (see the clear in ApplyMergedSkeletons).
+        private readonly List<(Vector3 a, Vector3 b)> _discardedBones = new(64);
+
+        /// <summary>Append the discarded cluster's bones (seed candidate's raw
+        /// skeleton, world space) to the mask list. Falls back to a pelvis
+        /// sphere when no bone has two valid joints (prediction pops).</summary>
+        private void AddDiscardedBoneCapsules(Cluster cluster)
+        {
+            if (!maskDiscardedFromPointCloud) return;
+            var cand = cluster.Seed;
+            var body = cand.Slot.Bodies[cand.BodyIndex];
+            int before = _discardedBones.Count;
+            var bones = BodyTrackingShared.Bones;
+            for (int b = 0; b < bones.Length; b++)
+            {
+                var ja = body.Joints[(int)bones[b].a];
+                var jb = body.Joints[(int)bones[b].b];
+                if (ja.ConfidenceLevel == k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_NONE
+                    || jb.ConfidenceLevel == k4abt_joint_confidence_level_t.K4ABT_JOINT_CONFIDENCE_NONE)
+                    continue;
+                Vector3 wa = SkeletonWorldTransform.ToWorld(
+                    ja.Position, cand.Slot.DepthToColorMm, cand.Slot.SourceTransform);
+                Vector3 wb = SkeletonWorldTransform.ToWorld(
+                    jb.Position, cand.Slot.DepthToColorMm, cand.Slot.SourceTransform);
+                _discardedBones.Add((wa, wb));
+            }
+            if (_discardedBones.Count == before)
+                _discardedBones.Add((cand.PelvisWorld, cand.PelvisWorld));
+        }
+
+        /// <summary>Rewrite the KeepOutside mask from the held bone list and wire
+        /// it into consumers that have no explicit capsule filter of their own.
+        /// Runs every merge pass; with zero capsules the shader passes all points,
+        /// so an empty mask costs nothing visually.</summary>
+        private void PublishDiscardMask()
+        {
+            if (!maskDiscardedFromPointCloud)
+            {
+                if (_discardMask != null && _discardMask.CapsuleCount > 0) _discardMask.Clear();
+                return;
+            }
+
+            // Nobody tracked at all → the held list is stale, drop it so a
+            // departed pair doesn't leave a permanent hole in the cloud.
+            // "Nobody" is judged from when eligible clusters were last observed,
+            // NOT from the visual pool: the grace hold purges every visual while
+            // people are still being tracked, and clearing on pool-empty would
+            // un-mask the waiting challenger for the whole vacant period.
+            if (_discardedBones.Count > 0
+                && Time.realtimeSinceStartup - _lastEligibleSeenTime > kPresenceTimeoutSeconds)
+                _discardedBones.Clear();
+
+            if (_discardMask == null)
+            {
+                if (_discardedBones.Count == 0) return;
+                var go = new GameObject("_DiscardedPersonMask");
+                go.transform.SetParent(transform, false);
+                _discardMask = go.AddComponent<PointCloudCapsuleFilter>();
+                _discardMask.filterMode = PointCloudCapsuleFilter.FilterMode.KeepOutside;
+            }
+
+            _discardMask.Clear();
+            for (int i = 0; i < _discardedBones.Count; i++)
+            {
+                var (a, b) = _discardedBones[i];
+                // Degenerate segment = pelvis fallback: use a wider sphere so a
+                // prediction-popped body without valid bones is still swallowed.
+                float r = a == b ? Mathf.Max(discardMaskRadiusMeters, 0.5f) : discardMaskRadiusMeters;
+                if (!_discardMask.TryAdd(a, b, r)) break;
+            }
+
+            foreach (var r in _boundRenderers)
+                if (r != null && r.capsuleFilter == null) r.capsuleFilter = _discardMask;
+            if (_subscribedRecorder != null && _subscribedRecorder.capsuleFilter == null)
+                _subscribedRecorder.capsuleFilter = _discardMask;
         }
 
         // Scratch id list for the non-primary visual purge (Visuals must not be
@@ -1528,35 +1735,94 @@ namespace BodyTracking
         // none — same reasoning as StashPriorState). Read by UpdateCrowdAlert.
         private int _lastEligiblePersonCount;
 
+        // Wall-clock of the last Update with at least one eligible cluster.
+        // Presence signal for the crowd alert and the discard mask — the visual
+        // pool can't be used for this (the grace hold empties it while people
+        // are still tracked).
+        private float _lastEligibleSeenTime = -999f;
+
+        // How long after the last eligible-cluster observation "somebody is
+        // here" stays true. Covers worker-output gaps (maxSkewMs is 200 ms)
+        // without holding stale state for seconds after everyone left.
+        private const float kPresenceTimeoutSeconds = 0.5f;
+
         /// <summary>Index into _clusterPool of the person to keep, or -1 when no
         /// eligible cluster exists. Picks the pelvis horizontally closest to the
         /// sensing-area center; the incumbent primary wins ties within
         /// primarySwitchMarginMeters.</summary>
+        private Vector3 SensingCenter => trackingVolume != null
+            ? trackingVolume.transform.position
+            : Vector3.zero;
+
+        private float DistToCenterXZ(Vector3 world)
+        {
+            Vector3 c = SensingCenter;
+            float dx = world.x - c.x;
+            float dz = world.z - c.z;
+            return Mathf.Sqrt(dx * dx + dz * dz);
+        }
+
+        // Sentinel returned by SelectPrimaryClusterIndex while the lost-primary
+        // grace window is open: emit NOBODY this frame (as opposed to -1 = no
+        // selection at all, which emits everyone).
+        private const int kHoldAll = -2;
+
         private int SelectPrimaryClusterIndex()
         {
-            Vector3 center = trackingVolume != null
-                ? trackingVolume.transform.position
-                : Vector3.zero;
-
             int best = -1, incumbent = -1;
             float bestDist = float.MaxValue, incumbentDist = 0f;
             for (int c = 0; c < _clusterCount; c++)
             {
                 var cluster = _clusterPool[c];
                 if (cluster.MemberIndices.Count < requireMinWorkerCount) continue;
-                Vector3 p = cluster.Seed.PelvisWorld;
-                float dx = p.x - center.x;
-                float dz = p.z - center.z;
-                float dist = Mathf.Sqrt(dx * dx + dz * dz);
+                float dist = DistToCenterXZ(cluster.Seed.PelvisWorld);
                 if (dist < bestDist) { bestDist = dist; best = c; }
                 if (cluster.Id == _primaryPersonId) { incumbent = c; incumbentDist = dist; }
             }
-            if (incumbent >= 0 && best != incumbent
-                && bestDist > incumbentDist - primarySwitchMarginMeters)
-                best = incumbent;
-            if (best >= 0) _primaryPersonId = _clusterPool[best].Id;
+
+            float now = Time.realtimeSinceStartup;
+            if (incumbent >= 0)
+            {
+                _primaryLastSeenTime = now;
+                if (primaryPolicy == PrimaryPolicy.FirstPersonSticky)
+                    best = incumbent;
+                else if (best != incumbent
+                         && bestDist > incumbentDist - primarySwitchMarginMeters)
+                    best = incumbent;
+            }
+            else if (_primaryPersonId != 0 && now - _primaryLastSeenTime < primaryLossGraceSeconds)
+            {
+                // The focused person just dropped out of tracking. Hold focus
+                // vacant instead of instantly crowning whoever else is present —
+                // a sub-second occlusion must not permanently move the focus.
+                return kHoldAll;
+            }
+
+            if (best >= 0)
+            {
+                uint newId = _clusterPool[best].Id;
+                if (_primaryPersonId != 0 && newId != _primaryPersonId)
+                {
+                    _lastSwitchMsg = $"{_primaryPersonId} -> {newId} (new {bestDist:F2}m vs old "
+                        + (incumbent >= 0 ? $"{incumbentDist:F2}m" : "gone") + ")";
+                    _lastSwitchTime = now;
+                    Debug.Log($"[{nameof(SkeletonMerger)}] primary switch {_lastSwitchMsg}, " +
+                              $"policy {primaryPolicy}.", this);
+                }
+                _primaryPersonId = newId;
+                _primaryLastSeenTime = now;
+            }
             return best;
         }
+
+        // Wall-clock of the last frame the focused person's cluster was present;
+        // drives the primaryLossGraceSeconds hold.
+        private float _primaryLastSeenTime = -1f;
+
+        // Last primary-switch event, kept for the stage HUD (the moment itself
+        // is easy to miss from inside the sensing area).
+        private string _lastSwitchMsg;
+        private float _lastSwitchTime = -1f;
 
         /// <summary>
         /// Optional post-merge refiner (e.g. TSDF surface snap). Set/cleared by
@@ -1624,7 +1890,11 @@ namespace BodyTracking
             _priorMaxConfById.Remove(id);
             _prevMergedPosByCluster.Remove(id);
             _gateStateById.Remove(id);
-            if (_primaryPersonId == id) _primaryPersonId = 0;
+            // Deliberately does NOT touch _primaryPersonId: focus handover is
+            // governed solely by primaryLossGraceSeconds in
+            // SelectPrimaryClusterIndex. Tying it to visual GC handed focus to
+            // the waiting challenger after unseenFramesBeforeDestroy ticks
+            // (~0.2s in the show scene), defeating the grace window.
         }
 
         private void StashPriorState()
@@ -2197,23 +2467,6 @@ namespace BodyTracking
                 if (c > max) max = c;
             }
             return max;
-        }
-
-        // Find the nearest unconsumed candidate within radius of a point. Returns
-        // -1 if none. Callers pass continuityRadiusMeters or mergeRadiusMeters as
-        // the cap; greedy nearest-neighbor at this scale (~10 candidates) is fine.
-        private int NearestUnconsumed(Vector3 point, float radius)
-        {
-            int best = -1;
-            float bestSqr = radius * radius;
-            for (int i = 0; i < _candidateCount; i++)
-            {
-                var c = _candidatePool[i];
-                if (c.Consumed) continue;
-                float d = (c.PelvisWorld - point).sqrMagnitude;
-                if (d <= bestSqr) { bestSqr = d; best = i; }
-            }
-            return best;
         }
 
         private int HighestConfidenceUnconsumed()
