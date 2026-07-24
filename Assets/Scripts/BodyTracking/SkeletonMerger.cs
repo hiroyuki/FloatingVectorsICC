@@ -340,6 +340,13 @@ namespace BodyTracking
                  "evaluation against recorded playback.")]
         public bool showDebugHud = false;
 
+        [Tooltip("Also mirror the debug HUD onto the stage displays (Display 2/3) via a " +
+                 "uGUI overlay, so the merger stats can be read while standing in the " +
+                 "tracked area. Off by default so the visitor-facing displays stay clean; " +
+                 "the operator IMGUI HUD on Display 1 is driven by showDebugHud and is " +
+                 "unaffected by this flag.")]
+        public bool mirrorDebugHudToStage = false;
+
         [Header("Crowd alert")]
         [Tooltip("Show on-screen warning when more than one merged person is detected. " +
                  "Per CLAUDE.md this installation is single-person only.")]
@@ -938,7 +945,7 @@ namespace BodyTracking
 
         private void UpdateStageHud()
         {
-            if (!showDebugHud)
+            if (!showDebugHud || !mirrorDebugHudToStage)
             {
                 global::Shared.StageHudOverlay.Hide();
                 return;
@@ -1087,7 +1094,12 @@ namespace BodyTracking
             var size = _hudStyleCache.CalcSize(content);
             float w = Mathf.Min(size.x + 16, Screen.width - 20);
             float h = Mathf.Min(size.y + 16, Screen.height - 20);
-            var rect = new Rect(10, 10, w, h);
+            const float hudMargin = 10f;
+            var rect = new Rect(
+                Screen.width - w - hudMargin,
+                Screen.height - h - hudMargin,
+                w,
+                h);
             var prev = GUI.color;
             GUI.color = new Color(0f, 0f, 0f, 0.75f);
             GUI.DrawTexture(rect, Texture2D.whiteTexture);

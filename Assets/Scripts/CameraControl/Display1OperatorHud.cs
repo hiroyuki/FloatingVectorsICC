@@ -144,18 +144,22 @@ namespace CameraControl
             float min = history.TunableMin(0);
             float max = history.TunableMax(0);
             int cur = Mathf.RoundToInt(history.TunableValue(0));
+            // width is shared with the rest of the HUD, but the slider should not
+            // stretch across the operator display. GUI coordinates are pre-scale,
+            // so convert half of the physical screen width back into GUI units.
+            float sliderWidth = Mathf.Min(width, Screen.width * 0.5f / uiScale);
 
-            GUI.Label(new Rect(position.x, position.y, width, 22),
+            GUI.Label(new Rect(position.x, position.y, sliderWidth, 22),
                       $"{history.TunableName(0)}: {cur}");
 
             // Explicit track: the default skin's slider rail is nearly invisible on a
             // black background — only the thumb showed.
             GUI.color = new Color(1f, 1f, 1f, 0.35f);
-            GUI.DrawTexture(new Rect(position.x, position.y + 24 + 8, width, 4), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(position.x, position.y + 24 + 8, sliderWidth, 4), Texture2D.whiteTexture);
             GUI.color = Color.white;
 
             float v = GUI.HorizontalSlider(
-                new Rect(position.x, position.y + 24, width, 20), cur, min, max);
+                new Rect(position.x, position.y + 24, sliderWidth, 20), cur, min, max);
             int next = Mathf.RoundToInt(v);
             if (next != cur) history.SetTunableValue(0, next);
 

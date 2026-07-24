@@ -1,11 +1,12 @@
-// Frame-rate readout in the top-right corner of every display.
+// Frame-rate readout in the top-right corner of the operator display (Display 1).
 //
 // Why this exists: in a standalone multi-display build there is no profiler and
-// no console — the only way to tell whether the operator display or one of the
-// two visitor displays is dropping frames is to see the number on the screen
-// itself. All displays are driven by the one player loop, so the number is the
-// same everywhere; showing it on each screen just means whichever screen you
-// happen to be standing in front of can answer the question.
+// no console — the only way to tell whether the player loop is dropping frames is
+// to see the number on the screen itself. All displays are driven by the one
+// player loop, so a single readout answers the question for the whole build; it
+// lives on the operator display only so the two visitor-facing displays stay
+// clean. Raise displayCount to also mirror it onto the visitor displays while
+// debugging.
 //
 // Drawn as a uGUI Canvas per display, NOT as IMGUI: IMGUI only reaches the
 // primary display in a standalone build, and it renders underneath every
@@ -37,11 +38,12 @@ namespace Shared
         [Tooltip("Toggle the readout.")]
         public KeyCode toggleKey = KeyCode.F2;
 
-        [Tooltip("Displays to draw on, including the primary one. Matches the " +
-                 "MultiDisplayActivator count (operator + two visitor displays). " +
-                 "Canvases for displays that are not connected simply never render, " +
-                 "and in the Editor they show up in extra Game views.")]
-        public int displayCount = 3;
+        [Tooltip("Displays to draw on, starting at the operator display (Display 1). " +
+                 "1 = operator only, so the two visitor-facing displays stay clean; " +
+                 "raise to 2 or 3 to also mirror the readout onto the visitor displays " +
+                 "while debugging. Canvases for displays that are not connected simply " +
+                 "never render, and in the Editor they show up in extra Game views.")]
+        public int displayCount = 1;
 
         [Tooltip("Averaging window in seconds. Longer reads steadier, shorter reacts " +
                  "faster to a stall.")]
