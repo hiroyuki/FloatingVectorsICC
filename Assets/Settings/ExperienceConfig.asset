@@ -88,26 +88,28 @@ MonoBehaviour:
   conversionProvider: 2
   conversionConfThreshold: 0.3
   runCatchupSmooth: 1
-  consentSe: {fileID: 8300000, guid: ca382a7857cee9943980c5caecd94050, type: 3}
-  welcomeSe: {fileID: 8300000, guid: 5fdde94a6f475e845824dd446a167473, type: 3}
-  calibrateSe: {fileID: 8300000, guid: 38e147a450fe57c4abc082e7a83d6ccf, type: 3}
+  consentSe: {fileID: 8300000, guid: 9ec752ad441f34ec0893467b2d704f8d, type: 3}
+  welcomeSe: {fileID: 8300000, guid: b59ab99e04b374c9f8cc71bf081e154d, type: 3}
+  calibrateSe: {fileID: 8300000, guid: 066882e171cba404ab7fad69e8c6d1e3, type: 3}
   poseMatchedSe: {fileID: 8300000, guid: f39da98e60f4f564b97f068f16f4f421, type: 3}
   testMove1IntroSe: {fileID: 0}
-  testMove1Intro2Se: {fileID: 0}
-  testMove2IntroSe: {fileID: 0}
+  testMove1Intro2Se: {fileID: 8300000, guid: 2327c7d90e8874ade81536e4af30d843, type: 3}
+  testMove2IntroSe: {fileID: 8300000, guid: 2327c7d90e8874ade81536e4af30d843, type: 3}
   shootCueSe: {fileID: 8300000, guid: f39da98e60f4f564b97f068f16f4f421, type: 3}
-  shootingSe: {fileID: 0}
-  processingSe: {fileID: 0}
-  resultSe: {fileID: 8300000, guid: f39da98e60f4f564b97f068f16f4f421, type: 3}
-  qrShowSe: {fileID: 8300000, guid: ca382a7857cee9943980c5caecd94050, type: 3}
-  exportFailedSe: {fileID: 0}
-  crowdSe: {fileID: 0}
-  countdownTickSe: {fileID: 0}
-  recordEndSe: {fileID: 0}
+  shootingSe: {fileID: 8300000, guid: 537429de4cecb4c4f93df294be47b7e3, type: 3}
+  processingSe: {fileID: 8300000, guid: 550e33b36405140a4bb1ee651c1d90fa, type: 3}
+  resultSe: {fileID: 8300000, guid: 5fdde94a6f475e845824dd446a167473, type: 3}
+  qrShowSe: {fileID: 8300000, guid: cdbb28b1dce6342d49f18862609edc41, type: 3}
+  exportFailedSe: {fileID: 8300000, guid: dc885d19d34ee486c815973e3da4ecdc, type: 3}
+  crowdSe: {fileID: 8300000, guid: ce17e0059052147ebab1852c173dcc2d, type: 3}
+  countdownTickSe: {fileID: 8300000, guid: 38e147a450fe57c4abc082e7a83d6ccf, type: 3}
+  recordEndSe: {fileID: 8300000, guid: 38e147a450fe57c4abc082e7a83d6ccf, type: 3}
+  cloudRevealSe: {fileID: 8300000, guid: ce17e0059052147ebab1852c173dcc2d, type: 3}
   poseGuideTexture: {fileID: 0}
   dryRunPublish: 0
   dryRunDelaySeconds: 1
   qrUrlKind: 2
+  viewerBaseUrl: https://hyper.ntticc.or.jp/kids2026/unknown-but-yours/
   uploadScriptSha256: 46d660b6ae081b648fdbcead21bfeb44419df78410c3e89cb55302c65dfac687
   lfksRemoteDirectory: sculptures
   lfksApiUrl: https://ntticc.lfks.app
@@ -119,12 +121,12 @@ MonoBehaviour:
   welcomeText: "\u3088\u3046\u3053\u305D\u3001\u304B\u3089\u3060\u3092\u3064\u304B\u3063\u3066\u3000\n\u304A\u3082\u3057\u308D\u3044\u304B\u305F\u3061\u304C\u3000\u3064\u304F\u308C\u308B\u3088"
   calibrateText: "\u3053\u306E\u3000\u30DD\u30FC\u30BA\u3092\u3000\u3068\u3063\u3066\u306D"
   calibrateMatchedText: "\u306F\u304B\u308C\u305F\u3088\uFF01"
-  testMove1IntroText: "\u3058\u3076\u3093\u306E\u3000\u3046\u3054\u304D\u3092\n\u3068\u308B\u308C\u3093\u3057\u3085\u3046\u3092\u3000\u3057\u3088\u3046"
-  testMove1Intro2Text: "\uFF15\u3073\u3087\u3046\u305F\u3063\u305F\u3089\n\uFF11\u3073\u3087\u3046\u304B\u3093\u3000\u3068\u308B\u3088\n\u305F\u304F\u3055\u3093\u3000\u3046\u3054\u3044\u3066\u306D"
+  testMove1IntroText: "\u3046\u3054\u304D\u304B\u3089\u3000\u304B\u305F\u3061\u3092\u3064\u304F\u308B\u3000\n\u308C\u3093\u3057\u3085\u3046\u3092\u3000\u3057\u3088\u3046"
+  testMove1Intro2Text: "\uFF15\u3073\u3087\u3046\u3054\u306B\u3000\n\uFF11\u3073\u3087\u3046\u304B\u3093\u3000\u3068\u308B\u3088\n\u305F\u304F\u3055\u3093\u3000\u3046\u3054\u3044\u3066\u306D\uFF01"
   testMove2IntroText: "\u3069\u3046\u3060\u3063\u305F\uFF1F\n\u3082\u3046\u3044\u3061\u3069\u3000\u308C\u3093\u3057\u3085\u3046\u3059\u308B\u3088"
   shootCueText: "\u3058\u3083\u3041\u3000\u307B\u3093\u3070\u3093\u3060\u3088"
   shootingText: "\u3055\u3064\u3048\u3044\u3061\u3085\u3046\uFF01"
-  processingText: "\u304D\u308D\u304F\u3092\u3000\u3058\u3085\u3093\u3073\u3057\u3066\u3044\u308B\u3088\u3000\u307E\u3063\u3066\u306D"
+  processingText: "\u304B\u305F\u3061\u3092\u3000\u3058\u3085\u3093\u3073\u3057\u3066\u3044\u308B\u3088\u3000\u307E\u3063\u3066\u306D"
   analyzingText: "\u3076\u3093\u305B\u304D\u3061\u3085\u3046"
   resultText: "\u3067\u304D\u305F\u3088\uFF01"
-  qrScanText: "\u306B\u3058\u3052\u3093\u30B3\u30FC\u30C9\u306E\u3000\u3057\u3083\u3057\u3093\u3092\u3000\u3068\u3063\u305F\u3089\n\u304A\u3046\u3061\u3067\u3082\u3000\u307F\u308C\u308B\u3088"
+  qrScanText: "\u306B\u3058\u3052\u3093\u30B3\u30FC\u30C9\u306E\u3000\u3057\u3083\u3057\u3093\u3092\u3068\u3063\u3066\n\u307B\u305E\u3093\u3092\u308F\u3059\u308C\u305A\u306B\uFF01"

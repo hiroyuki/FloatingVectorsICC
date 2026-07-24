@@ -204,6 +204,7 @@ namespace Experience
         private LiveSkeletonFeed _liveFeed;
         private ExperienceSpaceBuilder _space;
         private AudioSource _audio;
+        private AudioSource _loopAudio; // looped cue (processing) — own source so one-shots don't cut it
 
         // dev-value snapshot (restored on Exit)
         private int _savedHistorySamples;
@@ -689,6 +690,14 @@ namespace Experience
             _audio = _ui.GetComponent<AudioSource>();
             if (_audio == null) _audio = _ui.gameObject.AddComponent<AudioSource>();
             _audio.playOnAwake = false;
+            // Second source on the same GO for the looping processing cue (index 1;
+            // GetComponent above always resolves to index 0, so the pair is stable
+            // across mode re-entries on a scene-authored UI).
+            var audioSources = _ui.GetComponents<AudioSource>();
+            _loopAudio = audioSources.Length > 1
+                ? audioSources[1] : _ui.gameObject.AddComponent<AudioSource>();
+            _loopAudio.playOnAwake = false;
+            _loopAudio.loop = true;
             _presence = new GameObject("_ExperiencePresence").AddComponent<PresenceDetector>();
             _presence.transform.SetParent(transform, false);
             _presence.merger = merger;
@@ -881,7 +890,8 @@ namespace Experience
                 if (_uiSpawned) Destroy(_ui.gameObject);
                 _ui = null;
             }
-            _audio = null; // lived on the UI object
+            if (_loopAudio != null) _loopAudio.Stop();
+            _audio = null; _loopAudio = null; // both lived on the UI object
             if (_presence != null) { Destroy(_presence.gameObject); _presence = null; }
             if (_liveFeed != null) { Destroy(_liveFeed.gameObject); _liveFeed = null; }
             _snapshot = null;
@@ -1396,6 +1406,10 @@ namespace Experience
             // screen and its cue land together after the gap. Fault must alert
             // instantly and Idle is blank by definition — both paint immediately.
             StopRoutine(ref _gapPaintRoutine);
+            // The looping processing cue dies with its STATE — at the transition,
+            // not the deferred paint: Fault never reaches PlayStateEnterSe, and
+            // ResultShow's black gap should already be silent.
+            if (state != ExperienceState.Processing) StopLoopSe();
             // ResultShow holds a shorter pure-black beat before できたよ！(0.5s,
             // resultBlackGapSeconds — matched by ResultShowRoutine's own beat);
             // every other screen uses the standard inter-state gap.
@@ -1443,7 +1457,7 @@ namespace Experience
                 case ExperienceState.TestMove1: PlaySe(config.testMove1IntroSe); break;
                 case ExperienceState.TestMove2: PlaySe(config.testMove2IntroSe); break;
                 case ExperienceState.Shoot: PlaySe(config.shootCueSe); break;
-                case ExperienceState.Processing: PlaySe(config.processingSe); break;
+                case ExperienceState.Processing: PlayLoopSe(config.processingSe); break;
                 case ExperienceState.ResultShow: PlaySe(config.resultSe); break;
                 case ExperienceState.QrShow: PlaySe(config.qrShowSe); break;
             }
@@ -1581,6 +1595,13 @@ namespace Experience
                               && poseHistory.historySamples > 0;
             int curveTarget = growCurves ? poseHistory.historySamples : 0;
             if (growCurves) poseHistory.historySamples = 0;
+
+            // The rise gets its own sound, but only on the live intro reveal
+            // (Calibrate match / TestMove1 entry) — the playback phases' reveal
+            // edges (Processing→ResultShow) already carry their message cues.
+            if (_fsm != null && _fsm.State is ExperienceState.Calibrate
+                                    or ExperienceState.TestMove1)
+                PlaySe(config.cloudRevealSe);
 
             float dur = config.cloudRevealSeconds
                         / Mathf.Max(0.01f, config.timings.timeMultiplier);
@@ -1742,6 +1763,20 @@ namespace Experience
         private void PlaySe(AudioClip clip)
         {
             if (clip != null && _audio != null) _audio.PlayOneShot(clip);
+        }
+
+        // Looping state cue (processing): repeats until the state's exit
+        // transition calls StopLoopSe from ApplyStateSideEffects.
+        private void PlayLoopSe(AudioClip clip)
+        {
+            if (clip == null || _loopAudio == null) return;
+            _loopAudio.clip = clip;
+            _loopAudio.Play();
+        }
+
+        private void StopLoopSe()
+        {
+            if (_loopAudio != null && _loopAudio.isPlaying) _loopAudio.Stop();
         }
 
         // ------------------------------------------------ Calibrate ----
@@ -2291,10 +2326,10 @@ namespace Experience
             // next Idle (live-follow again) and on mode exit.
             FreezeSculpture();
 
-            // Hide the Processing white point cloud now that the capture is done — the stage
-            // goes black for the Processing→ResultShow reveal (ResultShow un-hides the
-            // finished cloud + ribbons). FreezeSculpture already closed the gate.
-            if (whitePointCloud) SetProcessingWhitePointCloud(false);
+            // Dissolve the Processing white point cloud OUT now that the capture is done —
+            // the stage goes black for the Processing→ResultShow reveal (ResultShow un-hides
+            // the finished cloud + ribbons). FreezeSculpture already closed the gate.
+            if (whitePointCloud) yield return DissolveWhitePointCloudOut();
 
             _snapshot = snap;
             if (debugCurveTrace)
@@ -2649,19 +2684,7 @@ namespace Experience
             if (config.debugPauseAtShootDissolve) UnityEditor.EditorApplication.isPaused = true;
 #endif
 
-            // Frame-based ramp (one SmoothStep increment PER FRAME), not time-based:
-            // while frame-stepping the Editor (⏭) Time.deltaTime collapses to ~0, so a
-            // time-driven ramp barely moves per step and looks stuck. Counting frames
-            // makes every ⏭ advance exactly one visible cull step. ~30 fps target, so
-            // normal playback still takes ≈ shootEndDissolveSeconds.
-            float dur = Mathf.Max(0.01f, config.shootEndDissolveSeconds / mult);
-            int totalFrames = Mathf.Max(1, Mathf.RoundToInt(dur * 30f));
-            for (int f = 1; f <= totalFrames; f++)
-            {
-                Shader.SetGlobalFloat(PcFadeCullId, Mathf.SmoothStep(0f, 1f, (float)f / totalFrames));
-                yield return null;
-            }
-            Shader.SetGlobalFloat(PcFadeCullId, 1f); // fully dissolved
+            yield return RampFadeCull(0f, 1f); // dither the live model out to black
 
             // Gone: hide the renderers + ribbons, un-freeze / release the hold and
             // resume the transport so DOWNSTREAM rebuilds cleanly (the Processing
@@ -2692,6 +2715,51 @@ namespace Experience
             if (motionCurves != null) motionCurves.freeze = false;
             if (poseHistory != null) poseHistory.hold = false;
             sensorRecorder?.ResumeFrames();
+        }
+
+        // Shared dither ramp for every dissolve beat (out: 0→1, in: 1→0). Frame-based
+        // (one SmoothStep increment PER FRAME), NOT time-based: while frame-stepping
+        // the Editor (⏭) Time.deltaTime collapses to ~0, so a time-driven ramp barely
+        // moves per step and looks stuck. Counting frames makes every ⏭ advance exactly
+        // one visible cull step. ~30 fps target, so normal playback takes ≈
+        // shootEndDissolveSeconds. Ends EXACTLY at `to` so a reveal lands at cull 0
+        // (undithered = full) and a dissolve-out lands at 1 (black). The SAME global
+        // _PcFadeCull drives the point cloud, ribbons AND the TSDF mesh — every caller
+        // ensures only ONE of them is on stage while it ramps.
+        private IEnumerator RampFadeCull(float from, float to)
+        {
+            float mult = Mathf.Max(0.01f, config.timings.timeMultiplier);
+            float dur = Mathf.Max(0.01f, config.shootEndDissolveSeconds / mult);
+            int totalFrames = Mathf.Max(1, Mathf.RoundToInt(dur * 30f));
+            for (int f = 1; f <= totalFrames; f++)
+            {
+                Shader.SetGlobalFloat(PcFadeCullId,
+                    Mathf.Lerp(from, to, Mathf.SmoothStep(0f, 1f, (float)f / totalFrames)));
+                yield return null;
+            }
+            Shader.SetGlobalFloat(PcFadeCullId, to);
+        }
+
+        // Reveal the Processing white point cloud (TSDF mesh net) by dithering it IN
+        // from black. The cloud renderers are hidden and the ribbons suppressed during
+        // this phase, so the mesh is the ONLY thing on stage — sharing _PcFadeCull with
+        // the cloud is safe. Enable it fully dithered-out (cull 1), then ramp to 0.
+        private IEnumerator DissolveWhitePointCloudIn()
+        {
+            Shader.SetGlobalFloat(PcFadeCullId, 1f);
+            SetProcessingWhitePointCloud(true);
+            yield return RampFadeCull(1f, 0f);
+        }
+
+        // Dissolve the white point cloud OUT to black, then hide it. Leaves cull at 1
+        // (black) like the shoot-end dissolve; the next reveal site clears it. No-op if
+        // the white point cloud was never shown (processingWhitePointCloud off) — ramping
+        // from 0 would flash the cull down before back up.
+        private IEnumerator DissolveWhitePointCloudOut()
+        {
+            if (!_processingWhitePointCloudOn) yield break;
+            yield return RampFadeCull(0f, 1f);
+            SetProcessingWhitePointCloud(false);
         }
 
         // Processing-screen white point cloud (2026-07-24). The TSDF mesh is drawn as an edge
@@ -2791,7 +2859,7 @@ namespace Experience
                 if (!showProgressBar) _ui.ShowMessage(caption);
                 yield return null;
             }
-            SetProcessingWhitePointCloud(true); // reveal the mesh — now the take's, not the residue
+            yield return DissolveWhitePointCloudIn(); // dither the mesh in — now the take's, not the residue
 
             // Wait for the single pass to finish: loop is off, so the recorder stops
             // itself at the last frame (IsPlaying → false). Safety deadline guards a
@@ -3086,7 +3154,7 @@ namespace Experience
                     yield return WhitePointCloudConvertLoop(takeRoot, 0f, 1f, config.analyzingText,
                                                       showProgressBar: false);
                     if (!Active()) yield break;
-                    SetProcessingWhitePointCloud(false); // hide the white point cloud → black for the reveal
+                    yield return DissolveWhitePointCloudOut(); // dither the white point cloud out → black for the reveal
                     _ui.ClearAll();                // clear ぶんせきちゅう so the gap is truly black
 
                     // Prep the ring for the growing replay: widen to the one-second
@@ -3113,10 +3181,13 @@ namespace Experience
                     if (revealHold > 0f) yield return new WaitForSeconds(revealHold);
                     if (!Active()) yield break;
 
-                    // Reveal the model and start the growing replay. Drop the dissolve
-                    // cull to 0 (undithered) the same frame the model is shown, so it
-                    // comes back at full — the dissolve left it at 1 to hold black.
-                    Shader.SetGlobalFloat(PcFadeCullId, 0f);
+                    // Reveal the model and start the growing replay. Hold the cull at 1
+                    // (dithered-out = black) while we show the renderers, then dither the
+                    // cloud + ribbons IN (RampFadeCull 1→0) as the replay begins — the
+                    // model fades up from nothing instead of snapping to full. Only the
+                    // cloud + ribbons are on stage here (the mesh stays deferred), so the
+                    // shared cull affects just them.
+                    Shader.SetGlobalFloat(PcFadeCullId, 1f);
                     SetCloudRenderersVisible(true);
                     if (motionCurves != null) { motionCurves.freeze = false; motionCurves.suppressDraw = false; }
                     if (poseHistory != null) poseHistory.ReleaseHoldAndClear();
@@ -3133,6 +3204,7 @@ namespace Experience
                     StartVisitorPlayback(takeRoot, loop: true,
                                          rate: config.presentationPlaybackRate);
                     played = _visitorPlaybackActive && sensorRecorder != null && sensorRecorder.IsPlaying;
+                    yield return RampFadeCull(1f, 0f); // dither the cloud + ribbons in
                 }
                 if (played)
                 {
@@ -3254,7 +3326,12 @@ namespace Experience
             // retraced. The exported snapshot already sits in _snapshot; the TSDF
             // integrator stays gated (_sculptureFrozen) — the mesh is session-hidden
             // and no longer consumed.
-            Shader.SetGlobalFloat(PcFadeCullId, 0f); // clear any lingering shoot-end dissolve
+            // Hold the cull at 1 (dithered-out = black) while the renderers are shown,
+            // then dither the cloud + ribbons IN (RampFadeCull 1→0) as the replay begins
+            // — the model fades up from nothing instead of snapping to full. Only the
+            // cloud + ribbons are on stage here (the mesh stays deferred to the freeze),
+            // so the shared cull affects just them.
+            Shader.SetGlobalFloat(PcFadeCullId, 1f);
             SetCloudRenderersVisible(true);
             if (motionCurves != null) { motionCurves.freeze = false; motionCurves.suppressDraw = false; }
             if (poseHistory != null) poseHistory.ReleaseHoldAndClear();
@@ -3282,10 +3359,13 @@ namespace Experience
                                  "holding the frozen frame instead.", this);
                 if (poseHistory != null) poseHistory.hold = true;
                 if (motionCurves != null) motionCurves.freeze = true;
-                // No replay to grow into — the frozen frame IS the final accumulated
-                // pose, so reveal the solid mesh here too (the freeze path below never
-                // runs on this branch). Without it presentationSolidMesh would show
-                // cloud+ribbons only through QR when playback fails to start.
+                // No replay to dither into — snap the frozen frame to full (the reveal
+                // above left the cull at 1 = black) instead of leaving it dissolved out.
+                Shader.SetGlobalFloat(PcFadeCullId, 0f);
+                // The frozen frame IS the final accumulated pose, so reveal the solid mesh
+                // here too (the freeze path below never runs on this branch). Without it
+                // presentationSolidMesh would show cloud+ribbons only through QR when
+                // playback fails to start.
                 if (tsdfView != null && config.presentationSolidMesh)
                 { tsdfView.whitePointCloud = false; tsdfView.suppressDraw = false; }
                 if (debugCurveTrace)
@@ -3300,6 +3380,7 @@ namespace Experience
                 yield break;
             }
             if (debugCurveTrace) CurveTrace("replay-start");
+            yield return RampFadeCull(1f, 0f); // dither the cloud + ribbons in
 
             // The camera stays STILL through the replay (no SetOrbit here) — it
             // starts circling only once the take finishes, easing in from the

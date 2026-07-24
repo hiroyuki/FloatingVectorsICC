@@ -401,6 +401,10 @@ namespace Experience
         public AudioClip countdownTickSe;
         [Tooltip("Played at countdown zero (shutter) and again when the second ends.")]
         public AudioClip recordEndSe;
+        [Tooltip("Played when the point cloud rises out of the floor — the live " +
+                 "intro reveal (star-pose match, or TestMove1 entry after window " +
+                 "expiry / skipCalibrate). Playback-phase reveals stay silent.")]
+        public AudioClip cloudRevealSe;
 
         [Header("Pose guide artwork")]
         [Tooltip("Star-pose guide image. Empty = programmatic silhouette " +

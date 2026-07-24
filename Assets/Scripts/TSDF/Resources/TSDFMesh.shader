@@ -99,6 +99,16 @@ Shader "TSDF/TSDFMesh"
             float    _WhitePointCloudThickness;
             float    _WhitePointCloudStride;
 
+            // Global dissolve fade, shared with the point cloud + ribbons (_PcFadeCull
+            // in PointCloudUnlit / MotionCurves). 0 = fully shown (default; Unity
+            // zero-fills unset globals, so dev scenes are untouched), ramps to 1 =
+            // fully gone. Each MC TRIANGLE gets a STABLE hash threshold so the surface
+            // (white-point-cloud net OR solid mesh) thins in a fixed random order
+            // instead of sparkling frame to frame. The experience only ever ramps this
+            // while the mesh is the ONLY thing on stage (the white point cloud phase),
+            // so sharing one global with the cloud is safe.
+            float    _PcFadeCull;
+
             struct V2F
             {
                 float4 pos      : SV_POSITION;
@@ -107,6 +117,7 @@ Shader "TSDF/TSDFMesh"
                 float3 vcol     : TEXCOORD2;
                 float3 bary     : TEXCOORD3;
                 nointerpolation float pointKeep : TEXCOORD4; // 1 = draw this tri's edges
+                nointerpolation float fadeKeep  : TEXCOORD5; // 0 = dissolved away
             };
 
             V2F vert(uint vid : SV_VertexID)
@@ -127,6 +138,18 @@ Shader "TSDF/TSDFMesh"
                 // all three corners agree on whether the triangle is drawn.
                 uint stride = (uint)max(1.0, _WhitePointCloudStride);
                 o.pointKeep = ((triIdx % stride) == 0u) ? 1.0 : 0.0;
+                // Dissolve cull: stable per-triangle hash; drop the whole triangle once
+                // its threshold falls below the current cull level (fixed random order,
+                // matching the point cloud's PassFade). Flat so all three corners agree.
+                float fkeep = 1.0;
+                if (_PcFadeCull > 0.0)
+                {
+                    uint h = triIdx * 2654435761u;
+                    h ^= h << 13; h ^= h >> 17; h ^= h << 5;
+                    float u = (h & 0x00FFFFFFu) * (1.0 / 16777216.0);
+                    fkeep = (u >= _PcFadeCull) ? 1.0 : 0.0;
+                }
+                o.fadeKeep = fkeep;
                 return o;
             }
 
@@ -193,6 +216,8 @@ Shader "TSDF/TSDFMesh"
 
             fixed4 frag(V2F i) : SV_Target
             {
+                if (i.fadeKeep < 0.5) discard;        // dissolved away (_PcFadeCull)
+
                 // White point cloud: keep only the fragments near a triangle edge; discard
                 // the interior so the black stage shows through and the surface
                 // reads as a net of white points. Screen-space AA via fwidth keeps the line a
