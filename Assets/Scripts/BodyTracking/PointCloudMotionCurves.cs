@@ -440,7 +440,8 @@ namespace BodyTracking
                 return;
             }
 
-            if (!CollectSeeds(out _)) return;
+            if (!CollectSeeds(out var collectReason)) { LastBuildReason = collectReason; return; }
+            LastBuildReason = null;
             _lastBuildParamHash = paramHash;
             _lastBuildPoseVersion = poseVersion;
 
@@ -458,6 +459,17 @@ namespace BodyTracking
         /// experience capture waits for +2 after changing historySamples so the
         /// exported trail window is guaranteed rebuilt (Phase 5 readiness).</summary>
         public int BuildVersion { get; private set; }
+
+        /// <summary>Diagnostic: a build has DISPATCHED into _outBuf and freeze mode will
+        /// draw it. Caveat: this does not prove the curve is non-empty — the build runs
+        /// even when the pose ring is empty / every seed is rejected, so it can be true
+        /// for the mesh-only symptom. Cross-check pose-ring fill for "are there actually
+        /// ribbons"; this only tells you a draw will be attempted.</summary>
+        public bool HasBuilt => _hasBuilt;
+        /// <summary>Diagnostic: why the last rebuild attempt bailed in CollectSeeds
+        /// (null when the last build succeeded). Non-null while the ribbons are not
+        /// growing — e.g. no pose ingested yet / no usable point-cloud source.</summary>
+        public string LastBuildReason { get; private set; }
 
         /// <summary>Discard the last built curve so the next Update rebuilds from the
         /// CURRENT ring instead of drawing the stale buffer. Call at a reveal right

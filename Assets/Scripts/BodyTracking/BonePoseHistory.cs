@@ -30,6 +30,7 @@ namespace BodyTracking
 
         private ulong _lastPoseVersion;
         private bool _havePoseVersion;
+        private float _lastBodyTime = -1f; // unscaled time a fresh body was last seen (bodyLossGraceSeconds)
 
         [Min(2)]
         [Tooltip("Ring-buffer length K: how many past frames form each bone's curve.")]
@@ -54,6 +55,7 @@ namespace BodyTracking
         public void ReleaseHoldAndClear()
         {
             hold = false;
+            _lastBodyTime = -1f;
             EnsureBuffers();
             ResetAll();
             PublishGpu();
@@ -63,6 +65,19 @@ namespace BodyTracking
         [Tooltip("An endpoint is treated as stale (bone history reset) if its last fresh BT " +
                  "frame is older than this many frames. Guards against dragging held/predicted joints.")]
         public int freshWindowFrames = 12;
+
+        [Min(0f)]
+        [Tooltip("Body-loss grace (seconds). A momentary loss of the tracked body no longer " +
+                 "wipes the accumulated ring on the spot — via ANY clear path (new body-less " +
+                 "frame OR a stalled pose version) — the ring is held until the body has been " +
+                 "continuously gone this long. Detection dropping for ~0.1-0.2s at the END of a " +
+                 "take (tracker jitter, the visitor's last pose) would otherwise empty the ring " +
+                 "in the window between the take ending and the freeze latching, leaving the " +
+                 "finished sculpture with no ribbons (only the mesh) — intermittently. Bounds " +
+                 "how long a departed visitor's trail lingers live. An intentional transport " +
+                 "pause still holds indefinitely (unaffected). 0 restores the old wipe-immediately " +
+                 "behaviour.")]
+        public float bodyLossGraceSeconds = 0.5f;
 
         [Min(0f)]
         [Tooltip("Discontinuity gate (m/s). A tracked endpoint that appears to move faster " +
@@ -332,37 +347,85 @@ namespace BodyTracking
             if (hold)
             {
                 // Explicit hold: the run is finished and this ring IS the result, so
-                // neither ingest nor stale-clear may touch it. Checked before
-                // `newFrame` because live frames keep arriving after the take ends.
-                // Same intent as the paused branch below, minus the dependency on the
-                // transport: a loop=false play-through STOPS rather than pauses, so
-                // IsPaused is false and the finished curve used to age out of
-                // existence a few frames after the take ended.
+                // nothing may touch it. (Live frames keep arriving after a take ends,
+                // and a loop=false play-through STOPS rather than pauses, so this — not
+                // the transport check below — is what keeps the finished curve from
+                // aging out once the take is over.)
+                return;
             }
-            else if (newFrame)
+
+            // "A fresh body this frame" must be judged from the returned ENDPOINTS, not
+            // from TryReadBonePosesWorld's bool: that bool stays true for a lingering-
+            // but-stale BodyVisual, and treating a stale visual as a body would let the
+            // stale-clear path below wipe the ring on a stalled PoseVersion mid-playback
+            // (the exact end-of-take failure this fix targets). freshBody == at least
+            // one bone has a valid, in-freshness-window endpoint.
+            bool readOk = bodyTracking != null
+                          && bodyTracking.TryReadBonePosesWorld(_scratch, freshWindowFrames);
+            bool freshBody = readOk && AnyFreshBone();
+
+            if (newFrame && freshBody)
             {
-                // New pose (play / frame-step): push fresh samples, reset bones that went invalid/stale.
+                // New pose with a real body (play / frame-step): push samples.
+                // UpdateHistory resets any individually stale bones while keeping the
+                // fresh ones, so a partial body still traces the bones it does have.
+                _lastBodyTime = Time.unscaledTime;
                 IngestCounter++;
                 UpdateHistory();
                 PublishGpu();
+                return;
             }
-            else if (recorder == null || !recorder.IsPaused)
+
+            // No new real-body sample this frame. While a take is playing OR paused,
+            // NEVER clear: the take is finite and the presentation freezes on the
+            // finished trail at its end (ResultShow / the Processing capture both latch
+            // `hold` the instant the play-through returns). A fixed time grace is also
+            // unreliable here — the presentation plays slowed (presentationPlaybackRate),
+            // so a take's last ~0.2s of body-loss stretches past any real-time window.
+            // Gating here (not only on the body-less bool) covers BOTH a body-less frame
+            // AND a stalled PoseVersion with a stale visual, so no clear path (ResetAll
+            // OR ClearStale) can empty the ring mid-take.
+            if (recorder != null && (recorder.IsPlaying || recorder.IsPaused))
+                return;
+
+            // ---- LIVE (recorder idle) ----
+            if (freshBody)
             {
-                // Static version but NOT an intentional pause => the body stalled or left. Clear bones
-                // whose freshness expired (or all, if no active visual) WITHOUT appending duplicate
-                // samples, so a ghost can't linger past freshWindowFrames while the stale BodyVisual is
-                // still alive. (TryReadBonePosesWorld stays true for a live-but-stale visual, so a
-                // freshness check — not just its bool — is what clears here.)
+                // Body present but the pose version is static (a live-but-stale visual):
+                // age out expired bones WITHOUT appending duplicates, so a ghost can't
+                // linger past freshWindowFrames while the stale visual is still alive.
+                _lastBodyTime = Time.unscaledTime;
                 ClearStale();
                 PublishGpu();
+                return;
             }
-            // else: intentional pause (recorder.IsPaused) with no new frame -> hold the ring so the
-            // frozen sculpture stays put even after the joints age out (no collapse, no premature clear).
+
+            // Live, no fresh body: a real visitor left. Bound how long their trail
+            // lingers — hold across a brief tracking gap (anti-flicker), then clear.
+            bool withinGrace = _lastBodyTime >= 0f
+                               && Time.unscaledTime - _lastBodyTime <= bodyLossGraceSeconds;
+            if (withinGrace) return;
+
+            ResetAll();
+            PublishGpu();
+        }
+
+        // Any bone with a valid, in-freshness-window endpoint this frame — a REAL body,
+        // as opposed to TryReadBonePosesWorld's bool, which stays true for a stale
+        // visual whose joints have all aged out. Reads the _scratch just filled by that
+        // call (only invoked when it returned true).
+        private bool AnyFreshBone()
+        {
+            for (int b = 0; b < _realBoneCount; b++)
+                if (_scratch[b].Valid && _scratch[b].Fresh) return true;
+            return false;
         }
 
         private void UpdateHistory()
         {
             if (bodyTracking == null) { ResetAll(); return; }
+            // No body → clear. LateUpdate only calls this while a fresh body is present
+            // (the body-loss grace is gated there), so this is the genuinely-gone path.
             if (!bodyTracking.TryReadBonePosesWorld(_scratch, freshWindowFrames)) { ResetAll(); return; }
 
             Vector3 torsoUp = ComputeTorsoUp();

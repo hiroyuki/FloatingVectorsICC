@@ -126,6 +126,16 @@ namespace Experience
                  "blocking readbacks right at the start of Processing.")]
         public bool compareCurveSources;
 
+        [Tooltip("Diagnose the intermittent ribbon dropout (curves stutter / cut off " +
+                 "in the ResultShow replay, then vanish at the freeze leaving only the " +
+                 "mesh). Writes a throttled per-frame CSV of the curve/pose pipeline " +
+                 "through Processing→ResultShow→QrShow to " +
+                 "persistentDataPath/curve_traces/, plus WARN lines when the pose ring " +
+                 "stalls (IngestCounter stops advancing while the take is playing) and " +
+                 "a key row at each freeze recording whether the curve was built. Safe " +
+                 "to leave on in production: ~10 Hz + one file per run for good/bad diff.")]
+        public bool debugCurveTrace;
+
         // ---- IStartupActivatable (Control Panel's big Activate On Play toggle) ----
         public string ActivateLabel => "Experience mode";
         public bool ActivateOnPlay
@@ -205,6 +215,14 @@ namespace Experience
         private bool _sculptureFrozen;
         private bool _savedMgrRebase, _savedRecRebase;
         private float _lastPoseDiagAt;
+        // --- debugCurveTrace state (per-run CSV of the curve/pose pipeline) ---
+        private System.IO.StreamWriter _curveTrace;
+        private float _curveTraceLastAt;
+        private ulong _curveTraceLastIngest;
+        private float _curveTraceIngestChangedAt;
+        private bool _curveStallLogged;
+        private const float CurveTraceHz = 10f;         // sampling rate of the tick rows
+        private const float CurveStallWarnSeconds = 0.3f; // ring frozen this long while playing → WARN
         // The visitor-facing curve as it stood the instant Processing began — i.e.
         // the ribbons they were actually watching. Stage 2 replays the take and
         // rebuilds the ring from the v11s bodies, so this is the only chance to
@@ -425,6 +443,7 @@ namespace Experience
 
             UpdateLiveRenderSync();
             if (_orbitOn) UpdatePresentationPivot();
+            CurveTraceAuto();
         }
 
         // --- live cloud <-> skeleton timestamp sync (curve-quality knob) ---
@@ -781,6 +800,7 @@ namespace Experience
         private void ExitMode()
         {
             _active = false;
+            CloseCurveTrace();
 
             // Display-only, but it must not outlive the mode: a dev session left
             // with delayed live renderers looks like a stuck cloud.
@@ -1115,6 +1135,18 @@ namespace Experience
 
         private void OnStateChanged(ExperienceState from, ExperienceState to)
         {
+            // Timestamped state timeline (debugCurveTrace): one marker row per
+            // transition — EXIT <from> / ENTER <to> at the same instant — so the
+            // curve trace's dense window rows can be read against which state owned
+            // the screen, and each state's dwell = gap between consecutive markers.
+            if (debugCurveTrace)
+            {
+                Debug.Log($"[curve-trace] {Time.realtimeSinceStartup * 1000f:0} ms  " +
+                          $"EXIT {from}  →  ENTER {to}", this);
+                CurveTrace($"exit:{from}");
+                CurveTrace($"enter:{to}");
+            }
+
             // Routine / device cleanup when a state is left by any path
             // (advance, walked away, fault).
             if (from == ExperienceState.Calibrate)
@@ -2167,6 +2199,28 @@ namespace Experience
                 sensorRecorder.PausePlayback();
             }
 
+            // Let ONE LateUpdate run before latching hold, so BonePoseHistory ingests the
+            // take's FINAL emitted pose: SensorRecorder emits the last frame and flips to
+            // Idle in the same tick, and yield-null coroutines resume before LateUpdate —
+            // latching hold right here would skip that last pose and leave the frozen
+            // ribbon one frame (~33ms) behind the final cloud/TSDF pose. The ring is safe
+            // across this single frame: the last good body was ingested <1 frame ago so
+            // the LIVE grace still covers it (and BonePoseHistory never clears mid-take
+            // anyway). If the mode/state was torn down during the yield the routine is
+            // already stopped, so no resume happens.
+            yield return null;
+            if (!_active || _fsm.State != ExperienceState.Processing)
+            { SetProcessingWhitePointCloud(false); _processingRoutine = null; yield break; }
+
+            // Latch the pose-ring hold BEFORE the historySamples change and the (up to
+            // 2 s) curve-rebuild wait below. Once a non-looping take stops the recorder is
+            // Idle, so BonePoseHistory treats it as LIVE and its body-loss grace could
+            // expire during that wait, clearing the ring right before the capture reads it
+            // (the intermittent mesh-only export). Holding here freezes the full ring as
+            // it stood at the take's last good frame; the curve rebuild still runs
+            // (motionCurves.freeze is separate and is set later, in FreezeSculpture).
+            if (poseHistory != null) poseHistory.hold = true;
+
             // ---- stage 3: capture the one-second window ----
             int trailFrames = Mathf.Clamp(Mathf.RoundToInt(config.captureSeconds * 30f), 2, 32);
             if (poseHistory != null) poseHistory.historySamples = trailFrames;
@@ -2181,13 +2235,6 @@ namespace Experience
                     Debug.LogWarning($"[{nameof(ExperienceDirector)}] curve rebuild wait timed out — " +
                                      "capturing anyway (mesh-only capture is valid).", this);
             }
-
-            // Freeze BEFORE the capture, not after the decimation wait: the take has
-            // already stopped (stopped, not paused), so every frame from here on is
-            // one where the staleness clear could empty the ring — and the wait below
-            // yields for seconds. What the capture reads and what ResultShow shows
-            // must be the same ribbons, so the hold has to start earlier than both.
-            if (poseHistory != null) poseHistory.hold = true;
 
             var capOpt = CaptureOptions();
             capOpt.deferDecimation = true; // longest phase — off the main thread, below
@@ -2250,6 +2297,14 @@ namespace Experience
             if (whitePointCloud) SetProcessingWhitePointCloud(false);
 
             _snapshot = snap;
+            if (debugCurveTrace)
+            {
+                Debug.Log($"[curve-trace] capture done: snapshot curveLines={snap.curveLines.Count}, " +
+                          $"buildVer={(motionCurves != null ? motionCurves.BuildVersion : -1)}, " +
+                          $"hasBuilt={(motionCurves != null && motionCurves.HasBuilt)}, " +
+                          $"lastReason='{(motionCurves != null ? motionCurves.LastBuildReason : null)}'.", this);
+                CurveTrace("capture");
+            }
             _ui.ShowProgress(1f, config.processingText);
             // historySamples intentionally stays at the one-second window: the
             // frozen curves on screen ARE the exported shape. Restored on Idle.
@@ -2286,6 +2341,157 @@ namespace Experience
                       $"size {expB.size:F3} | " +
                       $"centroid offset {Vector3.Distance(liveC, expC):0.000} m, " +
                       $"length ratio {(liveLen > 1e-4f ? expLen / liveLen : 0f):0.00}", this);
+        }
+
+        // ---------------- debugCurveTrace ----------------
+        // The intermittent symptom is entirely in the curve/pose path: the ribbons
+        // stutter and cut off in the replay, then disappear at the freeze (only the
+        // mesh remains). This traces the two signals that decide it — whether the
+        // pose ring keeps filling (IngestCounter advancing while the take plays) and
+        // whether the curve is actually built at the freeze (HasBuilt) — to a CSV,
+        // one file per run, so a good run and a bad run diff line-for-line.
+
+        // Called every Update while the mode is on. Runs the stall detector every
+        // frame; writes a throttled tick row through Processing→QrShow; closes the
+        // file once the run leaves that window.
+        private void CurveTraceAuto()
+        {
+            if (!debugCurveTrace || _fsm == null) return;
+            var s = _fsm.State;
+            bool inWindow = s == ExperienceState.Processing
+                            || s == ExperienceState.ResultShow
+                            || s == ExperienceState.QrShow;
+            // The file spans the whole session (opened on the first state transition,
+            // closed on ExitMode) so the state enter/exit markers frame the run; the
+            // dense per-frame tick rows + stall detection stay restricted to the
+            // Processing→QrShow window where the symptom lives.
+            if (!inWindow) return;
+            DetectPoseStall();
+            if (Time.realtimeSinceStartup - _curveTraceLastAt >= 1f / CurveTraceHz)
+            {
+                _curveTraceLastAt = Time.realtimeSinceStartup;
+                CurveTrace("tick");
+            }
+        }
+
+        // WARN the instant the pose ring stops filling while the transport is still
+        // playing — the direct cause of "the ribbons stutter / end partway through".
+        private void DetectPoseStall()
+        {
+            if (poseHistory == null) return;
+            ulong ing = poseHistory.IngestCounter;
+            float now = Time.realtimeSinceStartup;
+            if (ing != _curveTraceLastIngest)
+            {
+                _curveTraceLastIngest = ing;
+                _curveTraceIngestChangedAt = now;
+                _curveStallLogged = false;
+                return;
+            }
+            bool playing = sensorRecorder != null && sensorRecorder.IsPlaying;
+            if (playing && !_curveStallLogged
+                && now - _curveTraceIngestChangedAt > CurveStallWarnSeconds)
+            {
+                _curveStallLogged = true;
+                double head = sensorRecorder != null ? sensorRecorder.CurrentPlayheadSeconds : 0;
+                Debug.LogWarning($"[curve-trace] POSE RING STALLED {now - _curveTraceIngestChangedAt:0.00}s " +
+                                 $"while playing (state={_fsm.State}, playhead={head:0.00}s, " +
+                                 $"ingest={ing}) — ribbons will stop growing here.", this);
+                CurveTrace("STALL");
+            }
+        }
+
+        // Min/avg/max of stored samples over every bone — how full the pose ring is.
+        // Near-zero here means the curve has nothing to draw.
+        private void RingFill(out int mn, out int avg, out int mx)
+        {
+            mn = 0; avg = 0; mx = 0;
+            if (poseHistory == null) return;
+            int n = poseHistory.BoneCount;
+            if (n <= 0) return;
+            mn = int.MaxValue; long sum = 0;
+            for (int b = 0; b < n; b++)
+            {
+                int c = poseHistory.SampleCount(b);
+                if (c < mn) mn = c;
+                if (c > mx) mx = c;
+                sum += c;
+            }
+            if (mn == int.MaxValue) mn = 0;
+            avg = (int)(sum / n);
+        }
+
+        // Write one row (tag + full snapshot of the pipeline). Key events pass their
+        // own tag and also Debug.Log so they surface in the live console.
+        private void CurveTrace(string tag)
+        {
+            if (!debugCurveTrace) return;
+            EnsureCurveTrace();
+            if (_curveTrace == null) return;
+            RingFill(out int rMin, out int rAvg, out int rMax);
+            var rec = sensorRecorder;
+            string recState = rec != null ? rec.CurrentState.ToString() : "none";
+            double head = rec != null ? rec.CurrentPlayheadSeconds : 0;
+            double dur = rec != null ? rec.PlaybackDurationSeconds : 0;
+            ulong poseVer = poseHistory != null && poseHistory.bodyTracking != null
+                ? poseHistory.bodyTracking.PoseVersion : 0UL;
+            ulong ingest = poseHistory != null ? poseHistory.IngestCounter : 0UL;
+            int persons = merger != null ? merger.PersonCount : -1;
+            bool hold = poseHistory != null && poseHistory.hold;
+            int hist = poseHistory != null ? poseHistory.historySamples : 0;
+            var mc = motionCurves;
+            _curveTrace.WriteLine(string.Join(",",
+                (Time.realtimeSinceStartup * 1000f).ToString("0"),
+                tag,
+                _fsm != null ? _fsm.State.ToString() : "?",
+                _fsm != null ? _fsm.TimeInState.ToString("0.00") : "?",
+                recState,
+                head.ToString("0.000"),
+                dur.ToString("0.000"),
+                persons.ToString(),
+                poseVer.ToString(),
+                ingest.ToString(),
+                hold ? "1" : "0",
+                hist.ToString(),
+                rMin.ToString(), rAvg.ToString(), rMax.ToString(),
+                mc != null && mc.visible ? "1" : "0",
+                mc != null && mc.freeze ? "1" : "0",
+                mc != null && mc.suppressDraw ? "1" : "0",
+                mc != null ? mc.BuildVersion.ToString() : "?",
+                mc != null && mc.HasBuilt ? "1" : "0",
+                mc != null ? (mc.LastBuildReason ?? "") : ""));
+            _curveTrace.Flush();
+        }
+
+        private void EnsureCurveTrace()
+        {
+            if (_curveTrace != null) return;
+            try
+            {
+                string dir = System.IO.Path.Combine(Application.persistentDataPath, "curve_traces");
+                System.IO.Directory.CreateDirectory(dir);
+                string path = System.IO.Path.Combine(dir,
+                    $"curve_trace_{DateTime.Now:yyyyMMdd_HHmmss_fff}.csv");
+                _curveTrace = new System.IO.StreamWriter(path, false);
+                _curveTrace.WriteLine("t_ms,tag,state,timeInState,recState,playhead,dur,persons," +
+                                      "poseVer,ingest,hold,histSamples,ringMin,ringAvg,ringMax," +
+                                      "visible,freeze,suppressDraw,buildVer,hasBuilt,lastBuildReason");
+                _curveTrace.Flush();
+                Debug.Log($"[curve-trace] writing {path}", this);
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[curve-trace] could not open trace file: {e.Message}", this);
+                debugCurveTrace = false; // don't retry every frame
+            }
+        }
+
+        private void CloseCurveTrace()
+        {
+            if (_curveTrace == null) return;
+            try { _curveTrace.Flush(); _curveTrace.Dispose(); } catch { }
+            _curveTrace = null;
+            _curveStallLogged = false;
         }
 
         // Bounds + centroid + summed polyline length over a curve set.
@@ -3082,10 +3288,18 @@ namespace Experience
                 // cloud+ribbons only through QR when playback fails to start.
                 if (tsdfView != null && config.presentationSolidMesh)
                 { tsdfView.whitePointCloud = false; tsdfView.suppressDraw = false; }
+                if (debugCurveTrace)
+                {
+                    Debug.LogWarning("[curve-trace] ResultShow replay FAILED to start — freezing on " +
+                                     $"the frozen frame (hasBuilt={(motionCurves != null && motionCurves.HasBuilt)}, " +
+                                     $"buildVer={(motionCurves != null ? motionCurves.BuildVersion : -1)}).", this);
+                    CurveTrace("freeze-fail");
+                }
                 _resultShowDone = true;
                 _resultShowRoutine = null;
                 yield break;
             }
+            if (debugCurveTrace) CurveTrace("replay-start");
 
             // The camera stays STILL through the replay (no SetOrbit here) — it
             // starts circling only once the take finishes, easing in from the
@@ -3108,6 +3322,23 @@ namespace Experience
             // final skeleton.
             if (poseHistory != null) poseHistory.hold = true;
             if (motionCurves != null) motionCurves.freeze = true;
+            // ★ The money shot: at the freeze, does the curve actually exist? In freeze
+            // mode the draw is gated on HasBuilt — false here IS the "ribbons vanish,
+            // only the mesh remains" symptom. ringMin≈0 upstream points at a starved ring.
+            if (debugCurveTrace)
+            {
+                bool built = motionCurves != null && motionCurves.HasBuilt;
+                RingFill(out int rMin, out int rAvg, out int rMax);
+                // The reliable "no ribbons" signal is an EMPTY ring: HasBuilt only means
+                // a build dispatched, not that it produced a drawable (non-empty) curve.
+                bool curveMissing = rMax == 0;
+                Debug.LogWarning($"[curve-trace] FREEZE @ResultShow end: hasBuilt={built}, " +
+                                 $"buildVer={(motionCurves != null ? motionCurves.BuildVersion : -1)}, " +
+                                 $"lastReason='{(motionCurves != null ? motionCurves.LastBuildReason : null)}', " +
+                                 $"ring(min/avg/max)={rMin}/{rAvg}/{rMax}" +
+                                 (curveMissing ? "  <-- CURVE MISSING (empty ring → mesh-only result)" : ""), this);
+                CurveTrace("freeze-end");
+            }
             // NOW reveal the solid shaded TSDF mesh (config.presentationSolidMesh): the
             // replay has settled on its final pose, so the frozen sculpture lines up with
             // the cloud/ribbons instead of pre-standing at the end. Sticks through the
