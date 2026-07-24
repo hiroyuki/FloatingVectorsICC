@@ -365,12 +365,30 @@ namespace TSDF
             w.Write("] (\n            interpolation = \"vertex\"\n        )\n");
 
             // faceVarying st: three identical corners per triangle, pointing at
-            // that triangle's 2x2 block centre.
-            w.Write("        texCoord2f[] primvars:st = [");
+            // that triangle's 2x2 block centre. The st array is 3 values per
+            // triangle and dominates the usdc size, so it is written as
+            // texCoord2h (half) — ~5.5 MB smaller at show sizes. Only up to a
+            // 2048px atlas though: a half's spacing in [0.5, 1) is 2^-11, which
+            // at 2048 equals the 1-texel safe window around the block centre
+            // (a representable half always exists inside it — snapped below),
+            // while at 4096 the window is narrower than the spacing and pure
+            // block colour can no longer be guaranteed — that size keeps float.
+            bool halfSt = texSize <= 2048;
+            w.Write(halfSt ? "        texCoord2h[] primvars:st = ["
+                           : "        texCoord2f[] primvars:st = [");
             for (int t = 0; t < triCount; t++)
             {
-                float u = ((t % blocksPerRow) * 2 + 1) / (float)texSize;
-                float v = ((t / blocksPerRow) * 2 + 1) / (float)texSize;
+                float u, v;
+                if (halfSt)
+                {
+                    u = SafeHalfBlockUv((t % blocksPerRow) * 2, texSize);
+                    v = SafeHalfBlockUv((t / blocksPerRow) * 2, texSize);
+                }
+                else
+                {
+                    u = ((t % blocksPerRow) * 2 + 1) / (float)texSize;
+                    v = ((t / blocksPerRow) * 2 + 1) / (float)texSize;
+                }
                 string st = $"({F5(u, inv)}, {F5(v, inv)})";
                 if (t > 0) w.Write(", ");
                 w.Write(st); w.Write(", "); w.Write(st); w.Write(", "); w.Write(st);
@@ -407,6 +425,76 @@ namespace TSDF
         private static string F3(float v, CultureInfo inv) => v.ToString("0.###", inv);
         private static string F4(float v, CultureInfo inv) => v.ToString("0.####", inv);
         private static string F5(float v, CultureInfo inv) => v.ToString("0.#####", inv);
+
+        // ---- half-precision st ----
+        // The UV for a 2x2 atlas block must, AFTER rounding to half, still sample
+        // pure block colour: at least 0.5 texel inside the block so the bilinear
+        // kernel never reaches the neighbour. Returns the representable half
+        // nearest the block centre, nudged one ULP when the rounded centre falls
+        // outside the safe window. Callers guarantee texSize <= 2048, where the
+        // window (1 texel) is never narrower than the half spacing, so a valid
+        // half always exists.
+        private static float SafeHalfBlockUv(int blockTexel, int texSize)
+        {
+            float lo = (blockTexel + 0.5f) / texSize;
+            float hi = (blockTexel + 1.5f) / texSize;
+            float h = HalfRound((blockTexel + 1) / (float)texSize);
+            if (h < lo) h = HalfToFloat((ushort)(FloatToHalf(h) + 1));
+            else if (h > hi) h = HalfToFloat((ushort)(FloatToHalf(h) - 1));
+            return h;
+        }
+
+        private static float HalfRound(float f) => HalfToFloat(FloatToHalf(f));
+
+        // IEEE 754 binary16 conversions (round-to-nearest-even), managed so the
+        // export path stays free of main-thread-only Unity APIs. Inputs here are
+        // always finite UVs in (0, 1]; the clamping below is just safety.
+        private static ushort FloatToHalf(float f)
+        {
+            uint bits = (uint)BitConverter.SingleToInt32Bits(f);
+            uint sign = (bits >> 16) & 0x8000u;
+            int exp = (int)((bits >> 23) & 0xFF) - 127 + 15;
+            uint man = bits & 0x007FFFFFu;
+            if (exp >= 31) return (ushort)(sign | 0x7C00u); // overflow -> inf
+            if (exp <= 0)
+            {
+                if (exp < -10) return (ushort)sign; // underflow -> 0
+                man |= 0x00800000u;                 // subnormal half
+                int shift = 14 - exp;
+                uint sub = man >> shift;
+                uint rem = man & ((1u << shift) - 1u);
+                uint half2 = 1u << (shift - 1);
+                if (rem > half2 || (rem == half2 && (sub & 1u) != 0)) sub++;
+                return (ushort)(sign | sub);
+            }
+            uint rounded = man >> 13;
+            uint rest = man & 0x1FFFu;
+            if (rest > 0x1000u || (rest == 0x1000u && (rounded & 1u) != 0)) rounded++;
+            uint result = sign | ((uint)exp << 10) + rounded; // mantissa carry may bump exp
+            return (ushort)result;
+        }
+
+        private static float HalfToFloat(ushort h)
+        {
+            uint sign = (uint)(h & 0x8000) << 16;
+            int exp = (h >> 10) & 0x1F;
+            uint man = (uint)(h & 0x03FF);
+            uint bits;
+            if (exp == 0)
+            {
+                if (man == 0) bits = sign; // zero
+                else
+                {
+                    // subnormal half -> normalised float
+                    int e = -1;
+                    do { man <<= 1; e++; } while ((man & 0x0400u) == 0);
+                    bits = sign | (uint)(127 - 15 - e) << 23 | ((man & 0x03FFu) << 13);
+                }
+            }
+            else if (exp == 31) bits = sign | 0x7F800000u | (man << 13); // inf/nan
+            else bits = sign | (uint)(exp - 15 + 127) << 23 | (man << 13);
+            return BitConverter.Int32BitsToSingle((int)bits);
+        }
 
         // ---- STORED zip with 64-byte-aligned entry data (usdz packaging rule) ----
         private static void WriteStoredZip(MemoryStream outMs, (string name, byte[] data)[] entries)
