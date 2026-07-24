@@ -440,8 +440,10 @@ namespace Experience
         public string viewerBaseUrl = "https://hyper.ntticc.or.jp/kids2026/unknown-but-yours/";
 
         /// <summary>The URL the QR encodes. When <see cref="viewerBaseUrl"/> is set,
-        /// it is the viewer page for the sculpture's server-assigned id (the upload
-        /// API's <c>id</c> — same value the download link is built from), selected by
+        /// it is the viewer page for the sculpture id — the uploaded file's base
+        /// name (glb/usdz share it), which the viewer resolves to
+        /// <c>{base}/{id}.glb</c>. This is NOT the upload API's opaque <c>id</c>
+        /// (that only keys the raw <c>/files/{id}</c> download link). Selected by
         /// <see cref="qrUrlKind"/> just like the raw link. Falls back to the raw LFKS
         /// download link when the base is blank or no id came back.</summary>
         public string BuildQrUrl(string glbId, string usdzId, string glbUrl, string usdzUrl)
