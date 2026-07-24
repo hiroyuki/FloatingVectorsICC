@@ -50,10 +50,19 @@ namespace Experience
         public float presentationPlaybackRate = 1f / 3f;
 
         [Min(0f)]
-        [Tooltip("ResultShow only: hold the できたよ！text alone on a blank stage for " +
-                 "this long before the model appears and the replay begins. 0 = model " +
-                 "appears with the text.")]
+        [Tooltip("Hold the できたよ！text ALONE on the blank stage for this long before " +
+                 "the model appears and the replay begins. Used by BOTH ResultShow and " +
+                 "each practice round's shoot-end reveal. 0 = model appears with the " +
+                 "text. (The pure-black beat BEFORE できたよ！ is resultBlackGapSeconds.)")]
         public float resultRevealDelaySeconds = 0.5f;
+
+        [Min(0f)]
+        [Tooltip("Practice rounds / shoot-end reveal only: length of the pure-black beat " +
+                 "AFTER the model dissolves away and BEFORE できたよ！ appears (see " +
+                 "ExperienceDirector's shoot-end dissolve → black → できたよ！ → reveal " +
+                 "sequence). ResultShow uses stateGapSeconds for its equivalent blank " +
+                 "beat. 0 = できたよ！appears the instant the dissolve finishes.")]
+        public float resultBlackGapSeconds = 0.5f;
 
         [Min(0f)]
         [Tooltip("Shoot-end → できたよ！ transition: after 撮影中 the live model FREEZES " +
@@ -69,6 +78,13 @@ namespace Experience
                  "dissolve begins, so you can step through it one frame at a time (⏭). " +
                  "Leave off for the show.")]
         public bool debugPauseAtShootDissolve;
+
+        [Tooltip("DEBUG (editor only): auto-pause the Editor the instant the finished " +
+                 "できたよ！ model is revealed (both the ResultShow result AND each practice " +
+                 "round's preview), so the real presentation look — orbit framing, presentation " +
+                 "seed/tail values, and the presentationSolidMesh choice — can be studied frozen " +
+                 "instead of flashing past. Leave off for the show.")]
+        public bool debugPauseAtReveal;
 
         [Min(0f)]
         [Tooltip("Orbit speed (yaw °/s) during the replays and the QR screen. The dev " +
@@ -107,6 +123,21 @@ namespace Experience
                  "solid body sits inside the ribbons. A/B this to decide the final look — it only " +
                  "affects ResultShow/QrShow; every live/practice phase is unchanged.")]
         public bool presentationSolidMesh = false;
+
+        [Tooltip("Processing screen: play the TSDF as a looping wireframe (mesh forming " +
+                 "with the motion) behind the progress bar, instead of a black stage. The " +
+                 "mesh loops through the v11s conversion wait too. Turn OFF on machines " +
+                 "where the wait is GPU-bound (Windows v11s/ONNX) and the extra render " +
+                 "competes — Processing then falls back to the plain progress bar on black. " +
+                 "The export is unaffected either way (a clean capture pass runs regardless).")]
+        public bool processingWireframe = true;
+
+        [Min(0f)]
+        [Tooltip("processingWireframe: seconds to LOOP the recorded take as the wireframe " +
+                 "AFTER the v11s conversion finishes (the wireframe runs post-conversion " +
+                 "so the playback file handle can't block the converter). Long takes loop " +
+                 "only their last processingWireframeMinSeconds. Adds this long to Processing.")]
+        public float processingWireframeMinSeconds = 5f;
 
         [Header("Sensing overrides (pushed into PresenceDetector on enter)")]
         [Min(0f)] public float insetMeters = 0f;
@@ -266,6 +297,14 @@ namespace Experience
                  "switches off. Keep above head height with arms raised, or the top " +
                  "pops in at the end of the sweep.")]
         public float cloudRevealHeight = 2.6f;
+
+        [Min(0f)]
+        [Tooltip("After the cloud reveal sweep lands and the bones hand over, the " +
+                 "motion-line ribbons grow from nothing to their full trail length " +
+                 "over this many seconds. Held at zero during the sweep so the " +
+                 "rising-cloud wipe isn't hidden behind full-length lines. " +
+                 "0 = snap to full length the instant the sweep finishes.")]
+        public float curveGrowSeconds = 1f;
 
         [Header("Pose detection")]
         [Min(0f)] public float starHoldSeconds = 0.5f;
@@ -439,7 +478,8 @@ namespace Experience
         [TextArea] public string shootCueText = "じゃぁ　ほんばんだよ";
         [TextArea] public string shootingText = "さつえいちゅう！";
         [TextArea] public string processingText = "きろくを　じゅんびしているよ　まってね";
-        [Tooltip("Shown over the TSDF wireframe replay, before できたよ！ (resultText).")]
+        [Tooltip("Shown over the looping wireframe during the practice (TestMove) analysis " +
+                 "phase. The real-take Processing screen uses processingText instead.")]
         [TextArea] public string analyzingText = "ぶんせきちゅう";
         [TextArea] public string resultText = "できたよ！";
         [TextArea] public string qrScanText = "にじげんコードの　しゃしんを　とったら\nおうちでも　みれるよ";

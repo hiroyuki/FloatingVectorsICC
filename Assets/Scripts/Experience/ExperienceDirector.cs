@@ -277,11 +277,6 @@ namespace Experience
         // ExperienceInputs.TestMovePresenting. Cleared on every exit path.
         private bool _testMovePresenting;
         private bool _resultShowDone;  // ResultShow playback loops finished
-        // できたよ！ is withheld through the wireframe replay and painted only when
-        // the replay finishes and the finished model is revealed (2026-07-24). Gates
-        // ShowStateMessage(ResultShow) so any repaint (crowd notice clear) stays blank
-        // until the routine flips it. Reset on every ResultShow entry / mode exit.
-        private bool _deferResultText;
         private bool _recordingDone;
         private bool _processingDone, _processingFailed;
         private string _takeRoot;
@@ -946,11 +941,9 @@ namespace Experience
             if (poseHistory != null) poseHistory.historySamples = _savedHistorySamples;
             // Leaving mode mid-Processing must not strand the ribbons hidden.
             SetSculptureVisible(true);
-            // Session-long TSDF hide + orbit ownership — hand both back.
-            // A wireframe replay interrupted mid-flight (visitor walked off, fault, dev
-            // jump) must not strand the dev view as a wireframe or defer できたよ！.
-            _wireframeReplay = false;
-            _deferResultText = false;
+            // Session-long TSDF hide + orbit ownership — hand both back. An exit mid
+            // Processing-wireframe must not strand the dev view as a wireframe.
+            _processingWireframeOn = false;
             if (tsdfView != null) { tsdfView.wireframe = false; tsdfView.suppressDraw = _savedTsdfSuppress; }
             SetPresentationLook(false); // scene (live) values back before dev restore
             SetOrbit(false);
@@ -1132,10 +1125,7 @@ namespace Experience
                 _converter?.Abort();
                 _testMovePresenting = false;
                 AbortShootEndDissolve(); // stopped mid dissolve: no half-dissolved/frozen leak
-                // Stopped mid wireframe replay: undo it (hides the mesh, restores the
-                // integrator) so the next state isn't left drawing a wireframe / with
-                // integration off. SetWireframeReplay no-ops when it wasn't armed.
-                SetWireframeReplay(false);
+                SetProcessingWireframe(false); // stopped mid ぶんせきちゅう: hide the wireframe
             }
             if (from == ExperienceState.Shoot)
             {
@@ -1157,6 +1147,11 @@ namespace Experience
                     _converter?.Abort();
                     RestoreHistorySamples(); // the capture may have been mid-flight
                 }
+                // Belt-and-suspenders for the Processing wireframe: every exit path —
+                // the normal reveal (routine already turned it off), a failure yield
+                // break, or a mid-conversion walk-off — must hide the mesh so no state
+                // inherits a stray wireframe. No-ops when it wasn't armed.
+                SetProcessingWireframe(false);
                 // MUST run even when the routine already nulled itself on a failure path
                 // (no take / playback / capture failure): every Processing exit that
                 // isn't the ResultShow reveal has to clear the shoot-end dissolve, or
@@ -1166,13 +1161,6 @@ namespace Experience
             if (from == ExperienceState.ResultShow)
             {
                 StopRoutine(ref _resultShowRoutine);
-                // Left mid wireframe replay (walked off, fault, dev jump before the
-                // reveal): undo it so the mesh stops drawing and the integrator is
-                // restored. No-ops on the normal ResultShow→QrShow exit, where phase 2
-                // already turned the wireframe off. Also drop the deferred-text gate so
-                // a later ResultShow repaint isn't stuck blank.
-                SetWireframeReplay(false);
-                _deferResultText = false;
                 if (to == ExperienceState.Idle)
                     CancelPublish(); // fail path or skip; success path already completed
             }
@@ -1325,11 +1313,9 @@ namespace Experience
             // leaving it on screen through the inter-state beat read as "the finished
             // lines are already drawn and the body just retraces them". Clear the stale
             // curves + ring and hide the cloud NOW so the beat is truly empty;
-            // ResultShowRoutine then runs the wireframe replay and reveals the finished
-            // model FROM ZERO. Guarded on a replayable take so the no-take edge still
-            // shows the frozen piece rather than a black screen. _deferResultText holds
-            // できたよ！ back until the replay finishes (the routine paints it then).
-            _deferResultText = false;
+            // ResultShowRoutine reveals the model and replays it FROM ZERO after the
+            // beat, together with the できたよ！paint. Guarded on a replayable take so
+            // the no-take edge still shows the frozen piece rather than a black screen.
             if (state == ExperienceState.ResultShow
                 && sensorRecorder != null
                 && !string.IsNullOrEmpty(_takeRoot) && Directory.Exists(_takeRoot))
@@ -1337,7 +1323,6 @@ namespace Experience
                 if (motionCurves != null) { motionCurves.freeze = false; motionCurves.suppressDraw = true; }
                 if (poseHistory != null) poseHistory.ReleaseHoldAndClear();
                 SetCloudRenderersVisible(false);
-                _deferResultText = true;
             }
 
             // The beat between screens (stateGapSeconds): blank now, then the new
@@ -1387,8 +1372,7 @@ namespace Experience
                 case ExperienceState.TestMove2: PlaySe(config.testMove2IntroSe); break;
                 case ExperienceState.Shoot: PlaySe(config.shootCueSe); break;
                 case ExperienceState.Processing: PlaySe(config.processingSe); break;
-                // Deferred through the wireframe replay — the routine plays it on reveal.
-                case ExperienceState.ResultShow: if (!_deferResultText) PlaySe(config.resultSe); break;
+                case ExperienceState.ResultShow: PlaySe(config.resultSe); break;
                 case ExperienceState.QrShow: PlaySe(config.qrShowSe); break;
             }
         }
@@ -1505,6 +1489,25 @@ namespace Experience
         // the bones stay up on every abort path).
         private IEnumerator CloudRevealRoutine()
         {
+            // The one live intro reveal: the point cloud rises out of the floor
+            // when the visitor's body first becomes content — on the はかれたよ！
+            // beat (state still Calibrate) if the star pose matched, or on the
+            // TestMove1 entry if the calibrate window expired first (see the note on
+            // ApplyCloudVisibility). Collapse the ribbons to nothing for that sweep
+            // so the rising-cloud wipe isn't hidden behind full-length motion lines,
+            // then grow them back once the sweep lands and the bones hand over.
+            // Restricted to the live content phases so the playback phases'
+            // cloud-shown edge (Processing→ResultShow) can't zero out their
+            // capture-window historySamples.
+            bool liveCurvePhase = _fsm != null && _fsm.State is ExperienceState.Calibrate
+                                      or ExperienceState.TestMove1 or ExperienceState.TestMove2
+                                      or ExperienceState.Shoot;
+            bool growCurves = liveCurvePhase && motionCurves != null && motionCurves.visible
+                              && !_visitorPlaybackActive && poseHistory != null
+                              && poseHistory.historySamples > 0;
+            int curveTarget = growCurves ? poseHistory.historySamples : 0;
+            if (growCurves) poseHistory.historySamples = 0;
+
             float dur = config.cloudRevealSeconds
                         / Mathf.Max(0.01f, config.timings.timeMultiplier);
             if (dur > 0f)
@@ -1519,8 +1522,26 @@ namespace Experience
                 Shader.SetGlobalFloat(PcRevealModeId, 0f);
             }
             _cloudRevealed = true;
-            _cloudRevealRoutine = null;
             if (_fsm != null) ApplyBonesVisibility(_fsm.State);
+
+            // Bones gone — slide historySamples 0 → target so the ribbons grow
+            // in over curveGrowSeconds. Stays inside _cloudRevealRoutine so a
+            // hidden-edge / exit that stops the routine also stops the grow (and
+            // Idle / Exit restore the dev value via RestoreHistorySamples).
+            if (growCurves)
+            {
+                float grow = config.curveGrowSeconds
+                             / Mathf.Max(0.01f, config.timings.timeMultiplier);
+                for (float e = 0f; e < grow; e += Time.deltaTime)
+                {
+                    poseHistory.historySamples =
+                        Mathf.Clamp(Mathf.RoundToInt(Mathf.Lerp(0f, curveTarget, e / grow)),
+                                    0, curveTarget);
+                    yield return null;
+                }
+                poseHistory.historySamples = curveTarget;
+            }
+            _cloudRevealRoutine = null;
         }
 
         /// <summary>
@@ -1629,10 +1650,6 @@ namespace Experience
                     _ui.ShowProgress(_converter?.Progress ?? 0f, config.processingText);
                     break;
                 case ExperienceState.ResultShow:
-                    // Through the wireframe replay show ぶんせきちゅう (any repaint —
-                    // crowd notice clear, gap paint — keeps it) until the routine
-                    // finishes the replay and reveals the finished model with できたよ！.
-                    if (_deferResultText) { _ui.ShowMessage(config.analyzingText); break; }
                     // Same layout as the QR screen (headline already in place) so
                     // ResultShow→QrShow reads as ONE scene that gains the QR.
                     if (_exportFailed) _ui.ShowMessage(config.exportFailedText);
@@ -2039,22 +2056,36 @@ namespace Experience
             }
 
             // ---- stage 1: v11s conversion (skippable, shared with TestMove) ----
+            // Behind the progress bar, LOOP the recorded take (1x) as a wireframe that
+            // forms with the motion — through the conversion wait AND a guaranteed
+            // minimum window, so it visibly repeats even when the conversion is fast /
+            // skipped (Mac). This is VISUAL only: stage 2 runs a clean capture pass on a
+            // reset volume, so the export is never affected. Gated on processingWireframe
+            // (turn OFF where the conversion is GPU-bound). The real take keeps the
+            // processingText caption (ぶんせきちゅう is the practice-round wording).
             bool cannedTake = t.skipShoot || t.dummyShoot;
-            yield return ConvertTakeRoutine(_takeRoot, 0f, 0.8f);
+            bool wireframe = config.processingWireframe && tsdfView != null;
+            yield return WireframeConvertLoop(_takeRoot, 0f, 0.8f, config.processingText);
+            if (!_active || _fsm.State != ExperienceState.Processing)
+            { SetProcessingWireframe(false); _processingRoutine = null; yield break; }
 
             // ---- stage 2: single play-through of the take (loop off) ----
+            // Reset the volume so the capture rebuilds cleanly from THIS play-through —
+            // ALWAYS (both processingWireframe on and off), so the export is identical
+            // regardless of the flag AND free of the wireframe loop's writes or any
+            // pre-Shoot residue. The exported sculpture is exactly the take's window.
+            if (tsdfIntegrator != null) ResumeIntegratorLiveFollow();
             // Apply the dense presentation look (seedCount 60000, presentation
             // decimate + tailAlpha) BEFORE the play-through so the seeds rebuild
             // and trace the motion at full density during it — the capture below
-            // then exports exactly what ResultShow reveals. Without this the
-            // export froze the scene's base seedCount (500) → sparse curves that
-            // never matched the on-screen ribbons. Stays on through ResultShow
-            // (which re-asserts it); restored on Idle / mode exit.
+            // then exports exactly what ResultShow reveals. Stays on through
+            // ResultShow (which re-asserts it); restored on Idle / mode exit.
             SetPresentationLook(true);
             StartVisitorPlayback(_takeRoot);
             if (!_visitorPlaybackActive || sensorRecorder == null || !sensorRecorder.IsPlaying)
             {
                 Debug.LogError($"[{nameof(ExperienceDirector)}] take play-through failed to start.", this);
+                SetProcessingWireframe(false); // don't leave the wireframe under the failure notice
                 _processingFailed = true;
                 ShowExportFailed();
                 _processingRoutine = null;
@@ -2122,6 +2153,7 @@ namespace Experience
             if (snap == null)
             {
                 Debug.LogError($"[{nameof(ExperienceDirector)}] final capture failed: {err}", this);
+                SetProcessingWireframe(false); // don't leave the wireframe under the failure notice
                 _processingFailed = true;
                 ShowExportFailed();
                 _processingRoutine = null;
@@ -2169,6 +2201,11 @@ namespace Experience
             // every frame — the frozen result visibly flickers. Restored on the
             // next Idle (live-follow again) and on mode exit.
             FreezeSculpture();
+
+            // Hide the Processing wireframe now that the capture is done — the stage
+            // goes black for the Processing→ResultShow reveal (ResultShow un-hides the
+            // finished cloud + ribbons). FreezeSculpture already closed the gate.
+            if (wireframe) SetProcessingWireframe(false);
 
             _snapshot = snap;
             _ui.ShowProgress(1f, config.processingText);
@@ -2409,48 +2446,99 @@ namespace Experience
             sensorRecorder?.ResumeFrames();
         }
 
-        // TSDF wireframe replay (ResultShow + practice, 2026-07-24). The recorded
-        // take replays as an edge net that RE-FORMS with the motion — the integrator
-        // follows the playback (fresh batch, gate reopened) so the mesh tracks the
-        // body, drawn wireframe with the point cloud and ribbons hidden. The ribbons
-        // keep BUILDING underneath (suppressDraw hides only the draw) so the one-second
-        // window is full by the time the solid model is revealed after the replay.
-        // on=false re-freezes the sculpture and hides the mesh, leaving a black stage
-        // for the できたよ！ + finished-model reveal.
-        private bool _wireframeReplay;
-        private void SetWireframeReplay(bool on)
+        // Processing-screen wireframe (2026-07-24). The TSDF mesh is drawn as an edge
+        // net (config.processingWireframe) behind the progress bar while the take
+        // replays — the sculpture forms with the motion instead of a black stage. The
+        // point cloud + ribbons stay hidden (the wireframe is the only content); the
+        // TSDF mesh is un-suppressed just for this. off=false hides the mesh again,
+        // leaving the black stage the Processing→ResultShow reveal expects. Integration
+        // is owned by the routine (building through the play-through, frozen after the
+        // capture), NOT here.
+        private bool _processingWireframeOn;
+        private void SetProcessingWireframe(bool on)
         {
-            if (_wireframeReplay == on) return;
-            _wireframeReplay = on;
+            if (_processingWireframeOn == on) return;
+            _processingWireframeOn = on;
             if (on)
             {
                 SetCloudRenderersVisible(false);
-                if (motionCurves != null) { motionCurves.suppressDraw = true; motionCurves.freeze = false; }
+                if (motionCurves != null) motionCurves.suppressDraw = true;
                 if (tsdfView != null) { tsdfView.wireframe = true; tsdfView.suppressDraw = false; }
-                // Fold the replay so the net forms with the motion. BeginFreshBatch
-                // clears the write buffer so it re-forms from empty instead of holding
-                // the frozen final sculpture. (_sculptureFrozen stays set — the gate is
-                // re-closed on hand-off below and the exit restore still reopens it.)
-                if (tsdfIntegrator != null)
+            }
+            else if (tsdfView != null)
+            {
+                tsdfView.wireframe = false;
+                tsdfView.suppressDraw = true;
+            }
+        }
+
+        // Shared by Processing and practice: run ConvertTakeRoutine FIRST (caption on a
+        // black stage — a progress bar for the real take, the ぶんせきちゅう message for
+        // practice), THEN loop the converted take (1x) as a Processing-style wireframe
+        // for processingWireframeMinSeconds so it repeats visibly. Conversion runs before
+        // any playback because SensorRecorder.Load() holds bodies_main open, which would
+        // block the converter's File.Move promotion on Windows (see below). Long/canned
+        // takes loop only their tail. Assumes the stage is already black. Leaves the
+        // wireframe ON and the take looping — the caller turns it off
+        // (SetProcessingWireframe(false)) and transitions. When config.processingWireframe
+        // is off it just runs the conversion (no loop, black stage).
+        private IEnumerator WireframeConvertLoop(string takeRoot, float progressFrom,
+                                                 float progressTo, string caption,
+                                                 bool showProgressBar = true)
+        {
+            // Caption up front so the conversion phase isn't blank (also covers the
+            // skipped-conversion / wireframe-off case).
+            if (!showProgressBar) _ui.ShowMessage(caption);
+
+            // Convert FIRST, with NO playback open. SensorRecorder.Load() holds
+            // bodies_main open (FileShare.Read), and FusedTakeConverter promotes its
+            // result via File.Move(bodies_main, ...) — on Windows the open handle would
+            // fail that move with a sharing violation, silently dropping the conversion.
+            // So the wireframe loop only starts AFTER the converter has promoted the file.
+            yield return ConvertTakeRoutine(takeRoot, progressFrom, progressTo, caption, showProgressBar);
+
+            if (!(config.processingWireframe && tsdfView != null)) yield break;
+
+            // Loop the (now-converted) take as a wireframe for the guaranteed window so
+            // it repeats visibly. Long/canned takes loop only their tail.
+            SetProcessingWireframe(true);
+            StartVisitorPlayback(takeRoot, loop: true, rate: 1f);
+            if (!_visitorPlaybackActive || sensorRecorder == null || !sensorRecorder.IsPlaying) yield break;
+
+            double dur = Math.Max(0.1, sensorRecorder.PlaybackDurationSeconds);
+            double loopStart = dur > config.processingWireframeMinSeconds
+                ? dur - config.processingWireframeMinSeconds : 0;
+            bool seekPending = loopStart > 0;
+            Action onWrap = () => { if (loopStart > 0) seekPending = true; };
+            sensorRecorder.OnPlaybackLooped += onWrap;
+            try
+            {
+                if (seekPending)
                 {
-                    tsdfIntegrator.integrationEnabled = true;
-                    tsdfIntegrator.BeginFreshBatch();
+                    seekPending = false;
+                    if (sensorRecorder.SeekToPlayheadSeconds(loopStart)) sensorRecorder.ResumePlayback();
+                }
+                float minLoop = config.processingWireframeMinSeconds
+                                / Mathf.Max(0.01f, config.timings.timeMultiplier);
+                float until = Time.realtimeSinceStartup + minLoop;
+                while (_active && sensorRecorder != null && sensorRecorder.IsPlaying
+                       && Time.realtimeSinceStartup < until)
+                {
+                    if (seekPending)
+                    {
+                        seekPending = false;
+                        if (sensorRecorder.SeekToPlayheadSeconds(loopStart)) sensorRecorder.ResumePlayback();
+                    }
+                    if (showProgressBar) _ui.ShowProgress(progressTo, caption);
+                    else _ui.ShowMessage(caption);
+                    yield return null;
                 }
             }
-            else
+            finally
             {
-                if (tsdfView != null) { tsdfView.wireframe = false; tsdfView.suppressDraw = true; }
-                // Restore the integrator to whatever the freeze invariant dictates,
-                // NOT unconditionally off: a frozen sculpture (Processing ran →
-                // ResultShow) stays gated so the finished model holds; otherwise
-                // (practice, or a dev jump straight into ResultShow with no Processing)
-                // go back to live-follow so integration is never stranded off with
-                // _sculptureFrozen == false (UnfreezeSculpture would no-op).
-                if (tsdfIntegrator != null)
-                {
-                    if (_sculptureFrozen) tsdfIntegrator.integrationEnabled = false;
-                    else ResumeIntegratorLiveFollow();
-                }
+                // Runs even if the coroutine is stopped mid-loop (StopRoutine disposes
+                // the iterator) — never leak the OnPlaybackLooped subscription.
+                if (sensorRecorder != null) sensorRecorder.OnPlaybackLooped -= onWrap;
             }
         }
 
@@ -2500,9 +2588,11 @@ namespace Experience
         // Canned-take protection: the conversion rewrites bodies_main IN PLACE.
         // A dev E2E run must never mutate the canonical recording unless the
         // operator explicitly opted in with a disposable copy.
-        private IEnumerator ConvertTakeRoutine(string takeRoot, float progressFrom, float progressTo)
+        private IEnumerator ConvertTakeRoutine(string takeRoot, float progressFrom, float progressTo,
+                                               string caption = null, bool showProgressBar = true)
         {
             var t = config.timings;
+            if (string.IsNullOrEmpty(caption)) caption = config.processingText;
             if (_takeIsTapped)
             {
                 Debug.Log($"[{nameof(ExperienceDirector)}] playback-sourced (tapped) take — its " +
@@ -2561,8 +2651,10 @@ namespace Experience
                                      "within the grace window — abandoning it.", this);
                     break;
                 }
-                _ui.ShowProgress(progressFrom + (progressTo - progressFrom) * _converter.Progress,
-                                 config.processingText);
+                if (showProgressBar)
+                    _ui.ShowProgress(progressFrom + (progressTo - progressFrom) * _converter.Progress, caption);
+                else
+                    _ui.ShowMessage(caption);
                 yield return null;
             }
             if (_converter.Status != FusedTakeConverter.ConvertStatus.Done)
@@ -2708,23 +2800,13 @@ namespace Experience
                 }
                 PlaySe(config.recordEndSe);
 
-                // -- conversion (same pipeline as the real take; no capture) --
+                // -- shoot-end dissolve → ぶんせきちゅう wireframe (v11s conversion) →
+                //    black → できたよ！ → model reveal + growth. Order mirrors the real
+                //    take (Shoot→Processing→ResultShow): dissolve the live model away
+                //    FIRST, then loop the recording as a wireframe behind ぶんせきちゅう
+                //    while the conversion runs, then reveal the finished replay.
                 bool haveTake = !string.IsNullOrEmpty(takeRoot) && Directory.Exists(takeRoot);
-                if (haveTake)
-                {
-                    yield return ConvertTakeRoutine(takeRoot, 0f, 1f);
-                    if (!Active()) yield break;
-                }
-
-                // -- shoot-end dissolve → black → TSDF wireframe replay → できたよ！ + model --
-                //    Freeze the frozen model, hold, dissolve it away; then (order changed
-                //    2026-07-24, same as ResultShow) the take replays FIRST as a TSDF
-                //    wireframe that re-forms with the motion — no できたよ！, no curves,
-                //    no cloud — and only when it finishes do we paint できたよ！ and reveal
-                //    the finished curve model (history-30 ribbons that built underneath).
                 bool played = false;
-                float beat = config.resultRevealDelaySeconds
-                             / Mathf.Max(0.01f, config.timings.timeMultiplier);
                 if (haveTake)
                 {
                     // 撮影中 off so the frozen model stands alone, then freeze → hold →
@@ -2732,6 +2814,15 @@ namespace Experience
                     _ui.ClearAll();
                     yield return DissolveShootEndToBlack();
                     if (!Active()) yield break;
+
+                    // ぶんせきちゅう: loop the take as a wireframe while it converts. Practice
+                    // shows the plain ぶんせきちゅう TEXT (no progress bar — that "processing"
+                    // UI is the real-take screen only); the conversion runs the same pipeline.
+                    yield return WireframeConvertLoop(takeRoot, 0f, 1f, config.analyzingText,
+                                                      showProgressBar: false);
+                    if (!Active()) yield break;
+                    SetProcessingWireframe(false); // hide the wireframe → black for the reveal
+                    _ui.ClearAll();                // clear ぶんせきちゅう so the gap is truly black
 
                     // Prep the ring for the growing replay: widen to the one-second
                     // window and start it EMPTY (the lines build as the take plays,
@@ -2743,20 +2834,38 @@ namespace Experience
                         poseHistory.ReleaseHoldAndClear();
                     }
 
-                    // Wireframe replay: hide cloud + ribbons, show the TSDF as an edge
-                    // net that re-forms with the motion (integrator follows the replay).
-                    SetWireframeReplay(true);
-                    _ui.ShowMessage(config.analyzingText); // ぶんせきちゅう over the wireframe
+                    float mult = Mathf.Max(0.01f, config.timings.timeMultiplier);
+                    float blackGap = config.resultBlackGapSeconds / mult;
+                    float revealHold = config.resultRevealDelaySeconds / mult;
+
+                    // Pure black after the dissolve, BEFORE できたよ！ (resultBlackGapSeconds).
+                    if (blackGap > 0f) yield return new WaitForSeconds(blackGap);
+                    if (!Active()) yield break;
+
+                    // できたよ！alone on the black stage, then hold it for the reveal delay.
+                    PlaySe(config.resultSe);
+                    _ui.ShowMessage(config.resultText);
+                    if (revealHold > 0f) yield return new WaitForSeconds(revealHold);
+                    if (!Active()) yield break;
+
+                    // Reveal the model and start the growing replay. Drop the dissolve
+                    // cull to 0 (undithered) the same frame the model is shown, so it
+                    // comes back at full — the dissolve left it at 1 to hold black.
+                    Shader.SetGlobalFloat(PcFadeCullId, 0f);
+                    SetCloudRenderersVisible(true);
+                    if (motionCurves != null) { motionCurves.freeze = false; motionCurves.suppressDraw = false; }
+                    if (poseHistory != null) poseHistory.ReleaseHoldAndClear();
                     StartVisitorPlayback(takeRoot, loop: true,
                                          rate: config.presentationPlaybackRate);
                     played = _visitorPlaybackActive && sensorRecorder != null && sensorRecorder.IsPlaying;
                 }
                 if (played)
                 {
-                    // Camera stays STILL through the replay. Practice hands straight back
-                    // to live afterwards, so there is no post-replay orbit ease-in here
-                    // (that belongs to ResultShow's held QR frame).
-                    SetPresentationLook(true); // grades the ribbons that build for the reveal
+                    // Camera stays STILL through the replay (same as ResultShow) — the
+                    // model appears and its ribbons grow with a fixed camera. Practice
+                    // hands straight back to live afterwards, so there is no post-replay
+                    // orbit ease-in here (that belongs to ResultShow's held QR frame).
+                    SetPresentationLook(true);
                     // Canned dev take: replay only its tail — a full-length entrance
                     // recording would otherwise loop for minutes. (A recorded or
                     // tapped take is capture-window-sized and never triggers this.)
@@ -2766,23 +2875,6 @@ namespace Experience
                         && duration > config.devCannedTakeTailSeconds)
                         startAt = duration - config.devCannedTakeTailSeconds;
                     yield return RunPlaybackLoops(state, startAt);
-                    if (!Active()) yield break;
-
-                    // Replay done: hide the wireframe (re-freezes the sculpture), clear
-                    // ぶんせきちゅう, hold a pure-black beat, then paint できたよ！ and
-                    // reveal the finished curve model.
-                    SetWireframeReplay(false);
-                    _ui.ClearAll(); // black gap between ぶんせきちゅう and できたよ！
-                    if (beat > 0f) yield return new WaitForSeconds(beat);
-                    if (!Active()) yield break;
-                    Shader.SetGlobalFloat(PcFadeCullId, 0f);
-                    SetCloudRenderersVisible(true);
-                    if (motionCurves != null) { motionCurves.freeze = true; motionCurves.suppressDraw = false; }
-                    if (poseHistory != null) poseHistory.hold = true;
-                    PlaySe(config.resultSe);
-                    _ui.ShowMessage(config.resultText);
-                    // Hold the finished できたよ！ model on screen before handing back.
-                    yield return new WaitForSeconds(Mathf.Max(1f, beat * 3f));
                     if (!Active()) yield break;
 
                     // hand the stage back to the live body for the next round
@@ -2799,26 +2891,15 @@ namespace Experience
                     }
                     RestoreHistorySamples(); // back to the dev ring size
                     if (poseHistory != null) poseHistory.ReleaseHoldAndClear();
-                    // The finished-model reveal froze the curves + closed the integrator
-                    // gate (via SetWireframeReplay). Practice folds live frames again, so
-                    // undo both for the next round.
-                    if (motionCurves != null) motionCurves.freeze = false;
-                    ResumeIntegratorLiveFollow();
                 }
                 else
                 {
                     Debug.LogWarning($"[{nameof(ExperienceDirector)}] practice round {round}: nothing " +
                                      $"to play back ('{takeRoot}') — moving on.", this);
-                    // The wireframe replay was armed for a playback that never started —
-                    // undo it (re-shows the cloud, reopens the integrator) and put the
-                    // live round's window back (mirrors the success path).
+                    // The ring was widened for a playback that never started —
+                    // put the live round's window back (mirrors the success path).
                     if (haveTake)
                     {
-                        SetWireframeReplay(false);
-                        ResumeIntegratorLiveFollow();
-                        Shader.SetGlobalFloat(PcFadeCullId, 0f);
-                        SetCloudRenderersVisible(true);
-                        if (motionCurves != null) { motionCurves.freeze = false; motionCurves.suppressDraw = false; }
                         if (_visitorPlaybackActive) StopVisitorPlayback();
                         RestoreHistorySamples();
                         if (poseHistory != null) poseHistory.ReleaseHoldAndClear();
@@ -2861,46 +2942,59 @@ namespace Experience
                 yield break;
             }
 
+            // Hold the できたよ！text ALONE on the blank stage for a moment first (the
+            // gap paint lands the text at the beat; the model follows resultReveal-
+            // DelaySeconds later), so the reveal reads as "done! … and here it is".
             float revealDelay = config.resultRevealDelaySeconds
                                 / Mathf.Max(0.01f, config.timings.timeMultiplier);
+            if (revealDelay > 0f) yield return new WaitForSeconds(revealDelay);
+            if (!_active || _fsm.State != ExperienceState.ResultShow)
+            { _resultShowRoutine = null; yield break; }
 
-            // ---- phase 1: wireframe replay (no できたよ！, no curves, no cloud) ----
-            // Order changed 2026-07-24: the recorded take replays FIRST as a TSDF
-            // wireframe that re-forms with the motion (SetWireframeReplay drops the
-            // cloud + ribbons and reopens the integrator). Only when it finishes do
-            // we paint できたよ！ and reveal the finished curve model. The stage was
-            // blanked at entry (cloud hidden, ribbons suppressed, ring cleared).
-            SetWireframeReplay(true);
-            _ui.ShowMessage(config.analyzingText); // ぶんせきちゅう over the wireframe
-            if (poseHistory != null) poseHistory.ReleaseHoldAndClear(); // grow the ring from empty
+            // Reveal the model now. The stage was blanked at entry (cloud hidden,
+            // ribbons suppressed, ring cleared), so the finished piece appears from
+            // nothing and its ribbons grow from an empty ring as the replay plays,
+            // instead of the full sculpture lingering through the beat and being
+            // retraced. The exported snapshot already sits in _snapshot; the TSDF
+            // integrator stays gated (_sculptureFrozen) — the mesh is session-hidden
+            // and no longer consumed.
+            Shader.SetGlobalFloat(PcFadeCullId, 0f); // clear any lingering shoot-end dissolve
+            SetCloudRenderersVisible(true);
+            if (motionCurves != null) { motionCurves.freeze = false; motionCurves.suppressDraw = false; }
+            if (poseHistory != null) poseHistory.ReleaseHoldAndClear();
+            // Optional solid-mesh final model (A/B knob, config.presentationSolidMesh):
+            // by default the mesh stays suppressed and the finished model is cloud +
+            // ribbons; when on, draw the solid shaded TSDF mesh (with self-shadow) inside
+            // the ribbons. The Processing wireframe left it suppressed — override here so
+            // the choice sticks through the ResultShow/QrShow orbit. The exit restore
+            // (EnterMode's _savedTsdfSuppress) puts it back for the next visitor.
+            if (tsdfView != null && config.presentationSolidMesh)
+            {
+                tsdfView.wireframe = false;
+                tsdfView.suppressDraw = false;
+            }
 
-            // Restart the take from the top, looping. Processing left the transport
-            // loaded and stopped at the final frame; a dev jump straight here starts
-            // from nothing — StartVisitorPlayback covers both (Load is idempotent).
+            // Restart the take from the top, looping. Processing left the
+            // transport loaded and stopped at the final frame; a dev jump
+            // straight here starts from nothing — StartVisitorPlayback covers
+            // both (Load is idempotent over a loaded take).
             StartVisitorPlayback(_takeRoot, loop: true,
                                  rate: config.presentationPlaybackRate);
             if (!_visitorPlaybackActive || !sensorRecorder.IsPlaying)
             {
                 Debug.LogWarning($"[{nameof(ExperienceDirector)}] result replay failed to start — " +
-                                 "revealing the frozen model instead.", this);
-                SetWireframeReplay(false);
-                RevealFinishedResultModel();
+                                 "holding the frozen frame instead.", this);
                 if (poseHistory != null) poseHistory.hold = true;
                 if (motionCurves != null) motionCurves.freeze = true;
-                // Paint できたよ！ now — the replay that would have painted it never ran,
-                // and entry deferred the gap paint, so without this the screen stays blank.
-                _deferResultText = false;
-                PlayStateEnterSe(ExperienceState.ResultShow);
-                ShowStateMessage(ExperienceState.ResultShow);
-                SetOrbit(true, easeIn: true);
                 _resultShowDone = true;
                 _resultShowRoutine = null;
                 yield break;
             }
 
             // The camera stays STILL through the replay (no SetOrbit here) — it
-            // starts circling only once the finished model is revealed below.
-            SetPresentationLook(true); // grades the ribbons that build for the reveal
+            // starts circling only once the take finishes, easing in from the
+            // replay-end framing (SetOrbit(easeIn) below).
+            SetPresentationLook(true);
             double startAt = 0;
             double duration = sensorRecorder.PlaybackDurationSeconds;
             bool canned = _takeRoot == config.DevCannedTakeRoot;
@@ -2911,53 +3005,16 @@ namespace Experience
             if (!_active || _fsm.State != ExperienceState.ResultShow)
             { _resultShowRoutine = null; yield break; }
 
-            // ---- phase 2: できたよ！ + finished model ----
-            // Hide the wireframe (re-freezes the sculpture) AND clear ぶんせきちゅう, hold
-            // a pure-black beat, then paint できたよ！ and reveal the finished curve model
-            // (history-30 ring, frozen). Freeze BEFORE the orbit so the pivot reads the
-            // settled skeleton. _deferResultText stays true across the gap so a repaint
-            // (crowd notice clear) shows ぶんせきちゅう, not an early できたよ！.
-            SetWireframeReplay(false);
-            _ui.ClearAll(); // black gap between ぶんせきちゅう and できたよ！
-            if (revealDelay > 0f) yield return new WaitForSeconds(revealDelay);
-            if (!_active || _fsm.State != ExperienceState.ResultShow)
-            { _resultShowRoutine = null; yield break; }
-
-            RevealFinishedResultModel();
+            // Replay finished: freeze the final frame + ribbons for the QR screen,
+            // then ease the orbit in from where the camera was left standing (the
+            // ease-in routine runs on past _resultShowDone, into QrShow, which keeps
+            // the orbit on). Freeze BEFORE the orbit so the pivot reads the settled
+            // final skeleton.
             if (poseHistory != null) poseHistory.hold = true;
             if (motionCurves != null) motionCurves.freeze = true;
-
-            // できたよ！ lands with the finished model (deferred from the gap paint).
-            _deferResultText = false;
-            PlayStateEnterSe(ExperienceState.ResultShow);
-            ShowStateMessage(ExperienceState.ResultShow);
-
             SetOrbit(true, easeIn: true);
             _resultShowDone = true;
             _resultShowRoutine = null;
-        }
-
-        // Reveal the finished point-cloud + ribbon model on the black stage: clear
-        // any lingering shoot-end dissolve and draw the frozen final frame + the
-        // history-30 ribbons that built underneath the wireframe replay. The caller
-        // owns the freeze/hold that pins the model. Shared by the normal reveal and
-        // the replay-failed fallback.
-        private void RevealFinishedResultModel()
-        {
-            Shader.SetGlobalFloat(PcFadeCullId, 0f);
-            SetCloudRenderersVisible(true);
-            if (motionCurves != null) motionCurves.suppressDraw = false;
-            // Optional solid-mesh final model (A/B knob, config.presentationSolidMesh):
-            // by default the mesh stays suppressed and the finished model is cloud +
-            // ribbons; when on, draw the solid shaded TSDF mesh (with self-shadow) inside
-            // the ribbons. SetWireframeReplay(false) just set suppressDraw=true — override
-            // it here so the choice sticks through the ResultShow/QrShow orbit. The exit
-            // restore (EnterMode's _savedTsdfSuppress) puts it back for the next visitor.
-            if (tsdfView != null && config.presentationSolidMesh)
-            {
-                tsdfView.wireframe = false;
-                tsdfView.suppressDraw = false;
-            }
         }
 
         // ------------------------------------------------ visitor playback ----
