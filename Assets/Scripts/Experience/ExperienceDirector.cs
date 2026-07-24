@@ -2139,7 +2139,7 @@ namespace Experience
             // processingText caption (ぶんせきちゅう is the practice-round wording).
             bool cannedTake = t.skipShoot || t.dummyShoot;
             bool whitePointCloud = config.processingWhitePointCloud && tsdfView != null;
-            yield return WhitePointCloudConvertLoop(_takeRoot, 0f, 0.8f, config.processingText);
+            yield return WhitePointCloudConvertLoop(_takeRoot, 0f, 0.75f, config.processingText);
             if (!_active || _fsm.State != ExperienceState.Processing)
             { SetProcessingWhitePointCloud(false); _processingRoutine = null; yield break; }
 
@@ -2184,7 +2184,7 @@ namespace Experience
             {
                 float frac = duration > 0.01
                     ? Mathf.Clamp01((float)(sensorRecorder.CurrentPlayheadSeconds / duration)) : 1f;
-                _ui.ShowProgress(0.8f + 0.18f * frac, config.processingText);
+                _ui.ShowProgress(0.75f + 0.20f * frac, config.processingText);
                 yield return null;
             }
             // loop=false → the recorder stopped itself at the last frame; the
@@ -2269,7 +2269,7 @@ namespace Experience
                 () => TSDFSnapshotBuilder.Decimate(snap, targetTris));
             while (!decimateTask.IsCompleted)
             {
-                _ui.ShowProgress(0.98f, config.processingText);
+                _ui.ShowProgress(0.95f, config.processingText);
                 yield return null;
             }
             if (decimateTask.IsFaulted)
@@ -2743,9 +2743,27 @@ namespace Experience
             // result via File.Move(bodies_main, ...) — on Windows the open handle would
             // fail that move with a sharing violation, silently dropping the conversion.
             // So the white point cloud loop only starts AFTER the converter has promoted the file.
-            yield return ConvertTakeRoutine(takeRoot, progressFrom, progressTo, caption, showProgressBar);
+            // Split the passed band: the v11s conversion is the FAST phase and it
+            // saturates the GPU, so the render loop starves and its bar segment barely
+            // gets painted — the meter "leaps" to wherever the worker already reached
+            // (looked like it started ~halfway). The white-point-cloud slow-mo pass
+            // below is the LONG visible phase. Give conversion only the first slice and
+            // let the pass advance the rest by playhead, so the bar climbs steadily
+            // instead of jumping partway then sitting frozen at the top through the
+            // longest phase. (No-op for showProgressBar=false callers — TestMove.)
+            bool willShowCloud = config.processingWhitePointCloud && tsdfView != null;
+            // Reserve the conversion slice ONLY when a conversion will actually run.
+            // When it is skipped (tapped take / skipProcessing / protected canned),
+            // ConvertTakeRoutine emits no progress, so a reserved slice would make the
+            // cloud pass start at ~0.34 — the "meter starts partway" symptom again. In
+            // that case the cloud pass owns the whole band from progressFrom.
+            float convTo = !willShowCloud ? progressTo
+                         : !WillConvertTake(takeRoot) ? progressFrom
+                         : progressFrom + (progressTo - progressFrom) * 0.45f;
 
-            if (!(config.processingWhitePointCloud && tsdfView != null)) yield break;
+            yield return ConvertTakeRoutine(takeRoot, progressFrom, convTo, caption, showProgressBar);
+
+            if (!willShowCloud) yield break;
 
             // Play the (now-converted) take ONCE at the presentation rate (1/3 =
             // slow motion) as a white point cloud — a single slow pass, NOT a loop:
@@ -2797,11 +2815,20 @@ namespace Experience
             // itself at the last frame (IsPlaying → false). Safety deadline guards a
             // stalled transport (slow disk / stuck clock).
             double passSeconds = (dur - startAt) / Mathf.Max(0.01f, rate);
+            double passSpan = Math.Max(0.01, dur - startAt);
             float deadline = Time.realtimeSinceStartup + (float)passSeconds + 2f;
             while (_active && sensorRecorder != null && sensorRecorder.IsPlaying
                    && Time.realtimeSinceStartup < deadline)
             {
-                if (showProgressBar) _ui.ShowProgress(progressTo, caption);
+                if (showProgressBar)
+                {
+                    // Advance the bar across [convTo, progressTo] by how far this single
+                    // slow-mo pass has played — the longest visible phase must MOVE the
+                    // meter, not pin it at the top.
+                    float frac = Mathf.Clamp01(
+                        (float)((sensorRecorder.CurrentPlayheadSeconds - startAt) / passSpan));
+                    _ui.ShowProgress(convTo + (progressTo - convTo) * frac, caption);
+                }
                 else _ui.ShowMessage(caption);
                 yield return null;
             }
@@ -2853,25 +2880,34 @@ namespace Experience
         // Canned-take protection: the conversion rewrites bodies_main IN PLACE.
         // A dev E2E run must never mutate the canonical recording unless the
         // operator explicitly opted in with a disposable copy.
+        // Whether the v11s conversion will actually run for this take — the single
+        // source of truth shared by ConvertTakeRoutine (which runs it) and
+        // WhitePointCloudConvertLoop (which sizes the progress band for it, so the bar
+        // only reserves the conversion slice when there is a conversion to fill it).
+        // Skipped for a playback-tapped take (bodies passed through), skipProcessing, or
+        // a canned take without allowCannedTakeConversion.
+        private bool WillConvertTake(string takeRoot)
+            => !_takeIsTapped
+               && !config.timings.skipProcessing
+               && !(takeRoot == config.DevCannedTakeRoot && !config.allowCannedTakeConversion);
+
         private IEnumerator ConvertTakeRoutine(string takeRoot, float progressFrom, float progressTo,
                                                string caption = null, bool showProgressBar = true)
         {
             var t = config.timings;
             if (string.IsNullOrEmpty(caption)) caption = config.processingText;
-            if (_takeIsTapped)
+            if (!WillConvertTake(takeRoot))
             {
-                Debug.Log($"[{nameof(ExperienceDirector)}] playback-sourced (tapped) take — its " +
-                          "bodies passed through from the already-converted source; skipping " +
-                          "v11s conversion.", this);
+                if (_takeIsTapped)
+                    Debug.Log($"[{nameof(ExperienceDirector)}] playback-sourced (tapped) take — its " +
+                              "bodies passed through from the already-converted source; skipping " +
+                              "v11s conversion.", this);
+                else if (takeRoot == config.DevCannedTakeRoot && !config.allowCannedTakeConversion
+                         && !t.skipProcessing)
+                    Debug.Log($"[{nameof(ExperienceDirector)}] canned take — skipping v11s conversion " +
+                              "(allowCannedTakeConversion is off); playing existing bodies_main.", this);
                 yield break;
             }
-            bool cannedTake = takeRoot == config.DevCannedTakeRoot;
-            bool convert = !t.skipProcessing
-                && !(cannedTake && !config.allowCannedTakeConversion);
-            if (cannedTake && !config.allowCannedTakeConversion && !t.skipProcessing)
-                Debug.Log($"[{nameof(ExperienceDirector)}] canned take — skipping v11s conversion " +
-                          "(allowCannedTakeConversion is off); playing existing bodies_main.", this);
-            if (!convert) yield break;
 
             _converter = new FusedTakeConverter();
             bool started = _converter.Start(takeRoot, new FusedTakeConverter.Options
