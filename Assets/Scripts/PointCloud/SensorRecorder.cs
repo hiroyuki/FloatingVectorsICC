@@ -2514,6 +2514,13 @@ namespace PointCloud
             _lastPlayheadNs = _playbackTrackStartNs;
             IsPaused = false;
             CurrentState = State.Playing;
+            // Sync the hot-swap path watcher to the path we just started. Without this,
+            // a PROGRAMMATIC path change (e.g. ExperienceDirector.StartVisitorPlayback
+            // switching from the entrance take to the visitor take) trips the watcher's
+            // next 0.5 s poll, which reloads + restarts playback from frame 0 — a visible
+            // 頭出し a fraction of a second into the ぶんせきちゅう white point cloud. The
+            // watcher still catches genuine Inspector edits made AFTER this point.
+            _watchedPlaybackRoot = ResolvePlaybackRoot();
             SetStatus($"Playing {_tracks.Count} device(s)…");
         }
 
