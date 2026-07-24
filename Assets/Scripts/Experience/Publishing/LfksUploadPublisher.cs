@@ -67,15 +67,20 @@ namespace Experience.Publishing
             if (!VerifyScript(out string why))
                 return Fail(why);
 
-            var (glbUrl, glbId, glbErr) = await UploadWithRetryAsync(glbPath, ct);
+            var (glbUrl, _, glbErr) = await UploadWithRetryAsync(glbPath, ct);
             if (glbUrl == null) return Fail($"glb upload failed: {glbErr}");
-            var (usdzUrl, usdzId, usdzErr) = await UploadWithRetryAsync(usdzPath, ct);
+            var (usdzUrl, _, usdzErr) = await UploadWithRetryAsync(usdzPath, ct);
             if (usdzUrl == null) return Fail($"usdz upload failed: {usdzErr}");
 
+            // The viewer's ?id= is the fs file name, not the API's opaque id. We
+            // upload without -Name, so the stored name is the local file name and
+            // the sculpture id is that name without its extension. (The opaque id
+            // is still what GlbUrl/UsdzUrl — /files/{id} — are built from.)
             return new PublishResult
             {
                 Success = true, GlbUrl = glbUrl, UsdzUrl = usdzUrl,
-                GlbId = glbId, UsdzId = usdzId,
+                GlbId = Path.GetFileNameWithoutExtension(glbPath),
+                UsdzId = Path.GetFileNameWithoutExtension(usdzPath),
             };
         }
 

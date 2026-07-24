@@ -13,9 +13,10 @@ namespace Experience.Publishing
         public bool Success;
         public string GlbUrl;
         public string UsdzUrl;
-        // Server-assigned file ids from the upload API (LfksResult.id). The QR's
-        // viewer URL keys off these (?id=…), not the local file name. Empty from
-        // the dry-run publisher, which has no server round-trip.
+        // The sculpture id the ICC viewer resolves (?id=…): the uploaded file's
+        // base name without extension, e.g. exp_20260723_225648 — the viewer
+        // rebuilds {base}/{id}.glb from it, so it MUST be the fs file name, NOT
+        // the upload API's opaque LfksResult.id (which only keys /files/{id}).
         public string GlbId;
         public string UsdzId;
         public string Error;
