@@ -485,12 +485,14 @@ MonoBehaviour:
   boneBlendCount: 2
   blendSharpness: 0.05
   smoothSubdiv: 7
+  bakeVertexColors: 1
   brightness: 2.5
   ribbonWidth: 0.006
   round: 1
   rimBoost: 0.5
   tailAlpha: 0
   tailFadePow: 0.5
+  shadowStrength: 0.7
   freeze: 0
   sanityRange: 100
 --- !u!4 &333033384
@@ -622,10 +624,18 @@ MonoBehaviour:
   meshGamma: 1
   meshGradNormals: 1
   meshRimBoost: 0.5
+  meshLightDir: {x: 0.35, y: 0.85, z: 0.4}
+  meshShadowStrength: 0.7
+  meshShadowSteps: 24
+  meshShadowBiasVox: 3
+  meshShadowIsoFrac: 0.3
   meshMaxTriangles: 2000000
   meshIsoLevel: 0
   meshMinWeight: 0.5
   mcEveryNFrames: 1
+  whitePointCloudColor: {r: 1, g: 1, b: 1, a: 1}
+  whitePointCloudThickness: 1.2
+  whitePointCloudStride: 8
   useFullGridMC: 0
   diagnosticLogging: 0
 --- !u!1 &639959843
@@ -1228,7 +1238,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 96892899ec43f7246a88f0b3f63d9e67, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::PointCloud.PointCloudCameraManager
-  playbackOnly: 1
+  playbackOnly: 0
   defaultPointMaterial: {fileID: 0}
   depthWidth: 320
   depthHeight: 288
@@ -2194,6 +2204,7 @@ MonoBehaviour:
   btInferenceFps: 30
   loopSeamBlackoutSeconds: 0.4
   showBones: 0
+  overlayBoneShader: 1
   jointRadius: 0.03
   skeletonColor: {r: 0.7317106, g: 0.7597672, b: 0.764151, a: 1}
   boneWidth: 0.0149
@@ -2219,6 +2230,8 @@ MonoBehaviour:
   enableVolumeGate: 1
   trackingVolume: {fileID: 0}
   volumeGateMarginMeters: 0.25
+  selectClosestToCenter: 1
+  primarySwitchMarginMeters: 0.25
   showPerWorkerSkeletons: 0
   perWorkerVisualScale: 0.5
   showDebugHud: 1
@@ -2565,12 +2578,21 @@ MonoBehaviour:
   stlFloorSize: 1.5
   stlFloorThickness: 0.02
   stlFloorRaise: 0.05
+  webIncludeMesh: 0
+  webCurveBudgetMB: 12
+  webCurveRadiusScale: 1.5
+  webIncludePointCloud: 1
+  webPointCloudSize: 0.008
   webIncludeCurves: 1
   webCurveStride: 30
   webCurveSides: 3
   webCurveTipTaper: 0.25
   webMeshTargetTris: 150000
   webCurveTolerance: 0.003
+  webAoStrength: 0.6
+  webAoSamples: 32
+  webAoMaxDistance: 0.15
+  webAoOnCurves: 0
   usdPythonPath: 
 --- !u!4 &1547982917
 Transform:

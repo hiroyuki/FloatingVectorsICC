@@ -51,8 +51,8 @@ MonoBehaviour:
   presentationTailAlpha: 1
   presentationDecimatePercent: 7.9
   presentationSolidMesh: 1
-  processingWireframe: 1
-  processingWireframeMinSeconds: 5
+  processingWhitePointCloud: 1
+  processingWhitePointCloudMinSeconds: 5
   insetMeters: 0
   yBandMin: 0.15
   yBandMax: 100
@@ -104,7 +104,7 @@ MonoBehaviour:
   countdownTickSe: {fileID: 0}
   recordEndSe: {fileID: 0}
   poseGuideTexture: {fileID: 0}
-  dryRunPublish: 1
+  dryRunPublish: 0
   dryRunDelaySeconds: 1
   qrUrlKind: 2
   uploadScriptSha256: 46d660b6ae081b648fdbcead21bfeb44419df78410c3e89cb55302c65dfac687
