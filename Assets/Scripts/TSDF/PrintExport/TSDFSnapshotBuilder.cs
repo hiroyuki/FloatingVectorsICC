@@ -196,17 +196,23 @@ namespace TSDF
                     Debug.LogWarning($"[TSDFSnapshotBuilder] capture: curves skipped — {why}");
             }
 
-            // Point cloud at the SAME frame (region + decimater filters). Kept in
-            // world space; ExportFiles recentres it through snap.center/minY so it
-            // registers with the mesh and curves. Floor/person masks are TODO.
+            // Point cloud at the SAME frame, through the same content filters
+            // the display shader runs (region, decimater, capsule person-mask,
+            // floor mask). Kept in world space; ExportFiles recentres it through
+            // snap.center/minY so it registers with the mesh and curves.
             if (opt.includePointCloud)
             {
                 var bounds = UnityEngine.Object.FindFirstObjectByType<PointCloud.BoundingVolume>();
                 var deci = UnityEngine.Object.FindFirstObjectByType<PointCloud.PointCloudDecimater>();
+                var caps = UnityEngine.Object.FindFirstObjectByType<PointCloud.PointCloudCapsuleFilter>();
+                var floor = UnityEngine.Object.FindFirstObjectByType<PointCloud.PointCloudFloorMask>();
                 float keep = (deci != null && deci.Enabled) ? deci.KeepRatio : 1f;
-                PointCloud.PointCloudSnapshot.Gather(bounds, keep, 12345, out snap.pcPos, out snap.pcCol);
+                PointCloud.PointCloudSnapshot.Gather(bounds, keep, 12345, out snap.pcPos, out snap.pcCol,
+                                                     caps, floor);
                 Debug.Log($"[TSDFSnapshotBuilder] point cloud: {snap.pcPos.Length} pts " +
-                          $"(bounds {(bounds != null ? bounds.Mode.ToString() : "none")}, keep {keep:0.00})");
+                          $"(bounds {(bounds != null ? bounds.Mode.ToString() : "none")}, keep {keep:0.00}, " +
+                          $"caps {(caps != null ? caps.Mode.ToString() : "none")}, " +
+                          $"floor {(floor != null && floor.isActiveAndEnabled && floor.MaskActive ? "on" : "off")})");
             }
             return snap;
         }

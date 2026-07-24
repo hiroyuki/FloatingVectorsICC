@@ -137,8 +137,10 @@ namespace TSDF
                 yield break;
             }
             string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            bool windows = Application.platform == RuntimePlatform.WindowsEditor ||
-                           Application.platform == RuntimePlatform.WindowsPlayer;
+            // RuntimeInformation, not Application.platform: this runs on the
+            // export worker thread, where Unity's Application API is off-limits.
+            bool windows = System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
+                System.Runtime.InteropServices.OSPlatform.Windows);
             if (windows)
             {
                 yield return Path.Combine(home, ".venvs", "usd", "Scripts", "python.exe");
@@ -201,16 +203,115 @@ namespace TSDF
                 pixels[row0] = c32; pixels[row0 + 1] = c32;
                 pixels[row0 + texSize] = c32; pixels[row0 + texSize + 1] = c32;
             }
-            var tex = new Texture2D(texSize, texSize, TextureFormat.RGBA32, false);
-            try
+            return EncodePng(pixels, texSize);
+        }
+
+        // Pure-C# PNG encode (RGBA8) so the whole usdz write can run on a worker
+        // thread — Texture2D.EncodeToPNG is main-thread-only and was the last
+        // Unity-API dependency in this path. Matches EncodeToPNG's orientation:
+        // pixels[] is bottom-up (SetPixels32 layout), PNG scanlines are top-down.
+        private static byte[] EncodePng(Color32[] pixels, int size)
+        {
+            var raw = new byte[size * (size * 4 + 1)];
+            int o = 0;
+            for (int y = size - 1; y >= 0; y--)
             {
-                tex.SetPixels32(pixels);
-                return tex.EncodeToPNG();
+                raw[o++] = 0; // per-scanline filter: None
+                int row = y * size;
+                for (int x = 0; x < size; x++)
+                {
+                    var p = pixels[row + x];
+                    raw[o++] = p.r; raw[o++] = p.g; raw[o++] = p.b; raw[o++] = p.a;
+                }
             }
-            finally
+
+            byte[] deflated;
+            using (var ms = new MemoryStream())
             {
-                UnityEngine.Object.DestroyImmediate(tex);
+                using (var ds = new System.IO.Compression.DeflateStream(
+                           ms, System.IO.Compression.CompressionLevel.Fastest, leaveOpen: true))
+                    ds.Write(raw, 0, raw.Length);
+                deflated = ms.ToArray();
             }
+
+            // zlib wrapper: CMF/FLG 0x78 0x01 ((0x7801 % 31) == 0), then adler32.
+            var idat = new byte[2 + deflated.Length + 4];
+            idat[0] = 0x78; idat[1] = 0x01;
+            System.Buffer.BlockCopy(deflated, 0, idat, 2, deflated.Length);
+            uint adler = Adler32(raw);
+            idat[idat.Length - 4] = (byte)(adler >> 24);
+            idat[idat.Length - 3] = (byte)(adler >> 16);
+            idat[idat.Length - 2] = (byte)(adler >> 8);
+            idat[idat.Length - 1] = (byte)adler;
+
+            var ihdr = new byte[13];
+            WriteBE(ihdr, 0, (uint)size);
+            WriteBE(ihdr, 4, (uint)size);
+            ihdr[8] = 8;  // bit depth
+            ihdr[9] = 6;  // colour type: RGBA
+            // compression 0 / filter 0 / interlace 0 already zero
+
+            var outMs = new MemoryStream(idat.Length + 128);
+            outMs.Write(new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A }, 0, 8);
+            WritePngChunk(outMs, "IHDR", ihdr);
+            WritePngChunk(outMs, "IDAT", idat);
+            WritePngChunk(outMs, "IEND", System.Array.Empty<byte>());
+            return outMs.ToArray();
+        }
+
+        private static void WritePngChunk(MemoryStream ms, string type, byte[] data)
+        {
+            var len = new byte[4];
+            WriteBE(len, 0, (uint)data.Length);
+            ms.Write(len, 0, 4);
+            var typeBytes = Encoding.ASCII.GetBytes(type);
+            ms.Write(typeBytes, 0, 4);
+            ms.Write(data, 0, data.Length);
+            uint crc = Crc32(typeBytes, Crc32Seed);
+            crc = Crc32(data, crc);
+            var crcBytes = new byte[4];
+            WriteBE(crcBytes, 0, ~crc);
+            ms.Write(crcBytes, 0, 4);
+        }
+
+        private static void WriteBE(byte[] b, int at, uint v)
+        {
+            b[at] = (byte)(v >> 24); b[at + 1] = (byte)(v >> 16);
+            b[at + 2] = (byte)(v >> 8); b[at + 3] = (byte)v;
+        }
+
+        private static uint Adler32(byte[] data)
+        {
+            const uint mod = 65521;
+            uint a = 1, b = 0;
+            for (int i = 0; i < data.Length;)
+            {
+                int end = System.Math.Min(i + 5552, data.Length); // overflow-safe stride
+                for (; i < end; i++) { a += data[i]; b += a; }
+                a %= mod; b %= mod;
+            }
+            return (b << 16) | a;
+        }
+
+        private const uint Crc32Seed = 0xFFFFFFFFu;
+        private static uint[] s_crcTable;
+
+        private static uint Crc32(byte[] data, uint crc)
+        {
+            if (s_crcTable == null)
+            {
+                var table = new uint[256];
+                for (uint n = 0; n < 256; n++)
+                {
+                    uint c = n;
+                    for (int k = 0; k < 8; k++)
+                        c = (c & 1) != 0 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+                    table[n] = c;
+                }
+                s_crcTable = table;
+            }
+            foreach (byte t in data) crc = s_crcTable[(crc ^ t) & 0xFF] ^ (crc >> 8);
+            return crc;
         }
 
         // ---- root layer (ASCII usda; usdz allows usda as the default layer) ----

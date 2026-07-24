@@ -3307,16 +3307,13 @@ namespace Experience
             string usdzPath = Path.Combine(dir, $"exp_{stamp}.usdz");
             string usdPython = printExporter != null ? printExporter.usdPythonPath : "";
 
-            // Let the ResultShow frame finish before blocking on the write.
+            // Let the ResultShow frame finish before starting the write.
             // StartCoroutine runs a coroutine synchronously up to its first yield, and
             // ResultShow's own side effects — revealing the sculpture, painting
             // できたよ！ — are applied later in the SAME ApplyStateSideEffects call.
-            // uGUI only renders at end of frame, so without this yield the export
-            // (measured ~3 s with the USDZ step) stalls the frame that was supposed to
-            // present the reveal: the visitor keeps staring at the blank Processing
-            // stage for the whole write and the result appears only after it. Yielding
-            // once lets that frame present first, which is exactly the "frozen result
-            // view absorbs the hitch" the write below assumes.
+            // The export itself now runs on a worker thread, but the reveal frame
+            // should still present before any of it (thread spawn, file system
+            // touches) begins, and the state re-check below needs the frame gap.
             yield return null;
 
             // A frame passed — re-check that the show still wants this write. Fault
@@ -3333,8 +3330,13 @@ namespace Experience
                 yield break;
             }
 
-            // Synchronous local write (atomic tmp+rename; the frozen result view
-            // absorbs the hitch frame — the AO bake adds to it, watch aoMs in the log).
+            // Local write on a WORKER thread. This used to run synchronously and
+            // froze the frame for seconds right as ResultShow revealed (tube
+            // build + AO bake + the usda text + python usdc conversion, up to
+            // its 120 s WaitForExit) — the "hang after Processing". ExportFiles
+            // never mutates the snapshot and its writers are pure C# + file IO
+            // (the atlas PNG encode is hand-rolled for exactly this), so the
+            // whole call is worker-safe. The replay keeps animating while it runs.
             var webOpt = printExporter != null
                 ? printExporter.WebExportOptions()
                 : new TSDFSnapshotBuilder.WebFileOptions
@@ -3347,9 +3349,15 @@ namespace Experience
                     includePointCloud = true,
                     pointCloudSize = 0.008f,
                 };
-            if (!TSDFSnapshotBuilder.ExportFiles(snap, glbPath, usdzPath, usdPython,
-                                                 out _, out string err, webOpt))
+            string err = null;
+            var exportTask = Task.Run(() =>
+                TSDFSnapshotBuilder.ExportFiles(snap, glbPath, usdzPath, usdPython,
+                                                out _, out err, webOpt));
+            while (!exportTask.IsCompleted) yield return null;
+            if (exportTask.IsFaulted || !exportTask.Result)
             {
+                if (exportTask.IsFaulted)
+                    err = exportTask.Exception?.GetBaseException().Message;
                 Debug.LogError($"[{nameof(ExperienceDirector)}] export failed: {err}", this);
                 _exportFailed = true;
                 ShowExportFailed();
