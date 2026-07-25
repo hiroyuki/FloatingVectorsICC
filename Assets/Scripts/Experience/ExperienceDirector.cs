@@ -3473,13 +3473,12 @@ namespace Experience
                 tsdfView.suppressDraw = false;
             }
             SetOrbit(true, easeIn: true);
-            // Orbit the frozen sculpture for presentationOrbitSeconds before the QR
-            // appears — the FSM gates QrShow on _resultShowDone, so hold it down for
-            // the orbit window. The orbit keeps running under the QR afterwards.
-            float orbitHold = config.presentationOrbitSeconds;
-            float orbitUntil = Time.realtimeSinceStartup + orbitHold;
-            while (_active && _fsm.State == ExperienceState.ResultShow
-                   && Time.realtimeSinceStartup < orbitUntil) yield return null;
+            // The replay has frozen on its final frame and the orbit is easing in —
+            // signal ResultShowDone NOW so the QR appears the instant the upload
+            // completes (the FSM also gates on ExportDone). No fixed pre-QR orbit
+            // hold: the orbit just keeps running continuously under the QR.
+            // (presentationOrbitSeconds still bounds each practice round's replay,
+            // which hands back to the live body afterwards.)
             _resultShowDone = true;
             _resultShowRoutine = null;
         }

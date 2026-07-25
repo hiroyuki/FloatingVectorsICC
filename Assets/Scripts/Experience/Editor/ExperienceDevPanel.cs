@@ -397,11 +397,8 @@ namespace Experience.EditorTools
             TimingField(serialized, "timings.processingTimeoutSeconds", "処理タイムアウト");
             TimingField(serialized, "processingWhitePointCloudMinSeconds", "処理後の点群再生");
 
-            TimingHeading("8. 結果（ResultShow）");
-            TimingField(serialized, "timings.resultMinSeconds", "最小表示時間");
-
-            TimingHeading("9. QR");
-            TimingField(serialized, "timings.qrShowSeconds", "表示時間");
+            TimingHeading("8. QR");
+            TimingField(serialized, "timings.qrShowSeconds", "最大表示時間（在席上限）");
 
             TimingHeading("エラー");
             TimingField(serialized, "timings.exportFailNoticeSeconds", "書き出し失敗の表示時間");

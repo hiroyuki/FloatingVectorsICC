@@ -102,10 +102,11 @@ namespace Experience
         public float presentationOrbitBobMeters = 0.4f;
 
         [Min(0f)]
-        [Tooltip("できたよ！ result: after the replay freezes on the final decisive frame, the " +
-                 "camera orbits the held sculpture for this long. ResultShow then advances to " +
-                 "the QR (the orbit keeps running under it); each practice round hands back to " +
-                 "the live body afterwards. Applies to BOTH the practice replays and ResultShow.")]
+        [Tooltip("Practice rounds ONLY: after the replay freezes on the final decisive " +
+                 "frame, the camera orbits the held sculpture for this long before handing " +
+                 "back to the live body. The できたよ！ result (ResultShow) no longer uses a " +
+                 "fixed orbit window — its orbit runs continuously until the QR appears the " +
+                 "instant the upload completes.")]
         public float presentationOrbitSeconds = 15f;
 
         [Header("Playback presentation look (できたよ！ replay → QrShow)")]

@@ -29,8 +29,9 @@
 // Duration ownership: the TestMove mini-cycles, Shoot's cue+countdown+capture
 // and Processing's timeout/fallback are DIRECTOR-owned (they wrap real device
 // work and end in TestMoveDone / RecordingDone / ProcessingDone); Calibrate's
-// window, ResultShow's minimum dwell and QrShow's dwell are machine-owned
-// timers (ResultShow additionally waits on the director's ResultShowDone).
+// window and QrShow's dwell are machine-owned timers; ResultShow has no timer
+// of its own — it advances to the QR the instant the director's export
+// completes (ExportDone), once the reveal replay has finished (ResultShowDone).
 
 using System;
 using UnityEngine;
@@ -99,12 +100,13 @@ namespace Experience
         [Tooltip("Director-enforced ceiling on Processing (conversion + capture); " +
                  "expiry falls back to whatever bodies the take carries.")]
         public float processingTimeoutSeconds = 60f;
-        [Min(0f)]
-        [Tooltip("Minimum time the finished sculpture stays on screen even when the " +
-                 "export/upload finishes faster.")]
-        public float resultMinSeconds = 5f;
         [Min(0f)] public float exportFailNoticeSeconds = 5f;
-        [Min(0f)] public float qrShowSeconds = 30f;
+        [Min(0f)]
+        [Tooltip("QR screen SAFETY CAP: the QR stays up while the visitor is present " +
+                 "and the run resets when they leave (debounced by leaveGraceSeconds). " +
+                 "This is the maximum an overstaying visitor holds the station — the cap " +
+                 "counts present time only.")]
+        public float qrShowSeconds = 30f;
 
         [Min(0f)]
         [Tooltip("Grace period after the visitor leaves the sensing area before the run " +
@@ -232,10 +234,13 @@ namespace Experience
                 // (TestMovePresenting) it plays to completion, same rationale as
                 // ResultShow's no-early-leave.
                 case ExperienceState.TestMove1:
+                    // Single practice round: TestMove1 hands straight to Shoot.
+                    // TestMove2 is retained only as a dev-jump target (key 5) —
+                    // the normal flow no longer routes through it.
                     if (!inputs.TestMovePresenting && LeftEarly(inputs)) break;
                     if (inputs.TestMoveDone) _testMoveLatched = true;
                     if (t.skipTestMoves || _testMoveLatched)
-                        Go(ExperienceState.TestMove2);
+                        Go(ExperienceState.Shoot);
                     break;
 
                 case ExperienceState.TestMove2:
@@ -276,17 +281,27 @@ namespace Experience
                             Go(ExperienceState.Idle);
                         break;
                     }
-                    // The result presentation (the take looping with the ribbons)
-                    // must finish alongside the export before the QR appears.
+                    // The reveal replay must finish + freeze first (ResultShowDone),
+                    // then the QR appears the INSTANT the upload URL is ready — no
+                    // extra pre-QR dwell. The frozen sculpture keeps orbiting under
+                    // the QR. In practice the upload is the long pole, so the QR
+                    // lands right when it completes; a rare sub-replay upload just
+                    // waits for the reveal to finish.
                     if (inputs.ResultShowDone) _resultShowLatched = true;
-                    if (inputs.ExportDone && _resultShowLatched
-                        && TimeInState >= t.resultMinSeconds)
+                    if (inputs.ExportDone && _resultShowLatched)
                         Go(t.skipQr ? ExperienceState.Idle : ExperienceState.QrShow);
                     break;
 
                 case ExperienceState.QrShow:
-                    if (TimeInState >= t.qrShowSeconds || !inputs.Present)
-                        Go(ExperienceState.Idle);
+                    // The QR stays up as long as the visitor is here — a genuine
+                    // departure (debounced by leaveGrace, same as the interactive
+                    // stages) ends the run so the next person gets a clean start,
+                    // and qrShowSeconds is a SAFETY CAP that bounds an overstay.
+                    // The cap measures PRESENT time only: LeftEarly freezes
+                    // TimeInState while absent, so a lingering scan is never cut by
+                    // wall-clock that elapsed during a brief occlusion.
+                    if (TimeInState >= t.qrShowSeconds) { Go(ExperienceState.Idle); break; }
+                    LeftEarly(inputs);
                     break;
             }
 

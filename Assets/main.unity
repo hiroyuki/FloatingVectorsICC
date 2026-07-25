@@ -534,10 +534,10 @@ MonoBehaviour:
   blendSharpness: 0.05
   smoothSubdiv: 6
   bakeVertexColors: 1
-  brightness: 2.294
+  brightness: 1
   ribbonWidth: 0.006
   round: 1
-  rimBoost: 0.5
+  rimBoost: 0.3
   tailAlpha: 0
   tailFadePow: 0.5
   shadowStrength: 0.7
