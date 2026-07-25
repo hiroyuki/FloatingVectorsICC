@@ -50,7 +50,7 @@ MonoBehaviour:
   presentationSeedCount: 60000
   presentationTailAlpha: 1
   presentationDecimatePercent: 7.9
-  presentationSolidMesh: 1
+  presentationSolidMesh: 0
   processingWhitePointCloud: 1
   processingWhitePointCloudMinSeconds: 5
   insetMeters: 0
@@ -93,8 +93,8 @@ MonoBehaviour:
   calibrateSe: {fileID: 8300000, guid: 066882e171cba404ab7fad69e8c6d1e3, type: 3}
   poseMatchedSe: {fileID: 8300000, guid: f39da98e60f4f564b97f068f16f4f421, type: 3}
   testMove1IntroSe: {fileID: 0}
-  testMove1Intro2Se: {fileID: 8300000, guid: 2327c7d90e8874ade81536e4af30d843, type: 3}
-  testMove2IntroSe: {fileID: 8300000, guid: 2327c7d90e8874ade81536e4af30d843, type: 3}
+  testMove1Intro2Se: {fileID: 8300000, guid: b59ab99e04b374c9f8cc71bf081e154d, type: 3}
+  testMove2IntroSe: {fileID: 8300000, guid: b59ab99e04b374c9f8cc71bf081e154d, type: 3}
   shootCueSe: {fileID: 8300000, guid: f39da98e60f4f564b97f068f16f4f421, type: 3}
   shootingSe: {fileID: 8300000, guid: 537429de4cecb4c4f93df294be47b7e3, type: 3}
   processingSe: {fileID: 8300000, guid: 550e33b36405140a4bb1ee651c1d90fa, type: 3}
@@ -129,4 +129,5 @@ MonoBehaviour:
   processingText: "\u304B\u305F\u3061\u3092\u3000\u3058\u3085\u3093\u3073\u3057\u3066\u3044\u308B\u3088\u3000\u307E\u3063\u3066\u306D"
   analyzingText: "\u3076\u3093\u305B\u304D\u3061\u3085\u3046"
   resultText: "\u3067\u304D\u305F\u3088\uFF01"
-  qrScanText: "\u306B\u3058\u3052\u3093\u30B3\u30FC\u30C9\u306E\u3000\u3057\u3083\u3057\u3093\u3092\u3068\u3063\u3066\n\u307B\u305E\u3093\u3092\u308F\u3059\u308C\u305A\u306B\uFF01"
+  qrScanText: "\u3057\u3083\u3057\u3093\u3092\u3068\u3063\u3066 \u307B\u305E\u3093\u3092\u308F\u3059\u308C\u305A\u306B\uFF01\nAR
+    \u306F\u3042\u304B\u308B\u3044 \u3070\u3057\u3087\u3067 \u305F\u3081\u3057\u3066\u306D"
