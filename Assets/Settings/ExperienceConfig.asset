@@ -50,7 +50,7 @@ MonoBehaviour:
   presentationSeedCount: 60000
   presentationTailAlpha: 1
   presentationDecimatePercent: 7.9
-  presentationSolidMesh: 0
+  presentationSolidMesh: 1
   processingWhitePointCloud: 1
   processingWhitePointCloudMinSeconds: 5
   insetMeters: 0
