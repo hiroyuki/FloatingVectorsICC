@@ -185,6 +185,13 @@ namespace TSDF.EditorTools
                     "その下のジオメトリはプリントしない（床下の頂点を面まで引き上げてクリップ）。" +
                     "足元・床ノイズ・トレイル底を切り落として、プレートは上げた面に立つ。0=OFF。"),
                 pe.stlFloorRaise, 0f, 0.3f);
+            bool floorCenterModel = EditorGUILayout.ToggleLeft(
+                new GUIContent("STL: Floor Center on Model (bbox)",
+                    "床プレートをモデル全体（body＋全ライン）の XZ バウンディングボックス中心に" +
+                    "合わせる。ライン/トレイルがベースからはみ出すときに ON にすると、" +
+                    "モデル中心がベース中心に来てバランスする。OFF（既定）は足元中心（安定だが" +
+                    "非対称なトレイルは片側にはみ出す）。"),
+                pe.stlFloorCenterOnModel);
             bool buryHeads = EditorGUILayout.ToggleLeft(
                 new GUIContent("STL: Bury Tube Heads (突き出し防止 SDF)",
                     "各チューブの最新側先端を、体表を突き抜けさせず SDF で Print Radius ぶん" +
@@ -284,6 +291,7 @@ namespace TSDF.EditorTools
                 pe.stlFloorSize = stlFloorSz;
                 pe.stlFloorThickness = stlFloorTh;
                 pe.stlFloorRaise = stlFloorRaise;
+                pe.stlFloorCenterOnModel = floorCenterModel;
                 pe.stlBuryTubeHeads = buryHeads;
                 pe.webIncludeMesh = webMesh;
                 pe.webCurveBudgetMB = Mathf.Max(0f, webBudget);

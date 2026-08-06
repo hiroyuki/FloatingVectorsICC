@@ -1,8 +1,11 @@
-// Enables the sibling CameraOrbitController while the transport is holding
-// still — a playback pause or a live freeze (both surface as SensorRecorder.IsPaused) —
-// or while the trail sculpture is being generated (TSDFTrailBaker.IsCapturing), so the
-// growing sculpture can be inspected from any angle. Outside those states the controller
-// is disabled and the stage framing stays locked at its current pose.
+// Enables the sibling CameraOrbitController so the scene can be inspected from any angle.
+// In dev (Experience Mode OFF) freeOrbitInDev keeps it enabled continuously, so the
+// operator can move the camera at any time without pausing. It also turns on while the
+// transport is holding still — a playback pause or a live freeze (both surface as
+// SensorRecorder.IsPaused) — or while the trail sculpture is being generated
+// (TSDFTrailBaker.IsCapturing). During the show the ExperienceDirector forces
+// SuppressTransportOrbit on and owns the camera through the IOrbitOverride path, so none
+// of these dev triggers fire and the stage framing stays under the director's control.
 
 using PointCloud;
 using TSDF;
@@ -35,6 +38,12 @@ namespace CameraControl
                  "ExperienceDirector forces it on for the show so the stage framing " +
                  "comes back for the next visitor.")]
         public bool restorePoseOnDisable;
+
+        [Tooltip("Dev only: keep the orbit controller enabled while Experience Mode is " +
+                 "OFF, so the operator can move the camera at any time without pausing. " +
+                 "Suppressed during the show — the ExperienceDirector forces " +
+                 "SuppressTransportOrbit on, so this never fights the presentation camera.")]
+        public bool freeOrbitInDev = true;
 
         // ---- Shared.IOrbitOverride (ExperienceDirector, cross-asmdef) ----
         public bool OrbitOverride
@@ -142,7 +151,8 @@ namespace CameraControl
             if (orbit == null) return;
             bool want = autoOrbitOverride
                         || (!suppressTransportOrbit
-                            && ((recorder != null && recorder.IsPaused)
+                            && (freeOrbitInDev
+                                || (recorder != null && recorder.IsPaused)
                                 || (baker != null && baker.IsCapturing)));
             if (orbit.enabled == want) return;
             // Snapshot on the off→on edge / restore on the on→off edge. The

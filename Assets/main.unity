@@ -1212,6 +1212,7 @@ MonoBehaviour:
   baker: {fileID: 0}
   autoOrbitOverride: 0
   restorePoseOnDisable: 1
+  freeOrbitInDev: 1
 --- !u!114 &814255268
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -2285,6 +2286,7 @@ MonoBehaviour:
   baker: {fileID: 0}
   autoOrbitOverride: 0
   restorePoseOnDisable: 1
+  freeOrbitInDev: 1
 --- !u!114 &1147706889
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -3058,6 +3060,7 @@ MonoBehaviour:
   stlFloorSize: 1.5
   stlFloorThickness: 0.02
   stlFloorRaise: 0.05
+  stlFloorCenterOnModel: 1
   webIncludeMesh: 0
   webCurveBudgetMB: 12
   webCurveRadiusScale: 1.5

@@ -343,6 +343,14 @@ namespace TSDF
                  "raised plane. 0 = off (plate sits at the lowest point as before).")]
         public float stlFloorRaise = 0.05f;
 
+        [Tooltip("Centre the floor plate on the FULL model's XZ bounding-box centre " +
+                 "(body + all curve/line shells) instead of the feet centroid. Turn ON " +
+                 "when the trails/lines overhang the plate — it balances the sculpture so " +
+                 "the base sits under the model's centre. OFF (default) keeps the plate " +
+                 "under the feet, which is steadier when the body is the print's anchor " +
+                 "but lets asymmetric trails hang off one edge.")]
+        public bool stlFloorCenterOnModel = false;
+
         [Header("Web export (GLB + USDZ)")]
         [Tooltip("Include the TSDF surface mesh in the web files. OFF (spec 2026-07-24) = " +
                  "curves-only export: the sculpture ships as its motion strokes. The mesh is " +
@@ -2131,14 +2139,41 @@ namespace TSDF
                 if (i < bodyVerts && y < bodyMinY) bodyMinY = y;
             }
 
-            double sx = 0, sz = 0; long n = 0;
-            for (int i = 0; i < bodyVerts; i++)
+            float cx, cz;
+            if (stlFloorCenterOnModel)
             {
-                var l = inv * pos[i];
-                if (l.y > bodyMinY + kFloorContactBand) continue;
-                sx += l.x; sz += l.z; n++;
+                // XZ bounding-box centre of ALL assembled geometry (body + every
+                // curve/line shell). The floor plate is not in `pos` yet, so this
+                // is the pure model footprint. Balances asymmetric trails over the
+                // plate instead of anchoring on the (steadier) feet.
+                float minX = float.PositiveInfinity, maxX = float.NegativeInfinity;
+                float minZ = float.PositiveInfinity, maxZ = float.NegativeInfinity;
+                for (int i = 0; i < pos.Count; i++)
+                {
+                    var l = inv * pos[i];
+                    if (l.x < minX) minX = l.x;
+                    if (l.x > maxX) maxX = l.x;
+                    if (l.z < minZ) minZ = l.z;
+                    if (l.z > maxZ) maxZ = l.z;
+                }
+                cx = 0.5f * (minX + maxX);
+                cz = 0.5f * (minZ + maxZ);
             }
-            float cx = (float)(sx / n), cz = (float)(sz / n); // n >= 1: the min vertex is in band
+            else
+            {
+                // Feet centroid: body-shell vertices within kFloorContactBand of the
+                // body's lowest point. Steadier than the bbox centre (which drifts
+                // with trails / an outstretched arm), but lets trails overhang.
+                double sx = 0, sz = 0; long n = 0;
+                for (int i = 0; i < bodyVerts; i++)
+                {
+                    var l = inv * pos[i];
+                    if (l.y > bodyMinY + kFloorContactBand) continue;
+                    sx += l.x; sz += l.z; n++;
+                }
+                cx = n > 0 ? (float)(sx / n) : 0f; // n >= 1 when body present: the min vertex is in band
+                cz = n > 0 ? (float)(sz / n) : 0f;
+            }
             floorAt = new Vector2(cx, cz);
 
             // crop test prints get a plate matching the crop footprint
@@ -2257,14 +2292,21 @@ namespace TSDF
 
         // ---------------- shared ----------------
 
-        /// <summary>Playback frame index suffix for export names ("_f01234") —
-        /// traces a print back to its exact take frame. Empty when no recorder
-        /// playback is loaded.</summary>
+        /// <summary>Playback take + frame suffix for export names
+        /// ("_&lt;take&gt;_f01234") — traces a print back to its exact source recording
+        /// and frame. The take is the playback root's folder name (e.g.
+        /// "2026-07-14_15-09-52"). Empty when no recorder playback is loaded.</summary>
         private static string FrameSuffix()
         {
             var rec = UnityEngine.Object.FindFirstObjectByType<PointCloud.SensorRecorder>();
-            return rec != null && rec.CurrentPlaybackFrame > 0
-                ? $"_f{rec.CurrentPlaybackFrame:00000}" : "";
+            if (rec == null || rec.CurrentPlaybackFrame <= 0) return "";
+            string take = "";
+            string root = rec.ResolvePlaybackRoot();
+            if (!string.IsNullOrEmpty(root))
+                take = Path.GetFileName(root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            return string.IsNullOrEmpty(take)
+                ? $"_f{rec.CurrentPlaybackFrame:00000}"
+                : $"_{take}_f{rec.CurrentPlaybackFrame:00000}";
         }
 
         /// <summary>Print scale (mm per metre). A crop uses the FULL sculpture's
