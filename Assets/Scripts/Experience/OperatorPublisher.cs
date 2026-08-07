@@ -25,7 +25,7 @@ using UnityEngine;
 namespace Experience
 {
     [DisallowMultipleComponent]
-    public class OperatorPublisher : MonoBehaviour
+    public class OperatorPublisher : MonoBehaviour, Shared.IPanelAction
     {
         [Tooltip("Publish settings source (dryRunPublish / uploadScriptSha256 / " +
                  "lfksRemoteDirectory / publishTimeoutSeconds / qrUrlKind). When " +
@@ -167,8 +167,18 @@ namespace Experience
                 motionCurves.visible = false;
                 _curvesHidden = motionCurves;
             }
-            SetStatus($"preview: {surface.triangles.Length / 3 / 1000}k tris" +
-                      (tubes != null ? " + tubes" : "") + $" (t{trailSamples}) — toggle {previewToggleKey}");
+            // Estimated GLB size from the preview geometry: pos+nrm+col float3
+            // (36 B/vert) + uint32 indices. The real file adds only headers, so
+            // this tracks the export within a few % — good enough to tune
+            // tolerance / subdiv / decimation against.
+            int surfTris = surface.triangles.Length / 3;
+            int tubeTris = tubes != null ? tubes.triangles.Length / 3 : 0;
+            long verts = surface.vertexCount + (tubes != null ? tubes.vertexCount : 0);
+            long estBytes = verts * 36 + (long)(surfTris + tubeTris) * 12;
+            SetStatus($"preview: mesh {surfTris / 1000}k" +
+                      (tubes != null ? $" + tubes {tubeTris / 1000}k" : "") +
+                      $" tris — est GLB ~{estBytes / 1048576.0:0.0} MB" +
+                      $" (t{trailSamples}) — toggle {previewToggleKey}");
         }
 
         public void HidePreview()
@@ -212,9 +222,58 @@ namespace Experience
             _routine = StartCoroutine(PublishRoutine());
         }
 
-        private IEnumerator PublishRoutine()
+        /// <summary>Capture-only loop for tuning the web-export params: snapshot
+        /// with the CURRENT settings and swap in the preview — no files, no
+        /// upload. Adjust the Tuning sliders (Smooth Subdiv / Web Curve
+        /// Tolerance / …), press again, compare.</summary>
+        [ContextMenu("Capture Preview (no export)")]
+        public void CapturePreview()
         {
-            var sw = System.Diagnostics.Stopwatch.StartNew();
+            if (!Application.isPlaying) return;
+            if (_routine != null)
+            {
+                Debug.LogWarning($"[{nameof(OperatorPublisher)}] publish/capture already running — ignored.", this);
+                return;
+            }
+            _routine = StartCoroutine(CapturePreviewRoutine());
+        }
+
+        private IEnumerator CapturePreviewRoutine()
+        {
+            yield return CaptureRoutine();
+            if (_captureResult == null) yield break; // Fail already reported
+            _lastSnap = _captureResult;
+            ShowPreview();
+            _routine = null;
+        }
+
+        // ---- Shared.IPanelAction (one-stop Control Panel) ----
+        // The tune loop lives next to the Tuning sliders: tweak -> Capture →
+        // Preview -> judge the export geometry in-scene, no files or upload.
+        public string ActionsLabel => "Web export preview (書き出しデータ確認)";
+        public int ActionCount => 2;
+        public string ActionName(int i) =>
+            i == 0 ? "Capture → Preview"
+                   : PreviewShowing ? "Hide preview (ライブ表示へ)" : "Show last preview";
+        public bool ActionEnabled(int i) =>
+            i == 0 ? Application.isPlaying && !IsBusy
+                   : PreviewShowing || _lastSnap != null;
+        public void RunAction(int i)
+        {
+            if (i == 0) CapturePreview();
+            else if (PreviewShowing) HidePreview();
+            else ShowPreview();
+        }
+        public string ActionsStatus => _status;
+
+        // Shared capture front-half (PublishRoutine / CapturePreviewRoutine):
+        // restore live visuals -> operator trail window -> rebuild wait ->
+        // TSDFSnapshotBuilder.Capture. The result lands in _captureResult
+        // (null on failure, with Fail already called).
+        private TSDFSnapshot _captureResult;
+        private IEnumerator CaptureRoutine()
+        {
+            _captureResult = null;
             // A visible preview hides the curves, which also stops their rebuild —
             // restore the live visuals before capturing the next snapshot.
             HidePreview();
@@ -251,6 +310,15 @@ namespace Experience
                                                    printExporter.WebCaptureOptions(), out string err);
             RestoreHistorySamples();
             if (snap == null) { Fail(err); yield break; }
+            _captureResult = snap;
+        }
+
+        private IEnumerator PublishRoutine()
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            yield return CaptureRoutine();
+            var snap = _captureResult;
+            if (snap == null) yield break; // Fail already reported
 
             // in-place preview of exactly what the files will contain, while the
             // export + upload continue below
@@ -265,7 +333,7 @@ namespace Experience
             string glbPath = Path.Combine(dir, $"web_{stamp}_t{trailSamples}.glb");
             string usdzPath = Path.Combine(dir, $"web_{stamp}_t{trailSamples}.usdz");
             if (!TSDFSnapshotBuilder.ExportFiles(snap, glbPath, usdzPath,
-                                                 printExporter.usdPythonPath, out _, out err,
+                                                 printExporter.usdPythonPath, out _, out string err,
                                                  printExporter.WebExportOptions()))
             {
                 Fail($"export failed: {err}");

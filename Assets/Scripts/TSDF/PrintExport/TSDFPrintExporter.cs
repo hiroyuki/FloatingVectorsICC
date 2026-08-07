@@ -47,7 +47,7 @@ using UnityEngine;
 namespace TSDF
 {
     [DisallowMultipleComponent]
-    public class TSDFPrintExporter : MonoBehaviour
+    public class TSDFPrintExporter : MonoBehaviour, Shared.IPanelTunable
     {
         [Tooltip("Volume to export. Auto-resolves the first TSDFVolume at OnEnable.")]
         public TSDFVolume volume;
@@ -415,6 +415,19 @@ namespace TSDF
                  "The Catmull-Rom polylines are oversampled where motion is slow; 1.5 mm halves " +
                  "the tube triangles with no visible change at 6 mm ribbons. 0 = off.")]
         public float webCurveTolerance = 0.0015f;
+
+        // ---- Shared.IPanelTunable (one-stop Control Panel) ----
+        // Web-export weight knob next to Motion lines' Smooth Subdiv: subdiv adds
+        // curve points, this tolerance drops the near-collinear ones before tubing.
+        public string TuningLabel => "Print export";
+        public int TunableCount => 1;
+        public string TunableName(int i) => "Web Curve Tolerance (m)";
+        public float TunableValue(int i) => webCurveTolerance;
+        public void SetTunableValue(int i, float value) =>
+            webCurveTolerance = Mathf.Clamp(value, 0f, 0.01f);
+        public float TunableMin(int i) => 0f;
+        public float TunableMax(int i) => 0.01f;
+        public bool TunableIsInt(int i) => false;
 
         [Range(0f, 1f)]
         [Tooltip("Bake ambient occlusion into the web-export vertex colours (0 = off). " +

@@ -31,6 +31,7 @@ namespace Shared.EditorTools
         private readonly List<IViewToggle> _views = new List<IViewToggle>();
         private readonly List<IAccumulationController> _accums = new List<IAccumulationController>();
         private readonly List<IPanelTunable> _tunables = new List<IPanelTunable>();
+        private readonly List<IPanelAction> _actions = new List<IPanelAction>();
         private readonly List<IStartupActivatable> _activatables = new List<IStartupActivatable>();
         private GUIStyle _bigToggleStyle;
         private Vector2 _scroll;
@@ -43,6 +44,7 @@ namespace Shared.EditorTools
             _views.Clear();
             _accums.Clear();
             _tunables.Clear();
+            _actions.Clear();
             _activatables.Clear();
             foreach (var mb in FindObjectsByType<MonoBehaviour>(FindObjectsInactive.Include, FindObjectsSortMode.None))
             {
@@ -50,6 +52,7 @@ namespace Shared.EditorTools
                 if (mb is IViewToggle vt) _views.Add(vt);
                 if (mb is IAccumulationController ac) _accums.Add(ac);
                 if (mb is IPanelTunable tn) _tunables.Add(tn);
+                if (mb is IPanelAction pa) _actions.Add(pa);
                 if (mb is IStartupActivatable sa) _activatables.Add(sa);
             }
             // FindObjectsSortMode.None gives a nondeterministic order that changes
@@ -60,6 +63,11 @@ namespace Shared.EditorTools
             _tunables.Sort((a, b) =>
             {
                 int c = string.CompareOrdinal(a.TuningLabel, b.TuningLabel);
+                return c != 0 ? c : string.CompareOrdinal(GoName(a), GoName(b));
+            });
+            _actions.Sort((a, b) =>
+            {
+                int c = string.CompareOrdinal(a.ActionsLabel, b.ActionsLabel);
                 return c != 0 ? c : string.CompareOrdinal(GoName(a), GoName(b));
             });
             _activatables.Sort((a, b) => string.CompareOrdinal(a.ActivateLabel, b.ActivateLabel));
@@ -75,6 +83,8 @@ namespace Shared.EditorTools
             DrawAccumulationSection();
             EditorGUILayout.Space(12);
             DrawTuningSection();
+            EditorGUILayout.Space(12);
+            DrawActionsSection();
 
             EditorGUILayout.EndScrollView();
         }
@@ -402,6 +412,38 @@ namespace Shared.EditorTools
                         }
                     }
                 }
+            }
+        }
+
+        // ---------------- Actions ----------------
+        // One-shot operation buttons (IPanelAction) — e.g. OperatorPublisher's
+        // capture-preview loop for tuning the web-export params.
+        private void DrawActionsSection()
+        {
+            EditorGUILayout.LabelField("Actions (操作)", EditorStyles.boldLabel);
+            if (_actions.Count == 0)
+            {
+                EditorGUILayout.HelpBox("No IPanelAction components in the open scene(s).", MessageType.Info);
+                return;
+            }
+
+            foreach (var act in _actions)
+            {
+                var comp = act as Component;
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    EditorGUILayout.LabelField(act.ActionsLabel, EditorStyles.miniBoldLabel);
+                    DrawSelectButton(comp);
+                }
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    for (int i = 0; i < act.ActionCount; i++)
+                        using (new EditorGUI.DisabledScope(!act.ActionEnabled(i)))
+                            if (GUILayout.Button(act.ActionName(i), GUILayout.Height(24)))
+                                act.RunAction(i);
+                }
+                if (!string.IsNullOrEmpty(act.ActionsStatus))
+                    EditorGUILayout.HelpBox(act.ActionsStatus, MessageType.None);
             }
         }
 
