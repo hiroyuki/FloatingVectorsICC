@@ -1595,6 +1595,23 @@ namespace PointCloud
                     Debug.LogWarning(
                         $"[{nameof(SensorRecorder)}] could not copy cameras.yaml into recording: {mapEx.Message}", this);
                 }
+
+                // Same self-containment for the floor: carry the rig's floor.yaml so a
+                // machine with no live calibration of its own (the playback-only Mac)
+                // still lands the take on the recorded room's floor instead of the
+                // scene-serialized rebaseFloorY (see LoadFloorFromCalibration's
+                // fallback order).
+                try
+                {
+                    if (PointCloudRecording.TryReadFloor(
+                            cameraManager.ResolveExtrinsicsRoot(), out float fy, out var flp, out var flr))
+                        PointCloudRecording.WriteFloor(root, fy, flp, flr);
+                }
+                catch (Exception floorEx)
+                {
+                    Debug.LogWarning(
+                        $"[{nameof(SensorRecorder)}] could not copy floor.yaml into recording: {floorEx.Message}", this);
+                }
             }
         }
 
@@ -1757,6 +1774,29 @@ namespace PointCloud
             int applied = LoadExtrinsicsFromYaml(root);
             if (applied == 0) return;
             RecomputeWorldRebase();
+            ReplacePlaybackObjects();
+        }
+
+        /// <summary>
+        /// Floor-tune entry (CalibrationRuntimeUI): adopt the operator's floor
+        /// height + levelling as-is and re-place the playback GOs. The playback
+        /// mirror of SensorManager.ApplyExtrinsicsToLive — on a playback-only
+        /// machine the tune has no live rig to move, so without this the keys
+        /// would do nothing visible. Skips the floor.yaml re-read: the tune's
+        /// save is debounced, so the file lags the value passed in.
+        /// </summary>
+        public void ApplyFloorFromTune(float floorY, Pose leveling)
+        {
+            rebaseFloorY = floorY;
+            rebaseFloorLeveling = leveling;
+            RecomputeWorldRebase(reloadFloor: false);
+            ReplacePlaybackObjects();
+        }
+
+        /// <summary>Push the current extrinsics + world rebase to every existing
+        /// <c>_Playback_*</c> GameObject's transform.</summary>
+        private void ReplacePlaybackObjects()
+        {
             foreach (var kv in _tracks)
             {
                 var t = kv.Value;
@@ -1779,32 +1819,67 @@ namespace PointCloud
         private Pose _worldRebase = Pose.identity;
         private bool _worldRebaseValid;
 
+        // Serialized floor fallback, captured before any floor.yaml load or tune
+        // can overwrite the public fields. The double-failure path below RESTORES
+        // these instead of leaving the fields as-is: without that, switching from
+        // a take that had a floor.yaml to one without would silently keep the
+        // previous take's floor + levelling.
+        private float _fallbackFloorY;
+        private Pose _fallbackFloorLeveling = Pose.identity;
+        private bool _fallbackFloorCaptured;
+
+        private void CaptureFloorFallbackOnce()
+        {
+            if (_fallbackFloorCaptured) return;
+            _fallbackFloorCaptured = true;
+            _fallbackFloorY = rebaseFloorY;
+            _fallbackFloorLeveling = rebaseFloorLeveling;
+        }
+
         /// <summary>
         /// Pull the room's floor (height + 3-point levelling) from the LIVE
-        /// calibration, so the playback rig lands on the same floor as the live
-        /// rig. Deliberately not <see cref="ResolvePlaybackRoot"/>: the take's own
-        /// folder carries the floor that was current when it was recorded.
+        /// calibration first, so the playback rig lands on the same floor as the
+        /// live rig. When the machine has no live floor at all (a playback-only
+        /// Mac never ran the floor tune), fall back to the take's own
+        /// calibration/floor.yaml — Save copies it there, so the take reproduces
+        /// the floor that was current when it was recorded. Only when neither
+        /// exists does the scene-serialized rebaseFloorY apply, and that is worth
+        /// a warning: it is whatever value happened to be committed, not a
+        /// measurement of this room.
         /// </summary>
         private void LoadFloorFromCalibration()
         {
             if (!loadFloorFromCalibration) return;
-            if (!PointCloudRecording.TryReadFloor(
-                    PointCloudRecording.ResolveRecordingRoot(floorCalibrationRoot),
-                    out float y, out var lp, out var lr))
+            CaptureFloorFallbackOnce();
+            string liveRoot = PointCloudRecording.ResolveRecordingRoot(floorCalibrationRoot);
+            if (!PointCloudRecording.TryReadFloor(liveRoot, out float y, out var lp, out var lr)
+                && !PointCloudRecording.TryReadFloor(ResolvePlaybackRoot(), out y, out lp, out lr))
+            {
+                rebaseFloorY = _fallbackFloorY;
+                rebaseFloorLeveling = _fallbackFloorLeveling;
+                Debug.LogWarning(
+                    $"[{nameof(SensorRecorder)}] no floor.yaml under {liveRoot} nor the take " +
+                    $"({ResolvePlaybackRoot()}) — playback rebases with the scene value " +
+                    $"rebaseFloorY={rebaseFloorY}. Tune the floor (calibration UI) or copy " +
+                    "the rig machine's floor.yaml here.", this);
                 return;
+            }
             rebaseFloorLeveling = new Pose(new Vector3(lp[0], lp[1], lp[2]),
                                            new Quaternion(lr[0], lr[1], lr[2], lr[3]));
             rebaseFloorY = y;
         }
 
-        private void RecomputeWorldRebase()
+        private void RecomputeWorldRebase(bool reloadFloor = true)
         {
             _worldRebase = Pose.identity;
             _worldRebaseValid = false;
             if (!applyWorldRebase) return;
             // Before the rebase, not at Start: the operator can tune the floor
             // mid-session and the next playback load must pick it up.
-            LoadFloorFromCalibration();
+            // reloadFloor=false during a live tune (ApplyFloorFromTune): the yaml
+            // write is debounced, so re-reading here would snap back to the stale
+            // file mid-nudge.
+            if (reloadFloor) LoadFloorFromCalibration();
             // localPosition/localRotation composition equals a world rebase only
             // under an identity parent (playback GOs sit directly under us).
             if (!Calibration.WorldFrameRebase.ParentIsIdentity(transform))
@@ -2551,6 +2626,9 @@ namespace PointCloud
             // だけ進んで一度に 4〜5 frame の cursor advance = drop になる。
             Application.runInBackground = true;
             if (view == null) view = FindFirstObjectByType<PointCloudView>();
+            // Before any floor.yaml load / tune mutates the fields (lazy capture
+            // also exists for edit-mode ContextMenu Read, where Awake never ran).
+            CaptureFloorFallbackOnce();
         }
 
         private void Start()

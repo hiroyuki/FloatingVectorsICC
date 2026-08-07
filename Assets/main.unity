@@ -305,10 +305,10 @@ MonoBehaviour:
   folderPath: D:\Dropbox\projects\ICC\Recordings\RecordingBase
   folderPathMacOverride: /Volumes/horristicSSD2T/Dropbox/projects/ICC/Recordings/Rec2_jump
   playbackFolderPath: F:\RecordingBaseV11s\2026-07-14_15-09-52
-  playbackFolderPathMacOverride: /Users/horihiroyuki/Dropbox/projects/ICC/Recordings/RecordingBase/2026-07-14_15-09-52
+  playbackFolderPathMacOverride: /Volumes/horristicSSD2T/Dropbox/projects/ICC/Recordings/RecordingBase/2026-07-14_12-12-17
   applyWorldRebase: 1
   rigSerialOrder: []
-  rebaseFloorY: -0.9
+  rebaseFloorY: -0.024000501
   loadFloorFromCalibration: 1
   floorCalibrationRoot: 
   keepLiveRenderersOnLoad: 0
@@ -470,7 +470,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 4e1c8b0a6d2f4a91b7e35c2d094f8b3c, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::PointCloud.PointCloudDecimater
-  reductionPercent: 50.5
+  reductionPercent: 7
 --- !u!4 &173474410
 Transform:
   m_ObjectHideFlags: 0
@@ -515,7 +515,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: c0c9deb6dc0884342af8c8e8c4073279, type: 3}
   m_Name: 
   m_EditorClassIdentifier: BodyTracking::BodyTracking.PointCloudMotionCurves
-  visible: 0
+  visible: 1
   history: {fileID: 1180694596}
   recorder: {fileID: 0}
   sourceMeshes: []
@@ -659,7 +659,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: TSDF::TSDF.TSDFView
   volume: {fileID: 639959844}
   mode: 2
-  showMesh: 1
+  showMesh: 0
   voxelMaterial: {fileID: 0}
   voxelSphereScale: 0.5
   voxelHideAboveSdfFraction: 1
@@ -1467,7 +1467,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 96892899ec43f7246a88f0b3f63d9e67, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::PointCloud.PointCloudCameraManager
-  playbackOnly: 0
+  playbackOnly: 1
   defaultPointMaterial: {fileID: 0}
   depthWidth: 320
   depthHeight: 288
@@ -1496,7 +1496,7 @@ MonoBehaviour:
   extrinsicsRoot: 
   applyWorldRebase: 1
   rigSerialOrder: []
-  rebaseFloorY: -0.9
+  rebaseFloorY: -0.024000501
   loadFloorYFromCalibration: 1
   loadSensingAreaFromCalibration: 1
   targetFrameRate: 30
@@ -2429,7 +2429,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 566fa2a9a06762d499613ddd8a17e1e5, type: 3}
   m_Name: 
   m_EditorClassIdentifier: PointCloud::PointCloud.PointCloudView
-  showPointClouds: 0
+  showPointClouds: 1
   brightness: 1.519
   cumulative: {fileID: 18533122}
 --- !u!4 &1168113567
@@ -2588,7 +2588,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: BodyTracking::BodyTracking.BonePoseHistory
   bodyTracking: {fileID: 1180694595}
   recorder: {fileID: 86788058}
-  historySamples: 32
+  historySamples: 12
   freshWindowFrames: 30
   bodyLossGraceSeconds: 0.5
   maxEndpointSpeed: 15
@@ -3154,7 +3154,7 @@ MonoBehaviour:
   printExporter: {fileID: 0}
   healthMonitor: {fileID: 0}
   liveFusedSource: {fileID: 0}
-  activateOnPlay: 1
+  activateOnPlay: 0
   debugForceFault: 0
   debugPoseDiagnostics: 1
   compareCurveSources: 0

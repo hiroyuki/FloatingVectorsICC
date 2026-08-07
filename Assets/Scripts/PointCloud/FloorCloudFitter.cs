@@ -20,10 +20,10 @@
 // frame. Vertex layout is fixed by PointCloudMeshUtil.CreatePointMesh: position
 // float3 + color float3 interleaved, 24 bytes/vertex, position at offset 0.
 //
-// Live-only, exactly like the levelling it feeds: SensorManager applies the
-// levelling Pose to the live rig, and playback deliberately ignores
-// rebaseFloorY / floor.yaml. Fitting on playback would save a pose nothing
-// applies.
+// The FIT samples live clouds only (Gather finds PointCloudRenderer instances),
+// so it needs a live rig. The resulting floor is not live-only though:
+// SensorRecorder reads floor.yaml on rebase and CalibrationRuntimeUI pushes
+// tune values into playback GOs directly (PropagateFloorToPlayback).
 
 using System.Collections.Generic;
 using Unity.Collections;

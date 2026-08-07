@@ -1338,6 +1338,7 @@ namespace Calibration.RuntimeUI
             if (delta == 0f) return;
             _manager.rebaseFloorY += delta;
             _manager.ApplyExtrinsicsToLive();
+            PropagateFloorToPlayback();
             // Coalesce the write instead of saving per press: a held arrow key
             // walked rebaseFloorY 1.4 m in one session and persisted every 1 cm of
             // it. The nudge still sticks — it is just written once the operator
@@ -1424,9 +1425,24 @@ namespace Calibration.RuntimeUI
                 any = true;
             }
 
+            PropagateFloorToPlayback();
             _floorSaveDueAt = 0f;   // this save supersedes any pending nudge write
             SaveFloor($"Floor fitted: {fit.SampleCount} pts, residual σ {fit.SdY * 1000f:0.0} mm " +
                       $"(corrected {fit.TiltDeg:0.00}° tilt)");
+        }
+
+        // Playback mirror of ApplyExtrinsicsToLive. The tune's levers live on
+        // SensorManager, but a playback-only session (the Mac) has no live rig to
+        // move — push the same floor into every rebasing SensorRecorder so the
+        // _Playback_* GOs follow the keys. Values are passed directly instead of
+        // letting the recorder re-read floor.yaml: the save below is debounced,
+        // so the file lags the keypress.
+        private void PropagateFloorToPlayback()
+        {
+            if (_manager == null) return;
+            foreach (var rec in FindObjectsByType<SensorRecorder>(FindObjectsSortMode.None))
+                if (rec.applyWorldRebase)
+                    rec.ApplyFloorFromTune(_manager.rebaseFloorY, _manager.rebaseFloorLeveling);
         }
 
         private CaptureSample _floorSample;
