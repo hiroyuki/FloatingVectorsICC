@@ -2,12 +2,19 @@
 // operator display — in a standalone multi-display build (IMGUI renders to the
 // primary display only). In the Editor it draws over the Game view.
 //
-// Controls:
+// Controls (a runtime subset of Window > Control Panel — that panel is an
+// EditorWindow and does not exist in a build, so the knobs recently added to it
+// are mirrored here for the operator on the built app):
 //   - History Samples slider: BonePoseHistory's motion-curve time window (same
 //     knob as the Control Panel's "Motion history" tunable).
+//   - Brightness slider: PointCloudView overall colour brightness.
+//   - Web Curve Tol slider: TSDFPrintExporter web-export curve tolerance.
 //   - Auto Orbit toggle: turns on the idle auto-orbit on every stage camera's
 //     CameraOrbitController, keeping the controllers enabled regardless of the
 //     pause state (via PauseOrbitGate.autoOrbitOverride on gated cameras).
+//   - Experience Mode toggle + QR Dry Run toggle (ExperienceDirector).
+//   - Save settings button: persists the tuning above to PlayerPrefs; reloaded
+//     and applied on the next launch (Start).
 //
 // Lives in the CameraControl folder (Assembly-CSharp): it needs both
 // BodyTracking (BonePoseHistory) and the orbit controllers, and only
@@ -48,6 +55,10 @@ namespace CameraControl
                  "the hitch doesn't show on the stage displays.")]
         public TSDFPrintExporter exporter;
 
+        [Tooltip("Point cloud view whose Brightness slider is drawn. Auto-resolves the " +
+                 "first PointCloudView when left empty.")]
+        public PointCloudView pointCloudView;
+
         [Tooltip("4-camera tile overlay the view-switch key swaps in for the HUD. " +
                  "Auto-resolves the first MultiCameraDebugView when left empty.")]
         public MultiCameraDebugView debugView;
@@ -72,8 +83,19 @@ namespace CameraControl
                  "whenever the tiles are visible (whichever key toggled them).")]
         public bool exclusiveWithDebugView = true;
 
-        // Where the cheat sheet starts, below the widgets (slider / toggles / export).
-        private const float SheetTopOffset = 150f;
+        // Row heights (scaled GUI units) for the flowing widget column. The backdrop
+        // box and the draw cursor both add these up, so keep them the single source.
+        private const float SliderRowH = 48f;
+        private const float ToggleRowH = 28f;
+        private const float ButtonRowH = 32f;
+
+        // Save-button persistence (PlayerPrefs). Built-app operators tune on Display 1
+        // and press Save; the values reload on the next launch (Start applies them).
+        private const string KeyBrightness = "FVUI.pc.brightness";
+        private const string KeyCurveTol   = "FVUI.print.curveTol";
+        private const string KeyQrDryRun   = "FVUI.exp.qrDryRun";
+        private const string KeyHistory    = "FVUI.bt.historySamples";
+        private string _saveStatus;
 
         /// <summary>Panel height in scaled GUI units as last measured in OnGUI.
         /// Exposed so a check can tell whether the panel still fits the display.</summary>
@@ -86,6 +108,7 @@ namespace CameraControl
             if (orbits == null || orbits.Length == 0)
                 orbits = FindObjectsByType<CameraOrbitController>(FindObjectsSortMode.None);
             if (exporter == null) exporter = FindFirstObjectByType<TSDFPrintExporter>();
+            if (pointCloudView == null) pointCloudView = FindFirstObjectByType<PointCloudView>();
             if (debugView == null) debugView = FindFirstObjectByType<MultiCameraDebugView>();
             if (experienceDirector == null)
                 experienceDirector = FindFirstObjectByType<Experience.ExperienceDirector>();
@@ -113,6 +136,56 @@ namespace CameraControl
             }
         }
 
+        // Load persisted tuning (Save button) once the scene's components exist.
+        // Only values whose reload applies cleanly at Start are persisted: brightness
+        // and history apply anytime; curve tolerance is read at export; QR dry-run is
+        // read at ResultShow, always after Start.
+        private void Start() => LoadSettings();
+
+        private void LoadSettings()
+        {
+            if (pointCloudView == null) pointCloudView = FindFirstObjectByType<PointCloudView>();
+            if (exporter == null) exporter = FindFirstObjectByType<TSDFPrintExporter>();
+            if (experienceDirector == null)
+                experienceDirector = FindFirstObjectByType<Experience.ExperienceDirector>();
+            if (history == null) history = FindFirstObjectByType<BonePoseHistory>();
+
+            if (pointCloudView != null && PlayerPrefs.HasKey(KeyBrightness))
+                pointCloudView.SetTunableValue(0, PlayerPrefs.GetFloat(KeyBrightness));
+            if (exporter != null && PlayerPrefs.HasKey(KeyCurveTol))
+                exporter.SetTunableValue(0, PlayerPrefs.GetFloat(KeyCurveTol));
+            if (experienceDirector != null && PlayerPrefs.HasKey(KeyQrDryRun))
+                experienceDirector.DryRunPublish = PlayerPrefs.GetInt(KeyQrDryRun) == 1;
+            if (history != null && PlayerPrefs.HasKey(KeyHistory))
+                history.SetTunableValue(0, PlayerPrefs.GetFloat(KeyHistory));
+        }
+
+        private void SaveSettings()
+        {
+            if (pointCloudView != null) PlayerPrefs.SetFloat(KeyBrightness, pointCloudView.TunableValue(0));
+            if (exporter != null) PlayerPrefs.SetFloat(KeyCurveTol, exporter.TunableValue(0));
+            if (experienceDirector != null)
+                PlayerPrefs.SetInt(KeyQrDryRun, experienceDirector.DryRunPublish ? 1 : 0);
+            if (history != null) PlayerPrefs.SetFloat(KeyHistory, history.TunableValue(0));
+            PlayerPrefs.Save();
+            _saveStatus = "Saved ✓";
+        }
+
+        // One tuning slider (label line + rail + thumb) at the running cursor y.
+        // Returns the cursor advanced past the row so callers just chain the result.
+        private float SliderRow(float y, float sliderWidth, string label,
+                                float value, float min, float max, System.Action<float> set)
+        {
+            GUI.Label(new Rect(position.x, y, sliderWidth, 22), label);
+            // Explicit track: the default skin's rail is nearly invisible on black.
+            GUI.color = new Color(1f, 1f, 1f, 0.35f);
+            GUI.DrawTexture(new Rect(position.x, y + 24 + 8, sliderWidth, 4), Texture2D.whiteTexture);
+            GUI.color = Color.white;
+            float v = GUI.HorizontalSlider(new Rect(position.x, y + 24, sliderWidth, 20), value, min, max);
+            if (!Mathf.Approximately(v, value)) set(v);
+            return y + SliderRowH;
+        }
+
         private void OnGUI()
         {
             if (!visible) return;
@@ -126,62 +199,89 @@ namespace CameraControl
 
             GUI.matrix = Matrix4x4.Scale(Vector3.one * uiScale);
 
-            // Cheat sheet first: the backdrop has to be drawn before the widgets, and
-            // its height comes from measuring the sheet, so the text is built up here.
             string sheet = BuildCheatSheet();
             var sheetContent = new GUIContent(sheet);
-            float sheetTop = position.y + SheetTopOffset;
             // Measured, not a per-line guess: the skin's line height is not knowable
             // outside OnGUI, and a wrong guess clipped the last row off the panel.
             float sheetHeight = GUI.skin.label.CalcHeight(sheetContent, width);
+
+            // Widget-column height = sum of present rows (same constants the draw
+            // cursor advances by below), so the backdrop wraps exactly the widgets.
+            float widgetsH = SliderRowH;                            // History
+            if (pointCloudView != null) widgetsH += SliderRowH;     // Brightness
+            if (exporter != null)       widgetsH += SliderRowH;     // Web curve tolerance
+            widgetsH += ToggleRowH;                                 // Auto Orbit
+            if (experienceDirector != null) widgetsH += 2 * ToggleRowH; // Experience Mode + QR Dry Run
+            if (exporter != null)       widgetsH += ButtonRowH;     // Export
+            widgetsH += ButtonRowH;                                 // Save
+
+            float sheetTop = position.y + widgetsH + 10f;
             MeasuredHeight = sheetTop - position.y + sheetHeight + 34f;
 
             // Panel backdrop so the widgets read against the black operator display.
             GUI.Box(new Rect(position.x - 12, position.y - 10, width + 24, MeasuredHeight),
                     GUIContent.none);
 
-            // Tunable 0 is History Samples (frames) — same knob as the Control Panel.
-            float min = history.TunableMin(0);
-            float max = history.TunableMax(0);
-            int cur = Mathf.RoundToInt(history.TunableValue(0));
-            // width is shared with the rest of the HUD, but the slider should not
+            // width is shared with the rest of the HUD, but the sliders should not
             // stretch across the operator display. GUI coordinates are pre-scale,
             // so convert half of the physical screen width back into GUI units.
             float sliderWidth = Mathf.Min(width, Screen.width * 0.5f / uiScale);
+            float y = position.y;
 
-            GUI.Label(new Rect(position.x, position.y, sliderWidth, 22),
-                      $"{history.TunableName(0)}: {cur}");
+            // History Samples (frames) — same knob as the Control Panel.
+            y = SliderRow(y, sliderWidth,
+                $"{history.TunableName(0)}: {Mathf.RoundToInt(history.TunableValue(0))}",
+                history.TunableValue(0), history.TunableMin(0), history.TunableMax(0),
+                nv => history.SetTunableValue(0, Mathf.RoundToInt(nv)));
 
-            // Explicit track: the default skin's slider rail is nearly invisible on a
-            // black background — only the thumb showed.
-            GUI.color = new Color(1f, 1f, 1f, 0.35f);
-            GUI.DrawTexture(new Rect(position.x, position.y + 24 + 8, sliderWidth, 4), Texture2D.whiteTexture);
-            GUI.color = Color.white;
+            // Point cloud brightness (39544fc).
+            if (pointCloudView != null)
+                y = SliderRow(y, sliderWidth,
+                    $"Brightness: {pointCloudView.TunableValue(0):0.00}",
+                    pointCloudView.TunableValue(0), pointCloudView.TunableMin(0), pointCloudView.TunableMax(0),
+                    nv => pointCloudView.SetTunableValue(0, nv));
 
-            float v = GUI.HorizontalSlider(
-                new Rect(position.x, position.y + 24, sliderWidth, 20), cur, min, max);
-            int next = Mathf.RoundToInt(v);
-            if (next != cur) history.SetTunableValue(0, next);
+            // Print web-export curve tolerance (1e05bc1).
+            if (exporter != null)
+                y = SliderRow(y, sliderWidth,
+                    $"Web Curve Tol: {exporter.TunableValue(0):0.0000} m",
+                    exporter.TunableValue(0), exporter.TunableMin(0), exporter.TunableMax(0),
+                    nv => exporter.SetTunableValue(0, nv));
 
-            bool auto = GUI.Toggle(new Rect(position.x, position.y + 52, width, 24),
+            bool auto = GUI.Toggle(new Rect(position.x, y, width, 24),
                                    _autoOrbit, " Auto Orbit (stage cams)");
             if (auto != _autoOrbit) ApplyAutoOrbit(auto);
-
-            if (exporter != null)
-            {
-                if (GUI.Button(new Rect(position.x, position.y + 82, 190, 26), "Export GLB + USDZ"))
-                    exporter.ExportWeb();
-                GUI.Label(new Rect(position.x + 198, position.y + 84, width - 198, 44),
-                          exporter.StatusText);
-            }
+            y += ToggleRowH;
 
             if (experienceDirector != null)
             {
-                bool exp = GUI.Toggle(new Rect(position.x, position.y + 112, width, 24),
+                bool exp = GUI.Toggle(new Rect(position.x, y, width, 24),
                                       experienceDirector.Visible,
                                       $" Experience Mode ({experienceDirector.CurrentState})");
                 if (exp != experienceDirector.Visible) experienceDirector.Visible = exp;
+                y += ToggleRowH;
+
+                // QR Dry Run (a188523): ON = fake URL, OFF = real LFKS upload.
+                bool dry = experienceDirector.DryRunPublish;
+                bool ndry = GUI.Toggle(new Rect(position.x, y, width, 24), dry,
+                    dry ? " QR Dry Run: ON (fake URL)" : " QR Dry Run: OFF (real upload)");
+                if (ndry != dry) experienceDirector.DryRunPublish = ndry;
+                y += ToggleRowH;
             }
+
+            if (exporter != null)
+            {
+                if (GUI.Button(new Rect(position.x, y, 190, 26), "Export GLB + USDZ"))
+                    exporter.ExportWeb();
+                GUI.Label(new Rect(position.x + 198, y + 2, width - 198, 44), exporter.StatusText);
+                y += ButtonRowH;
+            }
+
+            if (GUI.Button(new Rect(position.x, y, 190, 26), "Save settings"))
+                SaveSettings();
+            if (!string.IsNullOrEmpty(_saveStatus))
+                GUI.Label(new Rect(position.x + 198, y + 2, width - 198, 22), _saveStatus);
+            y += ButtonRowH;
 
             GUI.color = new Color(1f, 1f, 1f, 0.35f);
             GUI.DrawTexture(new Rect(position.x, sheetTop - 8f, width, 2), Texture2D.whiteTexture);
