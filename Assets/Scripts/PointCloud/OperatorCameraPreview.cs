@@ -1,15 +1,16 @@
-// Small live preview in the top-right corner of the operator display (Display 1).
-// Purpose: while running the show from the operator PC you can keep an eye on what
-// the visitor is seeing without turning to the physical stage monitor.
+// Live preview on the operator display (Display 1) of what the visitor is seeing,
+// so the show can be run from the operator PC without turning to the stage monitor.
 //
-// Default source (mirrorDisplay2): a MIRROR of Display 2 (the visitor screen). The
-// Display-2 camera is cloned into a RenderTexture each frame and drawn in the panel.
-// Caveat: only what a CAMERA renders is mirrored — ScreenSpaceOverlay visitor UI
-// (QR code, messages) is composited per-display by Unity and is NOT captured.
+// Default source (mirrorDisplay2): a FULL-SCREEN MIRROR of Display 2 (the visitor
+// screen). The Display-2 camera is cloned into a 1080p RenderTexture each frame and
+// stretched across the whole display at the bottom sorting order, so the operator UI
+// (the IMGUI HUD, which always draws above uGUI) layers on top of it. Caveat: only
+// what a CAMERA renders is mirrored — ScreenSpaceOverlay visitor UI (QR code,
+// messages) is composited per-display by Unity and is NOT captured.
 //
-// Fallback source (mirrorDisplay2 == false): the raw colour feed of ONE sensor
-// camera (cameraIndex), the same per-camera check the four-camera diagnostic grid
-// on the visitor displays (CameraColorGridOverlay) does.
+// Fallback source (mirrorDisplay2 == false): a small top-right corner preview of the
+// raw colour feed of ONE sensor camera (cameraIndex), the same per-camera check the
+// four-camera diagnostic grid on the visitor displays (CameraColorGridOverlay) does.
 //
 // Which camera: cameraIndex is the CAMERA ID (calibration/cameras.yaml order, the
 // same id 0..3 the rest of the system uses — resolved via
@@ -200,7 +201,8 @@ namespace PointCloud
 
             if (_mirrorRt == null)
             {
-                _mirrorRt = new RenderTexture(640, 360, 24) { name = "OperatorDisplay2Mirror.RT" };
+                // Full-screen background needs real resolution, not a thumbnail.
+                _mirrorRt = new RenderTexture(1920, 1080, 24) { name = "OperatorDisplay2Mirror.RT" };
                 _mirrorRt.Create();
             }
             if (_mirrorCam == null)
@@ -237,12 +239,8 @@ namespace PointCloud
                 _image.color = Color.white;
                 _image.uvRect = new Rect(0f, 0f, 1f, 1f); // RT is upright; no V flip
             }
-            if (_panel != null)
-            {
-                float h = width * 9f / 16f;
-                if (!Mathf.Approximately(_panel.sizeDelta.y, h))
-                    _panel.sizeDelta = new Vector2(width, h);
-            }
+            // The panel fills the screen via anchors in mirror mode — no per-frame
+            // resize (that is only for the raw corner preview's aspect fit).
             if (_label != null) _label.text = $"Display {mirrorSourceDisplay + 1}";
         }
 
@@ -277,8 +275,11 @@ namespace PointCloud
             _canvas = go.AddComponent<Canvas>();
             _canvas.renderMode = RenderMode.ScreenSpaceOverlay;
             _canvas.targetDisplay = targetDisplay;
-            // Just under the FPS overlay (short.MaxValue - 2) so the readout stays on top.
-            _canvas.sortingOrder = short.MaxValue - 3;
+            // Mirror mode paints the whole display as a BACKGROUND, so it sits at the
+            // bottom sorting order — every other Display-1 overlay (FPS, alerts, boot
+            // splash) draws over it, and the IMGUI HUD always draws above uGUI anyway.
+            // Raw corner preview keeps its old spot just under the FPS overlay.
+            _canvas.sortingOrder = mirrorDisplay2 ? short.MinValue : (short.MaxValue - 3);
             var scaler = go.AddComponent<CanvasScaler>();
             scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
             scaler.referenceResolution = new Vector2(1920, 1080);
@@ -286,11 +287,24 @@ namespace PointCloud
 
             _panel = new GameObject("panel").AddComponent<RectTransform>();
             _panel.SetParent(_canvas.transform, false);
-            _panel.anchorMin = _panel.anchorMax = _panel.pivot = new Vector2(1f, 1f);
-            // Clear the FPS panel (top-right, ~72px tall + its 16px margin) by dropping
-            // below it, keeping the same right margin.
-            _panel.anchoredPosition = new Vector2(-16f, -96f);
-            _panel.sizeDelta = new Vector2(width, width * 9f / 16f); // refit to real aspect on first frame
+            if (mirrorDisplay2)
+            {
+                // Full-screen: stretch to every edge so Display 1 shows exactly what the
+                // visitor sees on Display 2, with the operator UI layered on top.
+                _panel.anchorMin = Vector2.zero;
+                _panel.anchorMax = Vector2.one;
+                _panel.pivot = new Vector2(0.5f, 0.5f);
+                _panel.offsetMin = Vector2.zero;
+                _panel.offsetMax = Vector2.zero;
+            }
+            else
+            {
+                _panel.anchorMin = _panel.anchorMax = _panel.pivot = new Vector2(1f, 1f);
+                // Clear the FPS panel (top-right, ~72px tall + its 16px margin) by dropping
+                // below it, keeping the same right margin.
+                _panel.anchoredPosition = new Vector2(-16f, -96f);
+                _panel.sizeDelta = new Vector2(width, width * 9f / 16f); // refit to real aspect on first frame
+            }
 
             var img = new GameObject("image").AddComponent<RawImage>();
             img.transform.SetParent(_panel, false);

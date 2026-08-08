@@ -50,8 +50,10 @@ namespace CameraControl
         [Tooltip("Slider width in scaled GUI pixels.")]
         public float width = 420f;
 
-        [Tooltip("Overall HUD scale (IMGUI's default skin is small on 4K displays).")]
-        [Range(1f, 4f)] public float uiScale = 2f;
+        [Tooltip("Overall HUD scale (IMGUI's default skin is small on 4K displays). " +
+                 "Lowered so the taller control column + cheat sheet still fit vertically; " +
+                 "raise on a 4K operator display if the text is too small.")]
+        [Range(1f, 4f)] public float uiScale = 1.4f;
 
         [Tooltip("Orbit controllers the Auto Orbit toggle drives. Auto-resolves every " +
                  "CameraOrbitController in the scene (including disabled ones) when empty.")]
@@ -106,9 +108,14 @@ namespace CameraControl
 
         // Row heights (scaled GUI units) for the flowing widget column. The backdrop
         // box and the draw cursor both add these up, so keep them the single source.
-        private const float SliderRowH = 48f;
-        private const float ToggleRowH = 28f;
-        private const float ButtonRowH = 32f;
+        // Tight — the column now carries many rows and must clear the screen bottom.
+        private const float SliderRowH = 32f;
+        private const float ToggleRowH = 22f;
+        private const float ButtonRowH = 26f;
+
+        // Compact cheat-sheet style (built lazily in OnGUI): smaller than the default
+        // label so the hotkey list does not push the panel off the bottom.
+        private GUIStyle _sheetStyle;
 
         // Save-button persistence (PlayerPrefs). Built-app operators tune on Display 1
         // and press Save; the values reload on the next launch (Start applies them).
@@ -118,6 +125,7 @@ namespace CameraControl
         private const string KeyHistoryPrint = "FVUI.pub.trailSamples";
         private const string KeyDecimate     = "FVUI.pc.decimate";
         private const string KeySeedCount    = "FVUI.mc.seedCount";
+        private const string KeyPrintStride  = "FVUI.print.seedStride";
         private string _saveStatus;
 
         // Seed Count is index 8 of PointCloudMotionCurves' IPanelTunable list.
@@ -203,6 +211,8 @@ namespace CameraControl
                 decimater.SetTunableValue(0, PlayerPrefs.GetFloat(KeyDecimate));
             if (motionCurves != null && PlayerPrefs.HasKey(KeySeedCount))
                 motionCurves.SetTunableValue(SeedCountTunable, PlayerPrefs.GetInt(KeySeedCount));
+            if (exporter != null && PlayerPrefs.HasKey(KeyPrintStride))
+                exporter.printSeedStride = Mathf.Clamp(PlayerPrefs.GetInt(KeyPrintStride), 1, 400);
         }
 
         private void SaveSettings()
@@ -214,6 +224,7 @@ namespace CameraControl
             if (decimater != null) PlayerPrefs.SetFloat(KeyDecimate, decimater.TunableValue(0));
             if (motionCurves != null)
                 PlayerPrefs.SetInt(KeySeedCount, Mathf.RoundToInt(motionCurves.TunableValue(SeedCountTunable)));
+            if (exporter != null) PlayerPrefs.SetInt(KeyPrintStride, exporter.printSeedStride);
             PlayerPrefs.Save();
             _saveStatus = "Saved ✓";
         }
@@ -223,12 +234,12 @@ namespace CameraControl
         private float SliderRow(float y, float sliderWidth, string label,
                                 float value, float min, float max, System.Action<float> set)
         {
-            GUI.Label(new Rect(position.x, y, sliderWidth, 22), label);
+            GUI.Label(new Rect(position.x, y, sliderWidth, 15), label);
             // Explicit track: the default skin's rail is nearly invisible on black.
             GUI.color = new Color(1f, 1f, 1f, 0.35f);
-            GUI.DrawTexture(new Rect(position.x, y + 24 + 8, sliderWidth, 4), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(position.x, y + 16 + 6, sliderWidth, 3), Texture2D.whiteTexture);
             GUI.color = Color.white;
-            float v = GUI.HorizontalSlider(new Rect(position.x, y + 24, sliderWidth, 20), value, min, max);
+            float v = GUI.HorizontalSlider(new Rect(position.x, y + 16, sliderWidth, 15), value, min, max);
             if (!Mathf.Approximately(v, value)) set(v);
             return y + SliderRowH;
         }
@@ -246,11 +257,14 @@ namespace CameraControl
 
             GUI.matrix = Matrix4x4.Scale(Vector3.one * uiScale);
 
+            if (_sheetStyle == null)
+                _sheetStyle = new GUIStyle(GUI.skin.label) { fontSize = 11, wordWrap = false };
+
             string sheet = BuildCheatSheet();
             var sheetContent = new GUIContent(sheet);
             // Measured, not a per-line guess: the skin's line height is not knowable
             // outside OnGUI, and a wrong guess clipped the last row off the panel.
-            float sheetHeight = GUI.skin.label.CalcHeight(sheetContent, width);
+            float sheetHeight = _sheetStyle.CalcHeight(sheetContent, width);
 
             // Widget-column height = sum of present rows (same constants the draw
             // cursor advances by below), so the backdrop wraps exactly the widgets.
@@ -258,7 +272,8 @@ namespace CameraControl
             if (publisher != null)      widgetsH += SliderRowH;     // History (print)
             if (pointCloudView != null) widgetsH += SliderRowH;     // Brightness
             if (decimater != null)      widgetsH += SliderRowH;     // Decimate
-            if (motionCurves != null)   widgetsH += SliderRowH;     // Seed Count
+            if (motionCurves != null)   widgetsH += SliderRowH;     // Seed Count (live)
+            if (exporter != null)       widgetsH += SliderRowH;     // Print Seed Stride
             if (exporter != null)       widgetsH += SliderRowH;     // Web curve tolerance
             widgetsH += ToggleRowH;                                 // Auto Orbit
             if (experienceDirector != null) widgetsH += ToggleRowH; // Experience Mode
@@ -308,13 +323,22 @@ namespace CameraControl
                     decimater.TunableValue(0), decimater.TunableMin(0), decimater.TunableMax(0),
                     nv => decimater.SetTunableValue(0, nv));
 
-            // Motion-curve seed count (PointCloudMotionCurves tunable 8).
+            // Motion-curve seed count — LIVE seed budget (PointCloudMotionCurves idx 8).
             if (motionCurves != null)
                 y = SliderRow(y, sliderWidth,
-                    $"Seed Count: {Mathf.RoundToInt(motionCurves.TunableValue(SeedCountTunable))}",
+                    $"Seed Count (live): {Mathf.RoundToInt(motionCurves.TunableValue(SeedCountTunable))}",
                     motionCurves.TunableValue(SeedCountTunable),
                     motionCurves.TunableMin(SeedCountTunable), motionCurves.TunableMax(SeedCountTunable),
                     nv => motionCurves.SetTunableValue(SeedCountTunable, nv));
+
+            // Seed density at 3D-EXPORT time is a separate knob: the export subsamples
+            // the live seeds by TSDFPrintExporter.printSeedStride (higher stride = fewer
+            // print seeds = sparser tubes). Shown as its own slider, not the live count.
+            if (exporter != null)
+                y = SliderRow(y, sliderWidth,
+                    $"Print Seed Stride: {exporter.printSeedStride}  (↑=sparser)",
+                    exporter.printSeedStride, 1f, 400f,
+                    nv => exporter.printSeedStride = Mathf.Clamp(Mathf.RoundToInt(nv), 1, 400));
 
             // Print web-export curve tolerance (1e05bc1).
             if (exporter != null)
@@ -323,14 +347,14 @@ namespace CameraControl
                     exporter.TunableValue(0), exporter.TunableMin(0), exporter.TunableMax(0),
                     nv => exporter.SetTunableValue(0, nv));
 
-            bool auto = GUI.Toggle(new Rect(position.x, y, width, 24),
+            bool auto = GUI.Toggle(new Rect(position.x, y, width, 20),
                                    _autoOrbit, " Auto Orbit (stage cams)");
             if (auto != _autoOrbit) ApplyAutoOrbit(auto);
             y += ToggleRowH;
 
             if (experienceDirector != null)
             {
-                bool exp = GUI.Toggle(new Rect(position.x, y, width, 24),
+                bool exp = GUI.Toggle(new Rect(position.x, y, width, 20),
                                       experienceDirector.Visible,
                                       $" Experience Mode ({experienceDirector.CurrentState})");
                 if (exp != experienceDirector.Visible) experienceDirector.Visible = exp;
@@ -339,7 +363,7 @@ namespace CameraControl
                 // Keep the raw visitor takes on disk (default OFF = visitor data never
                 // outlives the show). ON persists every take under visitorRecordingRoot
                 // for later playback.
-                bool keep = GUI.Toggle(new Rect(position.x, y, width, 24),
+                bool keep = GUI.Toggle(new Rect(position.x, y, width, 20),
                                        experienceDirector.KeepRecordings,
                                        " Keep recordings (raw takes on disk)");
                 if (keep != experienceDirector.KeepRecordings) experienceDirector.KeepRecordings = keep;
@@ -351,7 +375,7 @@ namespace CameraControl
             // change (see below) so the install setting survives relaunch.
             if (display3Mirror != null)
             {
-                bool flip = GUI.Toggle(new Rect(position.x, y, width, 24),
+                bool flip = GUI.Toggle(new Rect(position.x, y, width, 20),
                                        display3Mirror.mirrorHorizontally, " Flip Display 3 (X)");
                 if (flip != display3Mirror.mirrorHorizontally)
                 {
@@ -364,13 +388,13 @@ namespace CameraControl
 
             if (exporter != null)
             {
-                if (GUI.Button(new Rect(position.x, y, 190, 26), "Export GLB + USDZ"))
+                if (GUI.Button(new Rect(position.x, y, 190, 22), "Export GLB + USDZ"))
                     exporter.ExportWeb();
                 GUI.Label(new Rect(position.x + 198, y + 2, width - 198, 44), exporter.StatusText);
                 y += ButtonRowH;
             }
 
-            if (GUI.Button(new Rect(position.x, y, 190, 26), "Save settings"))
+            if (GUI.Button(new Rect(position.x, y, 190, 22), "Save settings"))
                 SaveSettings();
             if (!string.IsNullOrEmpty(_saveStatus))
                 GUI.Label(new Rect(position.x + 198, y + 2, width - 198, 22), _saveStatus);
@@ -379,7 +403,7 @@ namespace CameraControl
             GUI.color = new Color(1f, 1f, 1f, 0.35f);
             GUI.DrawTexture(new Rect(position.x, sheetTop - 8f, width, 2), Texture2D.whiteTexture);
             GUI.color = Color.white;
-            GUI.Label(new Rect(position.x, sheetTop, width, sheetHeight), sheetContent);
+            GUI.Label(new Rect(position.x, sheetTop, width, sheetHeight), sheetContent, _sheetStyle);
             if (publisher != null && !string.IsNullOrEmpty(publisher.StatusText))
                 GUI.Label(new Rect(position.x, sheetTop + sheetHeight + 4f, width, 22),
                           publisher.StatusText.Length > 60
