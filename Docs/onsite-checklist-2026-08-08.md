@@ -1,23 +1,29 @@
 # 現場動作確認チェックリスト(2026-08-07〜08 の変更分)
 
-対象コミット: 1e05bc1 / c990a85 / caaccdb / 69301e8 / a837d42 / ead1a72。
+対象コミット: 1e05bc1 / c990a85 / caaccdb / 69301e8 / a837d42 / ead1a72 / dcaf9a6。
 恒常的なセットアップ項目は [onsite-checklist.md](./onsite-checklist.md) を参照。
 ここは**この 2 日間で入った機能が現場の実機(Windows ビルド + 4 カメラ + 3 ディスプレイ)で
 動くかの確認**に絞る。
 
 ## 1. Display 1 オペレーター HUD(ビルドで確認 — Control Panel はビルドに無い)
 
-スライダー 6 本(上から History (live) / History (print) / Brightness / Decimate /
-Seed Count / Web Curve Tol)+ トグル 4 つ + ボタン 2 つの縦並びになった。
+スライダー 7 本(上から History (live) / History (print) / Brightness / Decimate /
+Seed Count (live) / Print Seed Stride / Web Curve Tol)+ トグル 4 つ + ボタン 2 つの
+縦並びになった。
 
-- [ ] スライダー 6 本すべてが表示され、ドラッグで**即座に見た目が変わる**こと
+- [ ] スライダー 7 本すべてが表示され、ドラッグで**即座に見た目が変わる**こと
   - History (live): 点群のモーションカーブの時間窓が伸縮する
   - History (print): 値を変えても**ライブ表示は変わらない**(書き出し時のみ使用)。
     Export 後の preview / GLB に反映されているかで確認
   - Brightness: 点群全体の明るさ
   - Decimate: 点群の間引き率(%)
-  - Seed Count: モーションカーブの本数
+  - Seed Count (live): ライブ表示のモーションカーブの本数
+  - Print Seed Stride: ライブ非反映。書き出し時にライブ seed を間引く間隔
+    (↑=チューブが疎になる)。Export 後の preview / est GLB サイズで確認
   - Web Curve Tol: ライブ非反映。Export 後のファイルサイズ/形状で確認
+- [ ] **コンパクト化された HUD の可読性**: uiScale 既定が 2 → 1.4 に下がり、
+  行間・チートシート文字も縮小された。現地のオペレーターディスプレイ(4K なら特に)で
+  文字が小さすぎないか確認し、必要なら Inspector で uiScale を上げる
 - [ ] パネル全体(スライダー+トグル+ボタン+チートシート)が
   **オペレーターディスプレイの縦に収まる**こと(行数が大幅に増えた)
 - [ ] **Save settings** → アプリ再起動 → スライダー値が復元されること(PlayerPrefs)
@@ -34,15 +40,20 @@ Seed Count / Web Curve Tol)+ トグル 4 つ + ボタン 2 つの縦並びにな
 - [ ] (旧) QR Dry Run トグルは **HUD から削除済み**。dry run の切替は
   ExperienceConfig.dryRunPublish で行う — 本番前に false を確認
 
-## 2. オペレータープレビュー(Display 1 右上 = Display 2 ミラー)
+## 2. オペレータープレビュー(Display 1 全面 = Display 2 ミラー)
 
-- [ ] Display 1 右上の小窓に**来場者画面(Display 2)のミラー**が出ること
-  (従来の単カメラ color feed から変更。戻すのは Inspector の mirrorDisplay2=false)
+- [ ] Display 1 の**全面背景**に来場者画面(Display 2)のミラーが出ること
+  (右上小窓 → 全面に変更。1080p RT をフルスクリーンに引き伸ばし)
+- [ ] **HUD・FPS 表示・アラート・ブートスプラッシュがミラーの上に重なって
+  読める**こと(ミラーは最下層 sorting order。IMGUI の HUD は常に uGUI より上)
 - [ ] **既知の制限**: ScreenSpaceOverlay の来場者 UI(QR コード・メッセージ)は
   ミラーに**映らない**。QR 表示確認は物理ステージモニターで行うこと
-- [ ] Display 2 側が X 反転(MirrorDisplayCamera)している場合でも、ミラー小窓の
+- [ ] Display 2 側が X 反転(MirrorDisplayCamera)している場合でも、ミラーの
   立体が裏返らない(inverted culling 対応)こと
-- [ ] 体験フロー 1 周の間、小窓のフレームレート/遅延が運用に耐えること
+- [ ] 体験フロー 1 周の間、ミラーのフレームレート/遅延が運用に耐えること
+  (全面 1080p 化でクローンカメラの描画負荷が上がった — ステージ側 FPS への影響も見る)
+- [ ] fallback(Inspector で mirrorDisplay2=false)にすると従来の右上小窓
+  単カメラ color feed に戻ること
 
 ## 3. Playback 床キャリブ(録画の持ち回り)
 
