@@ -6,10 +6,12 @@
 // filters on the CPU.
 //
 // Filter parity with PointCloudUnlit.shader (PassObb/PassCapsules/PassFloor):
-// BoundingVolume region, decimater KeepRatio, capsule person-mask and the
-// floor mask are all replicated here so the exported cloud is the on-screen
-// cloud. The joint-motion displacement and reveal/fade clips are experience
-// presentation effects, not content filters — deliberately not replicated.
+// the BoundingVolume region, capsule person-mask and floor mask are replicated
+// here so the exported cloud is spatially the on-screen cloud. Density is the
+// exception: the caller passes an EXPORT-ONLY keepRatio (TSDFPrintExporter.
+// exportPointKeepPercent), NOT the live PointCloudDecimater — the Display-1
+// Decimate slider thins only the on-screen cloud. The joint-motion displacement
+// and reveal/fade clips are presentation effects, not content filters — not replicated.
 //
 // Source parity: renderers flagged suppressAsSource are skipped, same as
 // TSDFIntegrator and PointCloudMotionCurves. During the visitor play-through
@@ -28,10 +30,11 @@ namespace PointCloud
 
         /// <summary>World-space positions + sRGB colours of every displayed
         /// point-cloud point, after the BoundingVolume region filter, the
-        /// decimater's KeepRatio, the capsule person-mask and the floor mask —
-        /// the same content filters the display shader runs. Deterministic for
-        /// a given <paramref name="seed"/>. Runs a synchronous GPU readback —
-        /// main thread only.</summary>
+        /// caller-supplied <paramref name="keepRatio"/> (the export-only density,
+        /// NOT the live decimater), the capsule person-mask and the floor mask.
+        /// Spatially matches the display shader; only the density knob differs.
+        /// Deterministic for a given <paramref name="seed"/>. Runs a synchronous
+        /// GPU readback — main thread only.</summary>
         public static void Gather(BoundingVolume bounds, float keepRatio, int seed,
                                   out Vector3[] pos, out Vector3[] col,
                                   PointCloudCapsuleFilter capsules = null,

@@ -9,8 +9,10 @@
 //   - History (print) slider: OperatorPublisher.trailSamples — the window the
 //     3D-data export temporarily overrides the live one with before baking.
 //   - Brightness slider: PointCloudView overall colour brightness.
-//   - Decimate slider: PointCloudDecimater reduction percent.
+//   - Decimate slider: PointCloudDecimater reduction percent (LIVE on-screen cloud only).
 //   - Seed Count slider: PointCloudMotionCurves seed budget.
+//   - Export Point Keep slider: TSDFPrintExporter.exportPointKeepPercent — the % of
+//     captured points kept in the EXPORTED files, independent of the live Decimate.
 //   - Web Curve Tol slider: TSDFPrintExporter web-export curve tolerance.
 //   - Auto Orbit toggle: turns on the idle auto-orbit on every stage camera's
 //     CameraOrbitController, keeping the controllers enabled regardless of the
@@ -126,6 +128,7 @@ namespace CameraControl
         private const string KeyDecimate     = "FVUI.pc.decimate";
         private const string KeySeedCount    = "FVUI.mc.seedCount";
         private const string KeyPrintStride  = "FVUI.print.seedStride";
+        private const string KeyExportPointKeep = "FVUI.print.pointKeep";
         private string _saveStatus;
 
         // Seed Count is index 8 of PointCloudMotionCurves' IPanelTunable list.
@@ -213,6 +216,8 @@ namespace CameraControl
                 motionCurves.SetTunableValue(SeedCountTunable, PlayerPrefs.GetInt(KeySeedCount));
             if (exporter != null && PlayerPrefs.HasKey(KeyPrintStride))
                 exporter.printSeedStride = Mathf.Clamp(PlayerPrefs.GetInt(KeyPrintStride), 1, 400);
+            if (exporter != null && PlayerPrefs.HasKey(KeyExportPointKeep))
+                exporter.exportPointKeepPercent = Mathf.Clamp(PlayerPrefs.GetFloat(KeyExportPointKeep), 1f, 100f);
         }
 
         private void SaveSettings()
@@ -225,6 +230,7 @@ namespace CameraControl
             if (motionCurves != null)
                 PlayerPrefs.SetInt(KeySeedCount, Mathf.RoundToInt(motionCurves.TunableValue(SeedCountTunable)));
             if (exporter != null) PlayerPrefs.SetInt(KeyPrintStride, exporter.printSeedStride);
+            if (exporter != null) PlayerPrefs.SetFloat(KeyExportPointKeep, exporter.exportPointKeepPercent);
             PlayerPrefs.Save();
             _saveStatus = "Saved ✓";
         }
@@ -274,6 +280,7 @@ namespace CameraControl
             if (decimater != null)      widgetsH += SliderRowH;     // Decimate
             if (motionCurves != null)   widgetsH += SliderRowH;     // Seed Count (live)
             if (exporter != null)       widgetsH += SliderRowH;     // Print Seed Stride
+            if (exporter != null)       widgetsH += SliderRowH;     // Export Point Keep
             if (exporter != null)       widgetsH += SliderRowH;     // Web curve tolerance
             widgetsH += ToggleRowH;                                 // Auto Orbit
             if (experienceDirector != null) widgetsH += ToggleRowH; // Experience Mode
@@ -339,6 +346,15 @@ namespace CameraControl
                     $"Print Seed Stride: {exporter.printSeedStride}  (↑=sparser)",
                     exporter.printSeedStride, 1f, 400f,
                     nv => exporter.printSeedStride = Mathf.Clamp(Mathf.RoundToInt(nv), 1, 400));
+
+            // Point cloud density at 3D-EXPORT time — a SEPARATE knob from the live
+            // Decimate slider above (which only thins the on-screen cloud). Keeps this
+            // % of the raw captured points in the exported files. 100 = every point.
+            if (exporter != null)
+                y = SliderRow(y, sliderWidth,
+                    $"Export Point Keep: {Mathf.RoundToInt(exporter.exportPointKeepPercent)} %  (export only)",
+                    exporter.exportPointKeepPercent, 1f, 100f,
+                    nv => exporter.exportPointKeepPercent = Mathf.Clamp(nv, 1f, 100f));
 
             // Print web-export curve tolerance (1e05bc1).
             if (exporter != null)

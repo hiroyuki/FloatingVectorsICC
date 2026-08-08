@@ -372,12 +372,19 @@ namespace TSDF
                  "(vertex count is unchanged — only the ring is pushed out).")]
         public float webCurveRadiusScale = 1.5f;
 
-        [Tooltip("Also write the displayed point cloud (BoundingVolume region + the Point cloud " +
-                 "decimater's %) into the web files. GLB gets a real POINTS primitive; USDZ gets " +
-                 "a tiny octahedron per point (AR Quick Look can't render true points). Registered " +
-                 "to the same frame as the curves. NOTE: floor/person masks not yet applied — the " +
-                 "cloud is wider than on-screen (floor/background survive).")]
+        [Tooltip("Also write the displayed point cloud (BoundingVolume region + capsule/floor " +
+                 "masks) into the web files. GLB gets a real POINTS primitive; USDZ gets a tiny " +
+                 "octahedron per point (AR Quick Look can't render true points). Registered to " +
+                 "the same frame as the curves. Density is set by Export Point Keep % below — " +
+                 "independent of the live Decimate slider.")]
         public bool webIncludePointCloud = true;
+
+        [Range(1f, 100f)]
+        [Tooltip("EXPORT-ONLY point cloud density: keep this % of the raw captured points in the " +
+                 "web/AR/print files. Independent of the live Point cloud Decimate slider, which " +
+                 "only thins the on-screen cloud. 100 = every captured point (the raw camera cloud " +
+                 "is the ceiling — this can thin but not add). Drives Display 1's 'Export Point Keep' knob.")]
+        public float exportPointKeepPercent = 100f;
 
         [Range(0.002f, 0.02f)]
         [Tooltip("Point size in metres (USDZ octahedron diameter). ~0.008 m reads as a dot at body scale.")]
@@ -2235,6 +2242,10 @@ namespace TSDF
             curveTipTaper = webCurveTipTaper,
             curveTolerance = webCurveTolerance,
             includePointCloud = webIncludePointCloud,
+            // Export-only point density (Display 1's "Export Point Keep %"), decoupled
+            // from the live PointCloudDecimater. Clamp01; 0 would mean "keep all" in
+            // Capture, but the field's range floor is 1 % so a real value always flows.
+            pointCloudKeepRatio = Mathf.Clamp01(exportPointKeepPercent * 0.01f),
         };
 
         /// <summary>The web/AR file options (AO bake, curves-only, size budget)

@@ -2784,8 +2784,18 @@ namespace Experience
         private IEnumerator DissolveWhitePointCloudIn()
         {
             Shader.SetGlobalFloat(PcFadeCullId, 1f);
+            bool wpcOnBefore = _processingWhitePointCloudOn;
             SetProcessingWhitePointCloud(true);
+            Debug.Log($"[wpc-trace] DissolveIn: wpcOnBefore={wpcOnBefore} -> wpcOn={_processingWhitePointCloudOn} " +
+                      $"tsdfView.white={(tsdfView != null ? tsdfView.whitePointCloud : false)} " +
+                      $"showMesh={(tsdfView != null ? tsdfView.showMesh : false)} " +
+                      $"suppress={(tsdfView != null ? tsdfView.suppressDraw : false)} " +
+                      $"cull={Shader.GetGlobalFloat(PcFadeCullId):0.00} " +
+                      $"pub={(tsdfVolume != null ? tsdfVolume.PublishVersion : -1)}", this);
             yield return RampFadeCull(1f, 0f);
+            Debug.Log($"[wpc-trace] DissolveIn after ramp: cull={Shader.GetGlobalFloat(PcFadeCullId):0.00} " +
+                      $"tsdfView.white={(tsdfView != null ? tsdfView.whitePointCloud : false)} " +
+                      $"suppress={(tsdfView != null ? tsdfView.suppressDraw : false)}", this);
         }
 
         // Dissolve the white point cloud OUT to black, then hide it. Leaves cull at 1
@@ -2857,6 +2867,10 @@ namespace Experience
             // instead of jumping partway then sitting frozen at the top through the
             // longest phase. (No-op for showProgressBar=false callers — TestMove.)
             bool willShowCloud = config.processingWhitePointCloud && tsdfView != null;
+            Debug.Log($"[wpc-trace] enter caption='{caption}' showBar={showProgressBar} " +
+                      $"willShowCloud={willShowCloud} procWhiteCfg={config.processingWhitePointCloud} " +
+                      $"tsdfView={(tsdfView != null)} wpcOn={_processingWhitePointCloudOn} " +
+                      $"take='{takeRoot}' willConvert={WillConvertTake(takeRoot)}", this);
             // Reserve the conversion slice ONLY when a conversion will actually run.
             // When it is skipped (tapped take / skipProcessing / protected canned),
             // ConvertTakeRoutine emits no progress, so a reserved slice would make the
@@ -2889,7 +2903,13 @@ namespace Experience
             if (tsdfIntegrator != null) tsdfIntegrator.RequestFullClearNextBatch();
             float rate = Mathf.Clamp(config.presentationPlaybackRate, 0.05f, 2f);
             StartVisitorPlayback(takeRoot, loop: false, rate: rate);
-            if (!_visitorPlaybackActive || sensorRecorder == null || !sensorRecorder.IsPlaying) yield break;
+            if (!_visitorPlaybackActive || sensorRecorder == null || !sensorRecorder.IsPlaying)
+            {
+                Debug.Log($"[wpc-trace] cloud pass ABORT (playback not started): caption='{caption}' " +
+                          $"playbackActive={_visitorPlaybackActive} rec={(sensorRecorder != null)} " +
+                          $"IsPlaying={(sensorRecorder != null && sensorRecorder.IsPlaying)}", this);
+                yield break;
+            }
             // The white point cloud is MESH-ONLY (the point cloud renderers are hidden), so there
             // is no skeleton to align to — the playback render delay only pins the mesh on
             // frame 0 for its first playbackRenderDelayFrames frames and truncates the tail.
@@ -2914,6 +2934,10 @@ namespace Experience
                 if (!showProgressBar) _ui.ShowMessage(caption);
                 yield return null;
             }
+            Debug.Log($"[wpc-trace] warmup done caption='{caption}' showBar={showProgressBar}: " +
+                      $"startPub={startPub} pub={(tsdfVolume != null ? tsdfVolume.PublishVersion : -1)} " +
+                      $"warmFrames={warm} IsPlaying={(sensorRecorder != null && sensorRecorder.IsPlaying)} " +
+                      $"active={_active}", this);
             yield return DissolveWhitePointCloudIn(); // dither the mesh in — now the take's, not the residue
 
             // Wait for the single pass to finish: loop is off, so the recorder stops
@@ -3771,6 +3795,7 @@ namespace Experience
                 curveTipTaper = 0.25f,
                 curveTolerance = 0.0015f,
                 includePointCloud = true,
+                pointCloudKeepRatio = 1f, // no exporter to tune it — keep all points
             };
         }
 

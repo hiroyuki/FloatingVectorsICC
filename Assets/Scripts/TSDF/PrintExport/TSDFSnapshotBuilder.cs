@@ -42,8 +42,9 @@ namespace TSDF
         public List<Vector3> curveColors = new List<Vector3>();
 
         // Displayed point cloud, WORLD space + sRGB colour (BoundingVolume +
-        // decimater applied). Null when the capture didn't include it. Exported
-        // through the SAME center/minY as the mesh/curves, so it stays registered.
+        // capsule/floor masks + the EXPORT-ONLY keep ratio, NOT the live
+        // decimater). Null when the capture didn't include it. Exported through
+        // the SAME center/minY as the mesh/curves, so it stays registered.
         public Vector3[] pcPos;
         public Vector3[] pcCol;
 
@@ -86,6 +87,11 @@ namespace TSDF
             public float curveTipTaper;       // radius scale at the old end
             public float curveTolerance;      // polyline simplification (m)
             public bool includePointCloud;    // also grab the displayed point cloud
+            // Export-only keep fraction (0..1) for the point cloud. Independent of
+            // the LIVE PointCloudDecimater — the exporter sets it from
+            // TSDFPrintExporter.exportPointKeepPercent so the operator can thin the
+            // exported cloud without changing what's on screen. 0 (unset) = keep all.
+            public float pointCloudKeepRatio;
         }
 
         public struct ExportStats
@@ -196,14 +202,14 @@ namespace TSDF
                     Debug.LogWarning($"[TSDFSnapshotBuilder] capture: curves skipped — {why}");
             }
 
-            // Point cloud at the SAME frame, through the same content filters
-            // the display shader runs (region, decimater, capsule person-mask,
-            // floor mask). Kept in world space; ExportFiles recentres it through
-            // snap.center/minY so it registers with the mesh and curves.
+            // Point cloud at the SAME frame, through the same SPATIAL filters the
+            // display shader runs (region, capsule person-mask, floor mask). Density
+            // is the exception: an export-only keep ratio (opt.pointCloudKeepRatio),
+            // NOT the live decimater. Kept in world space; ExportFiles recentres it
+            // through snap.center/minY so it registers with the mesh and curves.
             if (opt.includePointCloud)
             {
                 var bounds = UnityEngine.Object.FindFirstObjectByType<PointCloud.BoundingVolume>();
-                var deci = UnityEngine.Object.FindFirstObjectByType<PointCloud.PointCloudDecimater>();
                 // FindFirstObjectByType would grab SkeletonMerger's live discard
                 // person-mask (the only runtime PointCloudCapsuleFilter, KeepOutside),
                 // which erases the visitor's own points from the frozen capture —
@@ -217,7 +223,10 @@ namespace TSDF
                     break;
                 }
                 var floor = UnityEngine.Object.FindFirstObjectByType<PointCloud.PointCloudFloorMask>();
-                float keep = (deci != null && deci.Enabled) ? deci.KeepRatio : 1f;
+                // Export-only density knob (TSDFPrintExporter.exportPointKeepPercent),
+                // NOT the live PointCloudDecimater — the live Decimate slider now only
+                // thins the on-screen cloud. 0 (unset option) = keep all.
+                float keep = opt.pointCloudKeepRatio > 0f ? Mathf.Clamp01(opt.pointCloudKeepRatio) : 1f;
                 PointCloud.PointCloudSnapshot.Gather(bounds, keep, 12345, out snap.pcPos, out snap.pcCol,
                                                      caps, floor);
                 Debug.Log($"[TSDFSnapshotBuilder] point cloud: {snap.pcPos.Length} pts " +
