@@ -659,7 +659,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: TSDF::TSDF.TSDFView
   volume: {fileID: 639959844}
   mode: 2
-  showMesh: 0
+  showMesh: 1
   voxelMaterial: {fileID: 0}
   voxelSphereScale: 0.5
   voxelHideAboveSdfFraction: 1
