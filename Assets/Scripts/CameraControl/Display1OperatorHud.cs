@@ -5,14 +5,19 @@
 // Controls (a runtime subset of Window > Control Panel — that panel is an
 // EditorWindow and does not exist in a build, so the knobs recently added to it
 // are mirrored here for the operator on the built app):
-//   - History Samples slider: BonePoseHistory's motion-curve time window (same
-//     knob as the Control Panel's "Motion history" tunable).
+//   - History (live) slider: BonePoseHistory's motion-curve window at runtime.
+//   - History (print) slider: OperatorPublisher.trailSamples — the window the
+//     3D-data export temporarily overrides the live one with before baking.
 //   - Brightness slider: PointCloudView overall colour brightness.
+//   - Decimate slider: PointCloudDecimater reduction percent.
+//   - Seed Count slider: PointCloudMotionCurves seed budget.
 //   - Web Curve Tol slider: TSDFPrintExporter web-export curve tolerance.
 //   - Auto Orbit toggle: turns on the idle auto-orbit on every stage camera's
 //     CameraOrbitController, keeping the controllers enabled regardless of the
 //     pause state (via PauseOrbitGate.autoOrbitOverride on gated cameras).
-//   - Experience Mode toggle + QR Dry Run toggle (ExperienceDirector).
+//   - Experience Mode toggle (ExperienceDirector).
+//   - Keep recordings toggle: when ON, ExperienceDirector keeps the raw visitor
+//     takes on disk instead of deleting them at the QR / next-run boundary.
 //   - Save settings button: persists the tuning above to PlayerPrefs; reloaded
 //     and applied on the next launch (Start).
 //
@@ -75,6 +80,19 @@ namespace CameraControl
                  "Auto-resolves when left empty.")]
         public SensorRecorder recorder;
 
+        [Tooltip("Point cloud decimater whose Decimate (%) slider is drawn. " +
+                 "Auto-resolves the first PointCloudDecimater when left empty.")]
+        public PointCloudDecimater decimater;
+
+        [Tooltip("Motion curves whose Seed Count slider is drawn. Auto-resolves the " +
+                 "first PointCloudMotionCurves when left empty.")]
+        public BodyTracking.PointCloudMotionCurves motionCurves;
+
+        [Tooltip("Mirror component on the Display 3 camera the 'Flip Display 3 (X)' " +
+                 "toggle drives. Auto-resolves the camera whose targetDisplay is 2 " +
+                 "(Display 3) and adds a MirrorDisplayCamera if it has none.")]
+        public MirrorDisplayCamera display3Mirror;
+
         [Tooltip("Key that switches the operator display between the HUD and the " +
                  "4-camera tiles (drives debugView.Visible; the HUD mirrors off it).")]
         public KeyCode viewSwitchKey = KeyCode.Tab;
@@ -91,11 +109,21 @@ namespace CameraControl
 
         // Save-button persistence (PlayerPrefs). Built-app operators tune on Display 1
         // and press Save; the values reload on the next launch (Start applies them).
-        private const string KeyBrightness = "FVUI.pc.brightness";
-        private const string KeyCurveTol   = "FVUI.print.curveTol";
-        private const string KeyQrDryRun   = "FVUI.exp.qrDryRun";
-        private const string KeyHistory    = "FVUI.bt.historySamples";
+        private const string KeyBrightness   = "FVUI.pc.brightness";
+        private const string KeyCurveTol     = "FVUI.print.curveTol";
+        private const string KeyHistoryLive  = "FVUI.bt.historySamples";
+        private const string KeyHistoryPrint = "FVUI.pub.trailSamples";
+        private const string KeyDecimate     = "FVUI.pc.decimate";
+        private const string KeySeedCount    = "FVUI.mc.seedCount";
         private string _saveStatus;
+
+        // Seed Count is index 8 of PointCloudMotionCurves' IPanelTunable list.
+        private const int SeedCountTunable = 8;
+
+        // Display 3 is Unity targetDisplay index 2 (0-based). The flip toggle drives
+        // the MirrorDisplayCamera on whichever camera renders there.
+        private const int Display3Index = 2;
+        private const string KeyFlipDisplay3 = "FVUI.disp3.flipX";
 
         /// <summary>Panel height in scaled GUI units as last measured in OnGUI.
         /// Exposed so a check can tell whether the panel still fits the display.</summary>
@@ -114,6 +142,9 @@ namespace CameraControl
                 experienceDirector = FindFirstObjectByType<Experience.ExperienceDirector>();
             if (publisher == null) publisher = FindFirstObjectByType<Experience.OperatorPublisher>();
             if (recorder == null) recorder = FindFirstObjectByType<SensorRecorder>();
+            if (decimater == null) decimater = FindFirstObjectByType<PointCloudDecimater>();
+            if (motionCurves == null) motionCurves = FindFirstObjectByType<BodyTracking.PointCloudMotionCurves>();
+            if (display3Mirror == null) display3Mirror = ResolveDisplay3Mirror();
             // Reflect an override that is already on (e.g. HUD re-enabled mid-session).
             foreach (var o in orbits)
                 if (o != null && o.TryGetComponent(out PauseOrbitGate g) && g.autoOrbitOverride)
@@ -137,36 +168,43 @@ namespace CameraControl
         }
 
         // Load persisted tuning (Save button) once the scene's components exist.
-        // Only values whose reload applies cleanly at Start are persisted: brightness
-        // and history apply anytime; curve tolerance is read at export; QR dry-run is
-        // read at ResultShow, always after Start.
+        // Every persisted value reloads cleanly at Start: brightness / decimate /
+        // seed count / both history windows apply anytime; curve tolerance and the
+        // print history window are read at export, always after Start.
         private void Start() => LoadSettings();
 
         private void LoadSettings()
         {
             if (pointCloudView == null) pointCloudView = FindFirstObjectByType<PointCloudView>();
             if (exporter == null) exporter = FindFirstObjectByType<TSDFPrintExporter>();
-            if (experienceDirector == null)
-                experienceDirector = FindFirstObjectByType<Experience.ExperienceDirector>();
             if (history == null) history = FindFirstObjectByType<BonePoseHistory>();
+            if (publisher == null) publisher = FindFirstObjectByType<Experience.OperatorPublisher>();
+            if (decimater == null) decimater = FindFirstObjectByType<PointCloudDecimater>();
+            if (motionCurves == null) motionCurves = FindFirstObjectByType<BodyTracking.PointCloudMotionCurves>();
 
             if (pointCloudView != null && PlayerPrefs.HasKey(KeyBrightness))
                 pointCloudView.SetTunableValue(0, PlayerPrefs.GetFloat(KeyBrightness));
             if (exporter != null && PlayerPrefs.HasKey(KeyCurveTol))
                 exporter.SetTunableValue(0, PlayerPrefs.GetFloat(KeyCurveTol));
-            if (experienceDirector != null && PlayerPrefs.HasKey(KeyQrDryRun))
-                experienceDirector.DryRunPublish = PlayerPrefs.GetInt(KeyQrDryRun) == 1;
-            if (history != null && PlayerPrefs.HasKey(KeyHistory))
-                history.SetTunableValue(0, PlayerPrefs.GetFloat(KeyHistory));
+            if (history != null && PlayerPrefs.HasKey(KeyHistoryLive))
+                history.SetTunableValue(0, PlayerPrefs.GetFloat(KeyHistoryLive));
+            if (publisher != null && PlayerPrefs.HasKey(KeyHistoryPrint))
+                publisher.trailSamples = Mathf.Clamp(PlayerPrefs.GetInt(KeyHistoryPrint), 2, 32);
+            if (decimater != null && PlayerPrefs.HasKey(KeyDecimate))
+                decimater.SetTunableValue(0, PlayerPrefs.GetFloat(KeyDecimate));
+            if (motionCurves != null && PlayerPrefs.HasKey(KeySeedCount))
+                motionCurves.SetTunableValue(SeedCountTunable, PlayerPrefs.GetInt(KeySeedCount));
         }
 
         private void SaveSettings()
         {
             if (pointCloudView != null) PlayerPrefs.SetFloat(KeyBrightness, pointCloudView.TunableValue(0));
             if (exporter != null) PlayerPrefs.SetFloat(KeyCurveTol, exporter.TunableValue(0));
-            if (experienceDirector != null)
-                PlayerPrefs.SetInt(KeyQrDryRun, experienceDirector.DryRunPublish ? 1 : 0);
-            if (history != null) PlayerPrefs.SetFloat(KeyHistory, history.TunableValue(0));
+            if (history != null) PlayerPrefs.SetFloat(KeyHistoryLive, history.TunableValue(0));
+            if (publisher != null) PlayerPrefs.SetInt(KeyHistoryPrint, publisher.trailSamples);
+            if (decimater != null) PlayerPrefs.SetFloat(KeyDecimate, decimater.TunableValue(0));
+            if (motionCurves != null)
+                PlayerPrefs.SetInt(KeySeedCount, Mathf.RoundToInt(motionCurves.TunableValue(SeedCountTunable)));
             PlayerPrefs.Save();
             _saveStatus = "Saved ✓";
         }
@@ -207,11 +245,15 @@ namespace CameraControl
 
             // Widget-column height = sum of present rows (same constants the draw
             // cursor advances by below), so the backdrop wraps exactly the widgets.
-            float widgetsH = SliderRowH;                            // History
+            float widgetsH = SliderRowH;                            // History (live)
+            if (publisher != null)      widgetsH += SliderRowH;     // History (print)
             if (pointCloudView != null) widgetsH += SliderRowH;     // Brightness
+            if (decimater != null)      widgetsH += SliderRowH;     // Decimate
+            if (motionCurves != null)   widgetsH += SliderRowH;     // Seed Count
             if (exporter != null)       widgetsH += SliderRowH;     // Web curve tolerance
             widgetsH += ToggleRowH;                                 // Auto Orbit
-            if (experienceDirector != null) widgetsH += 2 * ToggleRowH; // Experience Mode + QR Dry Run
+            if (experienceDirector != null) widgetsH += ToggleRowH; // Experience Mode
+            if (experienceDirector != null) widgetsH += ToggleRowH; // Keep recordings
             if (exporter != null)       widgetsH += ButtonRowH;     // Export
             widgetsH += ButtonRowH;                                 // Save
 
@@ -228,11 +270,19 @@ namespace CameraControl
             float sliderWidth = Mathf.Min(width, Screen.width * 0.5f / uiScale);
             float y = position.y;
 
-            // History Samples (frames) — same knob as the Control Panel.
+            // History Samples — LIVE window (BonePoseHistory), the normal runtime knob.
             y = SliderRow(y, sliderWidth,
-                $"{history.TunableName(0)}: {Mathf.RoundToInt(history.TunableValue(0))}",
+                $"History (live): {Mathf.RoundToInt(history.TunableValue(0))}",
                 history.TunableValue(0), history.TunableMin(0), history.TunableMax(0),
                 nv => history.SetTunableValue(0, Mathf.RoundToInt(nv)));
+
+            // History Samples — 3D-EXPORT window (OperatorPublisher.trailSamples). The
+            // capture temporarily overrides the live window with this before baking.
+            if (publisher != null)
+                y = SliderRow(y, sliderWidth,
+                    $"History (print): {publisher.trailSamples}",
+                    publisher.trailSamples, 2f, 32f,
+                    nv => publisher.trailSamples = Mathf.Clamp(Mathf.RoundToInt(nv), 2, 32));
 
             // Point cloud brightness (39544fc).
             if (pointCloudView != null)
@@ -240,6 +290,21 @@ namespace CameraControl
                     $"Brightness: {pointCloudView.TunableValue(0):0.00}",
                     pointCloudView.TunableValue(0), pointCloudView.TunableMin(0), pointCloudView.TunableMax(0),
                     nv => pointCloudView.SetTunableValue(0, nv));
+
+            // Point cloud decimate (%).
+            if (decimater != null)
+                y = SliderRow(y, sliderWidth,
+                    $"Decimate: {decimater.TunableValue(0):0} %",
+                    decimater.TunableValue(0), decimater.TunableMin(0), decimater.TunableMax(0),
+                    nv => decimater.SetTunableValue(0, nv));
+
+            // Motion-curve seed count (PointCloudMotionCurves tunable 8).
+            if (motionCurves != null)
+                y = SliderRow(y, sliderWidth,
+                    $"Seed Count: {Mathf.RoundToInt(motionCurves.TunableValue(SeedCountTunable))}",
+                    motionCurves.TunableValue(SeedCountTunable),
+                    motionCurves.TunableMin(SeedCountTunable), motionCurves.TunableMax(SeedCountTunable),
+                    nv => motionCurves.SetTunableValue(SeedCountTunable, nv));
 
             // Print web-export curve tolerance (1e05bc1).
             if (exporter != null)
@@ -261,11 +326,13 @@ namespace CameraControl
                 if (exp != experienceDirector.Visible) experienceDirector.Visible = exp;
                 y += ToggleRowH;
 
-                // QR Dry Run (a188523): ON = fake URL, OFF = real LFKS upload.
-                bool dry = experienceDirector.DryRunPublish;
-                bool ndry = GUI.Toggle(new Rect(position.x, y, width, 24), dry,
-                    dry ? " QR Dry Run: ON (fake URL)" : " QR Dry Run: OFF (real upload)");
-                if (ndry != dry) experienceDirector.DryRunPublish = ndry;
+                // Keep the raw visitor takes on disk (default OFF = visitor data never
+                // outlives the show). ON persists every take under visitorRecordingRoot
+                // for later playback.
+                bool keep = GUI.Toggle(new Rect(position.x, y, width, 24),
+                                       experienceDirector.KeepRecordings,
+                                       " Keep recordings (raw takes on disk)");
+                if (keep != experienceDirector.KeepRecordings) experienceDirector.KeepRecordings = keep;
                 y += ToggleRowH;
             }
 

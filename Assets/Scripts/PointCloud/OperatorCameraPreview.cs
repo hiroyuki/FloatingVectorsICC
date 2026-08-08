@@ -1,8 +1,15 @@
-// Small live colour preview of ONE camera in the top-right corner of the operator
-// display (Display 1). Purpose: while running the show from the operator PC you can
-// keep an eye on a single camera's raw colour feed (framing, exposure, whether it
-// dropped out) without switching to the full four-camera diagnostic grid that lives
-// on the visitor displays (CameraColorGridOverlay).
+// Small live preview in the top-right corner of the operator display (Display 1).
+// Purpose: while running the show from the operator PC you can keep an eye on what
+// the visitor is seeing without turning to the physical stage monitor.
+//
+// Default source (mirrorDisplay2): a MIRROR of Display 2 (the visitor screen). The
+// Display-2 camera is cloned into a RenderTexture each frame and drawn in the panel.
+// Caveat: only what a CAMERA renders is mirrored — ScreenSpaceOverlay visitor UI
+// (QR code, messages) is composited per-display by Unity and is NOT captured.
+//
+// Fallback source (mirrorDisplay2 == false): the raw colour feed of ONE sensor
+// camera (cameraIndex), the same per-camera check the four-camera diagnostic grid
+// on the visitor displays (CameraColorGridOverlay) does.
 //
 // Which camera: cameraIndex is the CAMERA ID (calibration/cameras.yaml order, the
 // same id 0..3 the rest of the system uses — resolved via
@@ -26,6 +33,7 @@
 using System.Collections.Generic;
 using Orbbec;
 using UnityEngine;
+using UnityEngine.Rendering;
 using UnityEngine.UI;
 
 namespace PointCloud
@@ -45,9 +53,17 @@ namespace PointCloud
         [Tooltip("OS display index to draw on (0 = primary/operator display).")]
         public int targetDisplay = 0;
 
-        [Tooltip("Which camera to preview, by CAMERA ID (calibration/cameras.yaml order, " +
-                 "the same id 0..3 used across the system). Not a serial — serials are " +
-                 "machine-local and must not be committed.")]
+        [Tooltip("Mirror what Display 2 (the visitor screen) renders instead of a raw " +
+                 "sensor colour feed. Clones the Display-2 camera into a render texture; " +
+                 "ScreenSpaceOverlay visitor UI (QR / messages) is NOT captured.")]
+        public bool mirrorDisplay2 = true;
+
+        [Tooltip("Unity targetDisplay index (0-based) of the display to mirror. 1 = Display 2.")]
+        public int mirrorSourceDisplay = 1;
+
+        [Tooltip("Fallback only (mirrorDisplay2 == false): which camera to preview, by " +
+                 "CAMERA ID (calibration/cameras.yaml order, the same id 0..3 used across " +
+                 "the system). Not a serial — serials are machine-local, never committed.")]
         public int cameraIndex = 3;
 
         [Tooltip("Show/hide the preview.")]
@@ -82,13 +98,35 @@ namespace PointCloud
         private bool _dirty;
         private float _lastRedraw;
 
+        // Display-2 mirror
+        private Camera _mirrorSrc;
+        private Camera _mirrorCam;
+        private RenderTexture _mirrorRt;
+        private bool _mirrorHorizontally;   // does the source flip its projection X?
+        private bool _renderHooked;
+
         void OnEnable()
         {
             if (_mgr == null) _mgr = FindFirstObjectByType<SensorManager>();
             if (_recorder == null) _recorder = FindFirstObjectByType<SensorRecorder>();
             BuildCanvas();
-            ResolveTargetSerial();
-            SubscribeSources();
+            // Raw sensor feed is the fallback source only; in mirror mode nothing
+            // subscribes to camera frames — the panel shows the Display-2 render texture.
+            if (!mirrorDisplay2)
+            {
+                ResolveTargetSerial();
+                SubscribeSources();
+            }
+            else if (!_renderHooked)
+            {
+                // The mirrored display flips its projection X, which reverses triangle
+                // winding; GL.invertCulling must be toggled around the clone's render
+                // to keep solids from turning inside out (same trick MirrorDisplayCamera
+                // uses on the real display — which we cannot reference across asmdefs).
+                RenderPipelineManager.beginCameraRendering += OnBeginCameraRendering;
+                RenderPipelineManager.endCameraRendering += OnEndCameraRendering;
+                _renderHooked = true;
+            }
         }
 
         void OnDisable()
@@ -97,6 +135,16 @@ namespace PointCloud
             _subscribed.Clear();
             if (_playbackSub != null) { _playbackSub.OnPlaybackRawFrame -= OnPlaybackFrame; _playbackSub = null; }
             if (_tex != null) { Destroy(_tex); _tex = null; }
+            if (_renderHooked)
+            {
+                RenderPipelineManager.beginCameraRendering -= OnBeginCameraRendering;
+                RenderPipelineManager.endCameraRendering -= OnEndCameraRendering;
+                _renderHooked = false;
+            }
+            GL.invertCulling = false;
+            if (_mirrorCam != null) { Destroy(_mirrorCam.gameObject); _mirrorCam = null; }
+            if (_mirrorRt != null) { _mirrorRt.Release(); Destroy(_mirrorRt); _mirrorRt = null; }
+            _mirrorSrc = null;
             if (_canvas != null) { Destroy(_canvas.gameObject); _canvas = null; }
             _image = null; _panel = null; _label = null;
         }
@@ -107,6 +155,12 @@ namespace PointCloud
             {
                 visible = !visible;
                 if (_panel != null) _panel.gameObject.SetActive(visible);
+            }
+
+            if (mirrorDisplay2)
+            {
+                if (visible) UpdateMirror();
+                return; // raw-sensor path is bypassed while mirroring Display 2
             }
 
             SubscribeSources(); // live cameras / recorder appear asynchronously
@@ -130,6 +184,88 @@ namespace PointCloud
                 Redraw();
                 _dirty = false;
             }
+        }
+
+        // ---------------- Display-2 mirror ----------------
+
+        // Clone the camera that draws the mirrored display into a render texture and
+        // show it in the panel. CopyFrom every frame tracks the source's viewpoint and
+        // projection (the stage cameras orbit), so the mirror stays in lock-step.
+        void UpdateMirror()
+        {
+            if (_mirrorSrc == null || !_mirrorSrc.isActiveAndEnabled ||
+                _mirrorSrc.targetDisplay != mirrorSourceDisplay)
+                _mirrorSrc = FindCameraForDisplay(mirrorSourceDisplay);
+            if (_mirrorSrc == null) return;
+
+            if (_mirrorRt == null)
+            {
+                _mirrorRt = new RenderTexture(640, 360, 24) { name = "OperatorDisplay2Mirror.RT" };
+                _mirrorRt.Create();
+            }
+            if (_mirrorCam == null)
+            {
+                var go = new GameObject("OperatorDisplay2Mirror.Cam");
+                go.transform.SetParent(transform, false);
+                _mirrorCam = go.AddComponent<Camera>();
+            }
+
+            _mirrorCam.CopyFrom(_mirrorSrc);
+            // CopyFrom also copied the source's targetDisplay and cleared targetTexture —
+            // re-route to our RT so the clone renders off-screen, not onto Display 2.
+            _mirrorCam.targetDisplay = 0;
+            _mirrorCam.targetTexture = _mirrorRt;
+            _mirrorCam.transform.SetPositionAndRotation(
+                _mirrorSrc.transform.position, _mirrorSrc.transform.rotation);
+
+            // Reproduce MirrorDisplayCamera on the clone: the source negates its
+            // projection's X (m00 < 0 while mirrored). Detect that from the live source
+            // and re-derive the flip from the clone's own fov/aspect so it does not
+            // depend on whether CopyFrom carried the custom projection matrix.
+            _mirrorHorizontally = _mirrorSrc.projectionMatrix.m00 < 0f;
+            _mirrorCam.ResetProjectionMatrix();
+            if (_mirrorHorizontally)
+            {
+                Matrix4x4 p = _mirrorCam.projectionMatrix;
+                p.m00 = -p.m00; p.m01 = -p.m01; p.m02 = -p.m02; p.m03 = -p.m03;
+                _mirrorCam.projectionMatrix = p;
+            }
+
+            if (_image != null && _image.texture != _mirrorRt)
+            {
+                _image.texture = _mirrorRt;
+                _image.color = Color.white;
+                _image.uvRect = new Rect(0f, 0f, 1f, 1f); // RT is upright; no V flip
+            }
+            if (_panel != null)
+            {
+                float h = width * 9f / 16f;
+                if (!Mathf.Approximately(_panel.sizeDelta.y, h))
+                    _panel.sizeDelta = new Vector2(width, h);
+            }
+            if (_label != null) _label.text = $"Display {mirrorSourceDisplay + 1}";
+        }
+
+        // First enabled camera rendering to the given targetDisplay (excluding our own
+        // clone, whose targetDisplay is 0). Camera.allCameras only lists enabled ones.
+        Camera FindCameraForDisplay(int disp)
+        {
+            foreach (var c in Camera.allCameras)
+                if (c != _mirrorCam && c.targetDisplay == disp) return c;
+            return null;
+        }
+
+        // The clone's X-flipped projection reverses winding — invert culling for its
+        // render only, then restore, so front faces stay front (point clouds are
+        // winding-agnostic, but any solid sharing the view would otherwise invert).
+        void OnBeginCameraRendering(ScriptableRenderContext ctx, Camera cam)
+        {
+            if (_mirrorHorizontally && cam == _mirrorCam) GL.invertCulling = true;
+        }
+
+        void OnEndCameraRendering(ScriptableRenderContext ctx, Camera cam)
+        {
+            if (cam == _mirrorCam) GL.invertCulling = false;
         }
 
         // ---------------- canvas ----------------
@@ -272,6 +408,12 @@ namespace PointCloud
             }
             _tex.LoadRawTextureData(_color);
             _tex.Apply(false);
+
+            // Restore the raw path's vertical flip (colour bytes are top-down). Guarded
+            // so a runtime switch back from mirror mode — which leaves uvRect upright —
+            // is corrected without dirtying the canvas every redraw.
+            var rawFlip = new Rect(0f, 1f, 1f, -1f);
+            if (_image != null && _image.uvRect != rawFlip) _image.uvRect = rawFlip;
 
             if (_label != null)
                 _label.text = string.IsNullOrEmpty(_serial) ? $"cam {cameraIndex}" : $"cam {cameraIndex}  {_serial}";
