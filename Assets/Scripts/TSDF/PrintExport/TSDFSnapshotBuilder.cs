@@ -204,7 +204,18 @@ namespace TSDF
             {
                 var bounds = UnityEngine.Object.FindFirstObjectByType<PointCloud.BoundingVolume>();
                 var deci = UnityEngine.Object.FindFirstObjectByType<PointCloud.PointCloudDecimater>();
-                var caps = UnityEngine.Object.FindFirstObjectByType<PointCloud.PointCloudCapsuleFilter>();
+                // FindFirstObjectByType would grab SkeletonMerger's live discard
+                // person-mask (the only runtime PointCloudCapsuleFilter, KeepOutside),
+                // which erases the visitor's own points from the frozen capture —
+                // the "84-point empty cloud". Skip any filter flagged live-only.
+                PointCloud.PointCloudCapsuleFilter caps = null;
+                foreach (var c in UnityEngine.Object.FindObjectsByType<PointCloud.PointCloudCapsuleFilter>(
+                             FindObjectsSortMode.None))
+                {
+                    if (c.excludeFromExportCapture) continue;
+                    caps = c;
+                    break;
+                }
                 var floor = UnityEngine.Object.FindFirstObjectByType<PointCloud.PointCloudFloorMask>();
                 float keep = (deci != null && deci.Enabled) ? deci.KeepRatio : 1f;
                 PointCloud.PointCloudSnapshot.Gather(bounds, keep, 12345, out snap.pcPos, out snap.pcCol,

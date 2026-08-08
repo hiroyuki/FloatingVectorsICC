@@ -36,6 +36,16 @@ namespace PointCloud
                  "of capsules. KeepOutside = keep points outside every capsule.")]
         public FilterMode filterMode = FilterMode.KeepInside;
 
+        // A live-only mask that must never touch the frozen sculpture capture.
+        // SkeletonMerger's _DiscardedPersonMask (KeepOutside) is the only such
+        // filter — it hides non-primary people from the LIVE cloud, but the
+        // export/capture reads whatever PointCloudCapsuleFilter it finds
+        // (TSDFSnapshotBuilder), so without this opt-out the discard mask erases
+        // the visitor's points from their own take (the "84-point" empty cloud).
+        [Tooltip("When set, the web/AR/print capture skips this filter. Used for the live " +
+                 "discard person-mask, which should not shape the frozen sculpture.")]
+        public bool excludeFromExportCapture;
+
         // xyz = world-space endpoint, w = capsule radius (capsuleA only; capsuleB
         // shares the radius from its paired A entry).
         private readonly Vector4[] _capsuleA = new Vector4[MaxCapsules];

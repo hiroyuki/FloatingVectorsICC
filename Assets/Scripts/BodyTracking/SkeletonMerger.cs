@@ -1751,6 +1751,11 @@ namespace BodyTracking
                 go.transform.SetParent(transform, false);
                 _discardMask = go.AddComponent<PointCloudCapsuleFilter>();
                 _discardMask.filterMode = PointCloudCapsuleFilter.FilterMode.KeepOutside;
+                // Live-only: this mask hides non-primary people from the on-screen
+                // cloud, but must not shape the frozen sculpture capture — else the
+                // export/TSDFSnapshotBuilder grabs it via FindFirstObjectByType and
+                // erases the visitor's own points (the 84-point empty export).
+                _discardMask.excludeFromExportCapture = true;
             }
 
             _discardMask.Clear();
