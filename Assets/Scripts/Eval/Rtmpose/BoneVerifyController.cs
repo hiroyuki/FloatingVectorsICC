@@ -34,6 +34,13 @@ namespace BodyTracking.Eval.Rtmpose
     {
         public enum Mode { Off, Live, Review }
 
+        [Header("Enable")]
+        [Tooltip("Master switch for the bone-verify rig. OFF (default) = no operator " +
+                 "button panel on Display 1 and the F8/F7 hotkeys are inert, so the eval " +
+                 "tool stays out of the way of the show. Tick ON only for a dev " +
+                 "bone-verification session.")]
+        public bool enableVerifyRig = false;
+
         [Header("Displays (machine-local; display2/3 are swapped on the 5080 set)")]
         [Tooltip("OS display index for the colour grid (physical display2 = 2 here).")]
         public int gridDisplay = 2;
@@ -88,6 +95,9 @@ namespace BodyTracking.Eval.Rtmpose
 
         private void OnEnable()
         {
+            // Off by default: build nothing and draw no Display-1 button panel. The rig
+            // only stands up when explicitly enabled for a dev bone-verify session.
+            if (!enableVerifyRig) return;
             ResolveRefs();
             BuildOperatorUI();
         }
@@ -109,6 +119,7 @@ namespace BodyTracking.Eval.Rtmpose
 
         private void Update()
         {
+            if (!enableVerifyRig) return; // inert unless the rig is switched on
             if (Input.GetKeyDown(liveKey)) { if (CurrentMode == Mode.Live) Exit(); else EnterLive(); }
             if (Input.GetKeyDown(reviewKey)) { if (CurrentMode == Mode.Review) Exit(); else EnterPlaybackReview(null); }
             if (CurrentMode == Mode.Review)
