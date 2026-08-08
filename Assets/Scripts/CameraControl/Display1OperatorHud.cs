@@ -18,6 +18,9 @@
 //   - Experience Mode toggle (ExperienceDirector).
 //   - Keep recordings toggle: when ON, ExperienceDirector keeps the raw visitor
 //     takes on disk instead of deleting them at the QR / next-run boundary.
+//   - Flip Display 3 (X) toggle: mirrors the Display 3 camera left/right
+//     (MirrorDisplayCamera), independent of Display 2. Persists on change (it is a
+//     physical-install setting), so it is NOT part of the Save button below.
 //   - Save settings button: persists the tuning above to PlayerPrefs; reloaded
 //     and applied on the next launch (Start).
 //
@@ -181,6 +184,12 @@ namespace CameraControl
             if (publisher == null) publisher = FindFirstObjectByType<Experience.OperatorPublisher>();
             if (decimater == null) decimater = FindFirstObjectByType<PointCloudDecimater>();
             if (motionCurves == null) motionCurves = FindFirstObjectByType<BodyTracking.PointCloudMotionCurves>();
+            if (display3Mirror == null) display3Mirror = ResolveDisplay3Mirror();
+
+            // Display-3 flip is a physical-install setting, so it persists on toggle
+            // (not via the Save button) and re-applies here at launch.
+            if (display3Mirror != null && PlayerPrefs.HasKey(KeyFlipDisplay3))
+                display3Mirror.mirrorHorizontally = PlayerPrefs.GetInt(KeyFlipDisplay3) != 0;
 
             if (pointCloudView != null && PlayerPrefs.HasKey(KeyBrightness))
                 pointCloudView.SetTunableValue(0, PlayerPrefs.GetFloat(KeyBrightness));
@@ -254,6 +263,7 @@ namespace CameraControl
             widgetsH += ToggleRowH;                                 // Auto Orbit
             if (experienceDirector != null) widgetsH += ToggleRowH; // Experience Mode
             if (experienceDirector != null) widgetsH += ToggleRowH; // Keep recordings
+            if (display3Mirror != null) widgetsH += ToggleRowH;     // Flip Display 3
             if (exporter != null)       widgetsH += ButtonRowH;     // Export
             widgetsH += ButtonRowH;                                 // Save
 
@@ -336,6 +346,22 @@ namespace CameraControl
                 y += ToggleRowH;
             }
 
+            // Flip Display 3 left/right (X). Independent of Display 2 so a differently
+            // mounted third screen/projector can be corrected on its own. Persisted on
+            // change (see below) so the install setting survives relaunch.
+            if (display3Mirror != null)
+            {
+                bool flip = GUI.Toggle(new Rect(position.x, y, width, 24),
+                                       display3Mirror.mirrorHorizontally, " Flip Display 3 (X)");
+                if (flip != display3Mirror.mirrorHorizontally)
+                {
+                    display3Mirror.mirrorHorizontally = flip;
+                    PlayerPrefs.SetInt(KeyFlipDisplay3, flip ? 1 : 0);
+                    PlayerPrefs.Save();
+                }
+                y += ToggleRowH;
+            }
+
             if (exporter != null)
             {
                 if (GUI.Button(new Rect(position.x, y, 190, 26), "Export GLB + USDZ"))
@@ -400,6 +426,25 @@ namespace CameraControl
                    "TSDF DEBUG\n" +
                    "  Q W E R    single-cam view (cam 1-4)\n" +
                    "  A          all cams";
+        }
+
+        // The MirrorDisplayCamera on the camera that renders to Display 3. Includes
+        // inactive cameras so the flip resolves even before the display activates, and
+        // adds the component when the camera has none (default OFF — the toggle owns it).
+        private MirrorDisplayCamera ResolveDisplay3Mirror()
+        {
+            Camera target = null;
+            foreach (var c in FindObjectsByType<Camera>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+                if (c.targetDisplay == Display3Index) { target = c; break; }
+            if (target == null) return null;
+            if (target.TryGetComponent(out MirrorDisplayCamera m)) return m;
+            // MirrorDisplayCamera defaults mirrorHorizontally = true, so a freshly added
+            // one would flip Display 3 the moment the HUD appears. Force it OFF: adding
+            // the component must not change the display — only the toggle (or a saved
+            // pref applied in LoadSettings) does.
+            m = target.gameObject.AddComponent<MirrorDisplayCamera>();
+            m.mirrorHorizontally = false;
+            return m;
         }
 
         // ON: every stage camera's orbit controller runs its idle auto-orbit,

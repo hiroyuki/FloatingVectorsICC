@@ -204,6 +204,12 @@ namespace Experience
                  "timestamped subfolder). Keep on a fast disk.")]
         public string visitorRecordingRoot = "";
 
+        [Tooltip("Keep the raw visitor takes (depth/color/IR RCSV) on disk instead of " +
+                 "deleting them at the QR / next-run boundary. OFF (default) = visitor " +
+                 "data never outlives the show. ON = every take persists under " +
+                 "visitorRecordingRoot for later playback. Toggle from the Display 1 HUD.")]
+        public bool keepVisitorRecordings = false;
+
         [Range(0.5f, 2f)]
         [Tooltip("The ONE second: how long after the countdown hits zero the movement " +
                  "keeps recording — this window becomes the final curved line " +

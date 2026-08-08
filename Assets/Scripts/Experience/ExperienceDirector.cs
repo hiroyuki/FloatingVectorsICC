@@ -154,6 +154,15 @@ namespace Experience
             set { if (config != null) config.dryRunPublish = value; }
         }
 
+        /// <summary>Operator toggle (Display 1 HUD): keep the raw visitor takes on disk
+        /// instead of deleting them at the QR / next-run boundary. See
+        /// <see cref="DeleteRunTakes"/>.</summary>
+        public bool KeepRecordings
+        {
+            get => config != null && config.keepVisitorRecordings;
+            set { if (config != null) config.keepVisitorRecordings = value; }
+        }
+
         // ---- IViewToggle ("Experience mode" in the Views panel) ----
         public string ViewLabel => "Experience mode";
         public bool Visible
@@ -2010,6 +2019,23 @@ namespace Experience
         /// reads; it is deleted after the unload on the next run boundary.</summary>
         private void DeleteRunTakes(bool includeLoaded)
         {
+            // Operator asked to keep the visitor data (Display 1 HUD): leave every
+            // take where it was recorded (visitorRecordingRoot, timestamped subfolder)
+            // and stop tracking it so no later boundary deletes it. Still honour the
+            // loaded/unloaded split — the on-screen take stays in the list until it
+            // unloads, exactly as in the delete path.
+            if (KeepRecordings)
+            {
+                for (int i = _runTakeRoots.Count - 1; i >= 0; i--)
+                {
+                    bool loaded = _visitorPlaybackActive && _runTakeRoots[i] == _takeRoot;
+                    if (!includeLoaded && loaded) continue;
+                    Debug.Log($"[{nameof(ExperienceDirector)}] kept visitor take {_runTakeRoots[i]} " +
+                              "(keep-recordings ON).", this);
+                    _runTakeRoots.RemoveAt(i);
+                }
+                return;
+            }
             for (int i = _runTakeRoots.Count - 1; i >= 0; i--)
             {
                 string root = _runTakeRoots[i];
