@@ -13,7 +13,13 @@
 ## 現状（完了済み）
 
 - 作品ページは **Cloudflare Pages で公開済み・完成状態**:
-  https://floatingvectors.pages.dev/michinokarada/ （ルートは /michinokarada/ へ 302）
+  https://floatingvectors.com/michinokarada/ （ルートは /michinokarada/ へ 302、
+  https://floatingvectors.pages.dev/michinokarada/ も同内容で生きている）
+  - **2026-11-16 に独自ドメイン接続済み**: お名前.com の NS を Cloudflare
+    （brenda / micah.ns.cloudflare.com）へ変更、ゾーンは Free プラン・レコードは
+    apex と www の CNAME → floatingvectors.pages.dev（Proxied）の 2 件のみ。
+    Pages の Custom domains は両方 Active / SSL enabled。メール系レコードは
+    お名前.com 既定値だったので削除済み（このドメインでメールは未使用）
   - クレジット確定（撮影:丸尾隆一、連絡先行は削除）、アーティスト写真設置、
     記録映像（8/8・65秒・1テイク）を自前ホスティングの mp4 モーダルで埋め込み済み
   - og:url / og:image / canonical は https://floatingvectors.com/michinokarada/ の絶対URL
@@ -25,13 +31,13 @@
 ## 残作業（締切まで）
 
 1. **フォーム送信（〜11/19 17:00）**: PR 文は Dropbox の HANDOFF.md §4 の確定稿。
-   作品 URL は floatingvectors.com 移管が間に合わなければ pages.dev の URL で可
-   （2027-03-31 まで閲覧可能を維持する要項あり — pages.dev はその条件を満たす）。
+   作品 URL は https://floatingvectors.com/michinokarada/
+   （2027-03-31 まで閲覧可能を維持する要項あり — ドメイン期限は 2027-11-13、
+   Pages は無料枠なので条件を満たす）。
    サムネイルは `floatingvectors_site/michinokarada/images/hero.jpg` 使用可
 2. **赤羽さん・鹿島田さんに応募を伝える**（要項「共同制作者の許諾」。未連絡）
 3. **ICC に写真・映像使用の一言連絡**（「なんでも使っていい」と言われているが形に残す）
-4. （任意）**NS 移管 GMO→Cloudflare + Pages カスタムドメイン追加** — ユーザーの
-   ダッシュボード作業。間に合わなくても応募は成立する
+4. ~~NS 移管 + Pages カスタムドメイン追加~~ — 2026-11-16 完了（上記）
 5. （任意）記録映像の本編集版（HANDOFF.md §11 の 2 分構成）ができたら video.mp4 を差し替え
 
 ## 再デプロイ手順（ページを直したとき）
