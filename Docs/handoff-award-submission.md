@@ -31,6 +31,18 @@
 - 体験データ回収の引き継ぎは別紙 `Docs/handoff-sculpture-archive.md`（LFKS トークンは失効確認済み、
   回収は展示機ローカル `~/Documents/FloatingVectorsPrints` から）
 
+## 2026-11-18 の追加・変更
+
+- 記録映像は `video/v28_rough_1118.mp4`（約 2 分 46 秒）。ページの `video.mp4` も同じ内容。
+  変更の経緯は Dropbox の `video/CUTLIST.md` 冒頭
+- ページ: OG 画像を `images/og.jpg`（HERO 写真 + 題名 + 撮影クレジット、1200×630）に変更。
+  HERO のクレジットは画像の右下に重ねた。動画の表紙は 4 枚表示のコマ（`video-poster.jpg`）
+- 「かたち（AR体験）」: three.js の表示の右下に「ARで見る」→ `unknownbutyours/ar/?n=1〜9`。
+  iOS は USDZ を AR Quick Look、Android は Draco 圧縮の GLB を Scene Viewer で開く。
+  PC では二次元コード（`ar/qr/`、`npx qrcode` で生成）。**実機での AR 起動は未確認**
+- 3D プリントの文末に「（ダンサー：小暮香帆）」
+- 5080 機のアーカイブは回収済み（`Docs/handoff-sculpture-archive.md`）
+
 ## 残作業（締切まで）
 
 1. **フォーム送信（〜11/19 17:00）**: PR 文は Dropbox の HANDOFF.md §4 の確定稿。
